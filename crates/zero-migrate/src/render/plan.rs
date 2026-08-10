@@ -30,7 +30,7 @@
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
-use crate::render::step::{DialectScope, PlanStep};
+use crate::render::step::{DialectScope, PlanStep, StepReversibility};
 
 /// A database feature whose exact IR lowering has live target requirements.
 /// These are derived from the typed expression AST and carried on the complete
@@ -165,6 +165,30 @@ impl SqliteRebuildSpec {
     }
 }
 
+/// The independent facts a caller needs before offering an operator a rollback.
+///
+/// A product rather than one ranked verdict, because the three are not on one
+/// axis: whether evidence covers a step and how bad that step's outcome is are
+/// different questions, and a plan can carry all three at once. Any total order
+/// over them reports the winner and silently drops the rest - ranking an
+/// unassessed step above a known-lossy one overstates the opaque, and ranking it
+/// below hides that something was never measured.
+///
+/// Every field folds with OR across the plan's steps, so each answers "is there
+/// at least one such step". A plan with no steps carries none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RollbackAssessment {
+    /// At least one step has no `down`, so a complete rollback is unavailable
+    /// however the rest of the plan is treated.
+    pub has_irreversible_steps: bool,
+    /// At least one step's `down` restores structure while the data it removed
+    /// stays gone.
+    pub has_known_lossy_steps: bool,
+    /// At least one step's effect on the prior state is not established either
+    /// way, so the harm of rolling back cannot be bounded from the plan alone.
+    pub has_unassessed_steps: bool,
+}
+
 /// What one authored artifact (`.sql` or IR envelope) becomes after
 /// lowering — an ordered execution plan. NOT a single [`Migration`]; NOT
 /// the dry-run [`MigrationPlan`](crate::engine::MigrationPlan).
@@ -197,6 +221,9 @@ pub struct AppliedPlan {
     /// are gone for good, and this still reports `true` - see
     /// `tests/plan_rollbackable.rs`, which pins both readings. A host presenting
     /// this to an operator as "safe to undo" is over-reading it.
+    ///
+    /// [`rollback_assessment`](Self::rollback_assessment) answers the question a
+    /// host actually wants; this field is kept for callers already reading it.
     pub rollbackable: bool,
     /// The declaring app (server-stamped on the IR path).
     pub owner_app: String,
@@ -288,5 +315,28 @@ impl AppliedPlan {
     #[must_use]
     pub fn compute_rollbackable(steps: &[PlanStep]) -> bool {
         steps.iter().all(PlanStep::has_down)
+    }
+
+    /// What rolling this plan back can be relied on to do, as three independent
+    /// facts folded with OR over the steps.
+    ///
+    /// Answers what [`rollbackable`](Self::rollbackable) is routinely misread as
+    /// answering. A plan whose only step drops a column reports
+    /// `rollbackable == true` and `has_known_lossy_steps == true` at the same
+    /// time, and both are correct: the reversing SQL exists and the values do
+    /// not come back.
+    #[must_use]
+    pub fn rollback_assessment(&self) -> RollbackAssessment {
+        let mut facts = RollbackAssessment::default();
+        for step in &self.steps {
+            match step.reversibility() {
+                StepReversibility::Irreversible => facts.has_irreversible_steps = true,
+                StepReversibility::StructurallyReversibleLossy => {
+                    facts.has_known_lossy_steps = true;
+                }
+                StepReversibility::Unassessed => facts.has_unassessed_steps = true,
+            }
+        }
+        facts
     }
 }

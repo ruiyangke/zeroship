@@ -85,6 +85,21 @@ pub struct SynchronizeIdentityStep {
     pub writes_quiesced: String,
 }
 
+/// What one step's rollback is known to achieve, as distinct from whether it
+/// has reversing SQL at all. See [`PlanStep::reversibility`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepReversibility {
+    /// No reversing SQL exists for this step.
+    Irreversible,
+    /// Reversing SQL exists, and the step destroys data it cannot bring back.
+    /// A dropped column is the ordinary case: the column returns, its values
+    /// do not.
+    StructurallyReversibleLossy,
+    /// Reversing SQL exists and nothing establishes what it restores. Raw
+    /// `.sql` migrations land here, because their text is opaque to the engine.
+    Unassessed,
+}
+
 /// One ordered step of an [`AppliedPlan`](crate::render::plan::AppliedPlan).
 #[derive(Debug, Clone)]
 pub enum PlanStep {
@@ -203,6 +218,29 @@ impl PlanStep {
             ),
             _ => None,
         }
+    }
+
+    /// What rolling this step back can be relied on to do.
+    ///
+    /// [`has_down`](Self::has_down) answers only whether reversing SQL exists.
+    /// This separates the case where it exists and destroys data from the case
+    /// where nothing establishes what it restores.
+    ///
+    /// There is deliberately no "restores the prior state" answer. Proving that
+    /// needs positive evidence per operation, and a step carries rendered SQL
+    /// rather than the ops it came from, so the only signal left is the
+    /// `destructive` flag - whose `false` on a raw `.sql` migration means nobody
+    /// declared one, not that the engine established anything. Treating an
+    /// absent declaration as proof is the confusion this method exists to end.
+    #[must_use]
+    pub fn reversibility(&self) -> StepReversibility {
+        if !self.has_down() {
+            return StepReversibility::Irreversible;
+        }
+        if self.is_destructive() {
+            return StepReversibility::StructurallyReversibleLossy;
+        }
+        StepReversibility::Unassessed
     }
 
     /// Whether this step has a defined `down` for plan-level rollback.

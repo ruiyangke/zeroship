@@ -61,3 +61,63 @@ fn a_migration_with_no_down_reports_not_rollbackable() {
         "a migration carrying no down must not report rollbackable"
     );
 }
+
+// The same lossy drop the first arm pins, read through the assessment instead.
+// Both answers are correct at once, and that is the point: reversing SQL exists
+// AND the values are gone. `rollbackable` alone can only say the first.
+#[test]
+fn a_dropped_column_reports_a_known_lossy_step() {
+    let mut m = mig(
+        "ALTER TABLE t DROP COLUMN email",
+        Some("ALTER TABLE t ADD COLUMN email text"),
+    );
+    m.flags.destructive = true;
+    let plan = AppliedPlan::single_step(m);
+    let facts = plan.rollback_assessment();
+    assert!(plan.rollbackable, "the reversing SQL still exists");
+    assert!(
+        facts.has_known_lossy_steps,
+        "a destructive step with a down is lossy, not restorable: {facts:?}"
+    );
+    assert!(
+        !facts.has_irreversible_steps,
+        "a step carrying a down is not irreversible: {facts:?}"
+    );
+    assert!(
+        !facts.has_unassessed_steps,
+        "a step the engine classified is not unassessed: {facts:?}"
+    );
+}
+
+// A raw `.sql` migration declaring nothing. The engine has no evidence either
+// way, so it must not claim the rollback is clean. This is the arm that would
+// have been wrong under a `has_down && !destructive => restorable` rule: an
+// undeclared flag is not proof of anything.
+#[test]
+fn an_undeclared_migration_is_unassessed_rather_than_assumed_clean() {
+    let plan = AppliedPlan::single_step(mig("CREATE TABLE t (id int)", Some("DROP TABLE t")));
+    let facts = plan.rollback_assessment();
+    assert!(
+        facts.has_unassessed_steps,
+        "an undeclared down carries no evidence, so it is unassessed: {facts:?}"
+    );
+    assert!(
+        !facts.has_known_lossy_steps,
+        "absence of a destructive flag is not evidence OF loss either: {facts:?}"
+    );
+}
+
+// The control on the third fact.
+#[test]
+fn a_migration_with_no_down_reports_an_irreversible_step() {
+    let plan = AppliedPlan::single_step(mig("CREATE TABLE t (id int)", None));
+    let facts = plan.rollback_assessment();
+    assert!(
+        facts.has_irreversible_steps,
+        "no down at all is irreversible: {facts:?}"
+    );
+    assert!(
+        !facts.has_known_lossy_steps && !facts.has_unassessed_steps,
+        "a step is classified exactly once: {facts:?}"
+    );
+}
