@@ -336,7 +336,7 @@ if [ "$ANC" = "200" ] && [ "$ANON_USER" = "NULL" ]; then
 else
   # If the namespace is missing the handler 500s — surface the worker log.
   ERR="$(grep -iE 'env.auth|AuthPlugin|Cannot find module|auth' "$WORK/worker.log" | tail -1)"
-  known "anon auth.whoami unexpected (HTTP $ANC, user=$ANON_USER). err: ${ERR:-$ANB}"
+  fail "anon auth.whoami unexpected (HTTP $ANC, user=$ANON_USER). err: ${ERR:-$ANB}"
 fi
 
 # (b) auth.notes.list anonymous → app-level 401 (requireSignedIn throws 401).
