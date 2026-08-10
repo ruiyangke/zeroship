@@ -19,6 +19,45 @@
 //! bare `impl SqlSession for compio_postgres::Client` is disallowed. The newtype
 //! is the clean, allowed carrier.
 //!
+//! # Lower IR through the GUARDED door only
+//!
+//! The engine exposes five lowering entry points and they are not equivalent.
+//! Use `IrAuthor::load_and_lower_guarded` (or `load_and_lower`), which routes
+//! through `model::load::load_ir_document_authorized`. This crate does so at
+//! `platform.rs:387`; `crates/migrated` does so at `apply.rs:1082` and `:1227`.
+//!
+//! `IrAuthor::lower`, `lower_plan` and `lower_steps` take an ALREADY-deserialized
+//! `MigrationIr` and skip five checks the loader performs:
+//!
+//! - `check_ir_version` (IR version, fail-closed)
+//! - `validate_ir_authorized` (every `Expr` slot, plus SCHEMA CONFINEMENT and
+//!   guard direction - a Confined cross-schema op is refused here)
+//! - `enforce_ir_ownership` against the deploying app and project registry
+//! - checksum-hint verification
+//! - the `owner_app` stamp, which OVERWRITES whatever the artifact claimed
+//!
+//! The last two matter most for us: confinement and ownership are what keep one
+//! app's migration out of another app's schema, and the stamp is what makes a
+//! spoofed `owner_app` in a creator-supplied artifact inert. Deserializing an
+//! artifact yourself and handing it to an ungated door carries the claimed value
+//! instead.
+//!
+//! Not a licence to treat the ungated doors as unvalidated: they run six checks
+//! of their own (identifier lengths, per-row DML destinations, typed column
+//! references, FK targets, typed reference catalogs, SQLite repeat-rename). The
+//! five above are simply not among them, and lowering documents that it assumes
+//! a pre-validated IR rather than checking.
+//!
+//! Deserializing IR directly is fine as a PRE-PASS - `crates/migrated`
+//! deserializes to resolve table-shape policy and re-serializes, then hands the
+//! resolved bytes to the guarded door, which is the same shape the engine's own
+//! Node addon uses. What must not happen is deserialize-then-lower.
+//!
+//! Established 2026-08-10 with the engine maintainers (inter-project thread
+//! ZEROSHIP-2026-08-10-148 through ZERO-MIGRATE-2026-08-10-151). Recorded here
+//! because nothing in the type system prevents reaching for the cheaper door:
+//! the bypass is currently avoided by convention, not by construction.
+//!
 //! The mapping is a near-mechanical port of the engine's own
 //! `third_party/zero-migrate/crates/zero-migrate/src/apply/backend/postgres/session.rs`
 //! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
