@@ -443,11 +443,33 @@ jobs:
       #   @zeroship/migrate      6 golden/drift failures. Its fixtures resolve
       #                          into third_party/zero-migrate, so they compare
       #                          committed artifacts against that same pin.
-      #   @zeroship/vite-plugin  7 gen-types drift failures, same root cause.
+      #   @zeroship/vite-plugin  7 failures, and they are TWO causes, not one.
+      #                          2 are drift (env.db.ts committed vs fresh).
+      #                          The other 5 are not drift at all: gen-types
+      #                          hard-errors with `fold: constraint
+      #                          posts_authorId_fkey already exists on posts`
+      #                          and produces no artifact, so there is nothing
+      #                          for a committed one to have drifted from.
+      #                          Measured 2026-08-09; any manual schema.ts
+      #                          with a single relation reproduces it, and a
+      #                          schema with an explicit t.id() and no t.ref()
+      #                          does not. See task #219.
       #
-      # All three are the committed generated artifacts having drifted from the
-      # vendored engine. Fixing that removes all three exclusions at once; it
-      # waits on the decision about which engine commit is authoritative.
+      # The drift ones are the committed generated artifacts having drifted
+      # from the vendored engine, and settling which engine commit is
+      # authoritative resolves them. That does NOT clear all three exclusions:
+      # the 5 fold failures survive it untouched, because regenerating cannot
+      # fix a generator that refuses to generate. Whoever regenerates on this
+      # note alone will see them still red.
+      #
+      # Regenerate WITH CARE even for the drift ones: the fresh env.db.ts is
+      # emptier than the committed artifact (a bare `//` where the
+      # @zeroship/db import belongs), so the gate is right that they differ
+      # and wrong about which side is correct. Fix the renderer first. See
+      # task #220.
+      #
+      # The @zeroship/migrate line above is unverified by me and left as
+      # written; only the vite-plugin claim was measured.
       #
       # Runs through a script rather than inline so the result can be COUNTED.
       # `pnpm -r` skips a package whose `test` script is renamed or removed, in
