@@ -114,13 +114,13 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   get<W extends WithSpec>(
     idOrFilter: string | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
-  ): Promise<(Row<S> & WithRelations<S, W, AllSchemas>) | null>;
+  ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: string | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
@@ -173,7 +173,7 @@ export type TxQuery<
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
   after(id: string): TxQuery<S, P, AllSchemas>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with<W extends WithSpec>(spec: W): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {
     cursor?: string | null;
     numItems: number;

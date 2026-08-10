@@ -19,6 +19,17 @@ import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema } from "@zeroship/db";
 import { Query } from "../src/query.js";
+import type { NativeDb } from "../src/native.js";
+import type { Id } from "@zeroship/db";
+
+// The fixtures below key everything off project "10" (see the
+// `rowsByTable` literals). Those literals themselves are untyped mock
+// data (loose `AnyRec`), but every `find({ projectId: ... })` /
+// `.with(...)` call below goes through the REAL typed `Filter<S>`,
+// which types a `t.ref("projects")` field as the branded `Id<"projects">`
+// - a bare string literal does not structurally carry that brand.
+// This constant supplies it once instead of casting at each call site.
+const PROJECT_10 = "10" as Id<"projects">;
 
 type AnyRec = Record<string, unknown>;
 
@@ -45,7 +56,7 @@ type CallLog = {
  *  the typed_id contract directly. */
 function makeMock(
   tables: Record<string, Record<string, AnyRec>>,
-): { native: ZeroshipDb; calls: CallLog } {
+): { native: NativeDb; calls: CallLog } {
   const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   const native = {
     registerModel: () => Promise.resolve(),
@@ -89,7 +100,7 @@ function makeMock(
       };
     },
   };
-  return { native: native as unknown as ZeroshipDb, calls };
+  return { native: native as unknown as NativeDb, calls };
 }
 
 function makeDb(calls?: CallLog) {
@@ -142,7 +153,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
     const { db, calls } = makeDb();
     // Project 10 has 3 todos in fixtures: 100 (userId=1), 101 (userId=2),
     // 103 (userId=null — exercises the null FK path on the same page).
-    const { data, error } = await db.todos.find({ projectId: "10" }, { with: { userId: true } });
+    const { data, error } = await db.todos.find({ projectId: PROJECT_10 }, { with: { userId: true } });
     assert.equal(error, null);
     assert.ok(data);
     assert.equal(data!.length, 3);
@@ -165,7 +176,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   test("chainable .with(...) on Query produces the same result", async () => {
     const { db } = makeDb();
     const { data } = await db.todos
-      .find({ projectId: "10" })
+      .find({ projectId: PROJECT_10 })
       .with({ userId: true });
     assert.ok(data);
     const t100 = data!.find((r) => r.id === "100") as AnyRec;
@@ -202,7 +213,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   test("two relations in one call → one roundtrip per relation", async () => {
     const { db, calls } = makeDb();
     const { data, error } = await db.todos.find(
-      { projectId: "10" },
+      { projectId: PROJECT_10 },
       { with: { userId: true, projectId: true } },
     );
     assert.equal(error, null);
@@ -291,7 +302,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   test("inside db.transaction(...) — tx.x.find(...).with(...) works", async () => {
     const { db, calls } = makeDb();
     const { data, error } = await db.transaction(async (tx) => {
-      const rows = await tx.todos.find({ projectId: "10" }).with({ userId: true });
+      const rows = await tx.todos.find({ projectId: PROJECT_10 }).with({ userId: true });
       return rows;
     });
     assert.equal(error, null);
@@ -307,7 +318,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: {} (empty spec) is a no-op — relation step never runs", async () => {
     const { db, calls } = makeDb();
-    const { data } = await db.todos.find({ projectId: "10" }, { with: {} });
+    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} });
     assert.ok(data);
     // Original todos shape preserved; no users find fired.
     const userFinds = calls.find.filter((c) => c.collection === "users");
@@ -332,7 +343,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 describe("with: type-level inference (compile-time)", () => {
   test("Row<S> & WithRelations<S, W, AllSchemas> resolves the joined key to Row<TargetSchema>", async () => {
     const { db } = makeDb();
-    const { data } = await db.todos.find({ projectId: "10" }, { with: { userId: true } });
+    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: { userId: true } });
     if (!data) return;
     const first = data[0];
     // After the v2 generics refactor `first.userId` is `Row<usersSchema> | null`
@@ -380,7 +391,7 @@ describe("with: parallel relation loading", () => {
     tables: Record<string, Record<string, AnyRec>>,
     slowTargets: Set<string>,
     delayMs: number,
-  ): { native: ZeroshipDb; calls: CallLog; spans: SlowSpan[] } {
+  ): { native: NativeDb; calls: CallLog; spans: SlowSpan[] } {
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const spans: SlowSpan[] = [];
     const native = {
@@ -421,7 +432,7 @@ describe("with: parallel relation loading", () => {
         };
       },
     };
-    return { native: native as unknown as ZeroshipDb, calls, spans };
+    return { native: native as unknown as NativeDb, calls, spans };
   }
 
   test("two slow relations load in parallel, not sequentially", async () => {
@@ -682,7 +693,7 @@ describe("with: soft-delete + relations contract", () => {
           title: t.string().required(),
         },
       },
-      { native: native as unknown as ZeroshipDb, naming: { toColumn: s => s, toField: s => s } },
+      { native: native as unknown as NativeDb, naming: { toColumn: s => s, toField: s => s } },
     );
 
     const { data, error } = await db.todos.find({}, { with: { userId: true } });

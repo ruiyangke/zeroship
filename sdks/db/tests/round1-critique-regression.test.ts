@@ -10,6 +10,7 @@ import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
 import { schema, t } from "@zeroship/db";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
+import type { NativeDb } from "../src/native.js";
 
 /** Wire `env.db.openSubscription` to a mock so the `subscribe.ts`
  *  wrapper consumes our fake subs. */
@@ -65,7 +66,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
           return s;
         },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     installEnv(native);
     const db = installSchemaForTest(
@@ -122,7 +123,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
         async find() { return [] as unknown[]; },
         openSubscription: () => makeFakeSub(),
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     installEnv(native);
     const db = installSchemaForTest(
@@ -168,7 +169,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
           return s;
         },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     installEnv(native);
     const db = installSchemaForTest(
@@ -246,7 +247,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
         async find() { return []; },
         async findOne() { return null; },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     return installSchemaForTest(
       {
@@ -287,7 +288,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
         async find() { return []; },
         async findOne() { return null; },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
     const db = installSchemaForTest(
       {
         users: schema({
@@ -350,7 +351,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
           return [];
         },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     const db = installSchemaForTest(
       { users: { name: t.string().required() } },
@@ -412,7 +413,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
         async find() { return []; },
         async findOne() { return null; },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     const db = installSchemaForTest(
       { users: { name: t.string().required() } },
@@ -444,16 +445,19 @@ describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => 
   test("rejection from snapshot-vs-current mismatch has code === loader_tx_race", async () => {
     const { IdLoader } = await import("../src/loader.js");
     let currentDepth = 0;
-    const loader = new IdLoader<{ id: number; v: string }>(
+    // typed_id (P7 PR 3) - `IdLoader<R extends { id: string }>` (src/loader.ts)
+    // requires a string id. This literal predates that cascade and used a
+    // bare number; never typechecked until now.
+    const loader = new IdLoader<{ id: string; v: string }>(
       async (ids) => {
-        const m = new Map<number, { id: number; v: string }>();
+        const m = new Map<string, { id: string; v: string }>();
         for (const i of ids) m.set(i, { id: i, v: `row-${i}` });
         return m;
       },
       () => currentDepth,
     );
 
-    const p = loader.load(1, 0);
+    const p = loader.load("1", 0);
     currentDepth = 1;
     try {
       await p;
@@ -506,7 +510,7 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
           return rowsByTable[n]?.[0] ?? null;
         },
       }),
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     const db = installSchemaForTest(
       {

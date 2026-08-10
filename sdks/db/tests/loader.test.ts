@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { model } from "@zeroship/bootstrap/install-schema";
 import { t } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -109,7 +110,7 @@ function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Erro
       return beginCount;
     },
   };
-  return { native: native as unknown as ZeroshipDb, calls };
+  return { native: native as unknown as NativeDb, calls };
 }
 
 describe("IdLoader — DataLoader batching for get(id)", () => {
@@ -325,7 +326,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
           name: t.string().required(),
         },
       },
-      { native: native as unknown as ZeroshipDb },
+      { native: native as unknown as NativeDb },
     );
 
     // Prime the IdLoader so it's allocated. Then queue a get and let

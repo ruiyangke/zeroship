@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { schema, t } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
+import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------
 // Definition-time API
@@ -137,7 +138,7 @@ describe("installSchema — passes named indexes through to native registerModel
           async findOne() { return null; },
         };
       },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     installSchemaForTest(
       {
@@ -198,7 +199,7 @@ describe("Collection — unindexed-query warning honours declared indexes", () =
           async findOne() { return null; },
         };
       },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
 
     return installSchemaForTest(
       {

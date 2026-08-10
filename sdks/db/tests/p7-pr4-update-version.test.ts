@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "@zeroship/db";
 import { OptimisticLockError } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -42,7 +43,7 @@ function makeNativeCapturingUpdate() {
     },
     _captured: captured,
   };
-  return { native: native as unknown as ZeroshipDb, captured };
+  return { native: native as unknown as NativeDb, captured };
 }
 
 /** Native double that throws the runtime's typed CAS-failure code from
@@ -62,7 +63,7 @@ function makeNativeOptimisticConcurrencyFailure() {
       };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("P7 PR 4 — update() + version CAS via runtime", () => {

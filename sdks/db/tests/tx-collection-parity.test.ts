@@ -6,6 +6,7 @@ import type { Collection } from "../src/collection.js";
 import type { TxCollection, TxQuery } from "../src/db-types.js";
 import type { Query } from "../src/query.js";
 import { installSchemaForTest } from "./_install-helper.js";
+import type { NativeDb } from "../src/native.js";
 
 type ExampleSchema = {
   title: string;
@@ -81,7 +82,7 @@ const native = {
       },
     };
   },
-} as unknown as ZeroshipDb;
+} as unknown as NativeDb;
 
 const db = installSchemaForTest(
   {

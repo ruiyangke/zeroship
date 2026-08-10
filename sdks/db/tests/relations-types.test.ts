@@ -20,6 +20,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -34,7 +35,7 @@ const native = {
       async insert(doc: AnyRec) { return doc; },
     };
   },
-} as unknown as ZeroshipDb;
+} as unknown as NativeDb;
 
 const db = installSchemaForTest(
   {

@@ -172,26 +172,32 @@ describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
     // The `Row<UserSchema>` must include every system field shape.
     // Build a literal that names every system field; assignment to
     // `Row<UserSchema>` succeeds iff the type carries them all.
-    // PR 1 keeps legacy number-shaped id/timestamps; PR 3 widens to
-    // typed_id strings + ISO 8601 timestamps. The system-field
-    // PRESENCE is what PR 1 pins; the wire shapes evolve later.
+    // `id` is the typed_id STRING shape (P7 PR 3 landed the
+    // number->string cascade; `SystemFields.id: string` in
+    // src/types.ts is the current contract). `created_at`/`updated_at`
+    // stay number (epoch ms) - `SystemFields` has not widened those to
+    // ISO 8601 strings. This literal previously duplicated
+    // `created_at`/`updated_at` a second time under a comment claiming
+    // they were "legacy camelCase aliases"; they were not - camelCase
+    // keys (`createdAt`) are not part of `SystemFields` at all (the
+    // type's own doc comment: "system fields are exposed in snake_case
+    // only"), and the duplicate snake_case lines just silently
+    // overwrote the first ones with an identical value. Ticket #267
+    // surfaced this (TS1117 "object literal cannot have multiple
+    // properties with the same name") the moment tsc first looked at
+    // this file; the duplicates added nothing and are removed.
     const row: Row<UserSchema> = {
       title: "hello",
-      id: 42,
+      id: "usr_042",
       created_at: 1700000000000,
       updated_at: 1700000000000,
       created_by: null,
       updated_by: null,
       version: 1,
       deleted_at: null,
-      // Legacy camelCase aliases retained during the P7 migration
-      // window so existing callers (`db.users.find({ created_at })`)
-      // type-check unchanged.
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
     };
     assert.equal(row.title, "hello");
-    assert.equal(row.id, 42);
+    assert.equal(row.id, "usr_042");
     assert.equal(row.version, 1);
     assert.equal(row.created_by, null);
     assert.equal(row.deleted_at, null);
@@ -201,27 +207,23 @@ describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
     type UserSchema = { title: TypeBuilder<string, true> };
     const liveRow: Row<UserSchema> = {
       title: "hi",
-      id: 1,
+      id: "usr_001",
       created_at: 1700000000000,
       updated_at: 1700000000000,
       created_by: "usr_abc",
       updated_by: "usr_abc",
       version: 3,
       deleted_at: null,
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
     };
     const deletedRow: Row<UserSchema> = {
       title: "hi",
-      id: 2,
+      id: "usr_002",
       created_at: 1700000000000,
       updated_at: 1700000000000,
       created_by: null,
       updated_by: null,
       version: 5,
       deleted_at: 1700000060000,
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
     };
     assert.equal(liveRow.deleted_at, null);
     assert.equal(typeof deletedRow.deleted_at, "number");

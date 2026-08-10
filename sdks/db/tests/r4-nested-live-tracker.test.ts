@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "@zeroship/db";
+import type { LiveQuery } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 type SubEvent =
@@ -78,7 +80,7 @@ function makeMockNative() {
       };
     },
   };
-  return { native: native as unknown as ZeroshipDb, rowsByTable, subs };
+  return { native: native as unknown as NativeDb, rowsByTable, subs };
 }
 
 describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", () => {
@@ -103,7 +105,11 @@ describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", (
     // was still installed (explicit-tables branch skipped the stack
     // save/restore). Outer ended up watching ["todos", "users"] and
     // would spuriously rerun on every users mutation.
-    let innerLive: ReturnType<typeof db.live<AnyRec>> | null = null;
+    // `db.live` is an overloaded call signature (see DbExtensions.live in
+    // src/db-types.ts); instantiating it via `typeof db.live<AnyRec>`
+    // without a call resolved to `never` for `ReturnType`. `LiveQuery<R>`
+    // is the actual named return type - reference it directly.
+    let innerLive: LiveQuery<AnyRec> | null = null;
     const outer = db.live(async () => {
       const rows = await db.todos.find({});
       innerLive = db.live(
@@ -139,6 +145,14 @@ describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", (
     );
 
     outer.close();
-    innerLive?.close();
+    // `innerLive` is only ever reassigned inside the `db.live(async () =>
+    // {...})` queryFn closure above - TS's control-flow narrowing does not
+    // track assignments made inside a callback whose invocation it can't
+    // see, so by this point it treats the variable as narrowed away from
+    // its declared type entirely (`never`), not as the declared `LiveQuery
+    // <AnyRec> | null`. The awaited `outer.next()` above guarantees the
+    // closure ran at least once by this line; re-asserting the declared
+    // type is correct, not a weakened check.
+    (innerLive as LiveQuery<AnyRec> | null)?.close();
   });
 });

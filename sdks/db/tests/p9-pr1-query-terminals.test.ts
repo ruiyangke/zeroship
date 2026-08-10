@@ -23,6 +23,7 @@ import {
   NotUniqueError,
   InvalidOperationError,
 } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -44,7 +45,7 @@ function makeMockNative(rowsByCall: AnyRec[][]) {
       };
     },
   };
-  return { native: native as unknown as ZeroshipDb, calls };
+  return { native: native as unknown as NativeDb, calls };
 }
 
 function makeFailingNative(err: Error) {
@@ -58,7 +59,7 @@ function makeFailingNative(err: Error) {
       };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 const schemaUsers = {

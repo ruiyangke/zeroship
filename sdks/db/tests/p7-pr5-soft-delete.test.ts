@@ -21,6 +21,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -76,7 +77,7 @@ function makeNativeRecording() {
     },
     _captured: captured,
   };
-  return { native: native as unknown as ZeroshipDb, captured };
+  return { native: native as unknown as NativeDb, captured };
 }
 
 /** Native double for legacy-runtime simulation: omits the PR 5 ops
@@ -92,7 +93,7 @@ function makeNativeMissingPurge() {
       };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", () => {

@@ -18,13 +18,13 @@ const systemAwareToField = (key: string) => (
 );
 
 function makeMockNative(rows: PlainObject[]) {
-  const calls: { collection: string; filter: PlainObject; opts: PlainObject }[] = [];
+  const calls: { collection: string; filter: PlainObject; opts: ZeroshipDbFindOpts }[] = [];
   // NativeFn now returns rows directly (Record<string, unknown>[]),
   // not a JSON string — Query._exec consumes the array.
   const fn = async (
     collection: string,
     filter: PlainObject,
-    opts: PlainObject
+    opts: ZeroshipDbFindOpts
   ): Promise<PlainObject[]> => {
     calls.push({ collection, filter, opts });
     return rows;
@@ -154,7 +154,12 @@ describe("Query opts key names", () => {
     const q = new Query("users", {}, fn).sort({ name: 1 });
     await q;
     assert.ok("orderBy" in calls[0].opts);
-    assert.equal(calls[0].opts.sort, undefined);
+    // `.sort` is intentionally not a key on `ZeroshipDbFindOpts` - this
+    // assertion pins that the SDK never emits it (see the historical bug
+    // this regression test is named for). Widened to `Record<string,
+    // unknown>` for the read only; the correct key (`orderBy`, above) is
+    // still checked against the real, narrow ambient type.
+    assert.equal((calls[0].opts as Record<string, unknown>).sort, undefined);
     assert.deepEqual(calls[0].opts.orderBy, { name: 1 });
   });
 
@@ -163,7 +168,8 @@ describe("Query opts key names", () => {
     const q = new Query("users", {}, fn).skip(20);
     await q;
     assert.ok("offset" in calls[0].opts);
-    assert.equal(calls[0].opts.skip, undefined);
+    // Same rationale as `.sort` above: `.skip` is not a real key.
+    assert.equal((calls[0].opts as Record<string, unknown>).skip, undefined);
     assert.equal(calls[0].opts.offset, 20);
   });
 

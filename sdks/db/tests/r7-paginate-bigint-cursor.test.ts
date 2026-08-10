@@ -15,7 +15,7 @@ function makeMockNative(pages: PlainObject[][]) {
   const fn = async (
     _collection: string,
     _filter: PlainObject,
-    _opts: PlainObject,
+    _opts: ZeroshipDbFindOpts,
   ): Promise<PlainObject[]> => {
     return pages[i++] ?? [];
   };

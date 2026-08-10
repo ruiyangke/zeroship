@@ -16,16 +16,16 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { schema, t } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
-import type { ZeroshipDb } from "../src/native.js";
+import type { NativeDb } from "../src/native.js";
 
-function makeNative(): ZeroshipDb {
+function makeNative(): NativeDb {
   return {
     registerModel: () => Promise.resolve(),
     collection: () => ({
       async find() { return []; },
       async findOne() { return null; },
     }),
-  } as unknown as ZeroshipDb;
+  } as unknown as NativeDb;
 }
 
 describe("installSchemaForTest — the adapter stands in for the descriptor build", () => {
