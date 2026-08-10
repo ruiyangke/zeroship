@@ -244,7 +244,15 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement {
                 name: format!("create_schema_{name}"),
                 up,
-                down: Some(format!("DROP SCHEMA IF EXISTS {}", qid(name)?)),
+                // A guarded create may have created nothing, so it cannot own the drop:
+                // rolling it back would destroy a schema this migration never made. The
+                // engine cannot tell which happened, so it declines to guess and
+                // `plan_rollback` refuses the migration as irreversible.
+                down: if if_not_exists.unwrap_or(false) {
+                    None
+                } else {
+                    Some(format!("DROP SCHEMA IF EXISTS {}", qid(name)?))
+                },
             }]
         }
         Op::DropSchema {
@@ -283,7 +291,12 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement {
                 name: format!("create_extension_{name}"),
                 up,
-                down: Some(format!("DROP EXTENSION IF EXISTS {}", qid(name)?)),
+                // Same reasoning as the guarded schema create above.
+                down: if if_not_exists.unwrap_or(false) {
+                    None
+                } else {
+                    Some(format!("DROP EXTENSION IF EXISTS {}", qid(name)?))
+                },
             }]
         }
         Op::DropExtension { name, if_exists } => {
