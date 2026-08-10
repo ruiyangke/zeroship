@@ -2501,6 +2501,7 @@ pub fn plan_rollback<'a>(
     migrations: &'a [Migration],
     applied: &[AppliedRecord],
     outstanding: &[crate::apply::journal::PendingContract],
+    non_txn_downs: &std::collections::BTreeMap<String, String>,
     approval: Approval,
     guard: &dyn crate::guard::MigrationGuard,
 ) -> Result<RollbackPlan<'a>, RollbackError> {
@@ -2577,6 +2578,16 @@ pub fn plan_rollback<'a>(
             return Err(RollbackError::NonTransactionalDown {
                 version: version.to_string(),
                 reason: "the migration declares transaction:false".to_string(),
+            });
+        }
+        //      The flag above is what the author DECLARED. This is what the dialect
+        //      found in the reverse SQL itself, which catches the migration that
+        //      declares `transaction: true` and then reverses itself with a statement
+        //      the server will not run inside a transaction block.
+        if let Some(reason) = non_txn_downs.get(version) {
+            return Err(RollbackError::NonTransactionalDown {
+                version: version.to_string(),
+                reason: reason.clone(),
             });
         }
 
@@ -2816,7 +2827,30 @@ async fn rollback_locked<B: MigrationBackend>(
         None => Vec::new(),
     };
 
-    let plan = plan_rollback(request, migrations, &applied, &outstanding, approval, guard)?;
+    // Only migrations the journal actually holds can be selected, so only those are
+    // worth parsing. The verdict is the dialect's, read here where the backend is, and
+    // handed to the planner as data so every refusal stays in one pure function.
+    let applied_versions: std::collections::HashSet<&str> =
+        applied.iter().map(|r| r.version.as_str()).collect();
+    let non_txn_downs: std::collections::BTreeMap<String, String> = migrations
+        .iter()
+        .filter(|m| applied_versions.contains(m.version.as_str()))
+        .filter_map(|m| {
+            backend
+                .non_transactional_down_reason(m)
+                .map(|reason| (m.version.as_str().to_string(), reason))
+        })
+        .collect();
+
+    let plan = plan_rollback(
+        request,
+        migrations,
+        &applied,
+        &outstanding,
+        &non_txn_downs,
+        approval,
+        guard,
+    )?;
 
     let mut rolled_back = Vec::with_capacity(plan.steps.len());
     for m in &plan.steps {
@@ -2866,7 +2900,15 @@ mod rollback_selection_tests {
         approval: Approval,
         guard: &dyn crate::guard::MigrationGuard,
     ) -> Result<RollbackPlan<'a>, RollbackError> {
-        super::plan_rollback(request, migrations, applied, &[], approval, guard)
+        super::plan_rollback(
+            request,
+            migrations,
+            applied,
+            &[],
+            &std::collections::BTreeMap::new(),
+            approval,
+            guard,
+        )
     }
 
     /// A guard that admits everything, so gate tests isolate the gate under test.
@@ -3039,6 +3081,7 @@ mod rollback_selection_tests {
             &set,
             &vs,
             &[obligation(&expand, vec![])],
+            &std::collections::BTreeMap::new(),
             Approval::Approved,
             &PermissiveGuard,
         )
@@ -3064,6 +3107,7 @@ mod rollback_selection_tests {
             &set,
             &vs,
             &[obligation("mig_some_other_plan", vec![contract.clone()])],
+            &std::collections::BTreeMap::new(),
             Approval::Approved,
             &PermissiveGuard,
         )
@@ -3083,10 +3127,69 @@ mod rollback_selection_tests {
                 "mig_unrelated_plan",
                 vec!["mig_unrelated_c1".to_string()],
             )],
+            &std::collections::BTreeMap::new(),
             Approval::Approved,
             &PermissiveGuard,
         )
         .expect("an unrelated obligation must not block an unwind");
+        assert_eq!(plan.steps.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // The `transaction` flag is what the author DECLARED. A migration can declare
+    // `transaction: true` and still reverse itself with a statement PostgreSQL
+    // refuses inside a transaction block, and the leaf opens one unconditionally.
+    // The dialect's reading of the reverse SQL is therefore a second, independent
+    // input to the same gate.
+    // ---------------------------------------------------------------------
+    #[test]
+    fn a_down_the_dialect_cannot_run_in_a_transaction_is_refused() {
+        let set = three();
+        let vs = versions(&set);
+        let offender = set[2].version.as_str().to_string();
+        let verdicts: std::collections::BTreeMap<String, String> = [(
+            offender.clone(),
+            "its `down` runs `DROP INDEX CONCURRENTLY`".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        let err = super::plan_rollback(
+            &req(RollbackTarget::Steps(1)),
+            &set,
+            &vs,
+            &[],
+            &verdicts,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("a down the dialect refuses inside a transaction must not be planned");
+        match err {
+            RollbackError::NonTransactionalDown { version, reason } => {
+                assert_eq!(version, offender);
+                // The reason is the dialect's own words, not a restatement of the flag.
+                assert!(reason.contains("DROP INDEX CONCURRENTLY"), "{reason}");
+                assert!(!reason.contains("transaction:false"), "{reason}");
+            }
+            other => panic!("expected NonTransactionalDown, got {other:?}"),
+        }
+
+        // Scoped to the version it names: a verdict about a migration nobody selected
+        // leaves the unwind alone.
+        let elsewhere: std::collections::BTreeMap<String, String> =
+            [("mig_not_selected".to_string(), "irrelevant".to_string())]
+                .into_iter()
+                .collect();
+        let plan = super::plan_rollback(
+            &req(RollbackTarget::Steps(1)),
+            &set,
+            &vs,
+            &[],
+            &elsewhere,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("a verdict about an unselected version must not block an unwind");
         assert_eq!(plan.steps.len(), 1);
     }
 
@@ -3338,7 +3441,15 @@ mod rollback_selection_ordering_tests {
         approval: Approval,
         guard: &dyn crate::guard::MigrationGuard,
     ) -> Result<RollbackPlan<'a>, RollbackError> {
-        super::plan_rollback(request, migrations, applied, &[], approval, guard)
+        super::plan_rollback(
+            request,
+            migrations,
+            applied,
+            &[],
+            &std::collections::BTreeMap::new(),
+            approval,
+            guard,
+        )
     }
     use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
 

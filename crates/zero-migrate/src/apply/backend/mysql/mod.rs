@@ -746,6 +746,13 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         session::rollback_one(self.conn, cfg, m, applied_by).await
     }
 
+    /// MySQL has no statement that is refused inside a transaction the way
+    /// PostgreSQL refuses the CONCURRENTLY family. Its DDL commits implicitly
+    /// instead, which is a different problem and not this one.
+    fn non_transactional_down_reason(&self, _m: &Migration) -> Option<String> {
+        None
+    }
+
     fn validate_non_txn(&self, _m: &Migration) -> Result<(), ApplyError> {
         // The PG non-txn idempotency scan (forbid bare DML, require IF NOT EXISTS on
         // CONCURRENTLY) is Postgres-specific (`pg_query`-parsed). MySQL accepts a

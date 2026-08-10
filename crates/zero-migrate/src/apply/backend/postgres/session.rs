@@ -505,6 +505,72 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 /// idempotent guard (e.g. `INSERT … ON CONFLICT DO NOTHING` driven from a DDL op)
 /// rather than a bare statement.
 ///
+/// Why this migration's `down` cannot run inside the transaction the rollback leaf
+/// opens, or `None` when nothing in it objects.
+///
+/// The rollback leaf issues `BEGIN` unconditionally, and gate (5b) of `plan_rollback`
+/// used to consult only `flags.transactional` - the author's DECLARATION. A migration
+/// declaring `transaction: true` whose `down` reverses itself with a statement
+/// PostgreSQL refuses inside a transaction block therefore reached the `BEGIN` and
+/// failed there, giving the operator a raw driver error for something the engine had
+/// already accepted, and only after earlier downs in the batch had committed.
+///
+/// # Why only the CONCURRENTLY family
+///
+/// These forms are non-transactional on PostgreSQL 18 whatever the catalog holds, so
+/// reading the text decides them with certainty. The forms that depend on catalog
+/// facts - a named `CLUSTER`, `REINDEX` over a partitioned target, `DROP SUBSCRIPTION`
+/// holding a replication slot - cannot be decided from text at all, and refusing them
+/// on suspicion would block a VALID rollback at the moment an operator most needs one.
+/// Failing closed is right for corruption risk; it is wrong for tool availability.
+///
+/// `ALTER TYPE ... ADD VALUE` is deliberately absent: PostgreSQL 12 and later run it
+/// inside a transaction, so refusing it would reject downs that work.
+///
+/// Cluster-wide statements are not this function's business either. The line-1 guard
+/// runs over the same `down` before the `BEGIN` and denies `ALTER SYSTEM`
+/// (`zero_migrate_guard::guard`, `rule::ALTER_SYSTEM`) and `CREATE`/`DROP DATABASE`
+/// (`rule::DATABASE_MANAGEMENT`) already.
+///
+/// # Unparseable SQL
+///
+/// Returns `None`, which is not a fail-open: the guard parses this same text and
+/// errors on a syntax failure, and it runs as gate (5c) immediately after the gate
+/// this feeds. An unparseable `down` is refused there, by the component that owns
+/// that judgement.
+pub(crate) fn non_transactional_down_reason(m: &Migration) -> Option<String> {
+    let down = m.down.as_deref()?;
+    let parsed = pg_query::parse(down).ok()?;
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        let offender = match node {
+            NodeEnum::IndexStmt(idx) if idx.concurrent => "CREATE INDEX CONCURRENTLY",
+            NodeEnum::DropStmt(drop) if drop.concurrent => "DROP INDEX CONCURRENTLY",
+            NodeEnum::ReindexStmt(r) if reindex_is_concurrent(r) => "REINDEX CONCURRENTLY",
+            _ => continue,
+        };
+        return Some(format!(
+            "its `down` runs `{offender}`, which PostgreSQL refuses inside a transaction \
+             block, and every `down` runs inside one. Roll forward with a compensating \
+             migration instead"
+        ));
+    }
+    None
+}
+
+/// `REINDEX ... CONCURRENTLY` carries its flag as a `DefElem` in `params`, unlike
+/// `CREATE INDEX` and `DROP INDEX` which carry a struct field.
+fn reindex_is_concurrent(r: &pg_query::protobuf::ReindexStmt) -> bool {
+    r.params.iter().any(|node| {
+        matches!(
+            node.node.as_ref(),
+            Some(NodeEnum::DefElem(d)) if d.defname.eq_ignore_ascii_case("concurrently")
+        )
+    })
+}
+
 /// A violation is rejected with [`ApplyError::NonIdempotentNonTxn`].
 pub(crate) fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
     let parsed = pg_query::parse(&m.up).map_err(|e| ApplyError::NonIdempotentNonTxn {
@@ -1618,6 +1684,95 @@ mod pg_confinement_shape_tests {
         // The neutral identity fields ARE populated (engine-agnostic).
         assert_eq!(cfg.project_id, "app_test");
         assert_eq!(cfg.project_schema, "app_test");
+    }
+}
+
+#[cfg(test)]
+mod non_transactional_down_tests {
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
+
+    /// A transactional migration whose `down` is `sql`. Transactional on purpose: the
+    /// flag is what gate (5b) already checked, so a fixture declaring `false` would
+    /// pass this classifier's test while proving nothing about the text reading.
+    fn with_down(sql: &str) -> Migration {
+        let flags = MigrationFlags::default();
+        let up = "CREATE TABLE t()";
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up,
+            down: Some(sql),
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version: MigrationId::generate(),
+            name: "n".into(),
+            up: up.into(),
+            down: Some(sql.into()),
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn the_concurrently_family_is_named_and_everything_else_passes() {
+        // Each of the three carries its flag differently in the parse tree - two
+        // struct fields and a DefElem - so all three are exercised rather than
+        // assumed to follow the first.
+        for (sql, expected) in [
+            (
+                "CREATE INDEX CONCURRENTLY i ON t (c)",
+                "CREATE INDEX CONCURRENTLY",
+            ),
+            ("DROP INDEX CONCURRENTLY i", "DROP INDEX CONCURRENTLY"),
+            ("REINDEX INDEX CONCURRENTLY i", "REINDEX CONCURRENTLY"),
+        ] {
+            let reason = non_transactional_down_reason(&with_down(sql))
+                .unwrap_or_else(|| panic!("{sql} must be refused"));
+            assert!(reason.contains(expected), "{sql}: {reason}");
+            assert!(reason.contains("Roll forward"), "{sql}: {reason}");
+        }
+
+        // The non-concurrent spellings run inside a transaction perfectly well, so
+        // refusing them would block valid rollbacks. This is the arm that fails if the
+        // matcher ever keys on the statement kind instead of the CONCURRENTLY flag.
+        for sql in [
+            "DROP INDEX i",
+            "CREATE INDEX i ON t (c)",
+            "REINDEX INDEX i",
+            "DROP TABLE t",
+            "ALTER TABLE t DROP COLUMN c",
+            // PostgreSQL 12 and later run this inside a transaction, so it must pass.
+            "ALTER TYPE mood ADD VALUE 'sad'",
+        ] {
+            assert_eq!(
+                non_transactional_down_reason(&with_down(sql)),
+                None,
+                "{sql} must not be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_or_unparseable_down_raises_no_objection_here() {
+        let mut irreversible = with_down("DROP TABLE t");
+        irreversible.down = None;
+        assert_eq!(non_transactional_down_reason(&irreversible), None);
+
+        // Not a fail-open: the line-1 guard parses this same text as gate (5c) and
+        // errors on a syntax failure, so an unparseable `down` is refused there.
+        assert_eq!(
+            non_transactional_down_reason(&with_down("this is not sql at all")),
+            None
+        );
     }
 }
 

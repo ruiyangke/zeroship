@@ -458,6 +458,20 @@ pub trait MigrationBackend {
     /// `transaction:false` outright (no non-txn DDL exists on SQLite).
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError>;
 
+    /// Why this migration's `down` cannot run inside the transaction the rollback
+    /// leaf opens, or `None` when nothing in it objects.
+    ///
+    /// Gate (5b) of `plan_rollback` consults the `transaction` flag, which is the
+    /// author's DECLARATION. This is what the dialect says after reading the reverse
+    /// SQL itself, so a migration declaring `transaction: true` and then reversing
+    /// itself with a statement the server refuses inside a transaction block is caught
+    /// during planning instead of mid-batch.
+    ///
+    /// Required rather than defaulted, like `validate_non_txn` above: a new backend
+    /// must answer this deliberately. Inheriting `None` would be a silent fail-open
+    /// for a dialect nobody has thought about yet.
+    fn non_transactional_down_reason(&self, m: &Migration) -> Option<String>;
+
     // -- journal row I/O (dialect-neutral owned rows) -----------------------
 
     /// True iff the journal meta objects already exist. MUST NOT create them, and

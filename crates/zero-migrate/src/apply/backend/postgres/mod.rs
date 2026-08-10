@@ -194,6 +194,10 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         session::validate_non_txn_idempotent(m)
     }
 
+    fn non_transactional_down_reason(&self, m: &Migration) -> Option<String> {
+        session::non_transactional_down_reason(m)
+    }
+
     async fn journal_exists(&self, cfg: &ExecutorConfig) -> Result<bool, JournalError> {
         let rows = self
             .conn

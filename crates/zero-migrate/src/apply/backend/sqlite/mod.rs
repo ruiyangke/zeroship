@@ -614,6 +614,11 @@ impl MigrationBackend for SqliteBackend {
 
     // -- parse-time validation ----------------------------------------------
 
+    /// SQLite has no non-transactional DDL at all, so no `down` can object.
+    fn non_transactional_down_reason(&self, _m: &Migration) -> Option<String> {
+        None
+    }
+
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
         // Reject transaction:false at the dialect boundary: SQLite DDL is
         // transactional; there is no CONCURRENTLY / ADD VALUE non-txn path to
