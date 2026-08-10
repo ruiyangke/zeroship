@@ -1992,6 +1992,28 @@ pub enum RollbackError {
     },
     /// A version selected for rollback is not present in the supplied migration
     /// set, so its `down` SQL is unavailable. Nothing was rolled back.
+    /// A version selected for rollback sits inside an online rename whose contract
+    /// is still outstanding.
+    ///
+    /// The expand half creates the destination column and both columns stay alive
+    /// until the operator resolves the contract. Rolling back a version in that set
+    /// drops the destination, and `resolve` then refuses BOTH ways: its
+    /// `columns_compatible` check runs ahead of the commit arm and the abort arm
+    /// alike, and it needs both columns present. The table would be wedged behind
+    /// the interlock with no reachable repair.
+    #[error(
+        "migration {version} belongs to the outstanding online rename on {table} (contract {plan_version}); \
+         rolling it back would drop the destination column and leave that rename unresolvable in both \
+         directions. Abort the rename first with the resolve abort protocol, then roll back"
+    )]
+    PendingContractOutstanding {
+        /// The selected version that sits inside the obligation.
+        version: String,
+        /// The table the rename targets.
+        table: String,
+        /// The obligation's plan-level identity, the one `status` reports.
+        plan_version: String,
+    },
     #[error("migration {version} is applied but absent from the supplied set; cannot roll back (its `down` is unavailable)")]
     MissingFromSet {
         /// The applied-but-absent version.
@@ -2478,6 +2500,7 @@ pub fn plan_rollback<'a>(
     request: &RollbackRequest,
     migrations: &'a [Migration],
     applied: &[AppliedRecord],
+    outstanding: &[crate::apply::journal::PendingContract],
     approval: Approval,
     guard: &dyn crate::guard::MigrationGuard,
 ) -> Result<RollbackPlan<'a>, RollbackError> {
@@ -2605,7 +2628,39 @@ pub fn plan_rollback<'a>(
         }
     }
 
-    // (7) Reverse topological order: the transpose of apply's order. Every selected
+    // (7) Outstanding rename obligations. An online rename creates its destination
+    //     column in the expand half and keeps BOTH columns alive until the operator
+    //     resolves the contract. Rolling back a version inside that set drops the
+    //     destination, after which the obligation cannot be discharged either way:
+    //     `resolve` evaluates `columns_compatible` ahead of its commit arm and its
+    //     abort arm alike, and that check needs both columns present. The table would
+    //     sit wedged behind the interlock with no reachable repair, so the unwind is
+    //     refused here and the operator is sent to the protocol that owns this
+    //     transition.
+    //
+    //     This reads `steps`, not the raw selection: a version force-skipped as
+    //     irreversible above is not being rolled back and must not trip the gate.
+    //     It matches on the obligation identities a rollback can actually see - the
+    //     plan version and the contract versions - never the deep `pending_version`,
+    //     which no plan-level supplied set exposes.
+    for m in &steps {
+        let version = m.version.as_str();
+        if let Some(contract) = outstanding.iter().find(|contract| {
+            contract.plan_version == version
+                || contract
+                    .contract_versions
+                    .iter()
+                    .any(|held| held == version)
+        }) {
+            return Err(RollbackError::PendingContractOutstanding {
+                version: version.to_string(),
+                table: contract.table.clone(),
+                plan_version: contract.plan_version.clone(),
+            });
+        }
+    }
+
+    // (8) Reverse topological order: the transpose of apply's order. Every selected
     //     dependency is in-set, so nothing is pre-satisfied; reversing an
     //     ascending-version tiebreak yields the documented reverse-version
     //     degradation when there are no edges.
@@ -2752,7 +2807,16 @@ async fn rollback_locked<B: MigrationBackend>(
         })
         .collect();
 
-    let plan = plan_rollback(request, migrations, &applied, approval, guard)?;
+    // Read under the same lock as the journal, so the obligation set and the applied
+    // set describe one coherent moment. A backend with no cross-deploy obligation
+    // capability has none to observe, which is why the empty arm is a fact and not a
+    // fallback.
+    let outstanding = match backend.pending_contracts() {
+        Some(capability) => capability.outstanding_pending_contracts(cfg).await?,
+        None => Vec::new(),
+    };
+
+    let plan = plan_rollback(request, migrations, &applied, &outstanding, approval, guard)?;
 
     let mut rolled_back = Vec::with_capacity(plan.steps.len());
     for m in &plan.steps {
@@ -2788,6 +2852,22 @@ async fn rollback_locked<B: MigrationBackend>(
 mod rollback_selection_tests {
     use super::*;
     use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
+
+    /// Every gate test below predates the rename-obligation gate and exercises a
+    /// database with no outstanding obligation, so each supplies an empty set. The
+    /// shim shadows the real function rather than each call repeating `&[]`, which
+    /// keeps the "no obligations here" premise stated once where it can be read.
+    /// `outstanding_obligation_blocks_the_rollback` calls `super::plan_rollback`
+    /// directly, because supplying an obligation is the whole point of that one.
+    fn plan_rollback<'a>(
+        request: &RollbackRequest,
+        migrations: &'a [Migration],
+        applied: &[AppliedRecord],
+        approval: Approval,
+        guard: &dyn crate::guard::MigrationGuard,
+    ) -> Result<RollbackPlan<'a>, RollbackError> {
+        super::plan_rollback(request, migrations, applied, &[], approval, guard)
+    }
 
     /// A guard that admits everything, so gate tests isolate the gate under test.
     struct PermissiveGuard;
@@ -2850,6 +2930,26 @@ mod rollback_selection_tests {
                 event_seq: i as i64 + 1,
             })
             .collect()
+    }
+
+    /// An outstanding online-rename obligation naming `plan_version` as the identity
+    /// a rollback can see, plus whatever contract versions it still owes.
+    fn obligation(
+        plan_version: &str,
+        contract_versions: Vec<String>,
+    ) -> crate::apply::journal::PendingContract {
+        crate::apply::journal::PendingContract {
+            owner_app: Some("app_test".to_string()),
+            table: "accounts".to_string(),
+            from_col: "email".to_string(),
+            to_col: "email_address".to_string(),
+            ty: "text".to_string(),
+            // The deep expand sub-step id. Deliberately unlike any version the
+            // supplied set carries, so a gate keying on it would never fire.
+            pending_version: "mig_deep_expand_substep".to_string(),
+            plan_version: plan_version.to_string(),
+            contract_versions,
+        }
     }
 
     /// Three migrations with no edges, oldest first.
@@ -2918,6 +3018,76 @@ mod rollback_selection_tests {
             vec![set[2].version.as_str(), set[1].version.as_str()],
             "unwind down TO the target, keeping it"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // An online rename keeps both columns alive until its contract resolves.
+    // Rolling back a version inside that obligation drops the destination and
+    // wedges the table: `resolve` checks `columns_compatible` ahead of BOTH its
+    // commit arm and its abort arm, and that check needs both columns present.
+    // So the unwind is refused before it runs, and the refusal names the table
+    // and the contract rather than only the version.
+    // ---------------------------------------------------------------------
+    #[test]
+    fn outstanding_obligation_blocks_the_rollback() {
+        let set = three();
+        let vs = versions(&set);
+        let expand = set[2].version.as_str().to_string();
+
+        let err = super::plan_rollback(
+            &req(RollbackTarget::Steps(1)),
+            &set,
+            &vs,
+            &[obligation(&expand, vec![])],
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("a version inside an outstanding rename must not be rolled back");
+        match err {
+            RollbackError::PendingContractOutstanding {
+                version,
+                table,
+                plan_version,
+            } => {
+                assert_eq!(version, expand);
+                assert_eq!(table, "accounts");
+                assert_eq!(plan_version, expand);
+            }
+            other => panic!("expected PendingContractOutstanding, got {other:?}"),
+        }
+
+        // The contract half is covered too: an obligation still owing C1/C2 names
+        // those versions, and rolling one back strands the same interlock.
+        let contract = set[1].version.as_str().to_string();
+        let err = super::plan_rollback(
+            &req(RollbackTarget::Steps(2)),
+            &set,
+            &vs,
+            &[obligation("mig_some_other_plan", vec![contract.clone()])],
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect_err("a contract version inside an outstanding rename is equally unsafe");
+        assert!(
+            matches!(err, RollbackError::PendingContractOutstanding { ref version, .. } if *version == contract),
+            "expected the contract version named, got {err:?}"
+        );
+
+        // The gate is scoped to the obligation, not to rollback in general: an
+        // obligation over versions nobody selected leaves the unwind alone.
+        let plan = super::plan_rollback(
+            &req(RollbackTarget::Steps(1)),
+            &set,
+            &vs,
+            &[obligation(
+                "mig_unrelated_plan",
+                vec!["mig_unrelated_c1".to_string()],
+            )],
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("an unrelated obligation must not block an unwind");
+        assert_eq!(plan.steps.len(), 1);
     }
 
     #[test]
@@ -3158,6 +3328,18 @@ mod rollback_selection_tests {
 #[cfg(test)]
 mod rollback_selection_ordering_tests {
     use super::*;
+
+    /// These ordering tests observe no rename obligation, so they supply none. Same
+    /// shim as the selection module above, for the same reason.
+    fn plan_rollback<'a>(
+        request: &RollbackRequest,
+        migrations: &'a [Migration],
+        applied: &[AppliedRecord],
+        approval: Approval,
+        guard: &dyn crate::guard::MigrationGuard,
+    ) -> Result<RollbackPlan<'a>, RollbackError> {
+        super::plan_rollback(request, migrations, applied, &[], approval, guard)
+    }
     use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
 
     struct PermissiveGuard;
