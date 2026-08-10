@@ -59,6 +59,47 @@ echo "=== 1. Build examples/starter (pnpm build → dist/app.zship) ==="
 ( cd "$STARTER" && pnpm build ) >/tmp/gp-build.log 2>&1
 [ -f "$ZSHIP" ] && pass "built $(basename "$ZSHIP") ($(du -k "$ZSHIP" | cut -f1)KB)" || { fail "build produced no app.zship"; tail -20 /tmp/gp-build.log; exit 1; }
 
+# --- 1b. The artifact is INSPECTABLE, and declares the procedures we shipped ---
+#
+# There is no `zeroship inspect` command (removed in the artifact-layout
+# redesign), so the only way a creator sees inside their own build is plain
+# `tar`. That makes the archive layout a creator-facing contract even though no
+# first-party command depends on it: change it, and the only available way to
+# answer "what are my actual wire ids" stops working.
+#
+# That question is not hypothetical. Wire ids are configurable and need not
+# match export names - `examples/db-todos` exports `seedUser` but publishes
+# `users.seed`, and calling the export name returns a bare
+# `Method not found: seedUser` with no hint that an id mapping exists. The
+# manifest is where the real answer lives.
+#
+# WHAT THIS DOES NOT CATCH, and it is the failure that has actually bitten:
+# a module missing its `"use server"` directive builds clean, reports 0 server
+# functions, and STILL emits a manifest declaring every RPC - so a manifest
+# listing `getMessages` is NOT evidence that `getMessages` is callable. This
+# asserts the artifact is readable and says what we expect; step 5 is what
+# proves a procedure actually answers.
+zship_rpc_ids() {
+  local mf
+  mf="$(tar --zstd -xOf "$1" manifest.json 2>/dev/null)" || return 3
+  [ -n "$mf" ] || return 3
+  printf '%s' "$mf" | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let m; try { m = JSON.parse(s); } catch { process.exit(4); }
+      const ids = Object.keys(m.resources||{}).filter(k=>k.startsWith("rpc:")).sort();
+      if (!ids.length) process.exit(5);
+      process.stdout.write(ids.join(","));
+    });'
+}
+GP_IDS="$(zship_rpc_ids "$ZSHIP")"; GP_IDS_RC=$?
+if [ "$GP_IDS_RC" -ne 0 ]; then
+  fail "manifest not readable from the .zship (rc=$GP_IDS_RC: 3=no manifest.json, 4=unparseable, 5=no rpc resources)"
+elif [ "$GP_IDS" = "rpc:addMessage,rpc:getMessages" ]; then
+  pass "artifact inspectable via tar; manifest declares $GP_IDS"
+else
+  fail "manifest rpc ids changed: expected rpc:addMessage,rpc:getMessages got '$GP_IDS'"
+fi
+
 # --- 2. Bring up the stack (control + worker + gateway) ---
 echo "=== 2. Bring up the stack ==="
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
