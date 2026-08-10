@@ -619,19 +619,28 @@ mod tests {
     /// Signout must clear the SESSION cookie, not only the anchor and the
     /// breadcrumb.
     ///
-    /// This module's docs say "Returns `204` + no-store cookie clears" and
-    /// `signout`'s own doc says "Always 204 + cookie clears". Measured against
-    /// a live deployed app by `tests/e2e_dev_vs_deployed_login.sh`, the
-    /// response carried exactly two clears — `zeroship_app_anchor` and
-    /// `zs.<host>.is.authenticated` — and left the session cookie standing.
-    /// `crate::oidc_rp::clear_app_session_cookie` was written for this and is
-    /// referenced by nothing but its own unit test.
+    /// WHAT THIS PINS, and the state it is pinning against — past tense on
+    /// purpose. Until 2026-08-10 the module docs said "Returns `204` +
+    /// no-store cookie clears" and `signout`'s own doc said "Always 204 +
+    /// cookie clears", while a live deployed signout carried exactly two
+    /// clears — `zeroship_app_anchor` and `zs.<host>.is.authenticated` — and
+    /// LEFT the session cookie standing (measured by
+    /// `tests/e2e_dev_vs_deployed_login.sh`).
+    /// `crate::oidc_rp::clear_app_session_cookie` had been written for it and
+    /// was referenced by nothing but its own unit test.
     ///
-    /// Server-side revocation DOES work (the same run measured a `401` on
-    /// replay), so this is defence in depth rather than an open door. It is
-    /// still worth closing: a stale credential left in the browser after an
-    /// explicit signout is the thing signout exists to prevent, and the
-    /// docs already promise it.
+    /// That is fixed: `signout_cleared` now emits the session clear too, so
+    /// the two doc sites above are true again and this test is what keeps
+    /// them true. This paragraph was left in the present tense after the fix
+    /// landed, which meant the test guarding the repair read as a report that
+    /// the defect was still live — the reader most likely to act on it being
+    /// the one least able to check.
+    ///
+    /// Server-side revocation covered the credential independently (the same
+    /// run measured a `401` on replay), so the gap was defence in depth
+    /// rather than an open door. It was still worth closing: a stale
+    /// credential left in the browser after an explicit signout is the thing
+    /// signout exists to prevent.
     ///
     /// Asserted on the cookie NAME plus `Max-Age=0`, not on the whole header
     /// string, so a change to `Path`/`SameSite` does not fail this test —
