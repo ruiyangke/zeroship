@@ -98,3 +98,30 @@ runtime agree on the reserved dispatch prefix:
 The manifest's `transformer` currently defaults to `"json"`. If an app opts
 into `"superjson"`, the client and server must both use that transformer and
 the consuming project must install `superjson`.
+
+## Inspecting an artifact
+
+There is no `zeroship inspect` command. It was removed in the artifact-layout
+redesign and has not been replaced. The artifact is **not** opaque, though: a
+`.zship` is a zstd-compressed tar, so standard tools read it.
+
+```bash
+# The whole manifest.
+tar --zstd -xOf dist/app.zship manifest.json
+
+# Every RPC the build actually declared, which is the usual question -
+# a procedure missing here will 404 at runtime no matter what the source says.
+tar --zstd -xOf dist/app.zship manifest.json | grep -oE '"rpc:[^"]+"'
+
+# Archive layout: the manifest, then content-addressed blobs.
+tar --zstd -tf dist/app.zship
+```
+
+Verified 2026-08-10 against `examples/bench/dist/app.zship`: the first command
+prints the manifest, the second enumerates 14 `rpc:` entries, and the listing
+shows `manifest.json` alongside `blobs/<sha256>` entries.
+
+Piping the manifest through `jq` works too, but plain `grep` is deliberate here:
+the manifest is emitted as one line, so `jq` is a convenience rather than a
+requirement, and the commands above hold on a machine that has neither `jq` nor
+the zeroship CLI on `PATH`.
