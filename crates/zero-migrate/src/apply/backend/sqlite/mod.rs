@@ -392,9 +392,28 @@ impl SqliteBackend {
     }
 }
 
-/// Choose the file used for the process-wide migration lock. On Unix we lock the
-/// database inode itself, so symlinks and hard links cannot create separate lock
-/// identities. Other platforms keep the canonical sidecar behavior.
+/// Choose the file used for the process-wide migration lock. The lock is keyed on
+/// the database's `(dev, ino)` so symlinks and hard links cannot create separate
+/// lock identities, but it is taken on a SIDECAR file — NEVER on the database file
+/// itself.
+///
+/// # Why the sidecar, and not the database inode
+///
+/// `acquire_project_lock` takes `File::try_lock`, which is `flock(2)` on Unix. On
+/// Linux `flock` and the POSIX `fcntl` locks SQLite's unix VFS uses live in
+/// independent lock spaces, so locking the database file appeared to work. On
+/// **Darwin they are the same lock space**: an exclusive `flock` on the database
+/// file blocks SQLite's own writes to it — from the SAME process, on a different
+/// fd — and surfaces as `SQLITE_BUSY`:
+///
+/// ```text
+/// sqlite migration statement failed: database is locked
+/// ```
+///
+/// so every SQLite apply self-deadlocked on macOS the moment the project lock was
+/// taken, with zero migrations needed to reproduce. Measured, not hypothesised.
+/// The sidecar keeps the cross-process exclusion this lock exists for while
+/// leaving the database's own locking untouched.
 fn project_lock_path(app_path: &Path) -> Result<PathBuf, SqliteActorError> {
     let canonical = std::fs::canonicalize(app_path).map_err(|error| {
         SqliteActorError::Open(format!(
@@ -404,7 +423,23 @@ fn project_lock_path(app_path: &Path) -> Result<PathBuf, SqliteActorError> {
     })?;
     #[cfg(unix)]
     {
-        Ok(canonical)
+        use std::os::unix::fs::MetadataExt;
+
+        // `(dev, ino)` is the inode identity the old implementation got by locking
+        // the file itself. Naming the sidecar after it preserves that property:
+        // two hard links to one database still name one lock file.
+        let meta = std::fs::metadata(&canonical).map_err(|error| {
+            SqliteActorError::Open(format!(
+                "stat app path {} for project lock: {error}",
+                canonical.display()
+            ))
+        })?;
+        let parent = canonical.parent().unwrap_or_else(|| Path::new("."));
+        Ok(parent.join(format!(
+            ".zero-migrate-{}-{}.lock",
+            meta.dev(),
+            meta.ino()
+        )))
     }
     #[cfg(not(unix))]
     {
