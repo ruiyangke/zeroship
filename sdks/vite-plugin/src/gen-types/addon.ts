@@ -54,6 +54,8 @@ import type {
   GenArtifactsSource,
   IndexDescriptorDto,
   RuntimeOptionsDto,
+  ApplyIrSqliteRequest,
+  ApplyReply,
 } from "zero-migrate-node";
 
 export type {
@@ -62,6 +64,8 @@ export type {
   GenArtifactsSource,
   IndexDescriptorDto,
   RuntimeOptionsDto,
+  ApplyIrSqliteRequest,
+  ApplyReply,
 };
 
 const require = createRequire(import.meta.url);
@@ -77,11 +81,26 @@ const require = createRequire(import.meta.url);
  */
 export type GenArtifactsReply = Pick<AddonGenArtifactsReply, "ok" | "runtimeJson" | "error">;
 
-/** The two verbs gen-types needs, so the addon's larger apply-side surface is
- *  not reachable from here. */
+/** The verbs the dev tier needs, so the addon's larger apply-side surface is
+ *  not reachable from here.
+ *
+ *  `applyIrSqlite` is the dev tier's schema authority: the dev server applies
+ *  the committed migrations to the dev SQLite file AHEAD of the worker, in
+ *  authored order, exactly as `migrated` does for Postgres at deploy. The
+ *  worker's `registerModel` then never renders the descriptor into DDL - see
+ *  docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md.
+ *
+ *  Its request/reply types are IMPORTED from `zero-migrate-node`, never
+ *  re-declared here. A hand-mirrored copy is how a field the engine adds turns
+ *  into a runtime failure instead of a compile error. */
 interface MigrateAddon {
   genArtifacts(source: GenArtifactsSource): GenArtifactsReply;
   irVersion(): number;
+  applyIrSqlite(
+    appPath: string,
+    journalPath: string,
+    req: ApplyIrSqliteRequest,
+  ): Promise<ApplyReply>;
 }
 
 let cached: MigrateAddon | undefined;
