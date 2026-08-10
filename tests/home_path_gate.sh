@@ -32,7 +32,29 @@
 # pattern reports 42 hits in
 # examples/apple-website-study/src/assets/apple/sources.json, every one of
 # them inside `https://www.apple.com/v/iphone/home/cj/...`, where `home` is an
-# apple.com path segment. So URLs are stripped from each line BEFORE matching.
+# apple.com path segment. So WEB urls are stripped from each line BEFORE
+# matching.
+#
+# WEB ONLY - `http`/`https`, never `file:`. A `file:` URL is not a citation, it
+# is a path with a scheme on the front:
+#
+#     "dep": "file:///home/ruiyang/Projects/zero-migrate/packages/zero-migrate"
+#
+# That is the exact shape that started this (the vite-plugin dependency behind
+# #265), so a clause written as "strip URLs" rather than "strip web URLs" would
+# blind this gate to its own founding instance. The `https\?://` in the sed
+# below already has this property; it is spelled out here because it was
+# ACCIDENTAL - the restriction is what matters, not the regex that happens to
+# encode it, and the next person to simplify that pattern needs to know.
+# (zero-migrate raised this in ZERO-MIGRATE-2026-08-10-187 after I sent them
+#  the URL false-positive; they could not tell from my description whether I
+#  drew the line, and I could not either until I tested it.)
+#
+# Verified by running, 2026-08-10, all four arms:
+#     clean tree                                -> exit 0
+#     web URL alone                             -> exit 0
+#     web URL AND a real home path, same line   -> exit 1, path named
+#     file: URL carrying a home path            -> exit 1, path named
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
