@@ -4063,20 +4063,54 @@ enum RpcCallResult {
     FallThrough,
 }
 
-/// Slice `<id>` from a URL whose path contains `/__zeroship/v1/<id>`. Returns
-/// None for non-POST/GET methods or malformed URLs. Cheaper than
-/// constructing a URL object: a single `find` for the tag plus a single
-/// `find` for the first query/fragment terminator.
+/// Byte offset of the path component of `url` — the index of the `/` that
+/// begins the path. `None` when there is no path (`http://host`, `http://host?q`).
+/// A scheme-less relative URL (`/__zeroship/v1/x`) starts at its own first `/`.
+///
+/// The `?`/`#` bound matters twice: a `://` is only a scheme delimiter when
+/// nothing before it could already have ended the scheme (a URL scheme contains
+/// no `/`, `?` or `#`), and the first `/` only begins the path when it precedes
+/// the query. Without either bound, `/p?q=a://b` and `http://host?q=/x` would
+/// both report a "path" that lives inside the query string.
+fn url_path_start(url: &str) -> Option<usize> {
+    let after_scheme = url
+        .find("://")
+        .filter(|&i| !url[..i].contains(['/', '?', '#']))
+        .map(|i| i + 3)
+        .unwrap_or(0);
+    let rest = &url[after_scheme..];
+    let authority_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    rest[..authority_end].find('/').map(|i| after_scheme + i)
+}
+
+/// Slice `<id>` out of a URL whose path BEGINS `/__zeroship/v1/<id>`. Returns
+/// None for non-POST/GET methods, or when the tag is not at the path root.
+///
+/// The prefix anchor is load-bearing, not tidiness. This used to be
+/// `url.find(TAG)` — a substring search — while the gateway's own RPC lookup
+/// (`compiled.rs::lookup_canonical_resource_key`) fires only on a canonical
+/// path that STARTS WITH the tag. Prefix on one side and substring on the other
+/// is a gateway↔worker disagreement: measured end to end on 2026-08-10
+/// (`tests/e2e_gateway_path_backslash.sh` T9), `GET /x/__zeroship/v1/secret`
+/// was authorized by the gateway against the app's anon URL catch-all and then
+/// EXECUTED the `rpc:secret` procedure here, which answers 401 on its own
+/// canonical URL (T7a, the one-variable control). No exotic byte was needed —
+/// any leading segment at all was enough.
+///
+/// Still cheap: one `find` for the path start, one prefix compare, one `find`
+/// for the query/fragment terminator. No URL object is constructed.
 fn extract_zs_v1_id<'a>(method: &str, url: &'a str) -> Option<&'a str> {
     if !(method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("GET")) {
         return None;
     }
     const TAG: &str = "/__zeroship/v1/";
-    let start = url.find(TAG)? + TAG.len();
-    let rest = &url[start..];
-    let end = start + rest.find(['?', '#']).unwrap_or(rest.len());
-    if start >= end { return None; }
-    Some(&url[start..end])
+    let path = &url[url_path_start(url)?..];
+    let rest = path.strip_prefix(TAG)?;
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&rest[..end])
 }
 
 /// Outcome of `parse_rpc_input`. `Reject400` carries a static message
