@@ -652,6 +652,39 @@ fi
 # what would let this become a dev-vs-deployed comparison.
 step 9 "Data plane: migration field names survive to the database"
 TODOS="$ROOT/examples/db-todos"
+
+# Migrate BEFORE the dev server, because since ee2c352aa `pnpm dev` no longer
+# does it. That commit split the dev-database apply out of dev-server.ts into
+# its own `zeroship-dev-migrate` step, deliberately -- starting a server and
+# writing a schema have different blast radii. It updated no harness, so this
+# script kept passing on a `.zeroship/zs-default.sqlite` left over from BEFORE
+# the split, and would have gone red the first time it ran anywhere fresh --
+# which is every CI run.
+#
+# Measured 2026-08-10, one variable (state present vs absent, same commit):
+#   with a pre-existing .zeroship   24 passed, 0 failed   exit 0
+#   with .zeroship moved aside      21 passed, 1 failed   exit 1
+#     ✗ users.seed did not return an id: {"message":"internal error",...}
+# Note 21+1 = 22, not 24: the two checks after the seed never ran at all. That
+# is what GOLDEN_MIN_PASSED exists for -- the floor caught the shortfall the
+# PASS/FAIL tally alone would have under-reported.
+#
+# Invoked through `node <dist>` rather than `pnpm migrate` on purpose: the bin
+# is declared in sdks/vite-plugin/package.json but only symlinked by an install
+# that post-dates ee2c352aa, so a developer with an older node_modules gets
+# `zeroship-dev-migrate: command not found` (I did). The dist path works either
+# way, and this harness must not depend on when someone last installed.
+MIGRATE_CLI="$ROOT/sdks/vite-plugin/dist/cli/migrate-dev.js"
+if [ ! -f "$MIGRATE_CLI" ]; then
+  fail "dev-migrate CLI missing at $MIGRATE_CLI (run pnpm build)"
+else
+  if ( cd "$TODOS" && node "$MIGRATE_CLI" ) >/tmp/gp-dbmigrate.log 2>&1; then
+    pass "dev migrations applied ahead of the runtime ($(grep -o 'applied=[0-9]* skipped=[0-9]*' /tmp/gp-dbmigrate.log | tail -1))"
+  else
+    fail "zeroship-dev-migrate failed: $(tail -3 /tmp/gp-dbmigrate.log | tr '\n' ' ')"
+  fi
+fi
+
 free_ports "$DB_V" "$DB_RT"
 ( cd "$TODOS" && DB_TODOS_API_PORT="$DB_RT" ./node_modules/.bin/vite --port "$DB_V" --strictPort ) \
   >/tmp/gp-dbtodos.log 2>&1 &
@@ -754,7 +787,7 @@ gp_close_step
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
 # an easier one keeps the total at 24. Nothing here can see that; review can.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-24}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-25}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
