@@ -17,17 +17,35 @@
 //!   `RuntimeSchemaDescriptor`, injected as `globalThis.__zsRuntimeDescriptor`.
 //!   So on PG this registers a model's metadata; it creates nothing.
 //!
-//! * **SQLite dev tier - applies, but through the MIGRATION ENGINE, not the
-//!   phases below.** The arm calls [`sqlite_engine::run_sqlite_via_engine`],
-//!   which drives the security-hardened engine (journal / versioning / drift /
-//!   12-step rebuild / baseline / dev auto-approve) against the developer's
-//!   local file at first `registerModel`, so `pnpm dev` gets a schema without a
-//!   separate deploy step.
+//! * **SQLite dev tier - also registers metadata and creates NOTHING**, the
+//!   same as the PG arm. The dev server applies the committed migrations to the
+//!   app file ahead of the worker (`sdks/vite-plugin/src/gen-types/dev-apply.ts`),
+//!   so the schema already exists by the time a request arrives; the arm keeps
+//!   only `ensure_app_schema` (the ATTACH the data plane needs), and the caller
+//!   stamps `mark_model_registered` / `cache_schema` on its `Ok(())`.
 //!
-//! So the name is wider than either backend's behaviour. On PG it registers
-//! metadata; on SQLite the engine does the applying. Reading it as "this
-//! creates my tables" is wrong on PG and, on SQLite, credits the wrong
-//! component.
+//!   THIS PARAGRAPH SAID THE OPPOSITE until 2026-08-10: that the arm "applies,
+//!   but through the MIGRATION ENGINE", calling
+//!   [`sqlite_engine::run_sqlite_via_engine`] at first `registerModel`. That is
+//!   stale - it describes the pre-cutover arm, and it contradicted the comment
+//!   on the arm itself further down this file, which has said "metadata only,
+//!   NO DDL" since the cutover. Two records of one arm, disagreeing, with the
+//!   summary one wrong: the reader who stops at the module doc gets the
+//!   opposite of the behaviour.
+//!
+//!   Consequence worth knowing before editing here:
+//!   [`sqlite_engine::run_sqlite_via_engine`] now has **no production call
+//!   site** - every caller in the tree is a `#[cfg(test)]` test in this file
+//!   (verified by enumerating them, 2026-08-10). Its tests therefore exercise a
+//!   path `registerModel` no longer takes, and a charter or engine failure
+//!   reachable only through it cannot break a running dev server. Whether the
+//!   module should be deleted outright under the repo's no-back-compat stance
+//!   is an open call, not settled here.
+//!
+//! So the name is wider than either backend's behaviour: on BOTH backends this
+//! registers metadata and creates nothing. Reading it as "this creates my
+//! tables" is wrong on either tier - a migration process does that, ahead of
+//! the runtime.
 //!
 //! Not reachable from creator code either way: `env.db.registerModel` is
 //! `undefined` inside a handler and `env.db.__platform` throws
