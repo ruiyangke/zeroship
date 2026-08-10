@@ -53,6 +53,16 @@ pub enum BaselineError {
     #[error("db error: {0}")]
     #[cfg(pg_seam)]
     Db(#[from] crate::driver::DbError),
+    /// Taking or releasing the project lock failed.
+    ///
+    /// Carried as its own variant so baseline can route through the SAME
+    /// `session::acquire_project_lock` every other acquire site uses. That seam
+    /// compensates for a grant PostgreSQL recorded before failing the acquiring
+    /// statement; inlining the raw `pg_advisory_lock` here would take the lock
+    /// without the compensation, which is what it used to do.
+    #[error(transparent)]
+    #[cfg(pg_seam)]
+    Lock(#[from] crate::apply::executor::ApplyError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -149,22 +159,19 @@ pub(crate) async fn baseline<D: SqlSession>(
             source,
         })?;
 
-    // Privileged: serialize against all migration activity,
-    // exactly like apply. Held for the whole operation; released on every exit.
-    conn.exec(
-        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[(&cfg.project_id).into()],
-    )
-    .await?;
+    // Privileged: serialize against all migration activity, exactly like apply.
+    // Held for the whole operation; released on every exit.
+    //
+    // Through the shared seam rather than inlined SQL, so this acquire gets the
+    // grant compensation every other one has: PostgreSQL can record a session
+    // advisory lock and still fail the acquiring statement, and a caller told the
+    // acquisition failed has nothing to release with.
+    crate::apply::backend::postgres::session::acquire_project_lock(conn, &cfg.project_id).await?;
     let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
-    let unlock = conn
-        .exec(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[(&cfg.project_id).into()],
-        )
-        .await;
+    let unlock =
+        crate::apply::backend::postgres::session::release_project_lock(conn, &cfg.project_id).await;
     match result {
-        Ok(o) => unlock.map(|_| o).map_err(BaselineError::Db),
+        Ok(o) => unlock.map(|()| o).map_err(BaselineError::Lock),
         Err(e) => Err(e),
     }
 }
