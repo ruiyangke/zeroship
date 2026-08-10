@@ -66,28 +66,50 @@ provision_publisher() {
     verdaccio sh -lc 'node <<'"'"'NODE'"'"'
 const fs = require("node:fs");
 const path = "/verdaccio/conf/storage/htpasswd";
-const { generateHtpasswdLine } = require("/usr/local/lib/node_modules/verdaccio/node_modules/verdaccio-htpasswd/build/utils.js");
+// `addUserToHTPasswd`, NOT `generateHtpasswdLine`. This block used to import the
+// latter and broke with `TypeError: generateHtpasswdLine is not a function` --
+// measured 2026-08-10 against verdaccio/verdaccio:6, whose utils.js exports
+// exactly: addUserToHTPasswd, changePasswordToHTPasswd, lockAndRead,
+// parseHTPasswd, sanityCheck, stringToUtf8, verifyPassword.
+//
+// The function did not disappear; it stopped being EXPORTED. `addUserToHTPasswd`
+// still calls it internally. That is the whole hazard: this harness reaches into
+// a private internal of a container image pinned to a FLOATING tag, so an
+// upstream refactor with no API change silently disables the only harness that
+// can see the creator-install path. Using the exported entry point does not
+// remove the coupling -- it moves it to a surface upstream is likelier to keep.
+const utils = require("/usr/local/lib/node_modules/verdaccio/node_modules/verdaccio-htpasswd/build/utils.js");
 const { constants } = require("/usr/local/lib/node_modules/verdaccio/node_modules/@verdaccio/core");
 
 (async () => {
   const user = process.env.ZS_PUBLISH_USER;
   const password = process.env.ZS_PUBLISH_PASSWORD;
   if (!user || !password) throw new Error("missing publisher credentials");
-  const line = await generateHtpasswdLine(user, password, {
-    algorithm: constants.HtpasswdHashAlgorithm.bcrypt,
-    rounds: 10,
-  });
+  if (typeof utils.addUserToHTPasswd !== "function") {
+    throw new Error(
+      "verdaccio-htpasswd no longer exports addUserToHTPasswd; exports are: " +
+        Object.keys(utils).join(", "),
+    );
+  }
   let body = "";
   try {
     body = fs.readFileSync(path, "utf8");
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
   }
-  const lines = body
+  // Drop any prior line for this user first: addUserToHTPasswd APPENDS, so a
+  // re-run would otherwise stack duplicate entries for the same publisher.
+  const kept = body
     .split(/\r?\n/)
-    .filter((existing) => existing && !existing.startsWith(`${user}:`));
-  lines.push(line.trimEnd());
-  fs.writeFileSync(path, `${lines.join("\n")}\n`, { mode: 0o644 });
+    .filter((existing) => existing && !existing.startsWith(`${user}:`))
+    .join("\n");
+  const next = await utils.addUserToHTPasswd(
+    kept ? `${kept}\n` : "",
+    user,
+    password,
+    { algorithm: constants.HtpasswdHashAlgorithm.bcrypt, rounds: 10 },
+  );
+  fs.writeFileSync(path, next.endsWith("\n") ? next : `${next}\n`, { mode: 0o644 });
   console.log(`provisioned ${user} in ${path}`);
 })().catch((err) => {
   console.error(err);
@@ -196,7 +218,25 @@ npm install
 npm ls @zeroship/db @zeroship/kv @zeroship/migrate @zeroship/rpc @zeroship/server @zeroship/storage @zeroship/types @zeroship/vite-plugin --all
 assert_external_resolutions
 
-log "5. Build external app"
+log "5. Apply the scaffolded app's migrations"
+# THE ONLY PLACE THIS CAN BE TESTED. The template declares
+# `"migrate": "zeroship-dev-migrate"`, the bin comes from @zeroship/vite-plugin,
+# and `migrations/20260628000000_initial_schema.ts` ships in the scaffold. Every
+# link reads correctly -- and until now NOTHING ran it, so all five were
+# spelling rather than behaviour (docs/pilot/e2e-scenarios.md, scenario 1).
+#
+# golden_path.sh cannot cover this: it runs inside the monorepo, where the bin
+# resolves through workspace linking, so the check would pass even if the
+# PUBLISHED package were broken -- which is the only failure a creator can hit.
+# Its own migrate step sidesteps the bin deliberately, invoking
+# `node <dist>/cli/migrate-dev.js` by path. Here the app was installed from the
+# registry, outside the tree, so `npm run migrate` exercises what a creator
+# actually types.
+npm run migrate
+test -f .zeroship/dev.sqlite || { echo "FAIL: migrate produced no dev database"; exit 1; }
+echo "  scaffolded app migrated; dev database exists"
+
+log "6. Build external app"
 npm run build
 test -f dist/app.zship
 ls -lh dist/app.zship
