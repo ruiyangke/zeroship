@@ -61,14 +61,15 @@ use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 use crate::verbs::{
     apply_ir_with_locked_backend, charter_layer_refs, effective_policy_from_wire_layers,
-    legacy_status_with_locked_backend, owner_app_project, preview_dialect,
-    resolve_pending_with_locked_backend, status_ir_with_locked_backend, ApplyDialect,
+    legacy_status_with_locked_backend, owner_app_project, parse_rollback_target, preview_dialect,
+    resolve_pending_with_locked_backend, rollback_with_locked_backend,
+    status_ir_with_locked_backend, ApplyDialect,
 };
 use crate::wire::{
     ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, CollectionDescriptorDto,
     FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
-    HistoryRequest, LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RuntimeOptionsDto,
-    StatusIrRequest, StatusRequest,
+    HistoryRequest, LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest,
+    RuntimeOptionsDto, StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -765,6 +766,208 @@ pub fn apply_ir_sqlite(
             recovered: outcome.recovered,
             pending_contracts: Vec::new(),
         })
+    })
+}
+
+/// Decode the shared parts of a rollback request into what the verb takes.
+///
+/// Both entrypoints need the same four conversions and the same refusals, and
+/// duplicating them is how one path ends up accepting what the other rejects.
+#[cfg(feature = "napi")]
+struct DecodedRollback {
+    envelope_json: Vec<String>,
+    registry_json: String,
+    target: zero_migrate::RollbackTarget,
+    options: zero_migrate::RollbackOptions,
+    approval: Approval,
+}
+
+#[cfg(feature = "napi")]
+fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
+    let envelope_json = req
+        .envelopes
+        .iter()
+        .enumerate()
+        .map(|(index, envelope)| {
+            serde_json::to_string(envelope).map_err(|error| {
+                Error::from_reason(format!(
+                    "envelope at index {index} is not serializable: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let registry_json = serde_json::to_string(&req.registry)
+        .map_err(|error| Error::from_reason(format!("registry is not serializable: {error}")))?;
+    let target = parse_rollback_target(
+        &req.target.kind,
+        req.target.version.as_deref(),
+        req.target.steps,
+    )
+    .map_err(Error::from_reason)?;
+    // Forcing past a migration that declares no `down` discards data, so the force
+    // flag alone is not enough for the engine and an operator who sets only that
+    // one is told here rather than left wondering why the rollback still refused.
+    if req.force && !req.backup_acknowledged {
+        return Err(Error::from_reason(
+            "force needs backupAcknowledged as well: skipping a migration that declares no \
+             down discards the data it removed, so it takes an explicit acknowledgement that \
+             a backup exists",
+        ));
+    }
+    Ok(DecodedRollback {
+        envelope_json,
+        registry_json,
+        target,
+        options: zero_migrate::RollbackOptions {
+            force: req.force,
+            backup_acknowledged: req.backup_acknowledged,
+        },
+        approval: if req.approved {
+            Approval::Approved
+        } else {
+            Approval::None
+        },
+    })
+}
+
+/// `rollback` - unwind applied migrations over the host driver.
+///
+/// The authored envelopes are lowered through the same guarded Rust path `applyIr`
+/// uses, so the reverse SQL comes from the migration files rather than from
+/// anything the journal stored. Resolves to a typed [`RollbackReply`].
+///
+/// [`RollbackReply`]: crate::wire::RollbackReply
+#[napi(ts_return_type = "Promise<RollbackReply>")]
+pub fn rollback(
+    env: Env,
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
+    host_driver: HostDriverFn,
+    req: RollbackRequest,
+) -> Result<Object<'static>> {
+    let decoded = decode_rollback(&req)?;
+    let target_backend = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
+    let RollbackRequest {
+        owner_app,
+        project_schema,
+        migrator_role,
+        dialect,
+        charter_layers,
+        applied_by,
+        ..
+    } = req;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
+
+    run_verb(env, host_driver, move |session| async move {
+        let mut cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
+        if let Some(role) = migrator_role {
+            cfg = cfg.with_migrator_role(role);
+        }
+        match target_backend {
+            ApplyDialect::Postgres => {
+                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                rollback_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &decoded.envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &decoded.registry_json,
+                    &charter_layers,
+                    decoded.target,
+                    decoded.options,
+                    decoded.approval,
+                    &applied_by,
+                )
+                .await
+            }
+            ApplyDialect::Mysql => {
+                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                rollback_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &decoded.envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &decoded.registry_json,
+                    &charter_layers,
+                    decoded.target,
+                    decoded.options,
+                    decoded.approval,
+                    &applied_by,
+                )
+                .await
+            }
+        }
+    })
+}
+
+/// `rollbackSqlite` - unwind applied migrations through the bundled in-process
+/// SQLite backend. There is no host-driver callback.
+#[napi(js_name = "rollbackSqlite", ts_return_type = "Promise<RollbackReply>")]
+pub fn rollback_sqlite(
+    env: Env,
+    app_path: String,
+    journal_path: String,
+    req: RollbackRequest,
+) -> Result<Object<'static>> {
+    let decoded = decode_rollback(&req)?;
+    let RollbackRequest {
+        owner_app,
+        project_schema,
+        migrator_role,
+        dialect,
+        charter_layers,
+        applied_by,
+        ..
+    } = req;
+    if dialect != "sqlite" {
+        return Err(Error::from_reason(format!(
+            "rollbackSqlite requires dialect \"sqlite\" (got {dialect:?})"
+        )));
+    }
+    // SQLite has no roles to assume. Accepting one here would let a caller believe
+    // the reverse DDL runs least-privilege when it runs as the only identity there is.
+    if migrator_role.is_some() {
+        return Err(Error::from_reason(
+            "rollbackSqlite takes no migratorRole: SQLite has no roles, so the reverse DDL \
+             cannot be run under a narrower identity than the connection's own",
+        ));
+    }
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
+
+    run_in_process_verb(env, move || async move {
+        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+        let cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
+        rollback_with_locked_backend(
+            &backend,
+            &cfg,
+            &decoded.envelope_json,
+            &owner_app,
+            &project_schema,
+            &dialect,
+            &decoded.registry_json,
+            &charter_layers,
+            decoded.target,
+            decoded.options,
+            decoded.approval,
+            &applied_by,
+        )
+        .await
     })
 }
 

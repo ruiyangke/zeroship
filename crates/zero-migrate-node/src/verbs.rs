@@ -401,6 +401,54 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     }
 }
 
+/// Decode the wire spelling of how far a rollback should unwind.
+///
+/// The three shapes are mutually exclusive and each carries its own operand, so an
+/// operand set for the wrong kind is REFUSED rather than dropped. An operator who
+/// asked to unwind two steps and also typed a version has made a mistake worth
+/// hearing about before anything comes down, not after.
+pub fn parse_rollback_target(
+    kind: &str,
+    version: Option<&str>,
+    steps: Option<u32>,
+) -> std::result::Result<RollbackTarget, String> {
+    let reject_extra = |field: &str, present: bool| {
+        if present {
+            Err(format!(
+                "rollback target {kind:?} does not take a {field}; drop it or change the target kind"
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    match kind {
+        "toVersion" => {
+            reject_extra("step count", steps.is_some())?;
+            let version = version.ok_or_else(|| {
+                "rollback target \"toVersion\" needs the version to unwind down to".to_string()
+            })?;
+            let id = zero_migrate::model::migration::MigrationId::parse(version)
+                .map_err(|error| format!("invalid rollback target version: {error}"))?;
+            Ok(RollbackTarget::ToVersion(id))
+        }
+        "steps" => {
+            reject_extra("version", version.is_some())?;
+            let steps = steps.ok_or_else(|| {
+                "rollback target \"steps\" needs how many migrations to unwind".to_string()
+            })?;
+            Ok(RollbackTarget::Steps(steps as usize))
+        }
+        "all" => {
+            reject_extra("version", version.is_some())?;
+            reject_extra("step count", steps.is_some())?;
+            Ok(RollbackTarget::All)
+        }
+        other => Err(format!(
+            "unknown rollback target {other:?} (expected toVersion|steps|all)"
+        )),
+    }
+}
+
 /// The authored set a rollback reverses, plus the journaled identities it could
 /// not represent.
 struct RollbackSet {
@@ -866,5 +914,54 @@ mod status_projection_tests {
         // The offline renderer has no host driver to route at, so it takes sqlite.
         assert_eq!(preview_dialect("sqlite"), Ok(SqlDialect::Sqlite));
         assert!(preview_dialect("oracle").is_err());
+    }
+
+    #[test]
+    fn every_rollback_target_shape_decodes_and_carries_only_its_own_operand() {
+        assert_eq!(
+            parse_rollback_target("all", None, None),
+            Ok(RollbackTarget::All)
+        );
+        assert_eq!(
+            parse_rollback_target("steps", None, Some(2)),
+            Ok(RollbackTarget::Steps(2))
+        );
+        let version = zero_migrate::model::migration::MigrationId::generate();
+        assert_eq!(
+            parse_rollback_target("toVersion", Some(version.as_str()), None),
+            Ok(RollbackTarget::ToVersion(version.clone()))
+        );
+
+        // A missing operand is a question, not a default: unwinding "some" of a
+        // schema has no safe fallback, so each kind demands its own.
+        let no_version = parse_rollback_target("toVersion", None, None)
+            .expect_err("toVersion has nothing to stop at");
+        assert!(no_version.contains("unwind down to"), "{no_version}");
+        let no_count =
+            parse_rollback_target("steps", None, None).expect_err("steps has nothing to count");
+        assert!(no_count.contains("how many"), "{no_count}");
+
+        // An operand belonging to a different kind is REFUSED rather than dropped:
+        // silently ignoring it would tear down more than the operator described.
+        for (kind, version, steps) in [
+            ("all", Some(version.as_str()), None),
+            ("all", None, Some(3)),
+            ("steps", Some(version.as_str()), Some(3)),
+            ("toVersion", Some(version.as_str()), Some(3)),
+        ] {
+            let error = parse_rollback_target(kind, version, steps)
+                .expect_err("an operand for another kind is a mistake, not noise");
+            assert!(error.contains("does not take"), "{kind}: {error}");
+        }
+
+        let unknown =
+            parse_rollback_target("everything", None, None).expect_err("the spelling is exact");
+        assert!(unknown.contains("unknown rollback target"), "{unknown}");
+        let malformed = parse_rollback_target("toVersion", Some("not-a-version"), None)
+            .expect_err("a version that is not one cannot select anything");
+        assert!(
+            malformed.contains("invalid rollback target version"),
+            "{malformed}"
+        );
     }
 }

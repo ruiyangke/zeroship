@@ -314,6 +314,73 @@ pub struct ApplyReply {
     pub pending_contracts: Vec<ApplyPendingContractDto>,
 }
 
+/// How far a rollback should unwind, as a nested object rather than three flat
+/// fields.
+///
+/// A `#[napi(object)]` cannot be a Rust enum carrying data, so the three shapes
+/// share one struct and `kind` selects which operand applies. Keeping them nested
+/// means a host reads one field to know what was asked for; flattening them into
+/// the request would leave `version` and `steps` sitting next to unrelated deploy
+/// inputs with nothing saying they are alternatives.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct RollbackTargetDto {
+    /// `"toVersion"` unwinds everything applied AFTER the named version, keeping
+    /// it; `"steps"` unwinds the n most recently applied; `"all"` unwinds
+    /// everything. Required: there is no default, because every default would be
+    /// a guess about how much of a schema to tear down.
+    pub kind: String,
+    /// The version to stop at. Only for `"toVersion"`.
+    pub version: Option<String>,
+    /// How many migrations to unwind. Only for `"steps"`.
+    pub steps: Option<u32>,
+}
+
+/// The typed request for the `rollback` and `rollbackSqlite` verbs.
+///
+/// It carries the complete ordered envelope sequence rather than a prior/current
+/// split: a rollback reconstructs the reverse SQL for migrations that are ALREADY
+/// applied, so there is no "current" envelope to distinguish.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct RollbackRequest {
+    /// The deploying app id (the `app_` prefixed id), stamped during guarded lowering so the
+    /// reconstructed plan identities match the ones the deploy journaled.
+    pub owner_app: String,
+    /// The confined project schema the lower pins ops to.
+    pub project_schema: String,
+    /// The migrator role to `SET ROLE` under for the reverse DDL. Optional, and
+    /// refused outright by `rollbackSqlite`: SQLite has no roles, so accepting one
+    /// there would silently promise least-privilege that is not being applied.
+    pub migrator_role: Option<String>,
+    /// `"postgres" | "mysql"` for the host-driven verb, `"sqlite"` for the
+    /// in-process one.
+    pub dialect: String,
+    /// The project's `{ table: owner_app }` ownership registry.
+    pub registry: std::collections::HashMap<String, String>,
+    /// The ordered authored migration envelopes, as real JavaScript values.
+    pub envelopes: Vec<JsonValue>,
+    /// Ordered policy charter documents (TOML), starting with the root bound. The
+    /// guard over the reverse SQL is composed from these, so a `down` is held to
+    /// the same bound its `up` was.
+    pub charter_layers: Vec<String>,
+    /// How far to unwind. Required.
+    pub target: RollbackTargetDto,
+    /// Whether the operator approved the teardown. A `down` is destructive by
+    /// construction, so the engine refuses without it.
+    pub approved: bool,
+    /// Cross a migration that declares no `down` by skipping it rather than
+    /// refusing. Honored only together with `backupAcknowledged`.
+    pub force: bool,
+    /// The operator's acknowledgement that a backup exists. Forcing past an
+    /// irreversible migration discards data, so it takes both flags.
+    pub backup_acknowledged: bool,
+    /// The audit label recorded with the `rolled_back` events.
+    pub applied_by: String,
+}
+
 /// The typed reply for `rollback` (the projected [`RollbackOutcome`]).
 ///
 /// Deliberately NOT [`ApplyReply`]. The two verbs answer different questions, and
