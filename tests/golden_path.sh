@@ -988,6 +988,8 @@ db_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' "$DB_RPC/
 # leg pass exactly once per database and fail on every re-run. The identity is
 # per-run.
 GP_TAG="gp-$$-${RANDOM}"
+DEV_INSERT_VERDICT="not-run"
+DEV_JOIN_VERDICT="not-run"
 DB_UP=0
 for _ in $(seq 1 60); do
   if [ "$(http_status "http://localhost:$DB_RT/__zeroship/v1/todos.list")" != "000" ]; then
@@ -1011,8 +1013,8 @@ else
     # column the migration created, not a snake_cased rewrite of it.
     MADE=$(db_call todos.create "{\"userId\":\"$GP_ID\",\"title\":\"golden path\",\"priority\":\"low\"}")
     case "$MADE" in
-      *'"id":'*) pass "insert with a camelCase field (userId) reached the migration's column" ;;
-      *) fail "insert with a camelCase field FAILED: ${MADE:0:220}
+      *'"id":'*) DEV_INSERT_VERDICT="ok"; pass "insert with a camelCase field (userId) reached the migration's column" ;;
+      *) DEV_INSERT_VERDICT="fail"; fail "insert with a camelCase field FAILED: ${MADE:0:220}
     This is the descriptor-name-vs-column seam. A body naming a column that
     'has no column named ...' means a link in the chain renamed the field." ;;
     esac
@@ -1023,12 +1025,168 @@ else
     # user this run seeded. Matching a fixed address would pass on a row some
     # earlier run left behind.
     case "$JOINED" in
-      *"$GP_TAG@example.com"*) pass "with: eager-loaded across a migration-declared FK" ;;
-      *) fail "with: did not join across the migration's FK: ${JOINED:0:220}
+      *"$GP_TAG@example.com"*) DEV_JOIN_VERDICT="ok"; pass "with: eager-loaded across a migration-declared FK" ;;
+      *) DEV_JOIN_VERDICT="fail"; fail "with: did not join across the migration's FK: ${JOINED:0:220}
     'is not a t.ref field' here means relation loading is gated on a type
     token the migration-first pipeline cannot produce." ;;
     esac
   fi
+fi
+
+# --- 9b. THE SAME ASSERTIONS, deployed, diffed against the dev results above -
+#
+# Row 2 of docs/pilot/e2e-scenarios.md said this in as many words: "Deployed
+# half not compared - see row 11." Row 11 never closed it either - it walks
+# `env.db` CRUD/relations/transactions on both tiers via db-hitcounter/db-todos
+# through a SEPARATE harness (tests/e2e_dev_vs_deployed_db.sh), and its own
+# note records that db-hitcounter's one column ("path") has no case boundary,
+# so it is BLIND BY CONSTRUCTION to the exact naming seam this step exists to
+# catch. This closes it inside golden_path.sh itself: build db-todos through
+# the real vite-plugin, deploy it, apply ITS OWN migrations through
+# zeroship-migrated (the path #162 lived in), drive the SAME two RPC calls
+# through the gateway, and diff the RESULT against the dev run above -
+# following step 10's pattern (offline-mint a platform-admin PAT,
+# dev-provision, POST the recorded IR to zeroship-migrated) rather than
+# inventing a new one.
+#
+# A SEPARATE creator/PAT and a separate app name ("dbtodos9") from step 11's
+# later "dbtodos" deploy, on purpose: step 11 runs after step 10 and reuses
+# step 10's scaffold PAT/creator, neither of which exists yet here (step 9
+# runs first). Two independent deploys of the same source under different
+# names is the same shape step 10 and step 11 already use for the scaffold
+# app - it costs one extra build and provision, not new cross-step plumbing.
+#
+# THE FIXTURE MUST BE ABLE TO FAIL, and this is checked by RUNNING, not by
+# eyeballing the migration file. If every authored column were a single
+# lowercase word, `installSchema`'s snake_case-vs-asIs naming strategy would
+# be a no-op on it and a dev/deployed AGREE verdict below would mean nothing -
+# exactly the step-11 `created_at`-population trap this file's own history
+# warns about (a non-discriminating fixture that prints agreement over a
+# platform already proven broken). So before trusting anything below, parse
+# the ACTUAL migration file - not a name copied into this script - and require
+# at least one authored column to contain a lower-to-upper case boundary.
+DB9_CASE_FIELD="$(node -e '
+    const fs = require("fs");
+    const src = fs.readFileSync(process.argv[1], "utf8");
+    const re = /(\w+)\s*:\s*t\./g;
+    let m, found = null;
+    while ((m = re.exec(src))) { if (/[a-z][A-Z]/.test(m[1])) { found = m[1]; break; } }
+    process.stdout.write(found || "");
+  ' "$TODOS/migrations/20260101000000_create_todos.ts")"
+if [ -n "$DB9_CASE_FIELD" ]; then
+  DB9_SNAKE="$(node -e 'console.log(process.argv[1].replace(/([a-z0-9])([A-Z])/g,"$1_$2").toLowerCase())' "$DB9_CASE_FIELD")"
+  pass "fixture can discriminate: db-todos' migration authors '$DB9_CASE_FIELD' with a case boundary (a snake_case rewrite would corrupt it to '$DB9_SNAKE')"
+else
+  fail "FAILED SETUP: no column in db-todos' migration contains a case boundary. A snake_case
+    naming rewrite would be a no-op on every field, so the dev-vs-deployed comparison below
+    could not have caught the #162-class defect however broken the platform is. Do not trust
+    a green from this step until a camelCase (or otherwise case-boundary) column exists."
+fi
+
+DB9_APP="dbtodos9"
+DB9_READY=0
+if ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos9-build.log 2>&1 && [ -f "$TODOS/dist/app.zship" ]; then
+  pass "db-todos builds through the real vite-plugin for the deployed leg ($(du -k "$TODOS/dist/app.zship" | cut -f1)KB)"
+
+  DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
+  DB9_APP_ID=$(echo "$DB9_OUT" | awk -F= '$1 == "app_id" { print $2 }')
+  DB9_API_KEY=$(echo "$DB9_OUT" | awk -F= '$1 == "api_key" { print $2 }')
+  if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
+    fail "could not provision db-todos for the deployed leg: ${DB9_OUT:0:200}"
+  else
+    # Offline-mint a platform-admin PAT, following step 10's mechanism exactly
+    # (see step 10 for why it must be offline: no OP runs in this script).
+    DB9_POLICY='{"name":"golden-db9","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+    DB9_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$DB9_POLICY")"
+    DB9_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
+    DB9_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
+    DB9_EXP=$(( $(date +%s) + 86400 ))
+    docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$DB9_CREATOR','golden-db9-$DB9_CREATOR@zeroship.test'::citext,'Golden DB9',NOW());
+INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$DB9_CREATOR','admin','$DB9_CREATOR');
+INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$DB9_TOKID','$DB9_CREATOR','pat','golden db9','$DB9_POLICY'::jsonb,'$DB9_PHASH',to_timestamp($DB9_EXP));
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB9_APP_ID','$DB9_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+    DB9_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
+    DB9_PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$DB9_JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$GP_SIGNING_KEY" "$DB9_CREATOR" "$DB9_TOKID" "$DB9_PHASH" "$DB9_EXP" 2>/tmp/gp-dbtodos9-pat.log)"
+
+    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$TODOS/migrations" >/tmp/gp-dbtodos9-ir.json 2>/tmp/gp-dbtodos9-ir.log <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+    DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
+      "http://localhost:$MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_PAT" \
+      --data-binary @/tmp/gp-dbtodos9-ir.json)"
+    DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
+    if [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+      pass "db-todos' own migrations applied through zeroship-migrated to the deployed app (applied=$DB9_APPLIED ops)"
+      DB9_READY=1
+      sleep 6   # gateway route-sync poll
+    else
+      fail "zeroship-migrated could not apply db-todos' migrations for the deployed leg (http=$DB9_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos9-apply.json)"
+    fi
+  fi
+else
+  fail "db-todos does not build for the deployed leg: $(tail -5 /tmp/gp-dbtodos9-build.log | tr '\n' ' ')"
+fi
+
+DB9_BASE="http://localhost:$GATE_PORT/apps/$DB9_APP"
+db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $DB9_API_KEY" "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
+
+DEP_INSERT_VERDICT="not-run"
+DEP_JOIN_VERDICT="not-run"
+DEP_MADE=""
+DEP_JOINED=""
+if [ "$DB9_READY" -ne 1 ]; then
+  fail "the deployed db-todos never became drivable; the deployed half of this scenario did not run"
+else
+  DEP_TAG="gp9-$$-${RANDOM}"
+  DEP_SEED=$(db9_call users.seed "{\"email\":\"$DEP_TAG@example.com\",\"name\":\"GP9\",\"handle\":\"$DEP_TAG\"}")
+  DEP_ID=$(printf '%s' "$DEP_SEED" | sed -nE 's/.*"id":"([^"]+)".*/\1/p')
+  if [ -z "$DEP_ID" ]; then
+    fail "deployed users.seed did not return an id: ${DEP_SEED:0:200}"
+  else
+    pass "deployed: seeded a user through env.db"
+
+    DEP_MADE=$(db9_call todos.create "{\"userId\":\"$DEP_ID\",\"title\":\"golden path deployed\",\"priority\":\"low\"}")
+    case "$DEP_MADE" in
+      *'"id":'*) DEP_INSERT_VERDICT="ok"; pass "deployed: insert with a camelCase field (userId) reached the migration's column" ;;
+      *) DEP_INSERT_VERDICT="fail"; fail "deployed: insert with a camelCase field FAILED: ${DEP_MADE:0:220}
+    This is the descriptor-name-vs-column seam, deployed: a body naming a column that
+    'has no column named ...' means a link in the chain renamed the field." ;;
+    esac
+
+    DEP_JOINED=$(db9_call todos.listWithUser "{\"userId\":\"$DEP_ID\"}")
+    case "$DEP_JOINED" in
+      *"$DEP_TAG@example.com"*) DEP_JOIN_VERDICT="ok"; pass "deployed: with: eager-loaded across a migration-declared FK" ;;
+      *) DEP_JOIN_VERDICT="fail"; fail "deployed: with: did not join across the migration's FK: ${DEP_JOINED:0:220}" ;;
+    esac
+  fi
+fi
+
+# THE COMPARISON. Diff RESULTS, not code - the dev verdicts were captured by
+# the two `case` statements above into DEV_INSERT_VERDICT / DEV_JOIN_VERDICT.
+# Compare them against the deployed verdicts just captured, on the SAME
+# question each time, rather than only asserting each tier individually.
+if [ "$DEV_INSERT_VERDICT" = "$DEP_INSERT_VERDICT" ]; then
+  pass "camelCase insert reaching the migration's column: dev and deployed AGREE ($DEV_INSERT_VERDICT)"
+else
+  fail "camelCase insert reaching the migration's column: dev and deployed DIVERGE -- dev=$DEV_INSERT_VERDICT deployed=$DEP_INSERT_VERDICT
+    dev      : ${MADE:0:150}
+    deployed : ${DEP_MADE:0:150}"
+fi
+if [ "$DEV_JOIN_VERDICT" = "$DEP_JOIN_VERDICT" ]; then
+  pass "FK eager-load across a migration-declared relation: dev and deployed AGREE ($DEV_JOIN_VERDICT)"
+else
+  fail "FK eager-load across a migration-declared relation: dev and deployed DIVERGE -- dev=$DEV_JOIN_VERDICT deployed=$DEP_JOIN_VERDICT
+    dev      : ${JOINED:0:150}
+    deployed : ${DEP_JOINED:0:150}"
 fi
 
 # --- 10. The app a creator ACTUALLY receives, on both tiers ------------------
@@ -1863,7 +2021,44 @@ gp_close_step
 # WHEN THE ENGINE GAINS A COLLATION SLOT (#255) the deployed verdict and the
 # diff both go green with no edit here, and the total becomes 48 passed, 6
 # failed (step 10's scaffold six). Raising the floor to 48 is that change's job.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-46}"
+#
+# RAISED 46 -> 54 on 2026-08-10 when step 9 grew a deployed leg (docs/pilot/
+# e2e-scenarios.md row 2 said "Deployed half not compared - see row 11", and
+# row 11 never closed it either: its harness drives db-hitcounter, whose one
+# column has no case boundary, so it is blind BY CONSTRUCTION to the naming
+# seam this step exists to catch). Step 9 now builds db-todos, deploys it,
+# applies its own migrations through zeroship-migrated, and diffs the SAME
+# camelCase-insert and FK-eager-load calls against the dev results already
+# captured -- 8 new outcomes (6->14), all green unmutated. Read off a clean
+# four-service run:
+#
+#     before  golden path: 54 passed, 8 failed   step 9: 14 outcome(s)
+#
+# (the "before" total already includes the +8 -- "before" here means before
+# the mutation below, not before this change landed; the pre-existing floor
+# was measured at step 9 = 6 outcomes, so 46 + 8 = 54 is the same measurement
+# taken twice, not two different numbers reconciled by arithmetic).
+#
+# MUTATION-PROVEN, not merely added. `sdks/bootstrap/src/runtime-entry.ts`
+# was temporarily edited to force `naming: naming.snakeCase` on the DEPLOYED
+# install path only (dev-entry.ts untouched) -- exactly the pre-#162 defect
+# this scenario exists to catch, reintroduced on purpose. Rebuilt
+# `@zeroship/bootstrap` and `zeroship-worker`, then re-ran:
+#
+#     mutated golden path: 50 passed, 12 failed   step 9: 14 outcome(s)
+#
+# The delta is exactly the four new comparison outcomes and nothing else:
+# "deployed: insert with a camelCase field" and "deployed: with: eager-loaded"
+# both failed with `{"message":"internal error",...}` (the column lookup for
+# `userId` now misses, same as the original #162 report), and the two
+# AGREE/DIVERGE comparison lines both flipped to DIVERGE (dev=ok,
+# deployed=fail). Every other step's outcome count was unchanged
+# (1,2,3,4,5,6,7,8,10,11 identical), and step 9's own three PRE-EXISTING dev
+# assertions (seeded/insert/join) stayed green throughout, because the
+# mutation touches only the deployed path. Reverted (clean `git diff` on
+# runtime-entry.ts) and rebuilt again; the re-run matched the unmutated
+# numbers above exactly, including the per-step outcome list.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-54}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
