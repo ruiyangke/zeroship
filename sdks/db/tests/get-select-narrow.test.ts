@@ -8,6 +8,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { model } from "@zeroship/bootstrap/install-schema";
 import { t, type Row } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -29,7 +30,7 @@ function makeMockNative(row: AnyRec | null) {
       };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("get(...) select narrowing", () => {

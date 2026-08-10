@@ -1,0 +1,32 @@
+{
+  // Ticket #267 - `tsc --noEmit` (the plain `typecheck` script) reads this
+  // package's base tsconfig.json, whose `include` is `["src"]`. That means
+  // nothing under `tests/` ever entered the TypeScript program, so the
+  // `@ts-expect-error` type-only assertions carried by several tests/*.test.ts
+  // files (filter-encryption-types, c2-union, r5-array-item-validation,
+  // isolation-level-vocabulary) were checked by NOTHING: `tsc --noEmit`
+  // never saw them, and `npm test` runs them through `tsx`, which strips
+  // types without checking them.
+  //
+  // This is a SEPARATE tsconfig, not an `include` edit to tsconfig.json,
+  // because the base config sets `rootDir: "src"` for the package build
+  // (tsup emits dist/ from src/ only); adding "tests" to that `include`
+  // puts test files outside `rootDir` and tsc rejects every one with
+  // TS6059 ("not under 'rootDir'"). `rootDir: "."` here widens the root to
+  // cover both `src` and `tests` for this noEmit-only check, which never
+  // writes to `outDir` and so cannot collide with the real build.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    // The base tsconfig restricts ambient globals to `@zeroship/types`
+    // only (deliberately - `src/` runs in the WinterCG/V8 runtime, not
+    // Node, and must not see Node's ambient globals). Tests run under
+    // Node (`node --import tsx --test`) and import `node:test` /
+    // `node:assert/strict`, so this override widens ambient types for
+    // this noEmit-only check without touching the base config `src`
+    // compiles against.
+    "types": ["@zeroship/types", "node"]
+  },
+  "include": ["src", "tests"]
+}

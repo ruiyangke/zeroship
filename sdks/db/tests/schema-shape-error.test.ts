@@ -17,13 +17,14 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t, schema, TypeBuilder } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
+import type { NativeDb } from "../src/native.js";
 
 const native = {
   registerModel: () => Promise.resolve(),
   // P9 PR 3: native `transaction(callback)` orchestrator stub.
   transaction: (cb: (raw: unknown) => unknown) => Promise.resolve(cb(undefined)),
   collection: (_n: string) => ({ async find() { return []; }, async findOne() { return null; }, async insert(r: Record<string, unknown>) { return r; } }),
-} as unknown as ZeroshipDb;
+} as unknown as NativeDb;
 
 describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
   test("valid t.* builder fields compile and install", () => {

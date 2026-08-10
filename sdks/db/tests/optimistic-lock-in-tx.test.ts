@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "@zeroship/db";
 import { OptimisticLockError } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -51,7 +52,7 @@ function makeNativeCasMissOnUpdate() {
       return { rolledBack, committed, calls };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("db.transaction — OptimisticLockError surfaces via result.error", () => {
@@ -103,7 +104,7 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
           async update(_f: AnyRec, _u: AnyRec) { return { id: 1, name: "x" }; },
         };
       },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
     const db = installSchemaForTest({ widgets: { name: t.string().required() } }, { native });
     const result = await db.transaction(async () => {
       throw new Error("body bombed");

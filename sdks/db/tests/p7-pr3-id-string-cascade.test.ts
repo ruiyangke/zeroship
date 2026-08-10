@@ -16,8 +16,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { IdLoader } from "../src/loader.js";
 import { model } from "@zeroship/bootstrap/install-schema";
-import { t, type Row } from "@zeroship/db";
-import type { TypeBuilder } from "../src/internal.js";
+import { t, type Row, type TypeBuilder } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -82,7 +82,7 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
         };
       },
     };
-    return { native: native as unknown as ZeroshipDb, calls };
+    return { native: native as unknown as NativeDb, calls };
   }
 
   test("collection_load_by_id_string", async () => {
@@ -156,7 +156,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
           },
         };
       },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
     const Posts = model(
       "posts",
       { title: t.string().required() },
@@ -185,7 +185,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
           },
         };
       },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
     const Posts = model(
       "posts",
       { title: t.string().required() },
@@ -195,7 +195,17 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
     assert.equal(error, null);
     assert.ok(data);
     assert.equal(
-      (receivedDoc as AnyRec).id,
+      // TS cannot see that the `insert(doc)` closure above (invoked
+      // async, inside `Posts.insert(...)`) reassigns `receivedDoc` -
+      // control-flow narrowing does not cross into a callback's
+      // execution, so at this point TS still treats the variable as
+      // its last STATICALLY known value (`null`), not the declared
+      // `AnyRec | null`. `null` and `AnyRec` share no structural
+      // overlap, so a direct cast is refused; going through `unknown`
+      // first is the standard, sanctioned TS idiom for exactly this -
+      // not a weakened check, since the awaited call above guarantees
+      // the closure already ran by this line.
+      (receivedDoc as unknown as AnyRec).id,
       undefined,
       "SDK must NOT mint id client-side — Rust does it (see system_fields_pass)",
     );

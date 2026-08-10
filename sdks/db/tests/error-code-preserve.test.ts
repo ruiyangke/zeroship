@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { model } from "@zeroship/bootstrap/install-schema";
 import { t } from "@zeroship/db";
 import { mapNativeError } from "../src/errors.js";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -27,7 +28,7 @@ function makeFailingNative(err: Error) {
       };
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("native error .code preservation", () => {
@@ -49,7 +50,7 @@ describe("native error .code preservation", () => {
       Object.assign(new Error("unique violation"), { code: "UNIQUE_VIOLATION" }),
     );
     const Users = model("users", { name: t.string().required() }, native);
-    const { error } = await Users.update({ id: 1 }, { $set: { name: "Bob" } });
+    const { error } = await Users.update({ id: "1" }, { $set: { name: "Bob" } });
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "UNIQUE_VIOLATION");
   });

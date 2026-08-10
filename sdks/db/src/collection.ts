@@ -328,7 +328,7 @@ export class Collection<
   async get<W extends WithSpec>(
     idOrFilter: string | Id<N> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
-  ): Promise<Result<(Row<S> & WithRelations<S, W, AllSchemas>) | null>>;
+  ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: string | Id<N> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
@@ -343,7 +343,13 @@ export class Collection<
       unmaskReason?: string;
       with?: WithSpec;
     } = {},
-  ): Promise<Result<Row<S> | null>> {
+    // The implementation signature's return type must be compatible with
+    // EVERY overload above, including the `with` overload whose joined key
+    // OMITS the raw FK field from `Row<S>` before intersecting the joined
+    // shape back in (see WithRelations doc comment in types.ts). `any` is
+    // the standard TS idiom here — callers never see this signature, only
+    // the precise overloads above, which stay fully checked.
+  ): Promise<Result<any>> {
     return getCollection(this._crud(), idOrFilter, opts);
   }
 
@@ -354,12 +360,13 @@ export class Collection<
   find<W extends WithSpec>(
     filter: Filter<S>,
     opts: { with: W } & ReadHints<S>,
-  ): Query<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  ): Query<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(
     filter: Filter<S> = {} as Filter<S>,
     opts?: { with?: WithSpec } & ReadHints<S>,
-  ): Query<S, Row<S>, AllSchemas> {
+    // Same `any` rationale as `get` above.
+  ): Query<S, any, AllSchemas> {
     return findCollection(this._crud(), filter, opts);
   }
 

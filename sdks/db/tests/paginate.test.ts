@@ -5,12 +5,12 @@ import { Query } from "../src/query.js";
 type PlainObject = Record<string, unknown>;
 
 function makeMockNative(pages: PlainObject[][]) {
-  const calls: { collection: string; filter: PlainObject; opts: PlainObject }[] = [];
+  const calls: { collection: string; filter: PlainObject; opts: ZeroshipDbFindOpts }[] = [];
   let i = 0;
   const fn = async (
     collection: string,
     filter: PlainObject,
-    opts: PlainObject,
+    opts: ZeroshipDbFindOpts,
   ): Promise<PlainObject[]> => {
     calls.push({ collection, filter, opts });
     return pages[i++] ?? [];

@@ -452,6 +452,16 @@ jobs:
       - run: pnpm --filter zero-migrate build
       # The migrate type layer reads @zeroship/db's built types; build SDKs first.
       - run: pnpm build
+      # Ticket #267 - @zeroship/db's base `typecheck` (`tsc --noEmit`) reads
+      # `include: ["src"]`, so nothing under tests/ was ever in the tsc
+      # program: `tsc --noEmit --listFiles` showed 0 files under tests/,
+      # so the several tests/*.test.ts files carrying `@ts-expect-error`
+      # type-only assertions were checked by NOTHING (`npm test` runs them
+      # through tsx, which strips types without checking them). `check`
+      # additionally runs `tsconfig.tests.json` (extends the base config,
+      # widens `include` to `["src", "tests"]`, drops rootDir/outDir),
+      # mirroring the @zeroship/migrate pattern below.
+      - run: pnpm --filter @zeroship/db run check
       - run: pnpm --filter @zeroship/migrate run check
       # The committed `generated/zeroship/` artifacts have generator INPUTS that
       # nobody edits when they change them: the injection ceiling

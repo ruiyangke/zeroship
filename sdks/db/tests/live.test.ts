@@ -19,6 +19,8 @@ import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "@zeroship/db";
+import type { Id } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 type SubEvent =
@@ -75,7 +77,12 @@ function makeFakeSub(): FakeSub & { closes: number } {
  *  picks up the latest mutation. */
 function makeMockNative() {
   const rowsByTable: Record<string, AnyRec[]> = {};
-  const subs: Record<string, FakeSub[]> = {};
+  // `& { closes: number }` - the assertions below read `.closes` (the
+  // close-count `makeFakeSub()` tracks), not `.close` (the method). A
+  // bare `FakeSub[]` here type-erases the counter the moment it goes
+  // through this array, even though every element pushed in is always
+  // a `makeFakeSub()` result and genuinely carries it at runtime.
+  const subs: Record<string, (FakeSub & { closes: number })[]> = {};
   const calls = { find: 0, openSubscription: 0 };
 
   const native = {
@@ -92,8 +99,17 @@ function makeMockNative() {
           return [...(rowsByTable[name] ?? [])];
         },
         async insert(row: AnyRec) {
-          (rowsByTable[name] ??= []).push(row);
-          return row;
+          // The real native driver mints `id` server-side when the
+          // caller omits it (RowInput<S> forbids passing one -
+          // `id?: never`, see src/types.ts). This mock echoed `row`
+          // verbatim with no id at all, which was fine for tests that
+          // never read the id back - until the "live + with" test
+          // below needed a real FK value to join on. Mint one the same
+          // deterministic way `p9-pr3-native-transaction.test.ts`'s
+          // mock does.
+          const minted = { id: `${name}_${(rowsByTable[name]?.length ?? 0) + 1}`, ...row };
+          (rowsByTable[name] ??= []).push(minted);
+          return minted;
         },
         // **P9 PR 1** — subscriptions are minted via Collection-level
         // `openSubscription()` (the duplicate `Db.openSubscription(name)`
@@ -108,7 +124,7 @@ function makeMockNative() {
     },
   };
   return {
-    native: native as unknown as ZeroshipDb,
+    native: native as unknown as NativeDb,
     rowsByTable,
     subs,
     calls,
@@ -406,8 +422,18 @@ describe("db.live — reactive query layer", () => {
       },
       { native: ctx.native },
     );
-    await db.users.insert({ id: "1", name: "Alice" });
-    await db.todos.insert({ id: "100", userId: "1", title: "buy milk" });
+    // `id` is platform-minted (`RowInput<S>` forbids passing one) -
+    // capture it from the insert result and thread it into the FK,
+    // same as a real caller would.
+    const { data: alice } = await db.users.insert({ name: "Alice" });
+    if (!alice) throw new Error("insert(users) failed");
+    // `SystemFields.id` (src/types.ts) is a bare `string`, not
+    // parameterized per collection - only `t.ref(target)` fields carry
+    // the branded `Id<target>`. A freshly-read row's own id is
+    // genuinely a `users` id here; the cast supplies the brand the
+    // type layer has no way to infer on its own.
+    const aliceId = alice.id as Id<"users">;
+    await db.todos.insert({ userId: aliceId, title: "buy milk" });
 
     const live = db.live(() => db.todos.find({}, { with: { userId: true } }));
 
@@ -431,7 +457,7 @@ describe("db.live — reactive query layer", () => {
     );
 
     // Mutation on `todos` triggers a rerun.
-    await db.todos.insert({ id: "101", userId: "1", title: "write tests" });
+    await db.todos.insert({ userId: aliceId, title: "write tests" });
     ctx.fire("todos");
     const afterTodos = await live.next();
     assert.equal(afterTodos.done, false);

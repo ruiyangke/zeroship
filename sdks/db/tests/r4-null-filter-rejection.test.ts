@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -56,7 +57,7 @@ function makeRecordingNative() {
     },
     openSubscription(_name: string) { return makeFakeSub(); },
   };
-  return { native: native as unknown as ZeroshipDb, calls };
+  return { native: native as unknown as NativeDb, calls };
 }
 
 describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {

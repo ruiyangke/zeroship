@@ -214,7 +214,7 @@ export class Query<
    * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
    * `data[i].user` typechecks without a cast.
    */
-  with<W extends WithSpec>(spec: W): Query<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with<W extends WithSpec>(spec: W): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   with(spec: WithSpec): Query<S, any, AllSchemas>;
   with(spec: WithSpec): Query<S, any, AllSchemas> {
     // Reject early when the Query was constructed without a relation

@@ -33,6 +33,7 @@ import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "@zeroship/db";
 import { mapResultDoc } from "../src/utils.js";
 import type { Row, MaskedValue } from "@zeroship/db";
+import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -108,7 +109,7 @@ function makeNativeWithBulkUnmask(
       };
     },
   };
-  return { native: native as unknown as ZeroshipDb, captured };
+  return { native: native as unknown as NativeDb, captured };
 }
 
 /** Native double whose Collection lacks `bulkUnmask` (legacy runtime). */
@@ -119,11 +120,11 @@ function makeNativeMissingBulkUnmask() {
       return {};
     },
   };
-  return native as unknown as ZeroshipDb;
+  return native as unknown as NativeDb;
 }
 
 describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", () => {
-  function makeDb(native: ZeroshipDb) {
+  function makeDb(native: NativeDb) {
     return installSchemaForTest(
       {
         users: schemaWrap({
@@ -233,11 +234,15 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
     type R = Row<typeof fields>;
     // `as unknown as` casts because MaskedValue has no runtime constructor.
     const row: R = {
-      id: 1,
+      id: "usr_001",
       name: "Alice",
       ssn: "***-**-6789" as unknown as MaskedValue<string>,
       created_at: 0,
       updated_at: 0,
+      created_by: null,
+      updated_by: null,
+      version: 1,
+      deleted_at: null,
     };
     assertType<MaskedValue<string>>(row.ssn);
     assertType<string>(row.name);

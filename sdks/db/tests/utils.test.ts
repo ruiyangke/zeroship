@@ -248,7 +248,11 @@ describe("mapFilterOutbound with naming strategy", () => {
   });
 
   test("depth limit throws on deeply nested filters", () => {
-    let filter: Record<string, unknown> = { id: 1 };
+    // Synthetic pathological structure to trip the depth guard - not a
+    // real filter against a real schema, so it is built as a loose
+    // `Record` and cast at the call boundary rather than typed against
+    // `ZeroshipDbFilter` (which lacks an index signature) field by field.
+    let filter: ZeroshipDbFilter = { id: 1 } as unknown as ZeroshipDbFilter;
     for (let i = 0; i < 25; i++) {
       filter = { $not: filter };
     }

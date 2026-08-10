@@ -1182,6 +1182,9 @@ importers:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
         version: 0.18.2
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
       '@zeroship/bootstrap':
         specifier: workspace:*
         version: link:../bootstrap

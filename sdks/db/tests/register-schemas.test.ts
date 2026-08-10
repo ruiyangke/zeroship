@@ -31,13 +31,13 @@ import assert from "node:assert/strict";
 import { installSchema } from "@zeroship/bootstrap/install-schema";
 import { t } from "@zeroship/db";
 import { descriptorFor } from "./_install-helper.js";
-import type { ZeroshipDb } from "../src/native.js";
+import type { NativeDb } from "../src/native.js";
 
 /**
  * Install `schemas` the way the toolchain would: derive the descriptor from
  * the declaration, then hand both to the installer.
  */
-function install(schemas: Record<string, unknown>, native: ZeroshipDb) {
+function install(schemas: Record<string, unknown>, native: NativeDb) {
   return installSchema(schemas as never, native, {
     descriptor: descriptorFor(schemas),
   } as never);
@@ -64,7 +64,7 @@ function makeMockNative() {
         async insert(row: Record<string, unknown>) { return row; },
       };
     },
-  } as unknown as ZeroshipDb;
+  } as unknown as NativeDb;
 }
 
 describe("installSchema", () => {
@@ -168,7 +168,7 @@ describe("installSchema", () => {
       },
       async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
       collection(_name: string) { return { async find() { return []; } }; },
-    } as unknown as ZeroshipDb;
+    } as unknown as NativeDb;
     const { ready } = install({ items: { name: t.string().required() } }, native);
     let caught: unknown = null;
     try { await ready; } catch (e) { caught = e; }

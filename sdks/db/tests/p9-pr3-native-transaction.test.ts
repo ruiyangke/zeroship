@@ -74,7 +74,7 @@ function makeNativeTxMock(rowsByTable: Record<string, AnyRec[]> = {}) {
       return settles;
     },
   };
-  return native as unknown as import("../src/collection.js").NativeDb & { _settles: string[] };
+  return native as unknown as import("../src/native.js").NativeDb & { _settles: string[] };
 }
 
 describe("P9 PR 3 — native env.db.transaction(fn)", () => {

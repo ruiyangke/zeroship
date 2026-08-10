@@ -266,13 +266,23 @@ function stripRuntimeSystemFields(
 }
 
 /** Input form: a record of TypeBuilder instances. Field values must be
- *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.). */
-type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any>>;
+ *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.).
+ *
+ *  `TypeBuilder`'s 5th param (`D`, the has-default brand set by
+ *  `.default(...)`) must be `any` here, not omitted - omitting it pins the
+ *  default value `false`, which rejects every defaulted field
+ *  (`t.string().default("x")` has `D=true`) at the type layer even though
+ *  it is a completely valid, common schema declaration at runtime. Ticket
+ *  #267 surfaced this: `normalizeSchema({ role: t.string().default("x") })`
+ *  had never been typechecked (this package's own tests run through tsx,
+ *  which strips types) and failed the moment `@zeroship/db`'s test suite
+ *  finally ran `tsc --noEmit` over a call site that used it. */
+type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any, any>>;
 
 /** Accepts either a record of fields OR a top-level union TypeBuilder. */
-type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean, any, any>;
+type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean, any, any, any>;
 
-function isTypeBuilder(value: unknown): value is TypeBuilder<unknown, boolean, any, any> {
+function isTypeBuilder(value: unknown): value is TypeBuilder<unknown, boolean, any, any, any> {
   return value instanceof TypeBuilder;
 }
 

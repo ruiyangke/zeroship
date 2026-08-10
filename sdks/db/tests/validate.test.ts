@@ -185,7 +185,16 @@ describe("validateDoc", () => {
 describe("validateDoc — array and enum edge cases", () => {
   // I1: enum check should not fire on arrays
   test("enum check does not run on array fields", () => {
-    const schema = normalizeSchema({ tags: t.array(t.string()).enum("a", "b") });
+    // `.enum()`'s generic constraint (`Values extends readonly (T &
+    // (string|number))[]`, src/types.ts) is scalar-only by design -
+    // `t.array(t.string())`'s `T` is `string[]`, which does not overlap
+    // `string | number`, so the public typed API correctly refuses this
+    // call. The test's INTENT is defensive: verify the VALIDATOR skips
+    // enum checks even if `_def.enum` somehow ends up set on an array
+    // field (a shape the typed builder API cannot itself produce). The
+    // `any` cast is the deliberate off-contract construction that shape
+    // requires, not a general weakening of `.enum()`'s scalar-only type.
+    const schema = normalizeSchema({ tags: (t.array(t.string()) as any).enum("a", "b") });
     // Array value should not be rejected by enum (enum is for scalar types only)
     assert.doesNotThrow(() => validateDoc({ tags: ["x", "y"] }, schema));
   });

@@ -32,6 +32,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "check": "npm run typecheck && npm run typecheck:tests",
     "lint:pkg": "publint && attw --pack .",
     "prepublishOnly": "npm run build && npm test",
     "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
+    "@types/node": "catalog:",
     "@zeroship/bootstrap": "workspace:*",
     "fflate": "0.8.2",
     "publint": "^0.3.21",

@@ -1643,10 +1643,24 @@ export const t = {
    *   so the JOIN integrity check works.
    */
   encrypted<
-    T extends string | number | Uint8Array = string,
+    // `W` captures the `opts.wraps` builder so `T` (below) can be INFERRED
+    // from it instead of defaulting to `string` regardless of what was
+    // passed. Before this, `t.encrypted({ wraps: t.number() })` still
+    // produced a `TypeBuilder<string, ...>` unless the caller manually
+    // wrote `t.encrypted<number>({ wraps: t.number() })` - so `Filter<S>`
+    // typed the field's `$eq`/`$in` values as `string`, rejecting the
+    // number values `wraps: t.number()` was declared to accept. Ticket
+    // #267 surfaced this via `filter-encryption-types.test.ts`'s
+    // `amountDet: t.encrypted({ mode: "deterministic", wraps: t.number()
+    // })` filter assertion, which had never been typechecked.
+    W extends TypeBuilder<string | number | Uint8Array, any, any, any, any> | undefined = undefined,
     Mode extends EncryptionMode = "randomised",
+    T extends string | number | Uint8Array =
+      W extends TypeBuilder<infer WT extends string | number | Uint8Array, any, any, any, any>
+        ? WT
+        : string,
   >(
-    opts?: EncryptedFieldOpts<Mode>,
+    opts?: Omit<EncryptedFieldOpts<Mode>, "wraps"> & { wraps?: W },
   ): TypeBuilder<T, false, "full", Mode, false> {
     const wrapsBuilder = opts?.wraps;
     let wrapsKind: "string" | "number" | "bytes" = "string";

@@ -56,11 +56,15 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     // The build-tier `tsc` invariant: assigning a bare string to
     // `ssn` would be rejected.
     const row: UsersRow = {
-      id: 1,
+      id: "usr_001",
       name: "Alice",
       ssn: "***-**-6789" as unknown as MaskedValue<string>,
       created_at: 0,
       updated_at: 0,
+      created_by: null,
+      updated_by: null,
+      version: 1,
+      deleted_at: null,
     };
     assertType<MaskedValue<string>>(row.ssn);
     assertType<string>(row.name);
@@ -104,10 +108,14 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     // (kind: "full", classification: "pii") applies and the type
     // still wraps in MaskedValue<T>.
     const row: UsersRow = {
-      id: 1,
+      id: "usr_001",
       email: "***************" as unknown as MaskedValue<string>,
       created_at: 0,
       updated_at: 0,
+      created_by: null,
+      updated_by: null,
+      version: 1,
+      deleted_at: null,
     };
     assertType<MaskedValue<string>>(row.email);
     assert.equal(row.email as unknown as string, "***************");
@@ -125,10 +133,14 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     };
     type UsersRow = Row<typeof usersSchema>;
     const row: UsersRow = {
-      id: 1,
+      id: "usr_001",
       legacy: "raw",
       created_at: 0,
       updated_at: 0,
+      created_by: null,
+      updated_by: null,
+      version: 1,
+      deleted_at: null,
     };
     // .legacy is bare string (no MaskedValue wrap).
     assertType<string>(row.legacy);

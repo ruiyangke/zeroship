@@ -22,6 +22,7 @@ import { validateDoc, checkPartial } from "@zeroship/db/internal";
 // via tsx and `instanceof` checks would return false.
 import { ValidationError } from "@zeroship/db";
 import { model } from "@zeroship/bootstrap/install-schema";
+import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------
 // t.literal() — primitive literal field
@@ -308,7 +309,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
         };
       },
     };
-    return native as unknown as ZeroshipDb;
+    return native as unknown as NativeDb;
   }
 
   test("update({id}, {kind: 'invalidLiteral'}) rejects with ValidationError on the enum guard", async () => {
@@ -330,7 +331,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       ) as unknown as Record<string, unknown>,
       makeMockNative(),
     );
-    const { data, error } = await Events.update({ id: 1 }, { kind: "invalidLiteral" });
+    const { data, error } = await Events.update({ id: "1" }, { kind: "invalidLiteral" });
     assert.equal(data, null);
     assert.ok(error);
     assert.ok(error instanceof ValidationError);
