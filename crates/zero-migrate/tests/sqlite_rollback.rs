@@ -3,6 +3,8 @@
 //! reversals (DROP TABLE / DROP COLUMN), re-pending + re-apply, the
 //! rebuild-needed deferred typed error, and confinement of the `down`.
 
+mod support;
+
 use std::path::PathBuf;
 
 use tempfile::TempDir;
@@ -300,4 +302,65 @@ async fn malicious_down_writing_mig_is_denied() {
         .await
         .expect("read rolled_back");
     assert!(rb.is_empty(), "no rolled_back event from a denied rollback");
+}
+
+// ---------------------------------------------------------------------------
+// The ORCHESTRATOR, end to end: two applied migrations, one `rollback` call,
+// both `down`s run in reverse dependency order and both versions land in the
+// outcome. Before this shipped, `plan_rollback` produced a plan nothing executed.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
+    let p = paths("rb_orchestrator");
+    let be = backend(&p);
+    let cfg =
+        zero_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
+
+    let parent = mig(
+        "create_parent",
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY);",
+        "DROP TABLE parent;",
+    );
+    let mut child = mig(
+        "create_child",
+        "CREATE TABLE child (id INTEGER PRIMARY KEY);",
+        "DROP TABLE child;",
+    );
+    child.depends_on = vec![parent.version.clone()];
+    let pv = parent.version.as_str().to_string();
+    let cv = child.version.as_str().to_string();
+
+    assert!(be
+        .apply_one_additive(&parent, "d")
+        .await
+        .expect("apply parent"));
+    assert!(be
+        .apply_one_additive(&child, "d")
+        .await
+        .expect("apply child"));
+    assert!(table_exists(&be, "parent").await);
+    assert!(table_exists(&be, "child").await);
+
+    let set = vec![parent.clone(), child.clone()];
+    let outcome = zero_migrate::rollback(
+        &be,
+        &cfg,
+        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &set,
+        zero_migrate::Approval::Approved,
+        "operator",
+        &zero_migrate::SqliteDescriptorGuard::new(),
+    )
+    .await
+    .expect("orchestrated rollback of both migrations");
+
+    // The dependent is torn down BEFORE the thing it depends on.
+    assert_eq!(
+        outcome.rolled_back,
+        vec![cv, pv],
+        "child rolls back before parent (reverse depends_on order)"
+    );
+    assert!(outcome.skipped_irreversible.is_empty());
+    assert!(!table_exists(&be, "child").await, "child table gone");
+    assert!(!table_exists(&be, "parent").await, "parent table gone");
 }

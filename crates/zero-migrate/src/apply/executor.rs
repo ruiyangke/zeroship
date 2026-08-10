@@ -2627,6 +2627,75 @@ pub fn plan_rollback<'a>(
     })
 }
 
+/// Roll back migrations: plan every refusal, then run each `down` in order.
+///
+/// The counterpart to [`apply`], and the driver [`plan_rollback`] was written for.
+/// Selection is all-or-nothing: [`plan_rollback`] decides approval, target
+/// resolution, `down` availability, checksum agreement, reversibility,
+/// transactionality, the guard over the `down` SQL, dependency coherence and
+/// ordering BEFORE a single statement runs, so a rollback that would be refused
+/// four migrations deep is refused before the first one touches the database.
+///
+/// Execution then walks the planned steps in reverse topological order of
+/// `depends_on`, handing each to
+/// [`MigrationBackend::rollback_one_transactional`], which commits the `down` and
+/// its `rolled_back` journal event atomically. A rolled-back version becomes
+/// re-pending, because the journal's net state for it is no longer `completed`.
+///
+/// Generic over [`MigrationBackend`] rather than the `SqlSession` seam, because the
+/// per-migration leaf lives on that trait: this runs on PostgreSQL, MySQL and
+/// SQLite through the same code.
+///
+/// This does NOT take the project advisory lock. A caller that runs it alongside a
+/// deploy must serialise them itself, the same way a caller of
+/// [`apply_with_lock_backend`] with [`LockMode::Inherit`] does.
+///
+/// # Errors
+/// Any [`RollbackError`]. A selection variant means nothing ran at all. A
+/// [`RollbackError::DownFailed`] names the migration whose `down` failed, and every
+/// migration ahead of it in the plan is already rolled back and journaled.
+pub async fn rollback<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    request: &RollbackRequest,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    guard: &dyn crate::guard::MigrationGuard,
+) -> Result<RollbackOutcome, RollbackError> {
+    backend.ensure_journal(cfg).await?;
+
+    // A lone `started` marker is inflight work, not an applied migration, so it is
+    // not something a rollback unwinds - it is the recovery path's business. Only
+    // net-`completed` versions are candidates.
+    let applied: Vec<AppliedRecord> = backend
+        .applied(cfg)
+        .await?
+        .into_iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .map(|e| AppliedRecord {
+            version: e.version,
+            checksum: e.checksum,
+            event_seq: e.event_seq,
+        })
+        .collect();
+
+    let plan = plan_rollback(request, migrations, &applied, approval, guard)?;
+
+    let mut rolled_back = Vec::with_capacity(plan.steps.len());
+    for m in &plan.steps {
+        backend
+            .rollback_one_transactional(cfg, m, applied_by)
+            .await?;
+        rolled_back.push(m.version.as_str().to_string());
+    }
+
+    Ok(RollbackOutcome {
+        rolled_back,
+        skipped_irreversible: plan.skipped_irreversible,
+    })
+}
+
 // ===========================================================================
 // The Trusted profile applies arbitrary SQL on a REAL Postgres.
 //
