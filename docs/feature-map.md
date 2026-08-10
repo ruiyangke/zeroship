@@ -397,7 +397,6 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | streamResponse procedure wrapper | 🟢 | `streamResponse(handler, config?)` | `sdks/rpc/src/server.ts` | — | — | Returns raw Response. |
 | 'use server' file-level discovery | 🟢 | internal (Vite transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | Directive is the only opt-in now. |
 | 'use server' function-level discovery | 🟢 | internal (Vite transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | Per-binding server reference. |
-| reference-graph walk (Phase-2) | 🟢 | internal | `sdks/vite-plugin/src/server-graph.ts` | — | `sdks/vite-plugin/test/` | Static dispatch table; falls back to namespace-walk. |
 | Vite-generated client stubs | 🟢 | internal (client env) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | __zsRpc.query/mutation/stream; subscription fails. |
 | synthetic server entry (virtual) | 🟢 | `virtual:zeroship/_server-entry` | `sdks/vite-plugin/src/rpc-registry.ts` | `docs/reference/zeroship-standard.md` | `sdks/vite-plugin/test/` | namespace-walk default; Phase-2 dict optional. |
 | lazy procedure loading | 🟢 | `query(handler, { lazy: true })` | `sdks/vite-plugin/src/transform.ts`, `rpc-registry.ts` | — | — | Literal boolean only. |
@@ -735,9 +734,7 @@ plugins — the `mode` option selects the build posture.
 | WireId resolution | 🟢 | internal | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Prod rejects bare name; collision fails build. |
 | Lazy procedure loading | 🟢 | internal | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean; warns+eager fallback. |
 | Synthetic server entry | 🟢 | `virtual:zeroship/_server-entry` | `sdks/vite-plugin/src/rpc-registry.ts` | `docs/reference/vite-plugin.md` | — | namespace-walk always active in prod. |
-| Phase-2 static-binding entry | 🟠 | internal (getBindings param) | `sdks/vite-plugin/src/rpc-registry.ts` | — | — | Implemented/tested; never passed from build.ts. |
-| Server-graph reference walk | 🟡 | internal | `sdks/vite-plugin/src/server-graph.ts` | — | `sdks/vite-plugin/test/server-graph.test.ts` | Tested in isolation; not wired into active build. |
-| Strict-mode gate for server bindings | 🟡 | internal | `sdks/vite-plugin/src/server-graph.ts` | — | `sdks/vite-plugin/test/server-graph-strict.test.ts` | rpc.strict accepted but no effect (graph not called). |
+| Phase-2 static-binding entry | 🟠 | internal (getBindings param) | `sdks/vite-plugin/src/rpc-registry.ts` | — | `sdks/vite-plugin/test/synthetic-entry-bindings.test.ts` | Implemented/tested; never passed from build.ts. |
 | Manifest extras computation | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/manifest-resources.test.ts` | snake_case rename; secure-by-default. |
 | defineApp resources from config.ts | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | — | `sdks/vite-plugin/test/manifest-resources.test.ts` | new Function() eval; computed exprs error. |
 | Production build pipeline (client + SSR) | 🟢 | internal (buildPlugin) | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SSR target webworker; strips 'use server'. |
@@ -970,9 +967,8 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Vite plugin — server-entry auto-detection | 🟢 | internal | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | — | Fixed candidate list. |
 | Vite plugin — 'use server' (file-level) | 🟢 | @zeroship/vite-plugin transform | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/src/index.ts` | Directive is the only opt-in. |
 | Vite plugin — 'use server' (function-level) | 🟢 | @zeroship/vite-plugin transform | `sdks/vite-plugin/src/transform.ts` | — | — | Only graph consumes today. |
-| Vite plugin — wire-id + collision detection | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | Prod rejects bare name. |
+| Vite plugin — wire-id + collision detection | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/wireid-collision.test.ts` | Prod rejects bare name. |
 | Vite plugin — lazy procedure support | 🟢 | @zeroship/vite-plugin | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean only. |
-| Vite plugin — server-graph walk (strict) | 🟡 | `ZeroshipOptions.rpc.strict` | `sdks/vite-plugin/src/server-graph.ts` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/server-graph.test.ts` | Not wired into build.ts. |
 | Vite plugin — node compat shims | 🟢 | internal | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | unenv@2 + custom; @rollup/plugin-inject. |
 | Vite plugin — production build (.zship) | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/build.ts` | `docs/reference/zship.md` | `examples/db-todos` | rolldown SSR; strips 'use server'. |
 | Vite plugin — .zship packing + precompress | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | — | brotli default; canonical JSON. |
@@ -1230,7 +1226,7 @@ the `middleware` list, the `runtime_assets` mutation protocol, the `aliases` map
 the ingest limits (the zship.md "Limits" section does not exist), the legacy `BundleStore`/`LocalFs`
 VFS, and the CLI `deploy` command.
 
-**Vite plugin / CLI:** the Phase-2 static-binding entry, the server-graph walk + strict gate,
+**Vite plugin / CLI:** the Phase-2 static-binding entry,
 `probeUserDefaultExport`, `findServerEntry`, the dev RPC registry, the dev-bootstrap ModuleRunner,
 the `client-manifest` type shim, SSR/SSG build modes, the `ZEROSHIP_BIN` override, auto-derived URL
 resources, the custom node polyfills, function-level `"use server"`, the `.dotenv` parser, and the

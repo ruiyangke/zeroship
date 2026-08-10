@@ -67,7 +67,6 @@ These fields exist on `ZeroshipOptions`, but the current `zeroship()` pipeline d
 | Option | Current reality |
 | --- | --- |
 | `rpcEndpoint` | The transform receives it, but generated client stubs and the shared RPC client use the shipped `/__zeroship/v1/<wireId>` path. |
-| `rpc.strict` | `resolveRpcStrict()` and `server-graph.ts` exist, but the build path in [`sdks/vite-plugin/src/build.ts`](../../sdks/vite-plugin/src/build.ts) still emits manifest metadata from wrapper discovery only. |
 
 ## Procedure discovery in the active build path
 

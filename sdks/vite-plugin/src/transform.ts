@@ -117,7 +117,7 @@ export interface TransformState {
   discoveredProcedures: DiscoveredProcedureRecord[];
   discoveredSchedules: DiscoveredScheduleRecord[];
   /**
-   * Durable workflow classes exported by server-graph modules, in EXPORT-name
+   * Durable workflow classes exported by server modules, in EXPORT-name
    * form. The manifest emitter turns these into `manifest.workflows`, which
    * the control plane requires before it will start a run
    * (`crates/control/src/workflow_instance_api.rs` `active_deploy_for_workflow`).
@@ -197,8 +197,7 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
  *
  * A function-level directive makes ONLY that function a server
  * reference; other code in the file stays client-side. The returned
- * names feed both the per-file metadata pass and the reference-graph
- * walk in `server-graph.ts`.
+ * names feed the per-file metadata pass.
  */
 export function detectFunctionLevelUseServer(ast: { body?: unknown[] }): Set<string> {
   const out = new Set<string>();

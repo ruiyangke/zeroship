@@ -101,4 +101,119 @@ describe("wireId collision detection", () => {
       await cleanup();
     }
   });
+
+  test("both sides pinning distinct explicit ids collide on neither", async () => {
+    const { root, cleanup } = await tmproot();
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(root, "src/todos.ts"),
+          exportName: "add",
+          moduleSlug: "src-todos",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "todos.add" },
+        },
+        {
+          filePath: resolve(root, "src/users.ts"),
+          exportName: "add",
+          moduleSlug: "src-users",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "users.add" },
+        },
+      ];
+
+      const result = await computeManifestExtras({
+        root,
+        procedures,
+        mode: "development",
+      });
+
+      assert.ok(result.resources["rpc:todos.add"], "first explicit id resource");
+      assert.ok(result.resources["rpc:users.add"], "second explicit id resource");
+      assert.equal(
+        result.resources["rpc:add"],
+        undefined,
+        "no bare-name resource is emitted when both sides pin",
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // The dedup arm inside the collision loop. The transform can fire on
+  // more than one Vite environment, recording the SAME
+  // (filePath, exportName) twice. Two records that name one procedure
+  // are not two procedures — flagging them would refuse a build that has
+  // no ambiguity at all, since both entries dispatch to the same handler.
+  test("the same (filePath, exportName) recorded twice is not a collision", async () => {
+    const { root, cleanup } = await tmproot();
+    try {
+      const dup: DiscoveredProcedure = {
+        filePath: resolve(root, "src/todos.ts"),
+        exportName: "add",
+        moduleSlug: "src-todos",
+        kind: "mutation",
+        isStream: false,
+      };
+
+      const result = await computeManifestExtras({
+        root,
+        // Same procedure, recorded twice — e.g. client + ssr environments.
+        procedures: [dup, { ...dup }],
+        mode: "development",
+      });
+
+      assert.ok(result.resources["rpc:add"], "the one procedure still lands");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // Guards the OTHER direction of the dedup arm: dedup keys on
+  // (filePath, exportName), so two records that agree on the file but
+  // differ on the export name are still two distinct procedures and must
+  // still collide when they resolve to one wireId.
+  test("same file, different exports, one wireId → still a collision", async () => {
+    const { root, cleanup } = await tmproot();
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(root, "src/todos.ts"),
+          exportName: "add",
+          moduleSlug: "src-todos",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "todos.write" },
+        },
+        {
+          filePath: resolve(root, "src/todos.ts"),
+          exportName: "insert",
+          moduleSlug: "src-todos",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "todos.write" },
+        },
+      ];
+
+      await assert.rejects(
+        () =>
+          computeManifestExtras({
+            root,
+            procedures,
+            mode: "development",
+          }),
+        (err: Error) => {
+          assert.match(err.message, /collision/i, "mentions collision");
+          assert.match(err.message, /todos\.write/, "cites the colliding wireId");
+          assert.match(err.message, /"add"/, "cites the first export name");
+          assert.match(err.message, /"insert"/, "cites the second export name");
+          return true;
+        },
+      );
+    } finally {
+      await cleanup();
+    }
+  });
 });

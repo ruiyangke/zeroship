@@ -15,7 +15,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildServerEntrySource } from "../src/rpc-registry.js";
-import type { ServerBinding } from "../src/server-graph.js";
+import type { ServerBinding } from "../src/rpc-registry.js";
 
 function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBinding> {
   const out = new Map<string, ServerBinding>();
@@ -27,8 +27,6 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
       sourceFile: sf,
       exportName: en,
       kind: r.kind ?? "mutation",
-      marker: r.marker ?? "file",
-      chain: r.chain ?? [sf],
       ...(r.lazy ? { lazy: r.lazy } : {}),
     });
   }

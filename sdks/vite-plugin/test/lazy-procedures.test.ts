@@ -20,7 +20,7 @@ import { parse as acornParse } from "acorn";
 
 import { transformPlugin, type TransformState } from "../src/transform.js";
 import { buildServerEntrySource } from "../src/rpc-registry.js";
-import type { ServerBinding } from "../src/server-graph.js";
+import type { ServerBinding } from "../src/rpc-registry.js";
 
 // ── Test harness ──────────────────────────────────────────────────────────
 
@@ -61,8 +61,6 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
       sourceFile: sf,
       exportName: en,
       kind: r.kind ?? "mutation",
-      marker: r.marker ?? "file",
-      chain: r.chain ?? [sf],
       ...(r.lazy ? { lazy: true } : {}),
     });
   }
@@ -334,22 +332,21 @@ describe("lazy emission — buildServerEntrySource", () => {
   });
 
   test("re-export chain + lazy: dynamic import targets the actual source file", () => {
-    // The reference-graph walk records each binding's `sourceFile` as
-    // the ULTIMATE declaring location after re-export tracing. Our
-    // emission consumes that same field — so a lazy binding always
-    // imports from the source-of-truth, not from any intermediate
-    // re-exporting `index.ts`.
+    // A binding's `sourceFile` is the ULTIMATE declaring location, not
+    // whatever intermediate module re-exported it. Our emission consumes
+    // that field verbatim — so a lazy binding always imports from the
+    // source-of-truth, never from an intermediate re-exporting
+    // `index.ts`.
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
         {
-          // The walk resolved `index.ts`'s `export { heavy } from "./heavy.ts"`
-          // to the declaring file.
+          // Caller already resolved `index.ts`'s
+          // `export { heavy } from "./heavy.ts"` to the declaring file.
           sourceFile: "/proj/src/actions/heavy.ts",
           exportName: "heavy",
           wireId: "heavy",
           lazy: true,
-          chain: ["/proj/src/actions/index.ts", "/proj/src/actions/heavy.ts"],
         },
       ]),
     });

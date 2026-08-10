@@ -30,7 +30,7 @@ import {
   SERVER_ENTRY_RESOLVED_ID,
 } from "../src/rpc-registry.js";
 import type { TransformState } from "../src/transform.js";
-import type { ServerBinding } from "../src/server-graph.js";
+import type { ServerBinding } from "../src/rpc-registry.js";
 
 function emptyState(): TransformState {
   return { serverFunctionMap: new Map(), discoveredProcedures: [] };
@@ -46,8 +46,6 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
       sourceFile: sf,
       exportName: en,
       kind: r.kind ?? "mutation",
-      marker: r.marker ?? "file",
-      chain: r.chain ?? [sf],
       ...(r.lazy ? { lazy: r.lazy } : {}),
     });
   }
