@@ -82,6 +82,12 @@ export async function genTypesFromSchemaFile(
     // (the 7 system columns + [id] PK + system indexes). The SAME ceiling on both
     // sources keeps the descriptor + envelope outputs byte-identical.
     charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
+    // The RUNTIME DESCRIPTOR is dialect-neutral - it carries types, idPrefix and
+    // mask facets, never DDL - so this picks the dialect the engine renders
+    // through, not the dialect the output is for. `postgres` is the platform
+    // tier; the SQLite dev tier consumes the same descriptor for typing only.
+    // Required by the engine since the vendored pin moved.
+    dialect: "postgres",
   });
   const runtimeJson = unwrap(reply, "manual schema source");
 
@@ -109,6 +115,10 @@ export async function genTypesFromMigrations(
     // system columns + [id] PK + system indexes at resolve time, matching the
     // descriptor path so both sources stay byte-identical.
     charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
+    // Must match the MANUAL call above: the two sources are required to produce
+    // byte-identical output, so a dialect skew between them would break that
+    // contract silently rather than loudly.
+    dialect: "postgres",
   });
   const runtimeJson = unwrap(reply, "generated migration source");
   // The typed surface is rendered HERE, off the runtime descriptor - the engine's
