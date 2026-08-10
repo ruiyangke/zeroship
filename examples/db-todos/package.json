@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "migrate": "zeroship-dev-migrate",
     "build": "vite build",
     "smoke": "bash scripts/smoke.sh",
     "test": "vitest run",
