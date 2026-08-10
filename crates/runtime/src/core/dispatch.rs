@@ -124,8 +124,17 @@ pub struct ErrorExtras<'a> {
 /// its `newRequestId()` returns a UUID, and those bodies carried
 /// `"request_id":"5"` / `"6"` — the u64 counter below. The two emit an
 /// identical body shape when there is no code, so the id format is the only
-/// thing that distinguishes them. An RPC throw therefore escapes the TS catch
-/// and lands here.
+/// thing that distinguishes them.
+///
+/// The mechanism is the three-tier dispatcher, not a failure of the TS catch.
+/// The synthetic entry exports BOTH (`export default { fetch: _zsFetchHandler,
+/// rpc: _zsRpc, workflows }`, rpc-registry.ts), and the kernel prefers
+/// `default.rpc`. A `/__zeroship/v1/<id>` request taken by that fast path calls
+/// the procedure directly, so a throw propagates into native code and lands
+/// here. `createFetchHandler`'s own `/__zeroship/v1/` branch does catch — its
+/// `rpcAndRespond` opens with a `try` — but it is the fallback for a direct
+/// HTTP hit, and the kernel path never enters it. So the TS rail is not
+/// bypassed, it is simply not on this route.
 ///
 /// Two independent rails, both client-visible boundaries:
 ///
