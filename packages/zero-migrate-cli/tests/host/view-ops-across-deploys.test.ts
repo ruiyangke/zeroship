@@ -361,6 +361,63 @@ test("MySQL: replacing a view across two deploys succeeds, but only because the 
   }
 });
 
+/** The guarded form of the drop. `ifExists` is the obvious thing to reach for when an
+ *  unguarded drop is refused, which is why it gets measured rather than assumed. */
+function dropTheViewIfExists(): NamedMigration {
+  return authoredMigration("view_drop_guarded", () => {
+    view(VIEW).drop({ ifExists: true });
+  });
+}
+
+test("MySQL: an ifExists drop across two deploys is refused too, so the guard is not a workaround", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded view-drop arm skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueNamespace("viewdropg_my");
+  const meta = `${database}_migrations`;
+  const driver: DriverConfig = { kind: "mysql", url: MYSQL_URL };
+
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    const created = createTableAndView();
+    await applyOne(created, database, driver, []);
+
+    // The fold's DropView arm destructures with `..`, which swallows `existenceGuard`
+    // exactly as it swallows `replace` on the create side, so the guard never reaches
+    // the decision. The guard-absorbing path that exists one layer up
+    // (crates/zero-migrate-node/src/lower.rs:628-644) hardcodes NotSatisfied for this
+    // dialect, so there is nowhere else for it to be honoured either.
+    const outcome = await applyOne(dropTheViewIfExists(), database, driver, [created]).then(
+      () => "ran",
+      (error: unknown) => String((error as Error)?.message ?? error),
+    );
+    assert.equal(
+      outcome,
+      'failed to project pending schema after envelope "view_drop_guarded": ' +
+        "fold: view `" +
+        VIEW +
+        "` does not exist",
+      "the guarded drop is refused the same way the unguarded one is",
+    );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(meta)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
 // SQLite needs no server, so both arms always run. `dialect-table.ts:73` and `:96`
 // mark the base createView and dropView variants portable here too, so this is the
 // third cell of each row rather than a dialect that opts out.
