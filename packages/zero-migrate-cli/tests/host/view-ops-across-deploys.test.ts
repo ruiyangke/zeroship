@@ -52,6 +52,7 @@
 // exact message the engine produces today. A fix that lets the drop through fails here
 // and has to come back and change this file deliberately.
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { table, t, view } from "zero-migrate";
@@ -265,6 +266,9 @@ function replaceTheView(): NamedMigration {
 // from the one these two arms ask.
 const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 
+/** SQLite has one schema, and the CLI names it `public` in the project position. */
+const SQLITE_PROJECT = "public";
+
 test("PostgreSQL: replacing a view across two deploys is refused, because the fold ignores `replace`", async (ctx) => {
   if (!PG_URL) {
     ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; view-replace arm skipped");
@@ -354,6 +358,74 @@ test("MySQL: replacing a view across two deploys succeeds, but only because the 
       )
       .catch(() => {});
     await admin.end().catch(() => {});
+  }
+});
+
+// SQLite needs no server, so both arms always run. `dialect-table.ts:73` and `:96`
+// mark the base createView and dropView variants portable here too, so this is the
+// third cell of each row rather than a dialect that opts out.
+test("SQLite: both view operations across two deploys", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "zm-viewops-"));
+  const driver: DriverConfig = {
+    kind: "sqlite",
+    appPath: join(dir, "app.db"),
+    journalPath: join(dir, "app.migrations.db"),
+  };
+
+  try {
+    const created = createTableAndView();
+    await applyOne(created, SQLITE_PROJECT, driver, []);
+
+    // Recorded as whatever they are rather than asserted to match a sibling dialect:
+    // the point of this arm is to find out, and a guess written as an assertion would
+    // be the same mistake as inferring SQLite from PostgreSQL.
+    const dropOutcome = await applyOne(dropTheView(), SQLITE_PROJECT, driver, [created]).then(
+      () => "ran",
+      (error: unknown) => String((error as Error)?.message ?? error),
+    );
+    assert.equal(dropOutcome, "ran", "SQLite drops a view an applied migration created");
+
+    const created2 = createTableAndView();
+    const dir2 = mkdtempSync(join(tmpdir(), "zm-viewops2-"));
+    const driver2: DriverConfig = {
+      kind: "sqlite",
+      appPath: join(dir2, "app.db"),
+      journalPath: join(dir2, "app.migrations.db"),
+    };
+    try {
+      await applyOne(created2, SQLITE_PROJECT, driver2, []);
+      const replaceOutcome = await applyOne(
+        replaceTheView(),
+        SQLITE_PROJECT,
+        driver2,
+        [created2],
+        OWNED,
+      ).then(
+        () => "ran",
+        (error: unknown) => String((error as Error)?.message ?? error),
+      );
+      // SQLite populates its catalog views like PostgreSQL does
+      // (sqlite/drift_sql.rs:289), so it carries the same `replace` defect - the
+      // fold error is identical. The WRAPPER around it is not: SQLite surfaces the
+      // projection failure through the deploy path rather than the pending-schema
+      // path, so the same defect reads differently to an operator depending on which
+      // database they run. Both texts are recorded here rather than normalised, since
+      // a reader matching on either one needs to know the other exists.
+      assert.equal(
+        replaceOutcome,
+        'IR envelope deploy failed: migration "view_replace" failed during ' +
+          "historical schema projection: fold: view `" +
+          VIEW +
+          "` already exists",
+        "SQLite refuses the replace for the same reason PostgreSQL does",
+      );
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
