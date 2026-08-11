@@ -598,10 +598,30 @@ jobs:
       # #220 built the repo-wide runner for exactly that failure and it was never
       # wired here, so the failure recurred: measured 2026-08-10, at 0c852e2e1
       # `examples/db-todos/generated/zeroship/schema.runtime.json` was STALE on
-      # main. `maxLength: 255` on id/created_by/updated_by survived from when the
-      # engine bounded the confined system columns for MySQL keying (the #251
-      # divergence); the pin at cb1bcb59 now emits the `text` our ceiling declares,
-      # so the fresh artifact drops it.
+      # main.
+      #
+      # THE DIRECTION OF THAT DRIFT WAS RECORDED BACKWARDS HERE UNTIL 2026-08-11,
+      # and the wrong version cost a full investigation: it said cb1bcb59 "now
+      # emits the `text` our ceiling declares, so the fresh artifact drops it",
+      # i.e. that a committed artifact CARRYING `maxLength: 255` was the stale one.
+      # The opposite is true, verified by reading the pinned commit rather than
+      # HEAD:
+      #   git show cb1bcb59:crates/zero-migrate/src/model/table_shape.rs :413
+      #       "text" => ColType::String { length: 255 },
+      #   git show cb1bcb59:crates/zero-migrate/src/render/lower.rs  :9242-9245
+      #       ColType::String { length } => Some(i64::from(*length)),
+      #   render/declarative.rs :2035 emits that as `"maxLength": <len>`.
+      # So a policy-INJECTED system string column (`id`, `created_by`,
+      # `updated_by`) is bounded VARCHAR(255) at our pin - deliberately, so it can
+      # be keyed on MySQL where unbounded TEXT cannot be - and the FRESH artifact
+      # CARRIES maxLength. A committed artifact WITHOUT it is the stale one.
+      #
+      # The bounding is not new and not a pin bump: `git merge-base --is-ancestor
+      # 23cc6987 cb1bcb59` is true. 23cc6987 is "render t.text() as unbounded MySQL
+      # TEXT; bound injected system columns" - two changes in one subject, and
+      # reading only the first half yields exactly the inverted summary that stood
+      # here. Upstream confirms all three sites are unchanged in behaviour at their
+      # HEAD, so a newer pin does not change this.
       #
       # NOTHING CAUGHT IT, and it is worth knowing why before trusting the two
       # gen-types tests to cover this. They pin the vite-plugin's OWN fixtures,
