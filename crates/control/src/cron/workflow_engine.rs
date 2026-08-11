@@ -313,8 +313,8 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow inflight reaper starting");
     let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
-    if let Err(e) = store.provision().await {
-        tracing::error!(error = %e, "workflow inflight reaper provision failed");
+    if let Err(e) = store.ensure_ready().await {
+        tracing::error!(error = %e, "workflow inflight reaper store not provisioned");
         return;
     }
     match reconcile_scheduler_from_journal_with_store(&store, &state.registry, false).await {
@@ -363,7 +363,7 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
 pub async fn reconcile_scheduler_from_journal(state: &AppState) -> Result<usize, RegistryError> {
     let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
     store
-        .provision()
+        .ensure_ready()
         .await
         .map_err(scheduler_store_error_to_registry)?;
     reconcile_scheduler_from_journal_with_store(&store, &state.registry, false).await
@@ -481,7 +481,7 @@ pub async fn reap_parked_cancel_requested_batch(
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
     store
-        .provision()
+        .ensure_ready()
         .await
         .map_err(scheduler_store_error_to_registry)?;
     fire_once(
