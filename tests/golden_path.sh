@@ -2856,6 +2856,58 @@ SQL
       Body: $(head -c 200 /tmp/gp-logs-b.json)"
   fi
 
+  # --- DOES AN ERROR REACH THE CREATOR TOO, or only what they printed? ------
+  #
+  # The half of observability that matters most is the half you did not choose
+  # to emit. sdks/bootstrap/src/fetch-handler.ts:381 logs
+  # `console.error("[zeroship:rpc] sanitized error", ...)` on the RPC error
+  # path, and crates/runtime/src/core/init.rs:3214-3225 binds log/warn/error/
+  # info/debug to the SAME console_log_callback, which pushes into
+  # `per_request_logs` -- so there is no stdout/stderr split in the runtime and
+  # an error line should travel exactly the route the success line just did.
+  # That is READ, not run, which is why this arm exists.
+  #
+  # WHAT THIS DRIVES IS AN INPUT-REJECTION, NOT A HANDLER THROW. getMessages is
+  # the only anon procedure and takes no input, so garbage in `?input=` is the
+  # error class reachable without adding a procedure. A genuine uncaught throw
+  # is still untested and needs its own vehicle (#333) -- so a red here is
+  # informative and a green here does NOT license "errors reach the creator"
+  # in general.
+  # THE STATUS IS CAPTURED, and that is not decoration. The first version of this
+  # arm sent the response to /dev/null and reported 0 error lines -- which cannot
+  # distinguish "the error rail does not log" from "I never triggered an error".
+  # getMessages declares no input schema, so a stray `?input=` may simply be
+  # ignored and the request may SUCCEED. A red that proves nothing is worse than
+  # no arm, so the status now gates the reading below.
+  LOG_ERR_CODE=$(curl -s -o /tmp/gp-err-resp.json -w '%{http_code}' --max-time 15 \
+    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages?input=%7Bnot-json" \
+    -H "X-Api-Key: $API_KEY" 2>/dev/null)
+  command sleep 2
+  curl -s -o /tmp/gp-logs-e.json --max-time 20 "$LOG_URL" \
+    -H "Authorization: Bearer $SC_PAT" 2>/dev/null || true
+  LOG_ERR=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-e.json 2>/dev/null | wc -l | tr -d ' ')
+  echo "  deployed error probe: http=$LOG_ERR_CODE, rpc error marker x$LOG_ERR"
+  if [ "${LOG_ERR_CODE:-200}" -lt 400 ] 2>/dev/null; then
+    fail "the error probe did NOT produce an error: the request returned
+      http=$LOG_ERR_CODE. getMessages declares no input schema, so the stray
+      \`?input=\` was very likely ignored and this drove a SUCCESS. A zero
+      error-line count here says nothing about whether the error rail reaches
+      the creator -- it is a FAILED SETUP, not a finding. A genuine uncaught
+      throw needs its own anon procedure (#333); note golden_path.sh:334 asserts
+      the manifest ids are exactly rpc:addMessage,rpc:getMessages, so that
+      assertion moves with it."
+  elif [ "${LOG_ERR:-0}" -ge 1 ] 2>/dev/null; then
+    pass "deployed: an RPC error also reaches the creator's log surface (input-rejection class)"
+  else
+    fail "deployed: the RPC error path logged NOTHING the creator can see.
+      fetch-handler.ts:381 calls console.error on this path and the runtime binds
+      console.error to the same callback as console.log (init.rs:3214-3225), which
+      this same step just proved reaches the ring. So either this request did not
+      take the error path at all, or the error rail does not run in the deployed
+      isolate. A creator would see everything they chose to print and nothing
+      about the failures they hit. See #333."
+  fi
+
   # --- THE COMPARISON, which is the reason this step exists -----------------
   if [ "${LOG_DEV:-0}" -ge 1 ] 2>/dev/null && [ "${LOG_AFTER:-0}" -ge 1 ] 2>/dev/null; then
     pass "dev and deployed AGREE: the same operation's output is visible on both tiers"
@@ -3365,7 +3417,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility"}
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|the RPC error path logged NOTHING the creator can see"}
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
