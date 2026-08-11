@@ -29,6 +29,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:9092/oauth2";
 
+/// Single-binary dev fallback DSN. NOT a clap `default_value` — see the `--db`
+/// field doc: a non-empty clap default occupies `obtain_secret`'s CLI tier and
+/// silently shadows the `[secrets] database_url` reference. It is applied after
+/// both higher tiers come up empty.
+const DEFAULT_DB_URL: &str = "postgres://localhost/zeroship";
+
 /// zeroship control-plane startup configuration.
 #[derive(Parser)]
 #[command(name = "zeroship-control")]
@@ -41,13 +47,22 @@ struct ControlCli {
     #[arg(long, env = "CONTROL_BIND", default_value = "127.0.0.1")]
     bind: String,
 
-    /// PostgreSQL DSN for control-plane data.
-    #[arg(
-        long = "db",
-        env = "DATABASE_URL",
-        default_value = "postgres://localhost/zeroship",
-        hide_env_values = true
-    )]
+    /// `PostgreSQL` DSN for control-plane data.
+    ///
+    /// The default is EMPTY, and it has to be: `obtain_secret`'s contract is
+    /// "`cli` is the clap-merged CLI/env value (`""` when unset)", and it takes
+    /// the CLI branch on ANY non-empty string. A compiled-in `default_value`
+    /// here is indistinguishable from an operator-supplied `--db`, so it wins
+    /// over the `[secrets] database_url` reference and the file tier can never
+    /// be reached. That is not hypothetical: the compose stack resolves its DSN
+    /// through `deploy/ops/zeroship.toml`'s
+    /// `database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"` and never sets
+    /// `DATABASE_URL`, so control dialled `localhost:5432` inside its own
+    /// container and crash-looped on `Registry::new` while every other binary
+    /// on the same network connected. The compiled fallback is applied AFTER
+    /// `obtain_secret`, which is the only place it can sit without shadowing
+    /// the file tier (precedence: CLI/env > `[secrets]` reference > default).
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
 
     /// Root directory for bundles and content-addressed deploy blobs.
@@ -736,6 +751,18 @@ fn main() -> std::io::Result<()> {
         file_secrets.database_url.as_deref(),
         cli.check_config,
     );
+    // The compiled fallback, applied only once BOTH higher tiers came up empty.
+    // `--check-config` is a read-only report of what was CONFIGURED, so it keeps
+    // the empty string rather than substituting a default nobody supplied. That
+    // arm is currently unobservable — the report does not print the DSN, and the
+    // two binaries' `--check-config` output was diffed byte-for-byte (timestamps
+    // aside) across this change. It is here so the guard is already right if the
+    // DSN is ever added to the report, NOT because it fixes anything today.
+    let db_url = if db_url.is_empty() && !cli.check_config {
+        DEFAULT_DB_URL.to_string()
+    } else {
+        db_url
+    };
     let blob_store_root = cli.blob_store;
     // `s3://…` → remote S3 store (control writes deploys through the SAME
     // store gateway/worker read), bare path → local disk (dev default).
