@@ -147,6 +147,16 @@ jobs:
       # relabelled as infrastructure - and refuses to pass over zero cases.
       - name: Measurement-integrity self-test
         run: tests/lib_measurement_integrity_selftest.sh
+      # Same reasoning one layer over: the dev-readiness diagnosis only prints on
+      # a bad day, so a rule that stopped matching would be invisible until the
+      # run it was meant to explain. It classifies a TIMEOUT into cold dependency
+      # optimisation / port already bound / blocked port / app fault, and getting
+      # that wrong is worse than saying nothing, because a confident wrong
+      # diagnosis sends the next reader at the wrong layer. Needs no services -
+      # pure text in, text out - and refuses to pass over fewer cases than it
+      # declares. (#273)
+      - name: Dev-readiness diagnosis self-test
+        run: tests/lib/dev_ready_selftest.sh
       - name: Doc links resolve
         run: tests/run_doc_gate.sh
       # The source-path half of the citation checks above, in BOTH directions.

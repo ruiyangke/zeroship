@@ -329,6 +329,94 @@ deploy_zship() {
   return 0
 }
 
+# --- dev-server readiness: a deadline, and a diagnosis instead of a guess ---
+#
+# Every dev-vs-deployed harness used to wait with a fixed iteration count sized
+# on an idle machine (`for _ in $(seq 1 25); do probe && break; sleep 2; done`)
+# and report one string when it ran out: "dev app never came up". That string
+# is a conclusion, and it has been wrong in both directions we have measured:
+#
+#   cold dep cache   storage harness, 2026-08-11: run 1 RED, run 2 green, same
+#                    code. vite was "ready in 806 ms" and the runtime had
+#                    registered all four plugins; what expired was the 40 s
+#                    budget while vite logged "Re-optimizing dependencies
+#                    because lockfile has changed" twice.
+#   host contention  the CI file's own note on the workflows harness: 3/3 green
+#                    idle, 3/3 RED on 12 busy cores, one mode being "the
+#                    runtime missed the 25 x 2s readiness window". Its comment
+#                    concludes "every one is a timing budget", and that is the
+#                    stated reason two harnesses are NOT wired into CI.
+#
+# So the budget is expressed in SECONDS and is overridable per host, and the
+# timeout message reports which failure mode the LOG shows rather than naming
+# the app by default. A bigger fixed count would only move the cliff.
+#
+# ZS_DEV_READY_TIMEOUT: seconds to wait (default 180). The default is chosen to
+# cover a cold dependency optimisation on a loaded host; it is a ceiling, not a
+# cost, because the loop exits on the first successful probe.
+#
+# stack_dev_diagnosis <logfile> -- prints WHY the wait failed, from evidence.
+# Pure text in, text out: no services, no timing, so it is unit-testable and is
+# unit-tested (tests/lib/dev_ready_selftest.sh).
+stack_dev_diagnosis() {
+  local log="${1:-}"
+  if [ ! -s "${log:-/nonexistent}" ]; then
+    echo "the dev process produced no output at all -- it failed to launch, or its log went elsewhere"
+    return 0
+  fi
+  # Order matters: the most specific cause that can explain a silent app wins,
+  # and each arm names the layer to look at next.
+  if grep -qiE 'blocked port|network error: blocked' "$log"; then
+    local bp
+    bp="$(grep -oiE 'blocked port [0-9]+' "$log" | head -1)"
+    echo "the runtime refused to fetch modules over a blocked port (${bp:-see log}) -- the WHATWG bad-ports list is enforced by our own fetch (crates/runtime/src/web/fetch/bad_ports.rs); pick a different port, this is not an app fault"
+    return 0
+  fi
+  if grep -qiE 'is already in use|address already in use|port is already allocated' "$log"; then
+    echo "the dev server's port was already in use, so it never bound -- another harness or a leftover process holds it; this is not an app fault"
+    return 0
+  fi
+  if grep -qiE 'Re-optimizing dependencies|Optimizing dependencies|new dependencies optimized' "$log"; then
+    if grep -qiE 'ready in ' "$log"; then
+      echo "vite was re-optimising dependencies (cold cache after a lockfile change) and reached ready, but the app did not answer inside the deadline -- raise ZS_DEV_READY_TIMEOUT before suspecting the app"
+    else
+      echo "vite was re-optimising dependencies (cold cache after a lockfile change) and never reported ready inside the deadline -- raise ZS_DEV_READY_TIMEOUT before suspecting the app"
+    fi
+    return 0
+  fi
+  if grep -qiE 'ready in ' "$log"; then
+    echo "vite reported ready and no dependency work was pending, but the app never answered the probe -- this one IS a candidate app or runtime fault, read the log below"
+    return 0
+  fi
+  echo "vite never reported ready and no recognised cause is in the log -- read the tail below; the classifier has no rule for this shape"
+  return 0
+}
+
+# stack_wait_dev <label> <logfile> <probe command...>
+# Polls the probe until it exits 0 or the deadline passes. On timeout it prints
+# the diagnosis and the log tail, then returns 1 -- the CALLER decides whether
+# that is a `fail` + exit, because harnesses differ in what they do next.
+# On success it reports the elapsed seconds when the wait was slow, so a run
+# that only just made it is visible rather than silently green.
+stack_wait_dev() {
+  local label="$1" log="$2"; shift 2
+  local deadline="${ZS_DEV_READY_TIMEOUT:-180}"
+  local waited=0
+  while [ "$waited" -lt "$deadline" ]; do
+    if "$@" >/dev/null 2>&1; then
+      [ "$waited" -ge 30 ] && echo "  note: $label became ready after ${waited}s (deadline ${deadline}s)"
+      return 0
+    fi
+    sleep 2
+    waited=$((waited+2))
+  done
+  echo "  $label did not become ready within ${deadline}s."
+  echo "  diagnosis: $(stack_dev_diagnosis "$log")"
+  echo "  --- last 20 lines of $log ---"
+  tail -20 "$log" 2>/dev/null || echo "  (log unreadable)"
+  return 1
+}
+
 # --- stack_down: kill PIDs, remove PG container, clean WORK -----------------
 stack_down() {
   if [ -n "${PIDFILE:-}" ] && [ -f "$PIDFILE" ]; then

@@ -253,14 +253,32 @@ for _p in "$DEV_PORT" "$VITE_PORT"; do
 done
 ( cd "$APP" && ZEROSHIP_STORAGE_URL="file://$WORK/dev-storage" \
     ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
-for _ in $(seq 1 20); do
-  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
-    "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' && break
-  sleep 2
-done
-curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
-  "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' \
-  && pass "dev app reachable" || { fail "dev app never came up"; tail -20 "$WORK/dev.log"; exit 1; }
+# Readiness: a DEADLINE plus a diagnosis, not a fixed iteration count (#273).
+# The old form was `for _ in $(seq 1 20); do ... sleep 2; done` -- 40 s sized on
+# an idle machine -- and it reported "dev app never came up" whatever the cause.
+# Measured here on 2026-08-11: run 1 RED, run 2 green, same code, because vite
+# was re-optimising dependencies after a lockfile change while the budget ran
+# out. The app was fine; the message was not.
+#
+# SOURCED HERE, not at the top of the file, and that placement is load-bearing.
+# tests/lib/e2e_stack.sh opens with `: "${CONTROL_PORT:=9120}"` and four more of
+# the same shape. Those only assign when unset -- so sourcing it ABOVE this
+# harness's own `CONTROL_PORT="${CONTROL_PORT:-9396}"` block would let the
+# library's ports win, silently moving this harness onto another suite's band.
+# By here every port this script owns is already set, so the `:=` defaults are
+# all no-ops.
+# shellcheck source=/dev/null
+source "$ROOT/tests/lib/e2e_stack.sh"
+_dev_ping() {
+  curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
+    "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}'
+}
+if stack_wait_dev "dev app" "$WORK/dev.log" _dev_ping; then
+  pass "dev app reachable"
+else
+  fail "dev app never became ready -- see the diagnosis and log tail above"
+  exit 1
+fi
 probe "http://localhost:$DEV_PORT" > "$WORK/dev.txt" 2>&1
 grep -q '"textMatches":true' "$WORK/dev.txt" && pass "dev side answered the probe" \
   || { fail "dev side did not round-trip text"; head -20 "$WORK/dev.txt"; }
