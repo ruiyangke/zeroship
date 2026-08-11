@@ -287,20 +287,30 @@ Stable contracts, live in `docs/reference/`:
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.
 #
-# BUT `pnpm build` IS NOT THE FIRST STEP ON A CLEAN CHECKOUT, and this
-# sequence said it was until 2026-08-11. `sdks/vite-plugin` imports
-# `zero-migrate-node`, a Rust N-API addon in the vendored engine. Root
-# `pnpm build` filters to `./sdks/*` and so NEVER builds it, nothing
-# builds it on `pnpm install` either, and its outputs are untracked.
-# MEASURED, one variable: remove only index.js / index.d.ts / *.node
-# from third_party/zero-migrate/crates/zero-migrate-node and
+# `sdks/vite-plugin` imports `zero-migrate-node`, a Rust N-API addon in
+# the vendored engine whose outputs are untracked and which `pnpm install`
+# does not build. Root `pnpm build` DOES build it -- it is the first
+# filter in the chain (package.json, `pnpm --filter zero-migrate-node
+# build && ...`), so one `pnpm build` on a clean checkout is enough and
+# the addon needs Rust on PATH.
+#
+# THIS NOTE SAID THE OPPOSITE UNTIL 2026-08-11 -- that root `pnpm build`
+# "filters to ./sdks/* and so NEVER builds it", with a separate
+# `pnpm --filter zero-migrate-node build` line above the sequence. That
+# was true when written and stopped being true in d4a5fcd5d ("fix(build):
+# build the napi addon from the root pnpm build"), landed the same day.
+# Nothing re-ran the note, so it kept reading as current. If you are
+# about to add a manual addon step back, check package.json first.
+#
+# The original measurement still describes the FAILURE it protects
+# against, and is worth keeping: remove only index.js / index.d.ts /
+# *.node from third_party/zero-migrate/crates/zero-migrate-node and
 # `pnpm --filter @zeroship/vite-plugin build` fails with
 #   src/gen-types/addon.ts(66,8): error TS2307:
 #       Cannot find module 'zero-migrate-node'
-# restore them and the same command reports 0 errors. That red is
-# byte-identical to what the platform image build hits (task #265).
-# It is invisible on any machine that has already built the addon.
-pnpm --filter zero-migrate-node build   # napi build --platform --release (needs Rust)
+# restore them and the same command reports 0 errors. It is invisible on
+# any machine that has already built the addon -- which is why the fix
+# is that the ROOT build produces it rather than a step you must know.
 pnpm build
 cargo build --release
 
