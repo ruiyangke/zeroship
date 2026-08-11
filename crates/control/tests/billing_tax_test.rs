@@ -752,9 +752,25 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 
 // ===========================================================================
 // #23/#8 (missing customer with usage): a creator with BILLABLE usage but NO saved
-//     Stripe Customer is SKIPPED (warn `missing_customer_with_usage`) — `bill_creator`
-//     returns Ok(false) BEFORE any draft claim / Stripe item / finalize. Revenue is
-//     surfaced (the warn), never silently billed against a phantom customer.
+//     Stripe Customer is SKIPPED - `bill_creator` returns Ok(false) BEFORE any draft
+//     claim / Stripe item / finalize, so nothing is billed against a phantom customer.
+//
+// WHAT THIS TEST DOES NOT PIN, measured 2026-08-11 rather than reasoned about. The
+// comment here used to add "Revenue is surfaced (the warn), never silently billed",
+// crediting this test with both halves. Only the SKIP half is asserted. Deleting the
+// `tracing::warn!(billing_event = "missing_customer_with_usage", ...)` arm from
+// billing_reconcile.rs entirely and re-running leaves this test GREEN:
+//
+//     test result: ok. 1 passed; 0 failed   (warn present)
+//     test result: ok. 1 passed; 0 failed   (warn deleted)
+//
+// So the visibility half - the thing that turns silent revenue loss into something an
+// operator can see - rests on nobody noticing the line is gone. That is not this
+// test's fault; there is no log-assertion facility in this crate, and `billing_event`
+// has FIVE emitters in crates/control/src and ZERO mentions in crates/control/tests.
+// Whether to add a capturing subscriber or promote the markers to queryable rows is
+// an open call (task #310); the comment is corrected so it stops answering a question
+// the assertions never asked.
 // ===========================================================================
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
