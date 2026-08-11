@@ -2010,6 +2010,19 @@ SC_ZSHIP="$SCAFFOLD/dist/app.zship"
 #                            MUTATE_SCAFFOLD_POLICY 49 passed,  0 failed
 #     measured 2026-08-11    unmutated              67 passed,  8 failed
 #                            MUTATE_SCAFFOLD_POLICY 73 passed,  2 failed
+#     measured 2026-08-11 (later, after steps 2c and the grant assertions)
+#                            unmutated              81 passed,  8 failed
+#
+# The 81 is what GOLDEN_MIN_PASSED is set to, so the floor now sits EXACTLY at
+# the pass count with no slack: any assertion that stops firing takes the run
+# below it. That is deliberate and it is measured, not derived - an earlier run
+# the same day read 80 passed / 9 failed and I nearly lowered the floor to match
+# it. The ninth failure was a leftover, gitignored examples/db-todos/.zeroship
+# whose dev.sqlite journal predated a change to the migration body; with that
+# directory moved aside the same command goes from a checksum-drift failure to
+# `applied=5 skipped=0`. CI checks out fresh and cannot reproduce it. The eight
+# that remain are the known red-by-design set: step 10's six (#260) and step
+# 11's two (#255).
 #
 # BOTH rows are kept because the pair is the point: the whole-harness totals
 # moved (43 -> 67) as steps landed, and the "0 failed" of the 2026-08-10 row
