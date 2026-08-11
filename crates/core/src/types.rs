@@ -29,7 +29,7 @@ pub struct AppRuntimeLimits {
 
 /// Conservative free-tier runtime limits — the single shared source of truth.
 ///
-/// Used by the control-plane catalog seed (`bootstrap_console::builtin_plans`
+/// Used by the control-plane catalog seed (`plan_catalog::builtin_plans`
 /// free tier) and the registry's fallback for an app whose plan row is missing
 /// or whose `runtime_limits_json` fails to parse. Keeping ONE const stops the
 /// two copies from drifting (50ms CPU / 5s wall / 64MB heap). The worker

@@ -85,7 +85,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let url = db_url();
 
     let registry = Registry::new(&url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
     let raw = pg(&url).await;
@@ -94,7 +94,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let owner_id = seed_owner(&raw, "oac-owner").await;
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = app.id;
@@ -292,7 +292,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
     let blob_root = std::env::temp_dir().join(format!("oac-blob-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&blob_root).expect("mkdir blob root");
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
     let env_store =
@@ -363,7 +363,7 @@ async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
         .registry
         .create_app(
             &app_name,
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
         )
         .await

@@ -382,11 +382,13 @@ fn generate_client_secret_hash() -> String {
 /// **`first_party` / `skip_consent`.** Every creator app passes
 /// `first_party = false` ⇒ `skip_consent = false`: the consent prompt MUST fire
 /// (the single grant ledger depends on it). The ONE deliberate, narrow
-/// exception is the platform's own **first-party console**, which passes
-/// `first_party = true` ⇒ `skip_consent = true` (see
-/// [`crate::bootstrap_console`]) — a consent prompt for the platform's own
-/// surface is meaningless. This exception applies ONLY to the console, NEVER to
-/// creator apps. The flag is mirrored to `zeroship.oauth_clients.skip_consent`
+/// exception is a **first-party** caller, which passes
+/// `first_party = true` ⇒ `skip_consent = true` — a consent prompt for the
+/// platform's own surface is meaningless. NOTE: nothing in-tree sets that flag
+/// today. It was the console seed, which was removed when the console stopped
+/// being a built-in app; the flag itself is kept because the OAuth contract
+/// still admits a first-party client. It applies NEVER to creator apps. The
+/// flag is mirrored to `zeroship.oauth_clients.skip_consent`
 /// in the same transaction as the client rows.
 ///
 /// # Errors

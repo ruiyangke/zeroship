@@ -231,10 +231,6 @@ name = "bootstrap_builder_test"
 path = "tests/bootstrap_builder_test.rs"
 required-features = ["live-db-tests"]
 
-[[test]]
-name = "bootstrap_console_test"
-path = "tests/bootstrap_console_test.rs"
-required-features = ["live-db-tests"]
 
 [[test]]
 name = "connect_fee_test"

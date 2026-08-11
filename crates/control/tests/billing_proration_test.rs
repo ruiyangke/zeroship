@@ -358,7 +358,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");

@@ -41,13 +41,13 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     .expect("seed owner user");
     // plan_id is an FK into zeroship.plans — seed the built-in tiers and
     // use the real free-plan catalog id.
-    zeroship_control::bootstrap_console::seed_plans(registry)
+    zeroship_control::plan_catalog::seed_plans(registry)
         .await
         .expect("seed built-in plans");
     // Generate a unique name to survive parallel test runs.
     let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let rec = registry
-        .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
         .await
         .expect("create_app");
     rec.id

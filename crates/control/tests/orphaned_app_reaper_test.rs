@@ -67,7 +67,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
@@ -151,7 +151,7 @@ async fn insert_app(
     let api_key = format!("k-{}", id.simple());
     // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
-    let free = zeroship_control::bootstrap_console::free_plan_id();
+    let free = zeroship_control::plan_catalog::free_plan_id();
     state
         .control_pg
         .execute(
@@ -266,7 +266,7 @@ async fn reaper_leaves_owned_app_untouched() {
     // create_app seeds the owner membership atomically.
     let app = state
         .registry
-        .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner)
         .await
         .expect("create_app")
         .id;
@@ -301,7 +301,7 @@ async fn reaper_never_touches_system_app() {
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
 
-    // The console is owner-less BY CONSTRUCTION (bootstrap_console seeds no
+    // A system-owned app can be owner-less BY CONSTRUCTION (no
     // app_members row). Mirror that exactly: owner-less + system = true + old.
     let app_id = Uuid::new_v4();
     let name = format!("sys-console-{}", &app_id.simple().to_string()[..12]);

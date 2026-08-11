@@ -16,7 +16,7 @@
 //!
 //! ## The platform-console-safety guarantee
 //!
-//! `bootstrap_console` seeds the platform console into `zeroship.apps` with NO
+//! A system-owned app can exist in `zeroship.apps` with NO
 //! `app_members` owner row — the console is **owner-less by construction**. A
 //! naive "delete owner-less apps" sweep would DELETE THE PLATFORM'S OWN CONSOLE.
 //! The console seed sets `system = true`; this reaper's detection query excludes

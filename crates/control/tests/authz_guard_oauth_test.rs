@@ -128,7 +128,7 @@ async fn fixture_with_auth_provider(
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(&db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
@@ -233,7 +233,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> U
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     fx.app_id = Some(record.id);
@@ -767,7 +767,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         .registry
         .create_app(
             &format!("otherapp-{}", Uuid::new_v4().simple()),
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &other_owner,
         )
         .await
@@ -880,7 +880,7 @@ async fn billing_platform_role_lists_apps_fleet_wide() {
         .registry
         .create_app(
             &format!("otherapp-{}", Uuid::new_v4().simple()),
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &other_owner,
         )
         .await

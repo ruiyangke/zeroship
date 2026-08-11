@@ -81,9 +81,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             "UPDATE zeroship.plans SET workflows_allowed = true \
               WHERE id IN ($1, $2, $3)",
             &[
-                &zeroship_control::bootstrap_console::free_plan_id(),
-                &zeroship_control::bootstrap_console::pro_plan_id(),
-                &zeroship_control::bootstrap_console::unlimited_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
+                &zeroship_control::plan_catalog::pro_plan_id(),
+                &zeroship_control::plan_catalog::unlimited_plan_id(),
             ],
         )
         .await
@@ -153,7 +153,7 @@ async fn seed_app(fx: &Fixture, label: &str, workflows: &[&str]) -> (Uuid, Strin
         fx,
         label,
         workflows,
-        &zeroship_control::bootstrap_console::free_plan_id(),
+        &zeroship_control::plan_catalog::free_plan_id(),
     )
     .await
 }
@@ -244,7 +244,7 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
             &[
                 &app_id,
                 &format!("wf-api-nodeploy-{label}-{}", Uuid::new_v4().simple()),
-                &zeroship_control::bootstrap_console::free_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
             ],
         )
         .await

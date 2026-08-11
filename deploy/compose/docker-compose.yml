@@ -204,15 +204,20 @@ services:
       # byte-identical on control + gateway — both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
       PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
-      # --- Console runtime env, FORWARDED by --bootstrap-console -------------
-      # The deployed console (the AI app-builder, a gateway-fronted zeroship
-      # app) needs these as SERVER-SIDE app env to function. The console seed
-      # (crates/control/src/bootstrap_console.rs) reads each from THIS process
-      # env at install time and writes it onto the console app's env store
-      # (secrets encrypted + exposed to process.env; plain URLs as vars) — never
-      # the browser. An unset var here is skipped (that console feature
-      # degrades) rather than failing the seed. These replace what the retired
-      # `builder` Vite service used to inject.
+      # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
+      # These were read from THIS process env at install time by the console
+      # seed, which wrote them onto the console app's env store. That seed was
+      # REMOVED when the console stopped being a built-in app, so control no
+      # longer reads any of the vars below and setting them has no effect on the
+      # console.
+      #
+      # They are kept, not deleted, because the console still needs the same
+      # values -- it now receives them the way every creator app does, through
+      # `zeroship secret set` / `zeroship var set` against its own deploy. An
+      # operator wiring that up will want this list as the inventory of what to
+      # supply. Deleting them is a reasonable follow-up once that path is
+      # documented; leaving them is NOT a silent fallback, because nothing reads
+      # them at all.
       #
       # OPERATOR MUST SUPPLY: OPENAI_API_KEY (the AI codegen/chat is dead
       # without it). Export it in the host shell before `docker compose up`;
