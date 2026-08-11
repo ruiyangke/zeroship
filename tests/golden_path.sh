@@ -1674,16 +1674,22 @@ SC_ZSHIP="$SCAFFOLD/dist/app.zship"
 # Six identical failures are what a step wired to fail would also print, so the
 # red below is worth nothing on its own. Setting MUTATE_SCAFFOLD_POLICY=1 gives
 # the scaffold the policy the template lacks, BEFORE the build -- nothing else
-# in the step changes. Under it every assertion here must go GREEN, including
-# the six comparisons and the control (which then flips the other way, removing
-# the policy). Measured 2026-08-10:
+# in the step changes. Under it every assertion IN THIS STEP must go GREEN,
+# including the six comparisons and the control (which then flips the other way,
+# removing the policy).
 #
-#     unmutated              43 passed,  6 failed   (the six scaffold comparisons)
-#     MUTATE_SCAFFOLD_POLICY 49 passed,  0 failed
+#     measured 2026-08-10    unmutated              43 passed,  6 failed
+#                            MUTATE_SCAFFOLD_POLICY 49 passed,  0 failed
+#     measured 2026-08-11    unmutated              67 passed,  8 failed
+#                            MUTATE_SCAFFOLD_POLICY 73 passed,  2 failed
 #
-# The delta is exactly the six, and the control fires in BOTH directions, which
-# is what separates "the gateway honours the manifest" from "this harness
-# always 401s".
+# BOTH rows are kept because the pair is the point: the whole-harness totals
+# moved (43 -> 67) as steps landed, and the "0 failed" of the 2026-08-10 row
+# stopped being reachable when step 11's collation reds (#255) arrived - they
+# are not scaffold failures and no policy clears them. What did NOT move is the
+# invariant: **the delta is exactly the six**, and the control fires in BOTH
+# directions, which is what separates "the gateway honours the manifest" from
+# "this harness always 401s". Read the delta, not the totals.
 if [ "${MUTATE_SCAFFOLD_POLICY:-0}" = "1" ]; then
   mkdir -p "$SCAFFOLD/src/server"
   {
@@ -2510,7 +2516,17 @@ for _s in $GP_EXPECTED_STEPS; do
   printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"
 done
 echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
-echo "  MUTATION: MUTATE_SCAFFOLD_POLICY=1 must turn step 10 fully GREEN (49 passed, 0 failed)"
+# Stated as a DELTA and a cause, not an absolute pair. "(49 passed, 0 failed)"
+# stood here until 2026-08-11 and was unreachable by then: it was measured when
+# step 10's six were the only failures, and step 11's two collation reds (#255)
+# landed afterwards and are untouched by a scaffold policy. Someone running the
+# control to check this gate is load-bearing got a mismatch and had to decide
+# whether the gate or the platform was wrong. An absolute total rots on every
+# step that lands; +6 and "only step 11 survives" does not.
+echo "  MUTATION: MUTATE_SCAFFOLD_POLICY=1 must clear step 10's SIX comparisons --"
+echo "            passed rises by exactly 6, and the only failures left are step"
+echo "            11's collation reds while #255 is open (measured 2026-08-11:"
+echo "            67/8 unmutated -> 73/2 mutated)."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
