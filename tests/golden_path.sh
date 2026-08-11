@@ -2364,6 +2364,40 @@ fi
 # All three non-byte orderings agree, so the guard below models Postgres rather
 # than merely modelling itself.
 #
+# The pairwise sector must stay DERIVED FROM THE APP, not constant.
+#
+# Two apps must not be able to correlate the same human. That rests on
+# `derive_pairwise(salt, user, sector)` being fed a per-app `sector`
+# (crates/core/src/auth/mod.rs:304). The derivation itself is unit-tested for
+# distinctness (`assert_ne!` on two sectors, same file), and the sector is
+# written once at registration as the app's apex origin
+# (crates/control/src/app_oauth_client.rs:150, inserted at :592, immutable
+# afterwards by trigger).
+#
+# THE UNCOVERED LINK WAS REGISTRATION, and its failure is silent: make
+# `sector_identifier` return a constant and NOTHING goes red today. The `pws_`
+# format check still passes, and every harness runs one app, so no comparison
+# exists to break. This asserts the property that survives with one app - the
+# sector must CONTAIN the app's own name, which a constant cannot.
+#
+# WHAT THIS DOES NOT CATCH, stated because it is weaker than the real property:
+# it does not compare two apps. It infers distinctness from app-derivedness,
+# which holds only because app names are unique. A two-app comparison needs a
+# real OP and belongs in tests/e2e_dev_vs_deployed_auth.sh (#328); this gateway
+# has no database at all and cannot do OIDC.
+sector_rows=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from zeroship.app_oauth_clients" 2>/dev/null | tr -d '[:space:]')
+sector_ok=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from zeroship.app_oauth_clients c join zeroship.apps a on a.id = c.app_id where position(a.name in c.sector_identifier) > 0" 2>/dev/null | tr -d '[:space:]')
+# The row count is asserted separately: with zero clients the equality below is
+# 0 = 0 and would read as a pass over nothing.
+[ "${sector_rows:-0}" -ge 1 ] \
+  && pass "there is at least one registered app OAuth client to check ($sector_rows)" \
+  || fail "no rows in zeroship.app_oauth_clients - the sector assertion below would pass vacuously"
+[ "$sector_rows" = "$sector_ok" ] \
+  && pass "every app's pairwise sector is derived from its own name ($sector_ok of $sector_rows)" \
+  || fail "$((sector_rows - sector_ok)) of $sector_rows app OAuth clients carry a sector that does not contain the app name: two apps could derive the SAME pairwise subject and correlate a user (#328)"
+
 # WHY db-todos AND NOT THE SCAFFOLD. Step 10's app answers 401 deployed (it
 # ships no policy), so no env.db operation of it is observable on the deployed
 # tier. db-todos is anon by policy, has migrations, and its `todos.list` already
@@ -2849,7 +2883,7 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-81}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-83}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
