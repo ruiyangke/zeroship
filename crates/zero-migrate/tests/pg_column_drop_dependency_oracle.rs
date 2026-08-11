@@ -70,6 +70,21 @@ const SHAPES: &[(&str, bool)] = &[
     ("idx_key", false),    // an index keys on it
     ("idx_expr", false),   // an index expression key reads it
     ("plain", false),      // nothing depends on it
+    // An EXCLUDE whose WHERE predicate reads it and whose KEY does not, paired with
+    // `idx_pred` - the same predicate shape on a BARE index, which drops cleanly.
+    //
+    // These add SHAPE coverage, not BRANCH coverage, and the difference was measured
+    // rather than assumed: removing the internal-ownership check from the predicate
+    // fails on `idx_pred` first, so `excl_expr` and `idx_pred` already exercise both
+    // sides of that branch. What no other shape supplies is a column reaching a
+    // constraint through an index PREDICATE rather than through an expression KEY.
+    // Those are different catalog constructs that happen to produce the same
+    // dependency today, so a future predicate that tried to tell them apart would be
+    // caught here and nowhere else.
+    ("excl_pred", true),
+    // The KEY column of that same constraint. Its dependency lands on the CONSTRAINT
+    // rather than the index, so PostgreSQL drops the whole constraint and allows it.
+    ("excl_pred_key", false),
 ];
 
 #[compio::test]
@@ -92,6 +107,7 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                excl_plain int4range,
                excl_mixed text,
                idx_pred int, idx_key int, idx_expr int,
+               excl_pred text, excl_pred_key text,
                plain int
              );
              CREATE VIEW {schema}.v AS SELECT view_src FROM {schema}.t;
@@ -101,6 +117,8 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                EXCLUDE USING gist (excl_plain WITH &&);
              ALTER TABLE {schema}.t ADD CONSTRAINT c_mixed
                EXCLUDE USING btree (excl_mixed WITH =, lower(excl_mixed) WITH =);
+             ALTER TABLE {schema}.t ADD CONSTRAINT c_pred
+               EXCLUDE USING btree (excl_pred_key WITH =) WHERE (excl_pred IS NOT NULL);
              CREATE INDEX i_pred ON {schema}.t (idx_key) WHERE (idx_pred > 0);
              CREATE INDEX i_expr ON {schema}.t ((idx_expr + 1))"
         ))

@@ -270,8 +270,15 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         crate::apply::precondition::evaluate_all(self.conn, cfg, m).await
     }
 
-    /// The blocking-dependency predicate, MEASURED against a live server by
-    /// `tests/pg_column_drop_dependency_oracle.rs` (10 shapes, 10 agreements).
+    /// The blocking-dependency predicate. The RULE below is MEASURED against a live
+    /// server by `tests/pg_column_drop_dependency_oracle.rs` (12 shapes, 12
+    /// agreements), which attempts a real drop per shape and compares.
+    ///
+    /// What that oracle checks is the RULE, not this query: it runs its own SQL
+    /// spelling of the same predicate, so the two are independently maintained
+    /// expressions of one rule and an edit here would not fail it. Change this query
+    /// and the oracle's `predicate_sql` together, or the agreement it reports stops
+    /// being about the code that ships.
     ///
     /// Refuse iff a NORMAL dependency exists, or an AUTO dependency from an index
     /// a constraint internally owns exists WITHOUT that constraint also depending
