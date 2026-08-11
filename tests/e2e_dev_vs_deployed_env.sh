@@ -666,11 +666,27 @@ echo "  env dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed surface
 
 # A MUTATION run is EXPECTED to fail (MUTATE=no-worker-canary must turn the
 # precondition red, MUTATE=deploy-canary must turn the leak verdicts red), so
-# the floor is what still has to hold there.
+# the floor is what still has to hold there -- and it must therefore count
+# assertions that RAN, not assertions that PASSED. A failing assertion is
+# already caught by `FAIL -eq 0` on the line below; the floor exists for the
+# other failure, where an assertion stops running at all and its absence reads
+# as a pass. A mutation does not remove an assertion, it moves an outcome from
+# one column to the other, so PASS+FAIL is invariant across it.
+#
+# MEASURED 2026-08-11, both runs mine, same HEAD:
+#   MUTATE=none           40 passed,  0 failed   -> 40 ran
+#   MUTATE=deploy-canary  36 passed,  4 failed   -> 40 ran
+# The four are the canary-ABSENT verdicts, exactly the ones the mutation names.
+# Counting PASS alone reported `only 36 assertions passed, fewer than the 40`
+# on that run: a second, fake failure printed beside the four real ones, on the
+# one run this harness is designed to be told apart by.
+RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$PASS" -lt "$ENV_MIN_PASSED" ]; then
-  echo "FAIL: only $PASS assertions passed, fewer than the $ENV_MIN_PASSED this gate expects." >&2
+if [ "$RAN" -lt "$ENV_MIN_PASSED" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $ENV_MIN_PASSED this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above.)" >&2
   echo "      Assertions do not vanish by accident. Nearly every verdict here is an" >&2
   echo "      ABSENCE, and an absence reads the same as a response that never came," >&2
   echo "      so a shrinking count is the signal that the controls stopped running." >&2
