@@ -2027,6 +2027,8 @@ SC_ZSHIP="$SCAFFOLD/dist/app.zship"
 #                            MUTATE_SCAFFOLD_POLICY 73 passed,  2 failed
 #     measured 2026-08-11 (later, after steps 2c and the grant assertions)
 #                            unmutated              81 passed,  8 failed
+#     measured 2026-08-11 (later still, + the pairwise-sector pair)
+#                            unmutated              83 passed,  8 failed
 #
 # The 81 is what GOLDEN_MIN_PASSED is set to, so the floor now sits EXACTLY at
 # the pass count with no slack: any assertion that stops firing takes the run
