@@ -714,6 +714,64 @@ HDR_N33=$(hdr_count_probe 31)   # = 33 total
 
 echo "    header cap: baseline -> $HDR_BASE   16384 -> $HDR_AT   16385 -> $HDR_OVER   32 hdrs -> $HDR_N32   33 hdrs -> $HDR_N33"
 
+# --- the DEPLOYED half, measurement only on this pass ------------------------
+# Our code configures NO header cap on the gateway; whatever ntex defaults to is
+# the effective creator-facing limit, and no artifact in this repo records it.
+# That is the #42 shape again (a limit inherited from a framework, differing
+# from any number we declare), so it is worth a number rather than a shrug.
+#
+# PRINTED, NOT ASSERTED, on this pass and deliberately: I do not know the value,
+# and an assertion written to match whatever the first run prints would pin a
+# framework default as if it were our contract. The direction is what matters --
+# dev is 16 KiB, and if deployed were SMALLER the divergence would fail UNSAFE
+# (a creator's request accepted locally, refused in production). Once the number
+# is in hand the next pass can assert the safe direction.
+gw_hdr_probe() { # gw_hdr_probe <total_header_block_bytes> -> status
+  local target="$1" path="/apps/$APP_NAME/__zeroship/v1/getMessages" fixed pad resp
+  fixed=$'GET '"$path"$' HTTP/1.1\r\nHost: localhost:'"$GATE_PORT"$'\r\nConnection: close\r\nX-Pad: \r\n\r\n'
+  pad="$(head -c $(( target - ${#fixed} )) /dev/zero | tr '\0' 'x')"
+  exec 3<>"/dev/tcp/127.0.0.1/$GATE_PORT" || { echo "000"; return; }
+  printf 'GET %s HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\nX-Pad: %s\r\n\r\n' \
+    "$path" "$GATE_PORT" "$pad" >&3
+  resp="$(timeout 15 cat <&3)"; exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+  printf '%s' "$resp" | head -1 | awk '{print $2}'
+}
+GW_BASE=$(gw_hdr_probe 250)
+GW_8K=$(gw_hdr_probe 8192)
+GW_16K=$(gw_hdr_probe 16384)
+GW_17K=$(gw_hdr_probe 16385)
+GW_32K=$(gw_hdr_probe 32768)
+GW_32K1=$(gw_hdr_probe 32769)
+GW_64K=$(gw_hdr_probe 65536)
+echo "    header cap DEPLOYED: baseline -> $GW_BASE  8192 -> $GW_8K  16384 -> $GW_16K  16385 -> $GW_17K  32768 -> $GW_32K  32769 -> $GW_32K1  65536 -> $GW_64K"
+
+# WHAT IS ASSERTED, and what deliberately is NOT.
+#
+# NOT asserted: the deployed number itself. Our code configures no header cap on
+# the gateway, so whatever bound exists is a FRAMEWORK DEFAULT. Pinning it here
+# would record ntex's choice as if it were our contract, and the next ntex bump
+# would go red as a "failure" while nothing of ours had changed. The probe line
+# above prints it so a reader gets the value without a test claiming ownership.
+#
+# ASSERTED: the DIRECTION, which is ours. Dev caps at 16 KiB; if the deployed
+# tier were ever the STRICTER one, a creator's request accepted on `pnpm dev`
+# would be refused in production -- the fail-UNSAFE direction, and exactly the
+# trap row 11 of docs/pilot/e2e-scenarios.md names for the body cap. 16385 is
+# the byte where dev says 431, so it is the cheapest single point that settles
+# the direction.
+[ -n "$GW_BASE" ] && [ "$GW_BASE" != "000" ] \
+  && pass "CONTROL: the gateway answers a tiny raw request ($GW_BASE)" \
+  || fail "CONTROL: gateway gave no answer on a raw socket ($GW_BASE); the header verdict below means nothing"
+
+# Compared against the BASELINE, not against a status allow-list. A list would
+# have to guess which codes mean "accepted", and 404 is the trap: on this route
+# it would be a perfectly good accepted-but-not-found answer, yet it reads like
+# a rejection. The same mistake cost this step a red run on the dev side one day
+# earlier. Same URL, same method, one variable -- the header block size.
+[ "$GW_17K" = "$GW_BASE" ] \
+  && pass "deployed accepts the header block dev refuses at 16 385 ($GW_17K = baseline), so dev stays the stricter tier" \
+  || fail "deployed answered $GW_17K at 16 385 header bytes but $GW_BASE at 250 -- the deployed tier now bounds headers at or below dev's 16 KiB, which is the fail-UNSAFE direction: a request accepted by \`pnpm dev\` would be refused in production"
+
 # The baseline itself must be a real answer. `000` is a failed connect, and a
 # comparison against it would make every row below agree for the wrong reason.
 [ -n "$HDR_BASE" ] && [ "$HDR_BASE" != "000" ] \
@@ -2393,7 +2451,11 @@ gp_close_step
 # that the runtime answers a raw socket at all, then the header byte cap accepted
 # at exactly 16384 and refused at 16385, and the header COUNT accepted at 32 and
 # refused at 33. Arithmetic is 60 + 5, measured on my own run, not derived.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-65}"
+# RAISED 65 -> 67 on 2026-08-11 for step 6c's DEPLOYED half: a control that the
+# gateway answers a raw socket, and the tier-DIRECTION assertion (deployed must
+# not bound headers at or below dev's 16 KiB). The deployed NUMBER is printed,
+# never asserted -- it is a framework default, not our contract.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-67}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
