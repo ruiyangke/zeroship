@@ -4913,17 +4913,60 @@ impl IrAuthor {
                 vec![decl.lower_rename_table(table, to)]
             }
             Op::DropColumn { table, column, .. } => {
+                // A masked column is TWO physical columns: the declared one and the
+                // `<col>_masked` sibling the shared builder injects, carrying the
+                // `zero-migrate:mask` sentinel COMMENT. One authored op creates the
+                // pair - `addColumn` lowers the sibling as a second unit just above,
+                // and `createTable` reconciles it through
+                // `ensure_create_table_masked_siblings` - so one authored op removes
+                // it. Dropping only the named column left an orphan behind: a column
+                // with a mask sentinel on it belonging to a field that no longer
+                // exists, which nothing in this engine collects.
+                //
+                // The sibling is read from the LIVE schema rather than the op, because
+                // a drop names only the column and carries no mask facet. A column
+                // whose sibling is absent lowers exactly one unit, as before.
+                let sibling = format!("{column}_masked");
+                let masked_sibling = live_schema
+                    .table_snapshots
+                    .get(table)
+                    .is_some_and(|snap| snap.columns.iter().any(|c| c.name == sibling));
+
+                let mut units = vec![decl.lower_drop_column(table, column)];
+                if masked_sibling {
+                    units.push(decl.lower_drop_column(table, &sibling));
+                }
+
                 // dropColumn ifExists: presence-only on the column.
+                //
+                // OBJECT-SCOPED per unit, with `probe` left `None`, for the reason the
+                // masked `addColumn` arm spells out: the two units are separate
+                // transactions and separate journal rows, so a single main-column probe
+                // stamped on both by the generic stamp below would have unit 1 decide on
+                // `<col>` rather than on `<col>_masked`. On the drop side that reads
+                // `<col>` as already ABSENT and returns satisfied, skipping the
+                // sibling's own DROP and journaling green - the same silent skip in the
+                // other direction.
                 if let Some(g) = guard {
-                    probe = Some(crate::model::probe::GuardProbe::Column {
+                    units[0].0.existence_guard = Some(crate::model::probe::GuardProbe::Column {
                         schema: eff_schema.clone(),
                         table: table.clone(),
                         column: column.clone(),
                         direction: g.into(),
                         expect: None,
                     });
+                    if masked_sibling {
+                        units[1].0.existence_guard =
+                            Some(crate::model::probe::GuardProbe::Column {
+                                schema: eff_schema.clone(),
+                                table: table.clone(),
+                                column: sibling,
+                                direction: g.into(),
+                                expect: None,
+                            });
+                    }
                 }
-                vec![decl.lower_drop_column(table, column)]
+                units
             }
             Op::DropIndex {
                 name,
