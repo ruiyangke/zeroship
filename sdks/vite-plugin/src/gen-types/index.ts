@@ -220,6 +220,28 @@ export async function genTypesFromSchemaFile(
     //
     // While that holds, folding through `postgres` is exactly right.
     //
+    // AND THAT GREP IS THE WHOLE CHECK - there is no second door, which is what
+    // makes re-verifying this cheap. Three independent facts close the other
+    // routes a leg could take in:
+    //   - OUR recorder cannot accept a hand-written envelope. `discoverMigrations`
+    //     gates on `MIGRATION_TS_RE` (recorder.ts:37), so a committed `.json`
+    //     beside the migrations is silently skipped; envelopes exist only as
+    //     in-memory values built from a `.ts`, and nothing in gen-types reads one
+    //     from disk. Verified by me.
+    //   - THE DESCRIPTOR LANE cannot carry one at all: zero `Dialectal` in the
+    //     engine's `render/declarative.rs` at our pin cb1bcb59 (positive control:
+    //     316 `fn ` in the same file). Verified by me, at OUR pin rather than
+    //     upstream's.
+    //   - NOTHING UPSTREAM CONSTRUCTS ONE outside tests: 61 `Op::Dialectal` sites
+    //     in `crates/`, 3 construction-shaped, all 3 inside `#[cfg(test)]`
+    //     modules. Reported by zero-migrate (ZERO-MIGRATE-2026-08-11-015) with
+    //     counts and line numbers, after they corrected their OWN earlier
+    //     "verified" on it, which had been inferred from directory names. Taken
+    //     from them, not re-read by me.
+    // So a future reader re-checking this only has to re-run the migration grep
+    // above. They do not have to wonder about generated artifacts or the other
+    // `genArtifacts` source.
+    //
     // Nothing enforces it. `emitDialectal` is exposed on our own op surface
     // (sdks/migrate/src/ops.ts:525), so the first migration to use it makes this
     // constant silently wrong for the SQLite dev tier - a column set that the dev
