@@ -50,6 +50,76 @@ async fn shipped_blockers(
         .unwrap_or_else(|e| panic!("blocking_column_dependents for {column}: {e}"))
 }
 
+/// Every user column of the fixture table, paired with the catalog footprint the
+/// shipped predicate reads for it.
+///
+/// This is the SECOND enumeration basis. The shape list below is a set of constructs
+/// somebody thought of, so it cannot say anything about a construct nobody thought
+/// of - which is exactly how a wrong rule collected fifteen agreements twice. Here
+/// the server supplies both the columns and the grouping key, so which columns are
+/// COMPARABLE is not a judgement anyone makes.
+///
+/// The footprint is the predicate's own input basis, no more and no less: per
+/// dependency row, `deptype`, `classid`, whether that object is an index a constraint
+/// internally owns, and whether THAT OWNING CONSTRAINT also depends on the column
+/// directly. `objid` appears only as a dense rank, because the query asks whether the
+/// SAME object holds another edge and never reads the oid as a value - a raw oid would
+/// make every column unique and the grouping vacuous. `objsubid` is excluded: it feeds
+/// `pg_describe_object` for the blocker TEXT and takes no part in the refuse decision.
+///
+/// The owner term is here because leaving it out made this test FAIL, which is the
+/// useful part of writing it. Without it `excl_mixed` and `excl_sep` share a footprint
+/// - one constraint reading the column two ways, versus two constraints reading it one
+/// way each - and PostgreSQL treats them differently. That reads as "no predicate over
+/// this basis can be correct", and it was wrong: the shipped query separates them
+/// perfectly by following the internal edge's `refobjid`. The footprint was modelled
+/// on the query as it stood BEFORE that leg existed. A grouping key coarser than the
+/// real basis manufactures impossibility; one finer than it merely proves less.
+///
+/// Restricted to `t` rather than every relation in the schema. The view and the
+/// indexes have `pg_attribute` rows too, and a failed drop on one of those reports a
+/// relation kind rather than a dependency, which would look like disagreement.
+fn signature_sql(table: &str) -> String {
+    format!(
+        "WITH cols AS (
+   SELECT att.attname, att.attnum, att.attrelid
+     FROM pg_attribute att
+    WHERE att.attrelid = '{table}'::regclass
+      AND att.attnum > 0 AND NOT att.attisdropped
+), dep AS (
+   SELECT c.attname, d.deptype::text AS deptype, d.classid, d.objid,
+          EXISTS (SELECT 1 FROM pg_depend i
+                   WHERE i.classid = 'pg_class'::regclass AND i.objid = d.objid
+                     AND i.deptype = 'i'
+                     AND i.refclassid = 'pg_constraint'::regclass) AS constraint_owned,
+          EXISTS (SELECT 1 FROM pg_depend i
+                   WHERE i.classid = 'pg_class'::regclass AND i.objid = d.objid
+                     AND i.deptype = 'i'
+                     AND i.refclassid = 'pg_constraint'::regclass
+                     AND EXISTS (SELECT 1 FROM pg_depend o
+                                  WHERE o.refobjid = c.attrelid
+                                    AND o.refobjsubid = c.attnum
+                                    AND o.refclassid = 'pg_class'::regclass
+                                    AND o.deptype = 'a'
+                                    AND o.classid = 'pg_constraint'::regclass
+                                    AND o.objid = i.refobjid)) AS owner_depends
+     FROM cols c
+     LEFT JOIN pg_depend d ON d.refobjid = c.attrelid AND d.refobjsubid = c.attnum
+                          AND d.refclassid = 'pg_class'::regclass
+), tup AS (
+   SELECT attname,
+          coalesce(deptype, '-') || ':'
+            || coalesce(classid::regclass::text, '-') || ':'
+            || coalesce(constraint_owned::text, '-') || ':'
+            || coalesce(owner_depends::text, '-') || ':#'
+            || (dense_rank() OVER (PARTITION BY attname ORDER BY objid))::text AS t
+     FROM dep
+)
+SELECT attname, string_agg(DISTINCT t, ' | ' ORDER BY t) AS signature
+  FROM tup GROUP BY attname ORDER BY attname"
+    )
+}
+
 /// One column per dependent shape, and what the server is expected to do with it.
 /// The expectation is asserted against a real drop, so a wrong entry here fails
 /// rather than quietly redefining the test.
@@ -160,7 +230,38 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
         .expect("build the one-column-per-shape fixture");
 
     let table = format!("{schema}.t");
+
+    // The second basis, read before the drop probes so the fixture is intact.
+    let signature_rows = session
+        .query(&signature_sql(&table), &[])
+        .await
+        .expect("read the catalog footprint of every fixture column");
+    let signatures: std::collections::BTreeMap<String, String> = signature_rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get::<_, String>("attname").expect("decode attname"),
+                row.try_get::<_, String>("signature")
+                    .expect("decode signature"),
+            )
+        })
+        .collect();
+
+    // The fixture and the shape list are two hand-written things that can drift
+    // apart. A column added to the DDL and forgotten here would be checked by
+    // nothing, and the loop below would still report every shape compared.
+    let enumerated: std::collections::BTreeSet<&str> =
+        signatures.keys().map(String::as_str).collect();
+    let listed: std::collections::BTreeSet<&str> = SHAPES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        enumerated, listed,
+        "the fixture table's columns and the SHAPES list have drifted apart; a column \
+         the server reports but the list omits is covered by nothing"
+    );
+
     let mut checked = 0usize;
+    let mut by_signature: std::collections::BTreeMap<String, Vec<(&str, bool)>> =
+        std::collections::BTreeMap::new();
     for (column, expected_refusal) in SHAPES {
         // What the shipped gate says, by running it.
         let blockers = shipped_blockers(&session, &schema, column).await;
@@ -192,8 +293,44 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                 "wave through a drop PostgreSQL rejects"
             }
         );
+        by_signature
+            .entry(signatures[*column].clone())
+            .or_default()
+            .push((column, refused));
         checked += 1;
     }
+
+    // Does the footprint the predicate reads DETERMINE the server's answer? Every
+    // check above asks whether the predicate got a known column right. This asks
+    // something the shape list cannot: whether a predicate over this input basis
+    // could be right at all. Two columns the catalog describes identically that
+    // PostgreSQL treats differently would mean no rule reading only this basis can
+    // agree with the server everywhere, and the repair would be to widen what the
+    // query reads rather than to adjust its logic.
+    let mut compared_groups = 0usize;
+    for (signature, members) in &by_signature {
+        if members.len() < 2 {
+            continue;
+        }
+        compared_groups += 1;
+        let (first_column, first_answer) = members[0];
+        for (column, answer) in &members[1..] {
+            assert_eq!(
+                *answer, first_answer,
+                "{first_column} and {column} have the same catalog footprint \
+                 ({signature}) and PostgreSQL disagrees about them: refuse={first_answer} \
+                 versus refuse={answer}. The predicate reads only this footprint, so no \
+                 rule over it can be right about both; the query has to read something \
+                 it currently ignores"
+            );
+        }
+    }
+    assert!(
+        compared_groups >= 2,
+        "every column has a footprint of its own, so the comparison above compared \
+         nothing; the grouping key has become finer than the predicate's real input \
+         basis, or the fixture lost the columns that used to share one"
+    );
 
     assert_eq!(
         checked,
