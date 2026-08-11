@@ -756,4 +756,41 @@ echo ""
 echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed, $KNOWN known-fail"
 echo "============================================"
-[ $FAIL -eq 0 ] && exit 0 || exit 1
+
+# A FLOOR ON ASSERTIONS THAT RAN, not on assertions that passed. `FAIL -eq 0`
+# below already catches a red; this catches the other failure, and this harness
+# has now demonstrated it rather than theorised it.
+#
+# MEASURED 2026-08-11, all four runs mine:
+#   idle,   before a70280f4c   39 passed, 0 failed
+#   loaded, before a70280f4c   38 passed, 0 failed   <- an assertion VANISHED
+#   loaded, after              39 passed, 0 failed
+#   idle,   after              39 passed, 0 failed
+# The 38 was `applied deploy/ops/postgres-init.sql` disappearing behind a
+# `|| true` when a loaded host widened the Postgres readiness window. It
+# printed "0 failed" and read as healthy. Nothing here could tell the two
+# apart, which is exactly what a floor is for.
+#
+# PASS+FAIL, because a mutation or a genuine red moves an outcome between the
+# columns without removing it; only a lost assertion drops the sum. Same
+# invariant as the five dev-vs-deployed harnesses (b41665ea8 and after).
+#
+# NO HEADROOM: 39 is the count this file reaches, fixed by the source, not
+# discovered at run time. Adding an assertion passes untouched; removing one
+# costs a deliberate edit here.
+#
+# WHAT IT DOES NOT CATCH: substitution. Swapping one assertion for an easier
+# one keeps the total at 39. Nothing here can see that; review can.
+BILLING_MIN_RAN="${BILLING_MIN_RAN:-39}"
+RAN=$((PASS + FAIL))
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$RAN" -lt "$BILLING_MIN_RAN" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $BILLING_MIN_RAN this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above.)" >&2
+  echo "      An assertion that DISAPPEARS reports 0 failed and reads as healthy;" >&2
+  echo "      this harness lost one exactly that way under load on 2026-08-11." >&2
+  rc=1
+fi
+exit "$rc"
