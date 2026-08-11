@@ -2778,8 +2778,14 @@ else
   # that was already gone, or a schema that never existed.
   DEL_ROW_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
     "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  # LIKE, not '=', and that is a correction rather than a flourish. An app gets
+  # TWO schemas -- `<app_id>` for the creator's tables and `<app_id>_migrations`
+  # for the engine's journal. MEASURED on the golden database: 2 tables in the
+  # first and 5 in the second. The '=' this replaced counted only the first, so
+  # the failure below reported a residue of 2 when the real one is 7 across two
+  # schemas.
   DEL_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables where table_schema = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+    "select count(*) from information_schema.tables where table_schema like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
   DEL_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
     "http://localhost:$GATE_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
   echo "  before delete: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE gateway=$DEL_SRV_PRE"
@@ -2860,17 +2866,24 @@ else
   # a plan change before the delete would put both in play; that is the next
   # increment and it is NOT done here.
   DEL_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables where table_schema = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+    "select count(*) from information_schema.tables where table_schema like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
   DEL_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from pg_namespace where nspname = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+    "select count(*) from pg_namespace where nspname like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
   if [ "${DEL_NSP_POST:-1}" = "0" ] && [ "${DEL_TBL_POST:-1}" = "0" ]; then
     pass "the app's per-app Postgres schema was dropped with the app"
   else
-    fail "the per-app Postgres schema SURVIVED the delete -- schema=$DEL_NSP_POST table(s)=$DEL_TBL_POST
+    fail "the per-app Postgres schema SURVIVED the delete -- schema(s)=$DEL_NSP_POST table(s)=$DEL_TBL_POST
       (was $DEL_TBL_PRE before). purge_app deletes the manifest keyspace and the
       zeroship.apps/oauth_clients rows and stops; nothing calls
       crates/plugin-db/src/drop_namespace.rs, whose only callers are plugin-db's
-      own integration tests. The creator's data outlives the app. See #330."
+      own integration tests. The creator's data outlives the app. See #330.
+      AND IT IS NOT MERELY THAT THE DELETE FAILED FIRST. MEASURED directly on
+      the golden database, in a transaction that was rolled back: with both
+      blocking triggers disabled the cascade RUNS TO COMPLETION (DELETE 1,
+      apps 1 -> 0) and the schema count stays 2 and the table count stays 7.
+      A DB cascade cannot drop a schema -- a schema is not a row - so fixing
+      #331 will make the delete succeed and leave this residue exactly as it
+      is. This assertion will still be the last one red."
   fi
 fi
 
