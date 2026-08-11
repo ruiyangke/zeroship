@@ -2413,7 +2413,19 @@ else
   PW_JSON=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
     -d "{\"name\":\"$PW_APP\"}" 2>/tmp/gp-pairwise-create.log)
-  PW_ID=$(echo "$PW_JSON" | jq -r '.id // empty')
+  # NO jq HERE, deliberately. The CI job for this harness installs lsof, zstd
+  # and postgresql-client and nothing else, and this file has no prerequisite
+  # check at all - so a missing tool fails somewhere in the middle with no
+  # diagnosis. The one other jq use (step 3) sits inside the `if [ -n "$TOKEN" ]`
+  # branch, which CI never takes, so this block would have been the first
+  # unconditional dependency on it. Whether the runner image happens to ship jq
+  # is not something worth resting on.
+  #
+  # Anchored on the QUOTED key rather than a greedy `.*"id"`, and tested against
+  # a payload where `owner_id` follows `id`, the spaced `{ "id" : ... }` variant,
+  # and an error body with no id at all - which must yield empty so the fail arm
+  # below fires rather than deploying to nothing.
+  PW_ID=$(printf '%s' "$PW_JSON" | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
   if [ -z "$PW_ID" ]; then
     fail "could not create the second app for the pairwise check: $(head -c 200 <<<"$PW_JSON")"
   else
