@@ -118,7 +118,28 @@ services:
     # one-shot needs the same unconfined profile the long-running services use.
     security_opt:
       - seccomp:unconfined
-    restart: on-failure
+    # BOUNDED, unlike the long-running services below, because this is a ONE-SHOT
+    # and several of its failure modes are deterministic.
+    #
+    # MEASURED 2026-08-11 walking the operator deploy: with a journal recording
+    # `20260702000200_control_tables.ts` as applied on 2026-08-07 and the source
+    # edited since, the checksum guard refuses - correctly - and the refusal can
+    # never self-heal. `restart: on-failure` resolves to MaximumRetryCount=0,
+    # which is UNLIMITED, so the container restarted 10 times in about a minute
+    # and would have kept going until stopped by hand.
+    #
+    # It is a resource leak, NOT a hidden failure, and the distinction is worth
+    # keeping: `docker compose up -d` DID exit 1 and print
+    # `service "migrate" didn't complete successfully: exit 1`, and control /
+    # gateway / worker / auth stayed `created`, correctly gated. The operator is
+    # told. The container just keeps spinning afterwards.
+    #
+    # Three retries still absorb a transient blip. The not-ready race that
+    # usually justifies an unbounded policy is already handled above by
+    # `depends_on: postgres: condition: service_healthy`, so unbounded bought
+    # nothing here. The long-running services keep plain `on-failure`: a crashed
+    # server SHOULD come back indefinitely.
+    restart: on-failure:3
 
   control:
     build:
