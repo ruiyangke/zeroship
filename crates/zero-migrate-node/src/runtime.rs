@@ -149,13 +149,14 @@ impl EnginePanic {
 /// Run `make_future()`'s future to completion on a dedicated worker thread via a
 /// reactor-less `futures::executor::block_on`, then hand the result to `on_done`.
 ///
-/// - `make_future` is invoked **on the worker thread** so the future (which may
-///   capture `!Send` engine state, e.g. a `NapiHostSession` holding a `RefCell`)
-///   never crosses a thread boundary — only `on_done`'s `T` result does, so the
-///   caller chooses a `Send` result type (`bridge.rs` uses a serializable outcome).
+/// - `make_future` is invoked **on the worker thread** so the future never crosses
+///   a thread boundary: the engine's driver and apply futures are `!Send` by
+///   construction, which is why the workspace allows `future_not_send`, and `Fut`
+///   carries no `Send` bound. Only `on_done`'s `T` result crosses, so the caller
+///   chooses a `Send` result type (`bridge.rs` uses a serializable outcome).
 /// - `on_done` also runs on the worker thread; the napi wrapper makes it a
-///   `deferred.resolve(...)` (itself thread-safe / cross-thread in napi-rs), so the
-///   JS thread is never joined.
+///   `deferred.resolve(...)` or `deferred.reject(...)`, both thread-safe and
+///   cross-thread in napi-rs, so the JS thread is never joined.
 ///
 /// This is fire-and-forget from the JS thread's perspective: the worker owns the
 /// engine future's whole lifetime.
