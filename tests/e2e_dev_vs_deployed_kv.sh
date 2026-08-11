@@ -279,11 +279,25 @@ for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 ( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
-for _ in $(seq 1 20); do
-  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
-    "http://localhost:$DEV_PORT/__zeroship/v1/kv.visit" -d '{"json":{}}' && break
-  sleep 2
-done
+# Readiness: a deadline plus a log-derived diagnosis, not a fixed 20 x 2s count
+# sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
+# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# assign when unset, so sourcing it above this harness's own port block would
+# hand it the library's ports.
+#
+# The probe stays kv.visit, unchanged, and it is safe to call it while waiting
+# even though it INCREMENTS a counter this script later asserts is 1: `probe`
+# opens with `raw_call kv.clear` to start from a known state, so nothing the
+# wait does survives into the assertion. Both the old loop and this one stop at
+# the first success, so the number of successful pre-assertion calls is also
+# unchanged.
+# shellcheck source=/dev/null
+source "$ROOT/tests/lib/e2e_stack.sh"
+_dev_ping() {
+  curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
+    "http://localhost:$DEV_PORT/__zeroship/v1/kv.visit" -d '{"json":{}}'
+}
+stack_wait_dev "dev server" "$WORK/dev.log" _dev_ping || true
 RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
 probe "http://localhost:$DEV_PORT" > "$WORK/dev.txt" 2>&1
 grep -q '"visits":1' "$WORK/dev.txt" && pass "dev server answered the probe" \

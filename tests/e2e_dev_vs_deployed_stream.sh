@@ -289,14 +289,23 @@ for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 ( cd "$APP_DIR" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
-for _ in $(seq 1 20); do
-  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
-    "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' && break
-  sleep 2
-done
-curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
-  "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' \
-  && ok "dev app reachable" || { no "dev app never came up"; tail -20 "$WORK/dev.log"; exit 1; }
+# Readiness: a deadline plus a log-derived diagnosis, not a fixed 20 x 2s count
+# sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
+# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# assign when unset, so sourcing it above this harness's own port block would
+# hand it the library's ports.
+# shellcheck source=/dev/null
+source "$ROOT/tests/lib/e2e_stack.sh"
+_dev_ping() {
+  curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
+    "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}'
+}
+if stack_wait_dev "dev app" "$WORK/dev.log" _dev_ping; then
+  ok "dev app reachable"
+else
+  no "dev app never became ready -- see the diagnosis and log tail above"
+  exit 1
+fi
 drive "http://localhost:$DEV_PORT/__zeroship/v1/probe.ticks" "" "$WORK/dev.txt"
 judge "dev" "$WORK/dev.txt"
 frames "dev" "$WORK/dev.txt"
