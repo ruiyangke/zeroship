@@ -548,4 +548,24 @@ fi
 
 echo ""
 echo "  auth dev vs deployed: $PASS passed, $FAIL failed"
+# ANTI-HOLLOW GUARD. The verdict below is `FAIL == 0`, which is also true when
+# NOTHING RAN: PASS=0/FAIL=0 exits 0 and prints "0 passed, 0 failed", which
+# scrolls past as a green. Eight sibling harnesses carry a MIN_PASSED floor;
+# this one and e2e_redeploy_replaces_app did not (measured 2026-08-11).
+#
+# Deliberately a > 0 check and NOT a numeric floor: a floor needs a measured
+# count, this harness needs a live auth service plus four others to produce
+# one, and inventing the number would be worse than the gap. This closes the
+# zero case exactly and cannot go stale as assertions are added.
+#
+# BOUNDED HONESTLY: I could not construct a REACHABLE path to zero here. Every
+# assertion sits on the main path as an if/else or an unconditional pair, and
+# every setup failure hard-exits 1. So this is defence-in-depth against a hole
+# the arithmetic allows and the control flow does not, not a live defect.
+if [ "$((PASS + FAIL))" -eq 0 ]; then
+  echo "FAIL: reached the verdict having asserted NOTHING. A comparison that" >&2
+  echo "      compared nothing is indistinguishable from one that agreed, and" >&2
+  echo "      this script would otherwise have exited 0 over it." >&2
+  exit 1
+fi
 [ "$FAIL" -eq 0 ]
