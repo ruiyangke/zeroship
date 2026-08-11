@@ -123,7 +123,7 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 2b 3 4 5 6 7 8 9 9b 10 11"
+GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -644,6 +644,72 @@ grep -q "failed to connect to database" /tmp/gp-control-cliwins.log \
   && pass "control demonstrably tried the unreachable --db DSN and failed on it" \
   || fail "control did not log a connect failure - it never reached the CLI DSN, so the assertion above is vacuous"
 for p in $CFG_PORT $CFG_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+
+# --- 2c. The same control, under its REAL role ---
+step 2c "Least privilege: control under zeroship_control matches control under postgres"
+# Every other step in this file runs control as the SUPERUSER (DB_URL at the top
+# is postgres://postgres:...). That is why six defects of one class shipped past
+# a suite that reads as thorough: as superuser they all succeed.
+#   #319 auth token_sweep could never DELETE
+#   #320 control's workflow tick could never CREATE SCHEMA
+#   #321 the per-app journal can never CREATE ROLE/SCHEMA
+#   #324 audit retention could not SELECT/DELETE, authz_decisions could not INSERT
+#   #324 connect_checkout_failures could not be read, killing the whole
+#        billing-notify tick -- found by RUNNING this comparison, not by reading
+#
+# THE ASSERTION IS THE DIFF, not a message grep. Boot the same binary with the
+# same flags twice, changing ONLY the DSN, and require the two arms to log the
+# same number of ERROR lines. Keying on a message would have missed the defect
+# that motivated this: its text was "database: db error", which names neither a
+# table nor a privilege. The diff catches the next one whatever it says, and it
+# self-normalises against unrelated errors, which hit both arms equally.
+#
+# RED/GREEN PROVEN BY ME, by revoking the grant landed in a497fcbdf and
+# restoring it, same script both times:
+#   grant revoked  -> leastpriv_errors=1 superuser_errors=0   (this step FAILS)
+#   grant restored -> leastpriv_errors=0 superuser_errors=0   (this step PASSES)
+#
+# WHAT THIS DOES NOT CATCH: only control, and only the paths its crons touch in
+# the seconds this runs. Gateway, auth and worker are untouched, and a cron on a
+# long cadence will not have ticked. It is a floor on the class, not a proof
+# that the least-privilege deployment is sound.
+LP_PORT_A=9401; LP_PORT_B=9402
+# Derive the restricted DSN from the harness's own, so pointing the harness at a
+# different host stays consistent. Passwords equal role names today (#326); if
+# that is fixed, this needs GOLDEN_LP_DSN.
+LP_DSN="${GOLDEN_LP_DSN:-$(printf '%s' "$DB_URL" | sed 's|//postgres:[^@]*@|//zeroship_control:zeroship_control@|')}"
+if [ "$LP_DSN" = "$DB_URL" ]; then
+  fail "could not derive a zeroship_control DSN from DB_URL - set GOLDEN_LP_DSN explicitly rather than letting this step compare a role against itself"
+else
+  for _spec in "lpA:$LP_DSN:$LP_PORT_A" "lpB:$DB_URL:$LP_PORT_B"; do
+    _tag="${_spec%%:*}"; _rest="${_spec#*:}"; _dsn="${_rest%:*}"; _port="${_rest##*:}"
+    "$BIN/zeroship-control" --port "$_port" --db "$_dsn" --blob-store /tmp/gp-bundles \
+      --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+      --signing-key-file "$GP_SIGNING_KEY" > "/tmp/gp-$_tag.log" 2>&1 &
+    PIDS+=($!)
+  done
+  # Both must actually serve; comparing the logs of two processes that never
+  # started would report 0 == 0 and read as a pass.
+  lp_up=0
+  for _i in $(seq 1 25); do
+    a=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_A/health" 2>/dev/null)
+    b=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_B/health" 2>/dev/null)
+    [ "$a" = "200" ] && [ "$b" = "200" ] && { lp_up=1; break; }
+    sleep 1
+  done
+  [ "$lp_up" = "1" ] \
+    && pass "control serves under zeroship_control as well as under postgres" \
+    || fail "control did not come up on both DSNs (leastpriv=$a superuser=$b) - the comparison below cannot mean anything"
+  if [ "$lp_up" = "1" ]; then
+    sleep 8   # let the fast crons tick at least once
+    lp_err=$(grep -c '"level":"ERROR"' /tmp/gp-lpA.log || true)
+    su_err=$(grep -c '"level":"ERROR"' /tmp/gp-lpB.log || true)
+    [ "$lp_err" = "$su_err" ] \
+      && pass "least-privilege control logs the same $lp_err error(s) as the superuser control" \
+      || fail "least-privilege control logs $lp_err error(s) vs the superuser's $su_err: a privilege the code uses is not granted (the #319 class) - see /tmp/gp-lpA.log"
+  fi
+  for p in $LP_PORT_A $LP_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+fi
 
 # --- 3. Create app + deploy the real .zship ---
 step 3 "Create app + deploy"
@@ -2748,7 +2814,7 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-79}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-81}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
