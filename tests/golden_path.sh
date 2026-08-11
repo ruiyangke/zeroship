@@ -2387,8 +2387,50 @@ fi
 # which holds only because app names are unique. A two-app comparison needs a
 # real OP and belongs in tests/e2e_dev_vs_deployed_auth.sh (#328); this gateway
 # has no database at all and cannot do OIDC.
+# A SECOND app, registered through the DEPLOY API, so there are two rows to
+# compare rather than one to characterise.
+#
+# Only the deploy API calls `ensure_app_client`; `dev-provision` never does
+# (crates/control/src/bin/dev_provision.rs:106, zero references to it), which is
+# why three of this harness's four apps have no client row at all and the
+# check below would otherwise have exactly one to look at. The PAT minted for
+# step 10's control already carries apps:write + apps:deploy on {"type":"any"},
+# so no new credential is needed.
+#
+# A THROWAWAY APP ON PURPOSE: do NOT reuse db-todos for the second row. Step 11
+# asserts against its deployed state and re-deploying it here would change the
+# thing that step measures.
+if [ -z "${SC_PAT:-}" ]; then
+  fail "SC_PAT is unset, so the second app cannot be registered - the distinctness check below would compare one row against itself"
+else
+  PW_APP="gppairwise"
+  PW_JSON=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    -d "{\"name\":\"$PW_APP\"}" 2>/tmp/gp-pairwise-create.log)
+  PW_ID=$(echo "$PW_JSON" | jq -r '.id // empty')
+  if [ -z "$PW_ID" ]; then
+    fail "could not create the second app for the pairwise check: $(head -c 200 <<<"$PW_JSON")"
+  else
+    "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$PW_ID" \
+      --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" \
+      >/tmp/gp-pairwise-deploy.log 2>&1 \
+      && pass "second app registered through the deploy API ($PW_APP)" \
+      || fail "second app deploy failed: $(tail -2 /tmp/gp-pairwise-deploy.log | tr '\n' ' ')"
+  fi
+fi
+
 sector_rows=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   "select count(*) from zeroship.app_oauth_clients" 2>/dev/null | tr -d '[:space:]')
+# THE PROPERTY ITSELF, now that two apps exist: distinct apps must carry
+# DISTINCT sectors. The app-derivedness check below is weaker - it implies
+# distinctness only because names happen to be unique - so this measures what
+# that one infers. Requires >= 2 rows or it is vacuous, which the count above
+# and the guard here together enforce.
+sector_distinct=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(distinct sector_identifier) from zeroship.app_oauth_clients" 2>/dev/null | tr -d '[:space:]')
+[ "${sector_rows:-0}" -ge 2 ] && [ "$sector_rows" = "$sector_distinct" ] \
+  && pass "each app carries a DISTINCT pairwise sector ($sector_distinct distinct across $sector_rows apps)" \
+  || fail "sectors are not distinct per app ($sector_distinct distinct across $sector_rows apps; needs >= 2 rows and all distinct): two apps would derive the SAME pairwise subject for one human (#328)"
 sector_ok=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   "select count(*) from zeroship.app_oauth_clients c join zeroship.apps a on a.id = c.app_id where position(a.name in c.sector_identifier) > 0" 2>/dev/null | tr -d '[:space:]')
 # The row count is asserted separately: with zero clients the equality below is
@@ -2885,7 +2927,7 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-83}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-85}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
