@@ -11,7 +11,8 @@
 #   2. deploy the .zship                                (`zeroship deploy`)
 #   3. gateway serves the app index.html + hashed JS    (static asset serving)
 #   4. getMessages QUERY executes in the worker         (server function runs)
-#   5. addMessage MUTATION executes + persists          (round-trip, input schema)
+#   5. addMessage MUTATION executes                     (input schema, real dispatch)
+#      (the in-isolate round-trip is REPORTED, not asserted - see stage 5)
 #   6. the app's requests are METERED → usage_aggregates → a projected CHARGE
 #
 # Host-routed (starter.localhost) — how a deployed app is really hit. lite billing
@@ -155,10 +156,30 @@ echo "$QMSG" | grep -q "Build locally" && pass "getMessages QUERY executed in th
 # addMessage (mutation, input {text}): POST superjson body {"json":{"text":...}}
 NEWTXT="deployed-and-metered-$(date +%s)"
 AMSG="$(gw -X POST "http://localhost:$GATE_PORT/__zeroship/v1/addMessage" -H 'content-type: application/json' --data "{\"json\":{\"text\":\"$NEWTXT\"}}")"
-echo "$AMSG" | grep -q "$NEWTXT" && pass "addMessage MUTATION executed (input schema parsed, returned the new message)" || echo "    NOTE addMessage resp: ${AMSG:0:160}"
+# A failed mutation is a FAILURE, not a note. This arm used to be `|| echo`,
+# so a broken addMessage cost one pass and zero failures. RED-PROVEN by sending
+# a body the input schema must reject ({"WRONGFIELD":...}): the response was
+# INVALID_ARGUMENT and the run still reported "16 passed, 0 failed", rc 0.
+echo "$AMSG" | grep -q "$NEWTXT" \
+  && pass "addMessage MUTATION executed (input schema parsed, returned the new message)" \
+  || fail "addMessage MUTATION did not execute: ${AMSG:0:200}"
 # getMessages again → the mutation persisted in the worker instance
 QMSG2="$(gw "http://localhost:$GATE_PORT/__zeroship/v1/getMessages")"
-echo "$QMSG2" | grep -q "$NEWTXT" && pass "the added message is visible on the next getMessages (round-trip persisted)" || echo "    NOTE (worker may have re-loaded the isolate between calls; in-memory state reset)"
+# NOT AN ASSERTION, and now labelled as such. The starter's store is a
+# MODULE-LEVEL array (examples/starter/src/server.ts:28, pushed at :45), so this
+# only holds when both calls land in the SAME isolate - which the platform does
+# not promise: the worker runs one isolate per (app, live deploy) per thread with
+# LRU eviction. Measured 2026-08-11: the pass has NEVER fired, in a clean run or
+# a mutated one, and because its else-arm was an `echo` carrying a pre-written
+# excuse, nothing surfaced that. Reported, not asserted - promoting it would pin
+# a guarantee the platform does not make.
+if echo "$QMSG2" | grep -q "$NEWTXT"; then
+  echo "    note: the added message was visible on the next getMessages (same isolate served both)"
+else
+  echo "    note: the added message was NOT visible on the next getMessages - expected"
+  echo "          whenever the two calls land in different isolates. In-isolate state is"
+  echo "          not a platform guarantee, so this is REPORTED, never asserted."
+fi
 
 echo ""; echo "=== Stage 6: the real app's traffic is METERED → usage_aggregates → a projected CHARGE ==="
 # Drive a batch of real app requests (index + RPC), all metered dispatches.
