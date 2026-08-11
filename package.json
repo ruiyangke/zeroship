@@ -19,7 +19,7 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "build": "pnpm --filter zero-migrate-node build && pnpm --filter @zeroship/db build && pnpm --filter @zeroship/bootstrap build && pnpm -r --filter './sdks/*' --filter '!@zeroship/db' --filter '!@zeroship/bootstrap' build",
+    "build": "pnpm --filter zero-migrate-node build && pnpm --filter zero-migrate build && pnpm --filter @zeroship/db build && pnpm --filter @zeroship/bootstrap build && pnpm -r --filter './sdks/*' --filter '!@zeroship/db' --filter '!@zeroship/bootstrap' build",
     "publish:sdks": "deploy/scripts/publish-sdks.sh",
     "test": "pnpm -r --filter './sdks/*' test",
     "check": "pnpm -r --filter './sdks/*' check",
