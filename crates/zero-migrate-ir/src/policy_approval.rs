@@ -145,14 +145,46 @@ pub fn migration_requires_approval(
     ops: &[Op],
     default_schema: &str,
 ) -> bool {
-    ops.iter().any(|op| {
-        let object = object_for_op(op, default_schema);
-        match require_approval_level(effective, &object) {
-            ApprovalLevel::Never => false,
-            ApprovalLevel::Always => true,
-            ApprovalLevel::OnDestructive => op.is_destructive(),
-        }
-    })
+    ops.iter()
+        .any(|op| op_requires_approval(effective, op, default_schema))
+}
+
+/// The per-op half of [`migration_requires_approval`], descending `Op::Dialectal`.
+///
+/// A wrapper names no table and no schema of its own, so resolving the obligation AT the
+/// wrapper resolved it at `default_schema` - and an op touching a scoped object then
+/// inherited whatever the default schema was allowed, which is a way to author past an
+/// approval requirement by wrapping it.
+///
+/// EVERY leg, and there is no leg to select: this query takes no dialect, because
+/// whether a migration needs a human is a property of what it was AUTHORED to do rather
+/// than of one target's rendering. Over-asking costs a prompt; under-asking skips one.
+///
+/// Descending also sharpens `on_destructive`: the level and the destructiveness are now
+/// both judged per INNER op, where before a wrapper took one level from the default
+/// schema and applied it to `Op::is_destructive`'s union over every leg.
+fn op_requires_approval(effective: &EffectivePolicy, op: &Op, default_schema: &str) -> bool {
+    if let Op::Dialectal {
+        default,
+        pg,
+        sqlite,
+        mysql,
+    } = op
+    {
+        return [default, pg, sqlite, mysql]
+            .into_iter()
+            .flatten()
+            .any(|leg| {
+                leg.iter()
+                    .any(|inner| op_requires_approval(effective, inner, default_schema))
+            });
+    }
+    let object = object_for_op(op, default_schema);
+    match require_approval_level(effective, &object) {
+        ApprovalLevel::Never => false,
+        ApprovalLevel::Always => true,
+        ApprovalLevel::OnDestructive => op.is_destructive(),
+    }
 }
 
 fn approval_key() -> KnobKey {
@@ -272,6 +304,84 @@ mod tests {
             &[add_column("app_secret", "t")],
             "app_secret"
         ));
+    }
+
+    fn dialectal(legs: (Option<Vec<Op>>, Option<Vec<Op>>)) -> Op {
+        Op::Dialectal {
+            default: None,
+            pg: legs.0,
+            sqlite: None,
+            mysql: legs.1,
+        }
+    }
+
+    /// An op inside a `dialect()` leg is scoped at the object it TOUCHES, not at the
+    /// migration's default schema.
+    ///
+    /// The wrapper carries no table and no schema of its own, so resolving the approval
+    /// obligation at the wrapper resolved it at `default_schema`. A leg touching a
+    /// scoped object then inherited the UNSCOPED level, and an op that must be approved
+    /// could be authored past the obligation by wrapping it.
+    #[test]
+    fn an_op_inside_a_leg_is_scoped_at_the_object_it_touches() {
+        // `always` scoped ONLY to app_secret.*; the deploying default schema is not
+        // covered, so the wrapper's own object resolves to `never`.
+        let ep = effective_from_charter(
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
+        );
+
+        // The control: at the top level the scoped object is found and approval required.
+        assert!(
+            migration_requires_approval(&ep, &[add_column("app_secret", "t")], "app_main"),
+            "a top-level op on the scoped object requires approval"
+        );
+
+        // The defect: the same op, wrapped.
+        assert!(
+            migration_requires_approval(
+                &ep,
+                &[dialectal((Some(vec![add_column("app_secret", "t")]), None))],
+                "app_main"
+            ),
+            "a dialect() wrapper must not lower the obligation to the default schema's"
+        );
+    }
+
+    /// EVERY leg, not one: this query takes no dialect, so there is no leg to select,
+    /// and approval is a safety obligation where over-asking costs a prompt while
+    /// under-asking skips one. A leg the current target would not run still names an
+    /// object the author wrote.
+    #[test]
+    fn an_op_in_any_leg_is_scoped_at_the_object_it_touches() {
+        let ep = effective_from_charter(
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
+        );
+        assert!(
+            migration_requires_approval(
+                &ep,
+                &[dialectal((None, Some(vec![add_column("app_secret", "t")])))],
+                "app_main"
+            ),
+            "the mysql leg names the scoped object too"
+        );
+    }
+
+    /// The control that keeps the widening honest: a wrapper whose legs touch only
+    /// UNSCOPED objects must still require nothing. Without this, a fix that simply
+    /// returned `true` for every wrapper would pass the two arms above.
+    #[test]
+    fn a_leg_touching_an_unscoped_object_still_requires_no_approval() {
+        let ep = effective_from_charter(
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
+        );
+        assert!(
+            !migration_requires_approval(
+                &ep,
+                &[dialectal((Some(vec![add_column("app_main", "t")]), None))],
+                "app_main"
+            ),
+            "a leg touching only the unscoped schema requires no approval"
+        );
     }
 
     #[test]
