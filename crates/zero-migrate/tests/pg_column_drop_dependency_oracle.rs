@@ -29,9 +29,14 @@ mod support;
 
 use zero_migrate::driver::SqlSession;
 
-/// Refuse iff a NORMAL dependency exists, or an AUTO dependency from an index that
-/// a constraint internally owns exists WITHOUT the constraint itself depending on
-/// the column.
+/// Refuse iff a NORMAL dependency exists that the same object does NOT also hold an
+/// AUTO edge for, or an AUTO dependency from an index that a constraint internally
+/// owns exists WITHOUT the constraint itself depending on the column.
+///
+/// The AUTO qualifier on the NORMAL leg is what a CHECK constraint needs: it reports
+/// BOTH edges on its column, and the AUTO one is PostgreSQL's own record that it will
+/// drop the constraint rather than block on it. A view's rewrite rule and a generated
+/// column's default report NORMAL alone and do block.
 fn predicate_sql(table: &str) -> String {
     format!(
         "WITH dep AS (
@@ -43,7 +48,11 @@ fn predicate_sql(table: &str) -> String {
      AND att.attnum > 0 AND NOT att.attisdropped
 )
 SELECT (
-  coalesce(bool_or(deptype = 'n'), false)
+  coalesce(bool_or(deptype = 'n' AND NOT EXISTS (
+    SELECT 1 FROM dep auto_edge
+     WHERE auto_edge.deptype = 'a'
+       AND auto_edge.classid = dep.classid
+       AND auto_edge.objid = dep.objid)), false)
   OR (
     coalesce(bool_or(deptype = 'a' AND classid = 'pg_class'::regclass
       AND EXISTS (SELECT 1 FROM pg_depend i
@@ -85,6 +94,19 @@ const SHAPES: &[(&str, bool)] = &[
     // The KEY column of that same constraint. Its dependency lands on the CONSTRAINT
     // rather than the index, so PostgreSQL drops the whole constraint and allows it.
     ("excl_pred_key", false),
+    // A CHECK constraint, which reports a NORMAL dependency and is STILL droppable -
+    // PostgreSQL auto-drops the constraint and takes the column with it. Every shape
+    // above either blocks with a NORMAL dependency or allows without one, so a rule
+    // keyed on "any NORMAL dependency blocks" agreed with the server twelve times
+    // while being wrong. These three are the counterexample, and they are the reason
+    // the predicate has to ask whether the SAME dependent also holds an AUTO edge.
+    //
+    // Both spellings exist because they reach the column differently: a column
+    // constraint names one column, a table constraint names several, and dropping any
+    // one of the several still takes the whole constraint.
+    ("chk_single", false),
+    ("chk_multi_a", false),
+    ("chk_multi_b", false),
 ];
 
 #[compio::test]
@@ -108,6 +130,9 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                excl_mixed text,
                idx_pred int, idx_key int, idx_expr int,
                excl_pred text, excl_pred_key text,
+               chk_single int CHECK (chk_single > 0),
+               chk_multi_a int, chk_multi_b int,
+               CONSTRAINT c_multi CHECK (chk_multi_a > 0 AND chk_multi_b > 0),
                plain int
              );
              CREATE VIEW {schema}.v AS SELECT view_src FROM {schema}.t;

@@ -271,7 +271,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     /// The blocking-dependency predicate. The RULE below is MEASURED against a live
-    /// server by `tests/pg_column_drop_dependency_oracle.rs` (12 shapes, 12
+    /// server by `tests/pg_column_drop_dependency_oracle.rs` (15 shapes, 15
     /// agreements), which attempts a real drop per shape and compares.
     ///
     /// What that oracle checks is the RULE, not this query: it runs its own SQL
@@ -280,15 +280,21 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     /// and the oracle's `predicate_sql` together, or the agreement it reports stops
     /// being about the code that ships.
     ///
-    /// Refuse iff a NORMAL dependency exists, or an AUTO dependency from an index
-    /// a constraint internally owns exists WITHOUT that constraint also depending
-    /// on the column. The obvious "any NORMAL dependency" filter is WRONG: it
-    /// misses an EXCLUDE whose expression reads the column, which reports AUTO and
-    /// is still refused, because the exclusion's index is internally owned by its
-    /// constraint. Where the constraint ALSO depends on the column directly,
-    /// PostgreSQL drops the whole constraint and the drop succeeds - which is why
-    /// an exclusion naming the column both plainly and in an expression is
-    /// droppable while the expression-only form is not.
+    /// Refuse iff a NORMAL dependency exists whose own object does NOT also hold an
+    /// AUTO edge on the column, or an AUTO dependency from an index a constraint
+    /// internally owns exists WITHOUT that constraint also depending on the column.
+    ///
+    /// Both qualifiers are counterexamples the server supplied, not caution. "Any
+    /// NORMAL dependency" is too NARROW for an EXCLUDE whose expression reads the
+    /// column: that reports AUTO and is still refused, because the exclusion's index
+    /// is internally owned by its constraint. It is simultaneously too WIDE for a
+    /// CHECK constraint, which reports BOTH edges and is dropped: the AUTO edge is
+    /// PostgreSQL's own record that it will remove the constraint rather than block
+    /// on it. A view's rewrite rule and a generated column's default report NORMAL
+    /// alone, and those do block. The same "does the object also depend on the column
+    /// directly" question answers both legs, which is why an exclusion naming the
+    /// column both plainly and in an expression is droppable while the
+    /// expression-only form is not.
     ///
     /// `pg_describe_object` renders each blocker the way PostgreSQL's own error
     /// DETAIL does, so the refusal names what the server would have named.
@@ -315,7 +321,15 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                  )
                  SELECT pg_describe_object(classid, objid, objsubid) AS blocker
                    FROM dep
-                  WHERE deptype = 'n'
+                  WHERE (
+                       deptype = 'n'
+                       AND NOT EXISTS (
+                         SELECT 1 FROM dep auto_edge
+                          WHERE auto_edge.deptype = 'a'
+                            AND auto_edge.classid = dep.classid
+                            AND auto_edge.objid = dep.objid
+                       )
+                     )
                      OR (
                        deptype = 'a' AND classid = 'pg_class'::regclass
                        AND EXISTS (
