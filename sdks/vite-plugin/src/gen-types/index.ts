@@ -202,10 +202,23 @@ export async function genTypesFromSchemaFile(
     // `dialect` field contract and two live tests that fold one history under two
     // dialects and match each against that database's real catalog.)
     //
-    // The condition: NO migration in this repo authors a dialectal leg. Measured
-    // 2026-08-10 - zero `dialect(` call sites across all 16 files under
-    // db/migrations-ts/ and examples/*/migrations/. While that holds, folding
-    // through `postgres` is exactly right.
+    // The condition: NO migration in this repo authors a dialectal leg.
+    // Re-measured 2026-08-11 across ALL 17 migration `.ts` files in the live
+    // tree - db/migrations-ts/, the four examples/*/migrations/, and
+    // sdks/create-zeroship-app/template/migrations/, which the previous
+    // 16-file scope omitted. Zero hits for BOTH spellings: `dialect(` (the
+    // engine's own) and `emitDialectal` (ours, ops.ts:525). Grepping only the
+    // engine's spelling would miss every leg a creator could actually author
+    // through our surface, which is the one that matters here. Positive
+    // control: `table(` in the same scope, same tool, 456 hits.
+    //
+    // Run under `bash -c`, not this shell: an unquoted multi-root $SCOPE does
+    // not word-split in zsh, so the whole sweep collapses to one bogus path and
+    // reports a confident zero. The first attempt did exactly that and reported
+    // "0 files in scope" alongside its zeros, which is the only reason it was
+    // caught.
+    //
+    // While that holds, folding through `postgres` is exactly right.
     //
     // Nothing enforces it. `emitDialectal` is exposed on our own op surface
     // (sdks/migrate/src/ops.ts:525), so the first migration to use it makes this
