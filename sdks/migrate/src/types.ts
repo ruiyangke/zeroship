@@ -994,7 +994,19 @@ export interface TableOptions {
 
 export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 /** Column index element object form. Use `order: "desc"` to render `col DESC`;
- *  `order: "asc"` and omitted order serialize as the default ASC shape. */
+ *  `order: "asc"` and omitted order serialize as the default ASC shape.
+ *
+ *  `nulls` IS DECLARED AND DOES NOTHING. `indexElementToIr` never reads it, so
+ *  it is absent from the recorded op and cannot reach any DDL. It typechecks
+ *  (tsc correctly accepts `"first" | "last"` and correctly rejects anything
+ *  else), so a creator writing `nulls: "last"` gets no signal from either the
+ *  compiler or the runtime. MEASURED 2026-08-11 by recording the op:
+ *    in : { column, order: "desc", opclass, collation, nulls: "last" }
+ *    out: { kind: "column", name, order: "desc", opclass, collation }
+ *  The engine has no field for it either: `IndexElement`'s column branch in
+ *  ir-envelope.schema.json declares exactly collation/kind/name/opclass/order,
+ *  so implementing this is an UPSTREAM change to zero-migrate, not a local
+ *  threading job alongside opclass. See task #258 (implement-or-delete). */
 export interface IndexColumnElementArg {
   column: string;
   order?: IndexSortOrder;
@@ -1003,6 +1015,23 @@ export interface IndexColumnElementArg {
   nulls?: "first" | "last";
 }
 
+/** Expression index element object form.
+ *
+ *  ALL FOUR MODIFIERS BELOW ARE DECLARED AND DO NOTHING on this form - not
+ *  just `nulls`. `indexElementToIr`'s `expr` branch returns `{ kind, expr }`
+ *  and reads none of them. MEASURED 2026-08-11, same recorder:
+ *    in : { expr, order: "desc", opclass, collation, nulls: "last" }
+ *    out: { kind: "expr", expr: {...} }        // every modifier gone
+ *  `order` is the trap: the branch CALLS `indexColumnOrderToIr(element.order)`
+ *  and discards the result, so `order: "bogus"` throws
+ *  `OP_INVALID: index column order must be "asc" or "desc"` while `order:
+ *  "desc"` is silently ignored. An invalid value errors, which reads as proof
+ *  the option is wired; a valid one does nothing.
+ *
+ *  This is wider than the column form by construction: the engine's `expr`
+ *  branch declares only `expr`/`kind`, so it has no slot for any of the four.
+ *  PostgreSQL does permit all of them on an expression index element, so this
+ *  is an engine-scope gap, not a SQL limit. See task #258. */
 export interface IndexExprElementArg {
   expr: IndexExprFn;
   order?: IndexSortOrder;
