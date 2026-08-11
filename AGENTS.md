@@ -286,6 +286,21 @@ Stable contracts, live in `docs/reference/`:
 # so `pnpm build` must run before `cargo build -p zeroship-runtime`.
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.
+#
+# BUT `pnpm build` IS NOT THE FIRST STEP ON A CLEAN CHECKOUT, and this
+# sequence said it was until 2026-08-11. `sdks/vite-plugin` imports
+# `zero-migrate-node`, a Rust N-API addon in the vendored engine. Root
+# `pnpm build` filters to `./sdks/*` and so NEVER builds it, nothing
+# builds it on `pnpm install` either, and its outputs are untracked.
+# MEASURED, one variable: remove only index.js / index.d.ts / *.node
+# from third_party/zero-migrate/crates/zero-migrate-node and
+# `pnpm --filter @zeroship/vite-plugin build` fails with
+#   src/gen-types/addon.ts(66,8): error TS2307:
+#       Cannot find module 'zero-migrate-node'
+# restore them and the same command reports 0 errors. That red is
+# byte-identical to what the platform image build hits (task #265).
+# It is invisible on any machine that has already built the addon.
+pnpm --filter zero-migrate-node build   # napi build --platform --release (needs Rust)
 pnpm build
 cargo build --release
 
