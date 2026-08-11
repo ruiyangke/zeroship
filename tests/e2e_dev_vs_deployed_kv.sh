@@ -534,8 +534,36 @@ cut -c1-220 "$WORK/deployed.raw" | sed 's/^/  /'
 # still has to hold there: a mutation should flip verdicts, not remove them.
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$PASS" -lt "$KV_MIN_PASSED" ]; then
-  echo "FAIL: only $PASS assertions passed, fewer than the $KV_MIN_PASSED this gate expects." >&2
+# THE FLOOR COUNTS ASSERTIONS THAT RAN, NOT ASSERTIONS THAT PASSED.
+#
+# It used to test `$PASS`, and with NO HEADROOM (floor 44 == the unmutated
+# total, deliberately) that made every mutation control report a second,
+# spurious failure. Measured 2026-08-11, MUTATE=rate-never-limits:
+#
+#     dev vs deployed: 43 passed, 1 failed  (mutation: rate-never-limits)  (floor 44)
+#     FAIL: only 43 assertions passed, fewer than the 44 this gate expects.
+#
+# The mutation did exactly what it promises - `FAIL deployed rate6: sixth hit
+# REFUSED` is the control firing - and the floor then blamed the run for lost
+# coverage that was never lost. Someone checking whether this harness is
+# load-bearing sees two failures and has to work out which one is real.
+#
+# PASS+FAIL is the invariant the floor actually wants. Failing assertions are
+# already caught by `FAIL -eq 0` on the line above; the floor exists for
+# assertions that STOPPED RUNNING - a removed check, or a deployed capture that
+# lost rows so the reject verdicts pass over empty input. Both still drop
+# PASS+FAIL. A mutation does not: it moves an outcome from one column to the
+# other. Unmutated 44+0 = 44; rate-never-limits 43+1 = 44.
+#
+# Same defect, same week, in e2e_dev_vs_deployed_auth.sh (f9b597c10), where it
+# was patched with a mode-specific floor because that harness genuinely SKIPS an
+# assertion under mutation. This one does not skip; it flips. PASS+FAIL is the
+# better fix and needs no knowledge of the mode.
+RAN=$((PASS + FAIL))
+if [ "$RAN" -lt "$KV_MIN_PASSED" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $KV_MIN_PASSED this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above.)" >&2
   echo "      Assertions do not vanish by accident: either the deployed capture lost" >&2
   echo '      rows (in which case reject verdicts are passing on EMPTY rows and mean' >&2
   echo "      nothing) or an assertion was removed. If the removal was deliberate," >&2
