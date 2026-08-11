@@ -149,3 +149,77 @@ fn op_variant_names_from_schema() {
         "the ir-envelope.schema.json Op discriminant set must equal the closed Op variant set"
     );
 }
+
+/// The same exhaustiveness seed for `Precondition`, which needs its own
+/// extractor because it is EXTERNALLY tagged: a branch is `{ "TableExists": {...} }`,
+/// carrying the variant name as its property key, where an `Op` branch pins the
+/// name in `properties.op.const`. An extractor written for the `Op` shape reads
+/// no tag field here and yields an empty list, and an empty list compared against
+/// an empty list passes - so the obvious version of this test asserts nothing
+/// while looking correct. A downstream consumer's drift gate had exactly that
+/// bug: injecting a new variant into their vendored copy of this schema left it
+/// at 19 pass, 0 fail.
+///
+/// `emit_ir_envelope_schema` above already fails on any change to this file, so
+/// this is not the thing standing between a new variant and CI. It is here for
+/// what a byte comparison cannot do: that one is cleared by re-running with
+/// `UPDATE_SCHEMA=1`, which a contributor can do without reading what moved,
+/// while this one cannot go green until a human writes the new variant's name
+/// down.
+#[test]
+fn precondition_variant_names_from_schema() {
+    let schema = schemars::schema_for!(MigrationIr);
+    let value: serde_json::Value = serde_json::to_value(&schema).expect("schema -> value");
+
+    let def = value
+        .get("$defs")
+        .and_then(|d| d.get("Precondition"))
+        .expect("schema must define $defs/Precondition");
+    let branches = def
+        .get("oneOf")
+        .and_then(|o| o.as_array())
+        .expect("Precondition must be a oneOf union");
+
+    // Each branch names its variant in `required`, which for an externally
+    // tagged enum holds exactly the one key `properties` carries.
+    let mut found: Vec<String> = branches
+        .iter()
+        .filter_map(|b| {
+            b.get("required")
+                .and_then(|r| r.as_array())
+                .and_then(|r| r.first())
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    found.sort();
+
+    // The assertion that stops this passing vacuously. Without it, an extractor
+    // that matched nothing would compare empty against empty and report success,
+    // which is the failure mode this test exists to avoid rather than repeat.
+    assert!(
+        !found.is_empty(),
+        "extracted no Precondition variant names, so the comparison below would \
+         pass against any schema; the extractor no longer matches the union's shape"
+    );
+
+    let mut expected: Vec<String> = [
+        "TableExists",
+        "TableNotExists",
+        "ColumnExists",
+        "ColumnNotExists",
+        "ColumnHasNoBlockingDependents",
+        "RowCount",
+        "SqlBoolean",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    expected.sort();
+
+    assert_eq!(
+        found, expected,
+        "the ir-envelope.schema.json Precondition variant set must equal the closed \
+         Precondition variant set"
+    );
+}
