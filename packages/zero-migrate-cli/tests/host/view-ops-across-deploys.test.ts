@@ -1,9 +1,19 @@
-// Dropping a view that an EARLIER, ALREADY-APPLIED migration created.
+// View operations that span two deploys - where the object was created by a migration
+// that is already applied and journaled, rather than by one in the same batch.
 //
-// MySQL refuses it. PostgreSQL, given the same authored migrations, performs it. The
-// PostgreSQL arm below is the control: without it, the MySQL arm alone would be equally
-// consistent with "view drops are broken everywhere", which is a different defect with a
-// different fix.
+// Two separate defects live here, and each dialect has exactly one of them:
+//
+//   dropView across deploys      MySQL FAILS          PostgreSQL works
+//   createView replace across    MySQL works          PostgreSQL FAILS
+//
+// They have a common shape - the fold decides against a catalog snapshot it does not
+// fully trust - but different causes, and fixing either one naively makes the other
+// worse. Populating MySQL's empty views map to fix the drop turns the MySQL replace arm
+// into the PostgreSQL failure. That is why both live in one file: the pair is the
+// constraint on the fix, and splitting them hides it.
+//
+// The two arms that PASS are not padding. Each rules out a wrong diagnosis the failing
+// arm alone would also fit - see the comments on each.
 //
 // WHY MySQL REFUSES. Its catalog snapshot never populates the `views` map -
 // `crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:643` returns
@@ -104,6 +114,7 @@ function applyOne(
   projectSchema: string,
   driver: DriverConfig,
   priors: NamedMigration[],
+  registry: Record<string, string> = {},
 ) {
   return apply({
     migration,
@@ -112,7 +123,7 @@ function applyOne(
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
-    registry: {},
+    registry,
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "view-drop-across-deploys-e2e",
@@ -227,6 +238,114 @@ test("MySQL: creating and dropping a view within ONE migration succeeds, which i
       0,
       "the in-batch create satisfied the drop, and the view is gone",
     );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(meta)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+/** Re-creates the view with `replace: true`, the documented way to change a view's body. */
+function replaceTheView(): NamedMigration {
+  return authoredMigration("view_replace", () => {
+    view(VIEW).create({
+      replace: true,
+      as: (q) => q.from(TABLE).select(["id"]),
+    });
+  });
+}
+
+// The registry has to name both objects: the replacing migration's SELECT targets the
+// table, and a second deploy carries no adoption for it, so an empty registry is refused
+// for ownership before the fold is ever reached. That refusal is a different question
+// from the one these two arms ask.
+const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
+
+test("PostgreSQL: replacing a view across two deploys is refused, because the fold ignores `replace`", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; view-replace arm skipped");
+    return;
+  }
+  const pg = (await import("pg")).default;
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+  const schema = uniqueNamespace("viewrepl_pg");
+  const meta = `${schema}_migrations`;
+  const driver: DriverConfig = { kind: "postgres", url: PG_URL };
+
+  try {
+    await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
+    const created = createTableAndView();
+    await applyOne(created, schema, driver, []);
+
+    // `Op::CreateView` at crates/zero-migrate/src/render/fold.rs:2317 destructures with
+    // `..`, which swallows `replace`, then rejects on `views.contains_key(name)`
+    // unconditionally. PostgreSQL populates its catalog views, so the second deploy
+    // finds the first deploy's view and refuses - even though the renderer emits
+    // CREATE OR REPLACE VIEW (crates/zero-migrate/src/render/renderer.rs:566) and the
+    // dialect table calls the variant portable on every engine.
+    await assert.rejects(
+      applyOne(replaceTheView(), schema, driver, [created], OWNED),
+      (error: unknown) => {
+        assert.equal(
+          String((error as Error)?.message ?? error),
+          'failed to project pending schema after envelope "view_replace": ' +
+            "fold: view `" +
+            VIEW +
+            "` already exists",
+        );
+        return true;
+      },
+    );
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS ${pgIdent(schema)} CASCADE;
+         DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
+test("MySQL: replacing a view across two deploys succeeds, but only because the catalog map is empty", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL view-replace arm skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueNamespace("viewrepl_my");
+  const meta = `${database}_migrations`;
+  const driver: DriverConfig = { kind: "mysql", url: MYSQL_URL };
+
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    const created = createTableAndView();
+    await applyOne(created, database, driver, []);
+
+    // The same authored migration the PostgreSQL arm above refuses. It passes here for
+    // the WRONG reason: the empty catalog map means the fold's duplicate check finds
+    // nothing, so ignoring `replace` costs nothing. Populating the views map to fix the
+    // drop defect turns this into the PostgreSQL failure unless the fold learns to
+    // consult `replace` first. This arm is what would catch that.
+    await applyOne(replaceTheView(), database, driver, [created], OWNED);
+
+    const [rows] = await admin.query(
+      `SELECT VIEW_DEFINITION FROM information_schema.VIEWS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+      [database, VIEW],
+    );
+    assert.equal((rows as unknown[]).length, 1, "the view is still there after the replace");
   } finally {
     await admin
       .query(
