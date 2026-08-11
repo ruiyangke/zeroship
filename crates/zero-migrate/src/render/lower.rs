@@ -4937,6 +4937,25 @@ impl IrAuthor {
                     units.push(decl.lower_drop_column(table, &sibling));
                 }
 
+                // Each physical drop is its own transaction and journal row, so its
+                // dependency assertion must name that unit's column. PostgreSQL is
+                // the only backend with this evaluator; a non-empty precondition
+                // list is deliberately refused by the SQLite and MySQL backends.
+                if self.dialect == SqlDialect::Postgres {
+                    use crate::model::precondition::{Precondition, PreconditionCheck};
+
+                    let dependency_guard = |physical_column: &str| {
+                        PreconditionCheck::halt(Precondition::ColumnHasNoBlockingDependents {
+                            table: table.clone(),
+                            column: physical_column.to_string(),
+                        })
+                    };
+                    units[0].0.preconditions.push(dependency_guard(column));
+                    if masked_sibling {
+                        units[1].0.preconditions.push(dependency_guard(&sibling));
+                    }
+                }
+
                 // dropColumn ifExists: presence-only on the column.
                 //
                 // OBJECT-SCOPED per unit, with `probe` left `None`, for the reason the

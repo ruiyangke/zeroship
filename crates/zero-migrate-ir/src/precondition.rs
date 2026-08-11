@@ -69,6 +69,14 @@ pub enum Precondition {
         /// The bare column name.
         column: String,
     },
+    /// Dropping `column` from project-schema table `table` has no blocking
+    /// dependents.
+    ColumnHasNoBlockingDependents {
+        /// The bare table name (no schema qualifier).
+        table: String,
+        /// The bare column name.
+        column: String,
+    },
     /// `count(*)` of the project-schema table `table` compares to `value` under
     /// `op` (e.g. `RowCount { table, op: Eq, value: 0 }` = "the table is empty").
     RowCount {

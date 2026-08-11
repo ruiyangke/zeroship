@@ -7313,6 +7313,33 @@
           "additionalProperties": false
         },
         {
+          "description": "Dropping `column` from project-schema table `table` has no blocking\ndependents.",
+          "type": "object",
+          "properties": {
+            "ColumnHasNoBlockingDependents": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                },
+                "column": {
+                  "description": "The bare column name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table",
+                "column"
+              ]
+            }
+          },
+          "required": [
+            "ColumnHasNoBlockingDependents"
+          ],
+          "additionalProperties": false
+        },
+        {
           "description": "`count(*)` of the project-schema table `table` compares to `value` under\n`op` (e.g. `RowCount { table, op: Eq, value: 0 }` = \"the table is empty\").",
           "type": "object",
           "properties": {

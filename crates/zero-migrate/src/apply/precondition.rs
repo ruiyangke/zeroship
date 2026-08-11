@@ -63,6 +63,8 @@
 //! all contained here, the PG leaf.
 
 #[cfg(pg_seam)]
+use crate::apply::backend::{MigrationBackend, PostgresBackend};
+#[cfg(pg_seam)]
 use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
@@ -115,6 +117,11 @@ pub enum PreconditionError {
         /// The offending value.
         value: String,
     },
+    /// PostgreSQL could not describe the objects that block a bare column drop.
+    /// This query is part of the structured assertion, so failure to evaluate it
+    /// must fail closed instead of treating the column as safe to drop.
+    #[error("precondition blocking-column dependency query failed: {0}")]
+    BlockingColumnDependents(#[source] Box<ApplyError>),
     /// A [`Precondition::SqlBoolean`]'s SQL was denied by the guard (cross-schema
     /// / file / network / dangerous / unparseable). Same line-1 defense as `up`.
     #[error("SqlBoolean precondition denied by guard: {0}")]
@@ -172,6 +179,8 @@ fn quote_ident(ident: &str) -> String {
 /// # Errors
 /// - [`PreconditionError::InvalidIdentifier`] — a structured check's table/column
 /// is not a bare identifier.
+/// - [`PreconditionError::BlockingColumnDependents`] - PostgreSQL could not query
+/// the objects that block a bare column drop.
 /// - [`PreconditionError::Guard`] — a `SqlBoolean` was guard-denied.
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
 /// boolean-returning `SELECT`.
@@ -200,6 +209,11 @@ pub async fn evaluate<D: SqlSession>(
             validate_ident("table", table)?;
             validate_ident("column", column)?;
             Ok(!column_exists(conn, cfg, table, column).await?)
+        }
+        Precondition::ColumnHasNoBlockingDependents { table, column } => {
+            Ok(drop_column_blockers(conn, cfg, table, column)
+                .await?
+                .is_empty())
         }
         Precondition::RowCount { table, op, value } => {
             validate_ident("table", table)?;
@@ -249,21 +263,41 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
         // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
         // on_unmet. A precondition that cannot be checked must never wave the
         // migration through.
-        let met =
-            evaluate(conn, cfg, &pc.check)
-                .await
-                .map_err(|e| ApplyError::PreconditionFailed {
-                    version: m.version.as_str().to_string(),
-                    which: format!("{:?} could not be evaluated: {e}", pc.check),
+        // A blocked-column assertion needs the returned object descriptions after
+        // evaluation, not only a boolean, so its refusal can name what PostgreSQL
+        // says depends on the column. Keep that vector in this per-migration loop;
+        // projecting it through `evaluate` would discard the reason for refusal.
+        let (met, blockers) = match &pc.check {
+            Precondition::ColumnHasNoBlockingDependents { table, column } => {
+                let blockers = drop_column_blockers(conn, cfg, table, column)
+                    .await
+                    .map_err(|e| ApplyError::PreconditionFailed {
+                        version: m.version.as_str().to_string(),
+                        which: format!("{:?} could not be evaluated: {e}", pc.check),
+                    })?;
+                (blockers.is_empty(), Some(blockers))
+            }
+            _ => {
+                let met = evaluate(conn, cfg, &pc.check).await.map_err(|e| {
+                    ApplyError::PreconditionFailed {
+                        version: m.version.as_str().to_string(),
+                        which: format!("{:?} could not be evaluated: {e}", pc.check),
+                    }
                 })?;
+                (met, None)
+            }
+        };
         if met {
             continue;
         }
         match pc.on_unmet {
             OnUnmet::Halt => {
+                let blocker_detail = blockers.map_or_else(String::new, |blockers| {
+                    format!(": blocking dependents {blockers:?}")
+                });
                 return Err(ApplyError::PreconditionFailed {
                     version: m.version.as_str().to_string(),
-                    which: format!("{:?} is unmet (OnUnmet::Halt)", pc.check),
+                    which: format!("{:?} is unmet (OnUnmet::Halt){blocker_detail}", pc.check),
                 });
             }
             OnUnmet::Skip => {
@@ -274,6 +308,24 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
         }
     }
     Ok(verdict)
+}
+
+/// Ask the PostgreSQL backend's measured dependency predicate which objects block
+/// a bare drop. Keeping this as a backend call avoids a third SQL spelling whose
+/// behavior could drift independently from the rename guard and its live oracle.
+#[cfg(pg_seam)]
+async fn drop_column_blockers<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, PreconditionError> {
+    validate_ident("table", table)?;
+    validate_ident("column", column)?;
+    PostgresBackend::new_generic(conn)
+        .blocking_column_dependents(cfg, table, column)
+        .await
+        .map_err(|error| PreconditionError::BlockingColumnDependents(Box::new(error)))
 }
 
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the
