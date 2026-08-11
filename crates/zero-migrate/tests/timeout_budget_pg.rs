@@ -55,8 +55,19 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     c
 }
 
-async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
+/// Create the project schema and hand back the guard that removes it, and the meta
+/// schema apply creates later, when the test leaves scope. The DROP rides the guard
+/// rather than a trailing statement so a failing assertion cannot abandon them.
+#[must_use = "the guard drops the schemas when it falls out of scope"]
+async fn ensure_project_schema<'a>(
+    session: &'a PgDevSession,
+    cfg: &ExecutorConfig,
+) -> support::SchemaGuard<'a> {
     use zero_migrate::driver::SqlSession;
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -64,6 +75,7 @@ async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
         ))
         .await
         .expect("create project schema");
+    guard
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -173,7 +185,7 @@ async fn a_zero_lock_timeout_override_is_refused_before_any_ddl_runs() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let flags = MigrationFlags {
         lock_timeout_ms: Some(0),
@@ -211,7 +223,7 @@ async fn a_zero_statement_timeout_override_is_refused_before_any_ddl_runs() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let flags = MigrationFlags {
         timeout_ms: Some(0),
@@ -256,7 +268,7 @@ async fn a_config_timeout_that_truncates_to_zero_milliseconds_is_refused() {
         "a sub-millisecond config budget truncates to the no-limit sentinel"
     );
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let m = mig_with_flags(
         "config_zero_budget",
@@ -290,7 +302,7 @@ async fn a_zero_budget_on_the_non_transactional_path_is_refused() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     // The table the concurrent index needs; applied on the ordinary path.
     let setup = mig_with_flags(
@@ -335,7 +347,7 @@ async fn finite_timeout_overrides_still_apply() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let flags = MigrationFlags {
         timeout_ms: Some(45_000),
@@ -385,7 +397,7 @@ async fn a_one_millisecond_budget_is_finite_and_still_applies() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let flags = MigrationFlags {
         lock_timeout_ms: Some(1),

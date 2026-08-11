@@ -54,8 +54,19 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     c
 }
 
-async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
+/// Create the project schema and hand back the guard that removes it, and the meta
+/// schema apply creates later, when the test leaves scope. The DROP rides the guard
+/// rather than a trailing statement so a failing assertion cannot abandon them.
+#[must_use = "the guard drops the schemas when it falls out of scope"]
+async fn ensure_project_schema<'a>(
+    session: &'a PgDevSession,
+    cfg: &ExecutorConfig,
+) -> support::SchemaGuard<'a> {
     use zero_migrate::driver::SqlSession;
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -63,6 +74,7 @@ async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
         ))
         .await
         .expect("create project schema");
+    guard
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -138,14 +150,7 @@ async fn an_over_long_fts_index_name_re_diffs_clean() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    // Armed BEFORE the CREATE, not after: anything armed afterwards leaves the CREATE
-    // itself outside the guard, and the meta schema is created later still, by apply.
-    let _schemas = support::SchemaGuard::arm(
-        &session,
-        &url,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
-    );
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     // 57 bytes of collection name: the table name itself fits, but the derived
     // `<name>__fts_idx` is 57 + 9 = 66 bytes, three over what the server can hold.

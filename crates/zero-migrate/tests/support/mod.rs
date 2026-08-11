@@ -358,6 +358,9 @@ struct ReplyFault {
 /// connection (the seam's single-connection contract).
 pub struct PgDevSession {
     client: RefCell<Client>,
+    /// The DSN this session connected with, kept so cleanup that cannot use the pinned
+    /// connection can open its own without the caller threading the string through.
+    dsn: String,
     fail_next_resolved_pending_contract_insert: Cell<bool>,
     reply_fault: RefCell<Option<ReplyFault>>,
 }
@@ -375,6 +378,7 @@ impl PgDevSession {
             .unwrap_or_else(|e| panic!("PgDevSession: connect to {dsn} failed: {e}"));
         Self {
             client: RefCell::new(client),
+            dsn: dsn.to_string(),
             fail_next_resolved_pending_contract_insert: Cell::new(false),
             reply_fault: RefCell::new(None),
         }
@@ -448,25 +452,27 @@ impl PgDevSession {
 /// dropped, and `DROP SCHEMA ... CASCADE` from a second connection would block on
 /// its locks for as long as the guard lives - a hung suite in place of a leaked
 /// schema. Reusing the pinned connection sees those locks as its own.
+///
+/// `must_use` sits on the TYPE, not only on the functions that hand one back: an
+/// `#[must_use]` on an `async fn` marks the future, which an `.await` consumes, so a
+/// caller that awaits the guard and drops it on the spot would slip past it. On the
+/// type, dropping the awaited value is itself the unused expression.
+#[must_use = "bind the guard to a name; it drops the schemas when it falls out of scope"]
 pub struct SchemaGuard<'a> {
     session: &'a PgDevSession,
-    dsn: String,
     schemas: Vec<String>,
 }
 
 impl<'a> SchemaGuard<'a> {
     /// Take responsibility for dropping `schemas` when the guard goes out of scope.
-    ///
-    /// `dsn` is only used if the pinned connection cannot run the DROP.
-    #[must_use]
-    pub fn arm<I, S>(session: &'a PgDevSession, dsn: &str, schemas: I) -> Self
+    #[must_use = "the guard drops the schemas when it falls out of scope"]
+    pub fn arm<I, S>(session: &'a PgDevSession, schemas: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         Self {
             session,
-            dsn: dsn.to_string(),
             schemas: schemas.into_iter().map(Into::into).collect(),
         }
     }
@@ -507,7 +513,7 @@ impl Drop for SchemaGuard<'_> {
         // The pinned connection could not do it. Timeouts are set first so a lock the
         // test still holds turns into an error we can report rather than a suite that
         // hangs here.
-        let fallback = Client::connect(&self.dsn, NoTls).and_then(|mut client| {
+        let fallback = Client::connect(&self.session.dsn, NoTls).and_then(|mut client| {
             client.batch_execute(&format!(
                 "SET lock_timeout = '5s'; SET statement_timeout = '15s'; {sql}"
             ))
@@ -520,7 +526,7 @@ impl Drop for SchemaGuard<'_> {
                 std::io::stderr(),
                 "SchemaGuard: {} left behind on {}: {e}",
                 self.schemas.join(", "),
-                self.dsn
+                self.session.dsn
             );
         }
     }

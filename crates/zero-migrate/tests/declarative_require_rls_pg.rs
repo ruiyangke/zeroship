@@ -112,8 +112,19 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     c
 }
 
-async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
+/// Create the project schema and hand back the guard that removes it, and the meta
+/// schema apply creates later, when the test leaves scope. The DROP rides the guard
+/// rather than a trailing statement so a failing assertion cannot abandon them.
+#[must_use = "the guard drops the schemas when it falls out of scope"]
+async fn ensure_project_schema<'a>(
+    session: &'a PgDevSession,
+    cfg: &ExecutorConfig,
+) -> support::SchemaGuard<'a> {
     use zero_migrate::driver::SqlSession;
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -121,6 +132,7 @@ async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
         ))
         .await
         .expect("create project schema");
+    guard
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -193,7 +205,7 @@ async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let policy = charter_obligating(&cfg.project_schema, &cfg.project_schema);
     let engine = MigrationEngine::new();
@@ -267,7 +279,7 @@ async fn require_rls_names_only_the_covered_table_of_a_multi_table_create() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let policy = charter(
         &cfg.project_schema,
@@ -329,7 +341,7 @@ async fn require_rls_over_another_schema_still_plans_the_create() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let elsewhere = format!("other_{tok}");
     let policy = charter_obligating(&cfg.project_schema, &elsewhere);
@@ -376,7 +388,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let engine = MigrationEngine::new();
     let author = author_for(&cfg);
@@ -474,7 +486,7 @@ async fn a_charter_without_require_rls_plans_the_create() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let policy = charter_without_obligation(&cfg.project_schema);
     let engine = MigrationEngine::new();

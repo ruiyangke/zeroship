@@ -74,8 +74,19 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
 
 /// Create the project schema the migrations will populate (the platform provisions
 /// this at project creation; tests do it explicitly).
-async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
+/// Create the project schema and hand back the guard that removes it, and the meta
+/// schema apply creates later, when the test leaves scope. The DROP rides the guard
+/// rather than a trailing statement so a failing assertion cannot abandon them.
+#[must_use = "the guard drops the schemas when it falls out of scope"]
+async fn ensure_project_schema<'a>(
+    session: &'a PgDevSession,
+    cfg: &ExecutorConfig,
+) -> support::SchemaGuard<'a> {
     use zero_migrate::driver::SqlSession;
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -83,6 +94,7 @@ async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
         ))
         .await
         .expect("create project schema");
+    guard
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -280,7 +292,7 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -415,7 +427,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -527,7 +539,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -679,7 +691,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -788,7 +800,7 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -901,7 +913,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let role = format!("bf_role_{tok}");
     cfg.pg.migrator_role = Some(role.clone());
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -1015,7 +1027,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1216,7 +1228,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1327,7 +1339,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1436,7 +1448,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1609,7 +1621,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1725,7 +1737,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
@@ -1810,7 +1822,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".rename_guard_items (\
@@ -1980,7 +1992,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!(
@@ -2045,7 +2057,7 @@ async fn apply_acquires_and_releases_the_project_advisory_lock() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     use zero_migrate::driver::SqlSession;
     // Acquire directly through the shipped backend leaf, then confirm it is visible.
@@ -2095,7 +2107,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     // First, a base table (transactional).
     let v0 = MigrationId::generate();
@@ -2209,7 +2221,7 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v0 = MigrationId::generate();
     let base = mig(
@@ -2343,7 +2355,7 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v1 = MigrationId::generate();
     let create = mig_nontxn(
@@ -2453,7 +2465,7 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v0 = MigrationId::generate();
     let base = mig(
@@ -2546,7 +2558,7 @@ async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replay
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v1 = MigrationId::generate();
     let create = mig(
@@ -2616,7 +2628,7 @@ async fn an_armed_marker_outranks_a_skip_precondition() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v1 = MigrationId::generate();
     let mut gated = mig_nontxn(
@@ -2746,7 +2758,7 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!(
@@ -2809,7 +2821,7 @@ async fn snapshot_schema_reflects_the_live_catalog() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!(
@@ -2852,7 +2864,7 @@ async fn snapshot_schema_preserves_quoted_named_type_identity() {
     let mut cfg = cfg_for(&tok);
     cfg.project_schema = format!("AppSpace_{tok}");
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     session
         .batch(&format!(
@@ -2969,7 +2981,7 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".temp_t (id bigint)", cfg.project_schema);
@@ -3069,7 +3081,7 @@ async fn baseline_records_completed_without_running_up() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     ensure_journal(&session, &cfg)
         .await
         .expect("ensure_journal");
@@ -3129,7 +3141,7 @@ async fn status_and_history_report_over_the_seam() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".s (id bigint)", cfg.project_schema);
@@ -3177,7 +3189,7 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     // A base table + a non-txn migration whose `up` is bare DML (forbidden on the
     // two-phase path: crash recovery would re-run it verbatim and double-apply).
@@ -3222,7 +3234,7 @@ async fn limited_delete_honors_its_cap_across_partitions() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".events (id bigint, code bigint) PARTITION BY RANGE (id); \
@@ -3289,7 +3301,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".apply_users (id bigint PRIMARY KEY, email text); \
@@ -4033,7 +4045,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".legacy_apply_users (id bigint PRIMARY KEY, email text); \
@@ -4245,7 +4257,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".tombstone_retry_users (id bigint PRIMARY KEY, email text); \
@@ -4398,7 +4410,7 @@ async fn a_guard_denied_down_is_refused_before_it_runs() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let v = MigrationId::generate();
     let up = format!(
@@ -4524,7 +4536,7 @@ async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let base = mig(
         MigrationId::generate(),
@@ -4578,7 +4590,7 @@ async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_r
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let base = mig(
         MigrationId::generate(),
@@ -4659,7 +4671,7 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let base = mig(
         MigrationId::generate(),
@@ -4908,7 +4920,7 @@ async fn a_guarded_drop_partition_drops_the_child_and_its_rows() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let (relations, buckets, journaled) = drop_partition_outcome(&session, &cfg, true).await;
 
@@ -4934,7 +4946,7 @@ async fn an_unguarded_drop_partition_drops_the_child_and_its_rows() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let (relations, buckets, journaled) = drop_partition_outcome(&session, &cfg, false).await;
 
@@ -5013,7 +5025,7 @@ async fn a_guarded_create_partition_replay_is_a_clean_noop() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let replay = r#"[
       {"op":"createTable","name":"events","columns":[
@@ -5108,7 +5120,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
         let tok = token();
         let cfg = cfg_for(&tok);
         drop_schemas(&session, &cfg).await;
-        ensure_project_schema(&session, &cfg).await;
+        let _schemas = ensure_project_schema(&session, &cfg).await;
 
         let outcome = apply_second_partition_plan(
             &session,
@@ -5173,7 +5185,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".dep_rename_items (\
@@ -5264,7 +5276,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
@@ -5391,7 +5403,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");

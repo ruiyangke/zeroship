@@ -70,8 +70,19 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     c
 }
 
-async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
+/// Create the project schema and hand back the guard that removes it, and the meta
+/// schema apply creates later, when the test leaves scope. The DROP rides the guard
+/// rather than a trailing statement so a failing assertion cannot abandon them.
+#[must_use = "the guard drops the schemas when it falls out of scope"]
+async fn ensure_project_schema<'a>(
+    session: &'a PgDevSession,
+    cfg: &ExecutorConfig,
+) -> support::SchemaGuard<'a> {
     use zero_migrate::driver::SqlSession;
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -79,6 +90,7 @@ async fn ensure_project_schema(session: &PgDevSession, cfg: &ExecutorConfig) {
         ))
         .await
         .expect("create project schema");
+    guard
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -272,7 +284,7 @@ async fn a_access_method_change_is_surfaced() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let engine = MigrationEngine::new();
     deploy(&session, &cfg, &engine).await;
@@ -306,7 +318,7 @@ async fn b_predicate_change_is_surfaced() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let engine = MigrationEngine::new();
     deploy(&session, &cfg, &engine).await;
@@ -333,7 +345,7 @@ async fn c_include_change_is_surfaced() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let engine = MigrationEngine::new();
     deploy(&session, &cfg, &engine).await;
@@ -360,7 +372,7 @@ async fn d_unchanged_index_still_plans_nothing() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
-    ensure_project_schema(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let engine = MigrationEngine::new();
     deploy(&session, &cfg, &engine).await;
