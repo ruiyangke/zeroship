@@ -404,11 +404,18 @@ for i in $(seq 1 $N_REQ); do
     sleep 0.2
   done
 done
-if [ "$GW_OK" = "$N_REQ" ] && echo "$LAST_BODY" | grep -q '"metric":"db_writes"'; then
-  WROTE="$(echo "$LAST_BODY" | jget '.wrote')"
+# The second clause used to be `grep -q '"metric":"db_writes"'` -- a match on the
+# STRING db_writes anywhere in the response body. The probe prints that name in
+# its own payload whether or not the write happened, so the clause was satisfied
+# by the app describing itself. Measured 2026-08-11 at HEAD: this pass line
+# printed `probe db write ok=false` on all 100 requests and stayed green.
+# `.wrote` is the observable; assert on it.
+WROTE="$(echo "$LAST_BODY" | jget '.wrote')"
+if [ "$GW_OK" = "$N_REQ" ] && [ "$WROTE" = "true" ]; then
   pass "drove $GW_OK/$N_REQ requests through the gateway (HTTP 200; probe db write ok=$WROTE)"
 else
-  fail "gateway traffic failed ($GW_OK/$N_REQ HTTP 200); worker log tail:"; tail -20 "$WORK/worker.log"; exit 1
+  fail "gateway traffic: $GW_OK/$N_REQ HTTP 200, probe db write ok=$WROTE (want true) -- body: ${LAST_BODY:0:300}"
+  tail -20 "$WORK/worker.log"; exit 1
 fi
 
 # ===========================================================================
@@ -446,13 +453,38 @@ DBW="$(echo "$USAGE_JSON" | jget ".$PRIMARY_METRIC")"
 # cpu_us is a documented sync lower-bound — assert it's present/>=0, don't over-assert.
 if [ -n "$CPU" ] && [ "$CPU" -ge 0 ] 2>/dev/null; then pass "cpu_us present (sync lower-bound, $CPU ≥ 0)"; else fail "cpu_us absent (got '$CPU')"; fi
 # db_writes is platform-measured (emitted by the trusted env.db primitive, NOT
-# self-reported by app code). One write per request ⇒ ≥ N_REQ. If the probe's
-# env.db namespace was unavailable this is 0 — then the platform counters above
-# already prove the pipeline; flag low/missing as a soft note, not a hard fail.
+# self-reported by app code). One write per request => >= N_REQ.
+#
+# THIS USED TO BE A SOFT NOTE, and the note was hiding a live failure. The else
+# arm was a bare `echo`, so the strongest claim in the whole billing story --
+# that a PRIMITIVE the app cannot forge fed the meter -- could not fail. Its
+# stated reason ("the platform counters above already prove the pipeline")
+# answers a different question: the platform counters prove FLUSH -> AGGREGATE;
+# only this metric proves the primitive EMITS.
+#
+# MEASURED 2026-08-11 at HEAD, and it is why this is now a hard fail:
+#     usage_aggregates (current period):
+#       {"cpu_us":23466,"requests":108,"ingress_bytes":2808,"egress_bytes":41708,"wall_us":5024497}
+#     NOTE: 'db_writes' got '' (< 100).
+# Seven platform counters, no db_writes at all, and the harness reported a pass.
+#
+# ROOT CAUSE, found rather than worked around, and it is a mechanism this repo
+# has already named (#209): examples/metering-probe has NO migrations/ directory
+# and declares its schema INLINE via schema()/t.* in src/index.ts. An inline
+# schema builds a servable .zship whose manifest carries no runtime_descriptor,
+# so nothing installs on env.db and every insert fails -- which is exactly what
+# `probe db write ok=false` above was reporting. This harness also never invokes
+# zeroship-migrated (zero references in the file), unlike
+# tests/e2e_db_app_end_to_end.sh, whose db-hitcounter has a committed
+# migrations/20260711000000_create_hits.ts and an apply step.
+#
+# So this gate is RED at HEAD BY DESIGN until the probe gets migrations. That is
+# the honest state: the property was never true, and the guard was what made it
+# look true.
 if [ -n "$DBW" ] && [ "$DBW" -ge "$N_REQ" ] 2>/dev/null; then
-  pass "platform-measured metric '$PRIMARY_METRIC' aggregated ($DBW ≥ $N_REQ) — env.db primitive fed the pipeline (unforgeable; no env.meter)"
+  pass "platform-measured metric '$PRIMARY_METRIC' aggregated ($DBW >= $N_REQ) -- env.db primitive fed the pipeline (unforgeable; no env.meter)"
 else
-  echo "    NOTE: '$PRIMARY_METRIC' got '$DBW' (< $N_REQ). Platform counters above already prove the flush→aggregate path; the per-plugin emission is covered by the plugin integration tests."
+  fail "'$PRIMARY_METRIC' got '$DBW' (want >= $N_REQ) -- the env.db primitive did NOT feed the meter, so nothing here proves platform-measured billing"
 fi
 
 # ===========================================================================
