@@ -55,7 +55,7 @@
 //! to the pool, which would be a WORSE defect than the one being fixed
 //! (a transactional write leaking out of its transaction).
 //!
-//! The one non-`scope` constructor, [`TxRoute::pool_for_tests`], is
+//! The one non-`scope` constructor, `TxRoute::pool_for_tests`, is
 //! `#[cfg(any(test, feature = "test-helpers"))]`: the `test-helpers`
 //! feature is declared in this crate's `[features]` and is enabled only by
 //! its own `[[test]]` targets, never by a binary that ships.
