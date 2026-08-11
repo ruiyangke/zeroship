@@ -191,7 +191,29 @@ pass "created + deployed 3 apps; ownership: app1,app2→C1  app3→C2"
 
 # One Lago customer + subscription per CREATOR (external_id = creator UUID, which
 # is what the forwarder stamps as the event subject).
+#
+# THE HARNESS DOES THIS; THE PLATFORM DOES NOT. Measured 2026-08-11 by
+# enumerating every Lago path the control plane calls:
+#
+#     "/api/v1/events                        x2   (the only WRITE)
+#     "/api/v1/meters/{enc_slug}/query       x1
+#     "/api/v1/customers/{subject}/current_usage  x1
+#
+# There is no POST to /api/v1/customers or /api/v1/subscriptions anywhere in
+# crates/control/src/ - the only things in this repo that create them are these
+# harnesses. So on a Lago-configured deployment the provider-side customer must
+# be provisioned out of band, and `docs/reference/billing-metering.md` says
+# nothing about who does it (one Lago mention, line 108, a capability list).
+#
+# ATTR_SKIP_PROVISION=1 reproduces the un-provisioned state deliberately. It is
+# a control, not a convenience: it shows what the conservation check below is
+# for, and it is the state the product leaves Lago in by itself.
+if [ "${ATTR_SKIP_PROVISION:-0}" = "1" ]; then
+  echo "    (ATTR_SKIP_PROVISION=1 — NOT creating Lago customers/subscriptions,"
+  echo "     which is what the control plane does on its own)"
+fi
 for c in "$C1" "$C2"; do
+  [ "${ATTR_SKIP_PROVISION:-0}" = "1" ] && continue
   lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/customers" -d "{\"customer\":{\"external_id\":\"$c\",\"name\":\"cust-$c\",\"currency\":\"USD\"}}"
   lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/subscriptions" -d "{\"subscription\":{\"external_customer_id\":\"$c\",\"external_id\":\"$c\",\"plan_code\":\"e2e_plan\"}}"
 done
@@ -255,23 +277,33 @@ FLEET=$((N1+N2+N3))
   && pass "C1 is NOT over-attributed ($C1_SUM < ${ATTR_C1_CEIL:-$FLEET}) — A3's usage did not bleed onto C1" \
   || fail "over-attribution suspected — C1=$C1_SUM reached the ceiling ${ATTR_C1_CEIL:-$FLEET}; its own apps are only $C1_EXPECT, so something else's usage is on this creator"
 
-# CONSERVATION. Everything above is per-subject, and per-subject checks are
-# blind to usage that reaches the provider attributed to NOBODY. Measured
-# directly against this Lago on 2026-08-11:
+# CONSERVATION. Everything above is per-subject, so usage sent to a subject
+# nobody queries is invisible: a resolver returning the WRONG creator id leaves
+# C1 and C2 both reading their own correct totals while the events pile up
+# somewhere else. That is exactly what a mutated resolver produced here
+# (C1=0, C2=0, 0 dead-letters, and every per-subject row green).
 #
-#   POST /api/v1/events with external_subscription_id="nonexistent-creator-..."
-#     -> HTTP 200  {"lago_customer_id":null,"lago_subscription_id":null,...}
+# The fleet sum is the one check that can see it: every event this run drove
+# must land on SOME subject, so the total across all subjects cannot fall below
+# what was sent.
 #
-# Lago ACCEPTS an event for a subscription that does not exist. So if the
-# CreatorResolver ever returns a creator id with no Lago customer, the adapter
-# sees success, nothing dead-letters, and the usage is billed to nobody - while
-# C1 and C2 both keep reading their own correct totals. That is exactly the
-# state a mutated resolver produced here (C1=0, C2=0, 0 dead-letters), and no
-# assertion in this file could see it.
+# WHAT THIS DOES **NOT** COVER, corrected 2026-08-11 after I got it wrong. I
+# first wrote that Lago "accepts an event for a subscription that does not
+# exist, so the usage is billed to nobody", and treated this check as covering
+# that too. Running `ATTR_SKIP_PROVISION=1` - no Lago customers or
+# subscriptions created at all - REFUTED it: 21 passed, 0 failed, conservation
+# 183 >= 170. The events survive and stay retrievable BY SUBJECT, so counting
+# them cannot detect an unprovisioned creator. Measured directly:
 #
-# The fleet sum is the one check that can: every event this run drove must land
-# on SOME subject, so the total across all subjects cannot fall below what was
-# sent.
+#   GET /api/v1/events?external_subscription_id=<unprovisioned>
+#     -> the event, with lago_customer_id: null, lago_subscription_id: null
+#   GET /api/v1/customers/<unprovisioned>/current_usage
+#     -> HTTP 404 {"code":"resource_not_found"}
+#
+# So it is not silent LOSS, it is silent NON-BILLING: the data is retained and
+# the INVOICING read path - the one the shipped adapter uses at
+# crates/control/src/metering/provider/adapters/lago.rs:206 - 404s. The check
+# for that is below, and it is a different question from conservation.
 lago_sum_all(){ # sum of requests-event values across EVERY subject
   lago "$LAGO_URL/api/v1/events?per_page=1000" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");process.stdout.write(String(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})'
 }
@@ -280,6 +312,21 @@ echo "    Lago requests-sum across ALL subjects: $ALL_SUM (fleet driven = $FLEET
 [ -n "$ALL_SUM" ] && [ "$ALL_SUM" -ge "$FLEET" ] 2>/dev/null \
   && pass "conservation: every driven request reached SOME subject ($ALL_SUM >= $FLEET) — no usage accepted-and-orphaned" \
   || fail "usage vanished: Lago holds $ALL_SUM requests across all subjects but $FLEET were driven. Lago 200s an event whose external_subscription_id does not exist, so a wrong-but-present creator id is silently billed to nobody"
+
+# INVOICEABILITY. Accepted-and-retained is not the same as billable. The
+# adapter's aggregate read is GET /api/v1/customers/{subject}/current_usage
+# (lago.rs:206), and that endpoint 404s for a subject with no Lago customer -
+# which is the state the CONTROL PLANE leaves every creator in, since it never
+# POSTs to /api/v1/customers or /api/v1/subscriptions (enumerated above).
+# The harness provisions them itself, so without this row nothing here would
+# ever exercise the billing read path at all.
+for c in "$C1" "$C2"; do
+  CU_CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $LAGO_KEY" \
+    "$LAGO_URL/api/v1/customers/$c/current_usage?external_subscription_id=$c")"
+  [ "$CU_CODE" = "200" ] \
+    && pass "creator $c is INVOICEABLE (current_usage HTTP 200) — accepted usage can actually be billed" \
+    || fail "creator $c is NOT invoiceable: current_usage HTTP $CU_CODE. Its events are accepted and retrievable, but the aggregate read the adapter uses (lago.rs:206) cannot see them, so the usage is recorded and unbillable"
+done
 
 DL=$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.provider_dead_letter" 2>/dev/null | tr -d '[:space:]')
 [ "$DL" = "0" ] && pass "0 provider dead-letters (every app mapped to a real owning creator)" || fail "provider_dead_letter has $DL rows"
