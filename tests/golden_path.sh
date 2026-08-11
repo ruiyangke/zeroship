@@ -405,6 +405,14 @@ sched_dml=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # 2026-08-11 on the live deployment: postgres create=true createrole=true, and
 # zeroship_control / zeroship_gateway / zeroship_auth all false/false.
 #
+# Confirmed in TWO clusters, which matters because they differ in the one way
+# that could have made the reading accidental: on the managed deployment
+# `postgres` is NOT a superuser (rolsuper=false, create=true), and on the local
+# compose cluster it IS. The guard reads 3 in both, so it depends on neither
+# shape. The local reading came from a database built FROM SCRATCH by
+# zeroship-platform-migrate (624 ops, exit 0), where all four privilege
+# assertions above read 10 / 8 / t / 3.
+#
 # WHAT THIS DOES NOT CATCH: it reads the roles' privileges, not what the services
 # actually do with them. It cannot see a service that connects as postgres
 # anyway, which is what every harness in tests/ does today -- see #322.
