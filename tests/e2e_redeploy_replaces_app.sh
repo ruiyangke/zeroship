@@ -144,4 +144,23 @@ absent "$B_VISIT" && ok "B: kv.visit is gone, no stale isolate" \
 
 echo ""
 echo "  redeploy: $PASS passed, $FAIL failed"
+# ANTI-HOLLOW GUARD, the peer of the one in e2e_dev_vs_deployed_auth.sh. The
+# verdict below is `FAIL == 0`, which is also true of a run that asserted
+# nothing: PASS=0/FAIL=0 prints "0 passed, 0 failed" and exits 0. Eight sibling
+# harnesses carry a MIN_PASSED floor; this one and the auth comparison did not
+# (measured 2026-08-11).
+#
+# A > 0 check, not a numeric floor, on purpose: a floor needs a count measured
+# from a live four-service run, and inventing one would be worse than the gap.
+#
+# BOUNDED HONESTLY: no reachable path to zero was found here either. Every
+# assertion is an inline `cmd && ok || no` pair, so one arm always fires, and
+# every setup failure hard-exits 1. Defence-in-depth against a hole the
+# arithmetic allows and the control flow does not.
+if [ "$((PASS + FAIL))" -eq 0 ]; then
+  echo "FAIL: reached the verdict having asserted NOTHING. A redeploy check that" >&2
+  echo "      checked nothing is indistinguishable from one that passed, and this" >&2
+  echo "      script would otherwise have exited 0 over it." >&2
+  exit 1
+fi
 [ "$FAIL" -eq 0 ]
