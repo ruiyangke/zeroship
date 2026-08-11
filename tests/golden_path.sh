@@ -350,6 +350,58 @@ auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_auth can DELETE token_revocations (its sweep needs it)" \
   || fail "zeroship_auth lacks DELETE on token_revocations: token_sweep cannot succeed (#319)"
 
+# The same class, on the control side, for an audit trail that is WRITTEN rather
+# than only swept.
+#
+# crates/authz/src/eval.rs:243 INSERTs into zeroship.authz_decisions from
+# enforce(), on every authorization decision. control is the only caller of
+# enforce() among the services in the compose stack. That table had NO grant to
+# any zeroship_* role, and the insert error is swallowed
+# (`if let Err(err) = ... { tracing::error!(...) }`), so under least privilege
+# every decision failed to record with no functional symptom at all. Fixed by
+# 20260811000200_control_audit_grants.ts.
+#
+# MEASURED before that migration, as zeroship_control against a live session:
+#   insert into zeroship.authz_decisions ... -> ERROR: permission denied
+#   insert into zeroship.app_audit ...       -> INSERT 0 1
+# one variable, opposite outcomes.
+authz_write=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select has_table_privilege('zeroship_control','zeroship.authz_decisions','INSERT')" 2>/dev/null | tr -d '[:space:]')
+[ "$authz_write" = "t" ] \
+  && pass "zeroship_control can INSERT authz_decisions (every authz decision writes one)" \
+  || fail "zeroship_control lacks INSERT on authz_decisions: the authorization audit trail is silently never written (#325)"
+
+# control's retention sweep reads occurred_at and deletes from BOTH audit tables
+# (crates/control/src/cron/audit_retention.rs, sweep_all -> delete_older_than).
+# PostgreSQL requires SELECT on any column named in the WHERE clause, so DELETE
+# alone is not enough; the working reference, zeroship_auth on audit_events,
+# holds select/insert/delete for exactly this reason.
+sweep_priv=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('DELETE')) p(v) where n.nspname='zeroship' and c.relname in ('app_audit','authz_decisions') and has_table_privilege('zeroship_control',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$sweep_priv" = "4" ] \
+  && pass "zeroship_control holds SELECT+DELETE on both audit tables (its retention sweep needs both)" \
+  || fail "zeroship_control audit retention privileges read $sweep_priv of 4: the sweep cannot run (#324)"
+
+# Granting that DELETE must NOT weaken the append-only invariant.
+#
+# Immutability on these tables is enforced by BEFORE DELETE/UPDATE/TRUNCATE
+# triggers running <table>_block_tamper(), which refuse even the superuser. The
+# trigger permits a DELETE only for a session that has opted in with
+# `SET zeroship.audit_retention = 'on'` - which is what the retention cron does
+# on its own dedicated connection. This is the two-sided check: the same DELETE
+# must be REFUSED without the opt-in and ACCEPTED with it. A grant that
+# accidentally bypassed the trigger, or a trigger that stopped discriminating,
+# fails one arm or the other.
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "insert into zeroship.app_audit (app_id, action) values (gen_random_uuid(),'golden_tamper_probe')" >/dev/null 2>&1
+tamper_refused=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "delete from zeroship.app_audit where action='golden_tamper_probe'" 2>&1 | grep -c "append-only")
+tamper_allowed=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "set zeroship.audit_retention = 'on'; delete from zeroship.app_audit where action='golden_tamper_probe'" 2>&1 | grep -c "DELETE 1")
+[ "$tamper_refused" = "1" ] && [ "$tamper_allowed" = "1" ] \
+  && pass "app_audit stays append-only: DELETE refused without the retention GUC, accepted with it" \
+  || fail "audit tamper guard not discriminating (refused=$tamper_refused allowed=$tamper_allowed, both must be 1): the append-only trigger no longer gates on zeroship.audit_retention (#324)"
+
 # Platform tables must come from migrations, not from a service doing DDL.
 #
 # The workflow scheduler store was created at runtime by
@@ -2669,7 +2721,7 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-75}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-78}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
