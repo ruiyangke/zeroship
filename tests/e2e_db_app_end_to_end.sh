@@ -358,8 +358,19 @@ done
 # MUTATION CONTROL for the stage-5 equality below. Deleting one row makes the
 # billing tables claim one more write than the database can account for -- the
 # exact shape of over-counting, which is the direction the old floor could not
-# see. It mutates the OBSERVABLE, not the product, so it proves the ASSERTION
-# discriminates; it does not by itself prove the metering path would be caught.
+# see. It mutates the OBSERVABLE, not the product, so on its own it proves only
+# that the ASSERTION discriminates.
+#
+# THE PRODUCT ARM IS PROVEN TOO, separately and by hand (2026-08-11, not
+# automated here because it needs a rebuild). `crates/plugin-db/src/exec.rs`
+# Postgres write path, `emit_db_metric(app_id, DB_WRITES, 1)` -> `2`, one line,
+# then `cargo build --release -p zeroship-worker` and this harness unmutated:
+#   db_writes=62 db_rows_written=31 rows=31   -> RED, "does not match Postgres"
+# Reverted, rebuilt, re-run: 31/31/31, 21 passed 0 failed. So the equality does
+# observe the runtime's own counter travelling worker -> metering -> outbox ->
+# Redpanda -> control -> usage_aggregates, not merely this script's arithmetic.
+# The OLD predicate on those same mutated numbers is 62>=30 -> GREEN: a
+# platform billing every creator twice, reported as a pass.
 #
 # EXPECTATION, stated as the observable rather than a pass/fail total: the
 # `db_writes and db_rows_written EQUAL the Postgres row count` line must go RED
