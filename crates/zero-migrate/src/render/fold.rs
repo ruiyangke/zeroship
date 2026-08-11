@@ -98,6 +98,17 @@ pub enum FoldError {
     DuplicateTable(String),
     /// A `createView` named a view already present.
     DuplicateView(String),
+    /// A `createView` with `replace` would change whether the existing view is
+    /// materialized. `replace` licenses a new BODY under the same name, not a
+    /// different kind of object, and no engine turns one into the other in place.
+    ViewKindChanged {
+        /// The view both declarations name.
+        name: String,
+        /// Whether the view already in the folded schema is materialized.
+        existing_materialized: bool,
+        /// Whether the replacing declaration asks for a materialized view.
+        declared_materialized: bool,
+    },
     /// A `dropView` named a view not present in the folded schema.
     MissingView(String),
     /// A `createSequence` named a sequence already present.
@@ -216,6 +227,21 @@ impl std::fmt::Display for FoldError {
             FoldError::MissingTable(t) => write!(f, "fold: table `{t}` does not exist"),
             FoldError::DuplicateTable(t) => write!(f, "fold: table `{t}` already exists"),
             FoldError::DuplicateView(v) => write!(f, "fold: view `{v}` already exists"),
+            FoldError::ViewKindChanged {
+                name,
+                existing_materialized,
+                declared_materialized,
+            } => {
+                let kind = |m: &bool| if *m { "materialized" } else { "plain" };
+                write!(
+                    f,
+                    "fold: view `{name}` is {} and the replacing declaration is {}; \
+                     replace changes a view's body, not its kind - drop it and create the \
+                     other kind instead",
+                    kind(existing_materialized),
+                    kind(declared_materialized)
+                )
+            }
             FoldError::MissingView(v) => write!(f, "fold: view `{v}` does not exist"),
             FoldError::DuplicateSequence(s) => {
                 write!(f, "fold: sequence `{s}` already exists")
@@ -2334,8 +2360,23 @@ pub fn fold_ops_onto(
                 // used to discard it with the rest of the struct, so re-declaring a
                 // view any applied migration had created was refused before it ran.
                 // The insert below overwrites, which is what replacing means.
-                if !replace.unwrap_or(false) && views.contains_key(name) {
-                    return Err(FoldError::DuplicateView(name.clone()));
+                let replace = replace.unwrap_or(false);
+                let declared_materialized = materialized.unwrap_or(false);
+                match views.get(name) {
+                    Some(_) if !replace => return Err(FoldError::DuplicateView(name.clone())),
+                    // A replace may not turn a materialized view into a plain one or the
+                    // reverse. Refusing here keeps the objection at plan time, where the
+                    // accidental duplicate-name refusal used to put it: the engines all
+                    // reject the statement, so letting it through only moves the failure
+                    // into the middle of an apply.
+                    Some(existing) if existing.materialized != declared_materialized => {
+                        return Err(FoldError::ViewKindChanged {
+                            name: name.clone(),
+                            existing_materialized: existing.materialized,
+                            declared_materialized,
+                        })
+                    }
+                    _ => {}
                 }
                 views.insert(
                     name.clone(),
