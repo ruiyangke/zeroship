@@ -817,11 +817,19 @@ jobs:
       # reports tee's status - 0 whenever tee could write - and a failing harness
       # would sail through as a pass.
       #
-      # The harness carries its own anti-hollow-gate guards (a MEASURED
-      # total-passed floor of 24, plus a per-step ran-something check against a
-      # declared step list) and exits non-zero if either fires, so a run that
-      # asserted nothing cannot be reported as a pass. See the block at the
-      # bottom of tests/golden_path.sh for the run the floor was measured from.
+      # The harness carries its own anti-hollow-gate guards: a measured
+      # total-passed floor, plus a per-step ran-something check against a
+      # declared step list. It exits non-zero if either fires, so a run that
+      # asserted nothing cannot be reported as a pass.
+      #
+      # The floor's VALUE deliberately does not appear here. It lives in
+      # GOLDEN_MIN_PASSED at the bottom of tests/golden_path.sh, and nothing in
+      # this job overrides it - the env block below sets three unrelated
+      # variables and no more. This comment said "a MEASURED total-passed floor
+      # of 24" until 2026-08-11, which was true when the job was wired and had
+      # rotted by a factor of three as steps landed; the floor was 81 by then.
+      # A stale number here is worse than none, because someone auditing whether
+      # this gate means anything reads 24 and concludes it is nearly hollow.
       - name: Golden path (build locally -> deploy -> serve, dev vs deployed)
         run: |
           set -o pipefail
