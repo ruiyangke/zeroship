@@ -221,6 +221,28 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
+      # These two existed and ran in NO workflow until 2026-08-11. Both were
+      # written BECAUSE a specific drift happened - AGENTS.md advertised `build`
+      # and `inspect` for months after both were removed; the two [[inject]]
+      # ceilings disagreed about system-column defaults and every first insert
+      # failed - and a gate that only runs when someone remembers is not much of
+      # a gate. Measured before wiring: 33ms and 24ms, pure text, no services.
+      #
+      # Both proven load-bearing by MY OWN mutation rather than assumed:
+      #   adding a `"teleport" =>` dispatch arm makes the index gate name it
+      #     ("main.rs dispatches (8) ... AGENTS.md indexes (7) ... teleport")
+      #   flipping created_at's `nullable = false` to `true` in ONE ceiling makes
+      #     the mirror gate print the drifted line from both sides
+      # The mirror-gate mutation is worth a note: my FIRST attempt edited the
+      # word `created_at` where it appears in a COMMENT, the gate stayed green,
+      # and for a moment that looked like the gate being hollow. The extractor
+      # only compares `{ name = ... }` entries, so the mutation never reached
+      # the compared region. A mutation that does not apply and a check that
+      # does not fire print the same thing.
+      - name: AGENTS.md crate index names the commands the CLI has
+        run: tests/cli_command_index_gate.sh
+      - name: The two [[inject]] ceilings agree
+        run: tests/inject_policy_mirror_gate.sh
       # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
       # sharing a helper. The next day two of them were wired into CI by bare
       # path, where a non-executable file is exit 126 - so those steps could not
