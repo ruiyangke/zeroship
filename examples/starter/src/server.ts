@@ -30,10 +30,22 @@ const messages: Message[] = [
   { id: 2, text: "Run pnpm build to produce dist/app.zship.", createdAt: Date.now() - 30_000 },
 ];
 
-export const getMessages = query(async () => messages, {
-  id: "getMessages",
-  output: z.array(MessageSchema),
-});
+export const getMessages = query(
+  async () => {
+    // Server-side `console` output is a real platform affordance, and this is
+    // the only line in the starter that exercises it. In `pnpm dev` it lands in
+    // the terminal running the dev runtime. Deployed, the worker captures it
+    // per request into a per-app ring buffer and the control plane serves it
+    // back at `GET /api/apps/<id>/logs` -- which is how a creator sees what
+    // their app printed once it is no longer running on their machine.
+    console.log(`[starter] getMessages -> ${messages.length} message(s)`);
+    return messages;
+  },
+  {
+    id: "getMessages",
+    output: z.array(MessageSchema),
+  },
+);
 
 export const addMessage = mutation(
   async (input: { text: string }) => {
