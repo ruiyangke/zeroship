@@ -295,7 +295,7 @@ note "putLarge HTTP $PUT_CODE in ${PUT_ELAPSED}s; worker peak RSS over $SAMPLES 
 # data loss. Stat the FULL prefixed key so we measure the finalized object.
 # (The passing e2e_s3_storage.sh sidesteps this via a recursive-ls basename
 # grep; here we stat the exact key directly, which is precise and faster.)
-MINIO_OBJ_SIZE="$(docker exec "$MINIO_CONTAINER" mc stat --json "local/$MINIO_BUCKET/storage/$ST_APP/gallery/$SKEY" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).size||0)}catch(e){console.log(0)}})')"
+MINIO_OBJ_SIZE="$(docker exec "$MINIO_CONTAINER" mc stat --json "local/$MINIO_BUCKET/storage/$ST_APP/gallery/$SKEY" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).size||0)+"\n")}catch(e){process.stdout.write("0\n")}})')"
 MINIO_OBJ_SIZE="${MINIO_OBJ_SIZE:-0}"
 
 # Boundedness verdict — independent of pass/fail of the round-trip.

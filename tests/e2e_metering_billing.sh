@@ -662,11 +662,21 @@ RPERIOD="$(echo "$RECON" | jget '.period_start')"
 # Assert the mock recorded EXACTLY ONE invoice-item create for this creator,
 # plus the invoice create + finalize (both POST /v1/invoices…).
 MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
+# process.stdout.write(String(n)), NOT console.log(n). console.log routes a
+# NUMBER through util.inspect, which colours it when colour is forced -- and
+# FORCE_COLOR is set in plenty of developer shells. The comparisons below are
+# string equality, so `1` arrives as ESC[33m1ESC[39m and every one of them
+# fails while the platform is behaving. MEASURED 2026-08-11 on this machine
+# (FORCE_COLOR=3): `node -e 'console.log(1)'` into a pipe emits
+# 033 [ 3 3 m 1 033 [ 3 9 m; with FORCE_COLOR unset it emits a bare `1`.
+# Same fix as cee243ec4 (#211), which cleared the JSON-extractor sites and did
+# not reach the shell harnesses. `jget` in this same file already writes raw,
+# which is why .billed and .period_start were never affected.
 count_path() { echo "$MOCK_REQS" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   const arr=JSON.parse(s);
   const [method,prefix]=process.argv.slice(1);
-  console.log(arr.filter(r=>r.method===method && r.path.startsWith(prefix) && !r.replayed).length);
+  process.stdout.write(String(arr.filter(r=>r.method===method && r.path.startsWith(prefix) && !r.replayed).length)+"\n");
 });' "$1" "$2"; }
 ITEMS="$(count_path POST /v1/invoiceitems)"
 INVOICES="$(count_path POST /v1/invoices)"
