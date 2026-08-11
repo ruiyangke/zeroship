@@ -176,12 +176,45 @@ docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
   -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
   postgres:16 -c max_connections=300 >/dev/null || { fail "docker run postgres failed"; exit 1; }
-for _ in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
-  && pass "ephemeral PG ready on :$PG_PORT (dedicated)" || { fail "PG never became ready"; exit 1; }
+# Readiness = three CONSECUTIVE successful queries, not one pg_isready. This
+# file had diverged from tests/lib/e2e_stack.sh `stack_pg_up`, which already
+# polls exactly this way and records the measurement: there is a window in
+# which pg_isready reports ready and `psql -c 'select 1'` still fails, because
+# the entrypoint tears down its initdb-phase server and restarts it. Third time
+# a harness has drifted from that library (see #274).
+#
+# MEASURED 2026-08-11, and this is why it changed: under 12 busy cores the
+# pg_isready form let the run through that window, the init.sql apply below
+# failed, and its `|| true` made the assertion VANISH. The run reported
+# "38 passed, 0 failed" against 39 idle -- a lost assertion reads exactly like
+# a healthy pass unless someone counts.
+PG_READY=0
+for _ in $(seq 1 90); do
+  if docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+    PG_READY=$((PG_READY + 1))
+    [ "$PG_READY" -ge 3 ] && break
+  else
+    PG_READY=0
+  fi
+  sleep 1
+done
+[ "$PG_READY" -ge 3 ] \
+  && pass "ephemeral PG query-able on :$PG_PORT (3 consecutive selects, dedicated)" \
+  || { fail "PG never became query-able on :$PG_PORT"; docker logs --tail 20 "$PG_CONTAINER" 2>&1 | sed 's/^/      /'; exit 1; }
 
-[ -f "$ROOT/deploy/ops/postgres-init.sql" ] && psql_exec < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1 \
-  && pass "applied deploy/ops/postgres-init.sql" || true
+# A real failure, not `|| true`. init.sql sets `search_path = zeroship, public`
+# for the postgres role, and several control queries name tables UNQUALIFIED
+# (`UPDATE apps ...`), so a silent skip here leaves a database that works until
+# it suddenly does not. The old form also sent both streams to /dev/null, so
+# there was nothing to diagnose either.
+if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then
+  if INIT_OUT="$(psql_exec < "$ROOT/deploy/ops/postgres-init.sql" 2>&1)"; then
+    pass "applied deploy/ops/postgres-init.sql"
+  else
+    fail "postgres-init.sql failed -- search_path is unset, unqualified queries will break"
+    printf '%s\n' "$INIT_OUT" | tail -10 | sed 's/^/      /'
+  fi
+fi
 
 # Redpanda — the durable usage-event stream. Needs an explicit advertised
 # listener so the worker producer + control consumers reach it at $RP_BROKERS.
