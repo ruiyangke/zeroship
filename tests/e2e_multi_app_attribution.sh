@@ -241,6 +241,19 @@ FLEET=$((N1+N2+N3))
 [ -n "$C2_SUM" ] && [ "$C2_SUM" -lt "$C1_EXPECT" ] 2>/dev/null \
   && pass "no cross-attribution — C2 ($C2_SUM) has only A3's usage, far below C1's aggregate ($C1_EXPECT) and the fleet ($FLEET)" \
   || fail "cross-attribution suspected — C2=$C2_SUM should be ~$C2_EXPECT, not near C1's $C1_EXPECT / fleet $FLEET"
+# The MIRROR of the row above, and it was missing. Everything else here is a
+# FLOOR (`>= expected`), so a leak INTO C1 is invisible: with A3 bled onto C1,
+# C1 would read ~$FLEET and `$FLEET >= $C1_EXPECT` is true, so the header's
+# claim of "ZERO cross-attribution" held in one direction only. That is the
+# one-sided-floor shape task #288 removed from scenario 14.
+#
+# The threshold is measured, not guessed. A correct run reads C1 = 109 against
+# an expected 100 - the excess is the metered ready/warm probe traffic (~4-5 per
+# app, and C1 owns two). A leak of A3 would put C1 at ~179. Anything at or above
+# the fleet total cannot be C1's own two apps plus probe noise.
+[ -n "$C1_SUM" ] && [ "$C1_SUM" -lt "${ATTR_C1_CEIL:-$FLEET}" ] 2>/dev/null \
+  && pass "C1 is NOT over-attributed ($C1_SUM < ${ATTR_C1_CEIL:-$FLEET}) — A3's usage did not bleed onto C1" \
+  || fail "over-attribution suspected — C1=$C1_SUM reached the ceiling ${ATTR_C1_CEIL:-$FLEET}; its own apps are only $C1_EXPECT, so something else's usage is on this creator"
 
 DL=$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.provider_dead_letter" 2>/dev/null | tr -d '[:space:]')
 [ "$DL" = "0" ] && pass "0 provider dead-letters (every app mapped to a real owning creator)" || fail "provider_dead_letter has $DL rows"
