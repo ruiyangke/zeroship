@@ -26,6 +26,18 @@ function enumTokens(def: any): string[] {
 }
 /** The internally-tagged variant tags of an internally-tagged `oneOf` def
  *  (the const of the `tagField` property in each branch). */
+/** Variant names of an EXTERNALLY tagged enum (`{ VariantName: {...} }`), where
+ *  the name is the branch's single property key rather than a `const` tag field.
+ *  `variantTags` returns [] for these, which is silent rather than loud -- an
+ *  empty list compared against an empty list passes. */
+function externalVariantNames(def: any): string[] {
+  return def.oneOf
+    .map((b: any) => Object.keys(b?.properties ?? {}))
+    .filter((keys: string[]) => keys.length === 1)
+    .map((keys: string[]) => keys[0])
+    .sort();
+}
+
 function variantTags(def: any, tagField: string): string[] {
   return def.oneOf
     .map((b: any) => b?.properties?.[tagField]?.const)
@@ -82,6 +94,14 @@ const TS = {
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["fk", "unique", "check", "exclusion"].sort(),
+  // Precondition variant names. EXTERNALLY tagged (`{ TableExists: {...} }`),
+  // so the variant name is the branch's single property KEY, not a `const` tag
+  // field -- which is why `variantTags` cannot read it and this union went
+  // ungated until 2026-08-11. See the test below for how that was measured.
+  Precondition: [
+    "TableExists", "TableNotExists", "ColumnExists", "ColumnNotExists",
+    "RowCount", "SqlBoolean",
+  ].sort(),
   // §A2 — trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
@@ -222,6 +242,35 @@ test("ColType string tokens match the schema", () => {
 
 test("IrConstraintKind tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.IrConstraintKind, "kind"), TS.IrConstraintKind);
+});
+
+// PRECONDITION WAS UNGATED UNTIL 2026-08-11, and this file's own header claimed
+// otherwise ("A schema change that adds / renames a variant or token FAILS
+// here"). It did not, for this union.
+//
+// MEASURED, not reasoned: zero-migrate sent advance notice that `Precondition`
+// gained a `ColumnHasNoBlockingDependents` variant. I injected exactly that
+// variant into the vendored schema and re-ran this file: 19 pass, 0 fail --
+// unchanged. Restored byte-identically afterwards, submodule clean.
+//
+// WHY IT WAS MISSED, and why the miss was silent rather than loud: every other
+// union here is INTERNALLY tagged (`{ op: "createTable" }`), so `variantTags`
+// reads a `const` tag field. `Precondition` is EXTERNALLY tagged
+// (`{ TableExists: {...} }`), where the variant name is the branch's property
+// KEY. `variantTags` returns [] for it, and [] deepEqual [] passes -- so a test
+// written in the obvious shape would have looked correct and asserted nothing.
+// The separate extractor above exists for that reason.
+//
+// The orphan-type test below ("every exported interface/type ... has a schema
+// counterpart") does NOT cover this: `Precondition` exists on both sides, so it
+// passes whatever the variant sets are.
+test("Precondition variant names match the schema (externally tagged)", () => {
+  const fromSchema = externalVariantNames(schema.$defs.Precondition);
+  assert.ok(
+    fromSchema.length > 0,
+    "extractor returned no variants: it is not reading this union, so the comparison below would pass vacuously",
+  );
+  assert.deepEqual(fromSchema, TS.Precondition);
 });
 
 test("trigger action/body tags match the schema", () => {
