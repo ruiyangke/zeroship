@@ -162,9 +162,13 @@ describe("installSchema — passes named indexes through to native registerModel
     assert.equal(got.collection, "users");
     assert.equal(got.indexes.length, 2);
     assert.equal(got.indexes[0].name, "by_email");
-    // snakeCase naming strategy is the default — firstName → first_name.
+    // `naming.asIs` is the default, so a JS field name IS its column name.
+    // This line used to expect `first_name`: the default was `naming.snakeCase`
+    // until install-schema.ts:1067-1091 changed it deliberately, so that both
+    // installSchema and collection.ts construct the same mapping. The test kept
+    // asserting the abandoned strategy and had been red ever since.
     assert.deepEqual(got.indexes[0].fields, ["email"]);
-    assert.deepEqual(got.indexes[1].fields, ["first_name", "done"]);
+    assert.deepEqual(got.indexes[1].fields, ["firstName", "done"]);
   });
 });
 

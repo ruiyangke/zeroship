@@ -485,7 +485,11 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
         { id: "usr_1", email: "alice@example.com", name: "Alice" },
       ],
       todos: [
-        { id: "todo_10", user_id: "usr_1", title: "buy milk" },
+        // `naming.asIs` is the default (install-schema.ts:1067-1091), so the native
+        // returns the FK under the JS field name. This row used to say `user_id`,
+        // modelling the abandoned snakeCase default -- `relations.ts` reads
+        // `r[field]` i.e. `r.userId`, found undefined, and nulled every relation.
+        { id: "todo_10", userId: "usr_1", title: "buy milk" },
       ],
     };
     const native = {
