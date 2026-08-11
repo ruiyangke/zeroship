@@ -608,10 +608,28 @@ echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed  (mutation: $MUT
 echo "  MUTATIONS: MUTATE=no-sleep | signal-payload-dropped | basic-step-drift"
 echo "    each must leave the diff GREEN and turn its own section-3b verdict RED"
 
+# The floor counts assertions that RAN, not assertions that PASSED. The line
+# above already fails the run on any red; this exists for the other failure,
+# named in the message below -- a case that never started, whose empty row
+# silences its pins instead of failing them. That drops PASS+FAIL. A mutation
+# does not: each of the three turns exactly one counted verdict red, which
+# moves an outcome between columns and leaves the sum alone.
+#
+# MEASURED 2026-08-11, both runs mine, same HEAD:
+#   MUTATE=none              44 passed, 0 failed  -> 44 ran
+#   MUTATE=basic-step-drift  43 passed, 1 failed  -> 44 ran
+# The one is `deployed basic: the second step computes n=2 from the first`,
+# exactly the verdict that mutation names, and the diff stayed GREEN as the
+# line above promises. Counting PASS alone reported `only 43 assertions passed,
+# fewer than the 44` on that run: a second failure that is not one, on the one
+# run this harness is designed to be told apart by.
+RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$PASS" -lt "$WORKFLOWS_MIN_PASSED" ]; then
-  echo "FAIL: only $PASS assertions passed, fewer than the $WORKFLOWS_MIN_PASSED this gate expects." >&2
+if [ "$RAN" -lt "$WORKFLOWS_MIN_PASSED" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $WORKFLOWS_MIN_PASSED this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above.)" >&2
   echo "      Assertions do not vanish by accident: a case that never started still" >&2
   echo "      produces an empty row, and an empty row silences its pins rather than" >&2
   echo "      failing them. If an assertion was removed deliberately, lower" >&2
