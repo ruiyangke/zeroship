@@ -265,6 +265,11 @@ pub mod rule {
     pub const UNRECOGNIZED_DANGEROUS: &str = "unrecognized_dangerous_construct";
     pub const BODY_INSPECTION: &str = "dangerous_construct_in_body";
     pub const INTERNAL_GUARD_ERROR: &str = "internal_guard_error";
+    /// Text handed to the raw view-body scanner that is not a view body: it must
+    /// parse as exactly one top-level `SELECT`. The engine's own caller refuses
+    /// the same shapes first with richer diagnostics; this is the boundary check
+    /// for a host calling the scanner directly.
+    pub const VIEW_BODY_NOT_A_SELECT: &str = "view_body_not_a_select";
     /// `CREATE/ALTER FUNCTION … SECURITY DEFINER` — runs with the definer's
     /// (migrator) privileges, an escalation primitive once installed.
     pub const SECURITY_DEFINER: &str = "security_definer_function";

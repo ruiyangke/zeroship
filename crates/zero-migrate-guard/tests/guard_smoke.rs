@@ -397,3 +397,36 @@ fn a_rename_inside_a_view_body_literal_is_walked_but_never_meets_the_injected_ru
     )
     .expect("the body scanner admits a rename of an injected column under body scope");
 }
+
+/// The public body scanner refuses text that is not a view body at all.
+///
+/// It answers "not injected" for every element, so its rename rules cannot fire. That
+/// answer is only sound for text which cannot carry a rename, which is why the scanner
+/// checks the shape itself rather than trusting its caller to have done so. Before that
+/// check existed, a bare `ALTER TABLE ... RENAME COLUMN` handed straight to this function
+/// was ADMITTED.
+///
+/// The engine's own path is unaffected: `validate_raw_view_body_sql`
+/// (crates/zero-migrate/src/model/validate.rs) refuses the same shapes first, with the
+/// authoring diagnostics this layer has no context to produce.
+#[test]
+fn the_public_body_scanner_refuses_text_that_is_not_a_view_body() {
+    let scope = SchemaScope::Single("app1".to_string());
+
+    for body in [
+        "ALTER TABLE app1.widgets RENAME COLUMN tenant_id TO t",
+        "SELECT 1; SELECT 2",
+        "INSERT INTO app1.widgets (id) VALUES (1)",
+    ] {
+        let err = check_raw_view_body_text(body, "view body", Some(&scope))
+            .expect_err("a view body must be exactly one top-level SELECT");
+        assert!(
+            matches!(&err, GuardError::Denied { rule, .. } if *rule == "view_body_not_a_select"),
+            "{body:?} must be refused as not-a-view-body, got {err:?}"
+        );
+    }
+
+    // The shape it exists to admit still passes.
+    check_raw_view_body_text("SELECT * FROM app1.widgets", "view body", Some(&scope))
+        .expect("a single top-level SELECT is what a view body is");
+}

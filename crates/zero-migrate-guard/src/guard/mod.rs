@@ -2762,6 +2762,28 @@ pub fn check_raw_view_body_text(
     raw: &str,
     scope: Option<&SchemaScope>,
 ) -> Result<(), GuardError> {
+    // A view body is exactly one top-level SELECT. Checking that HERE rather than
+    // trusting the caller is what makes the function safe to call directly: the
+    // adapter below answers "not injected" for every element, so the injected-shape
+    // immutability rule cannot fire, and that answer is only sound for text which
+    // cannot carry a rename in the first place.
+    //
+    // The engine's own caller (`validate_raw_view_body_sql` in
+    // crates/zero-migrate/src/model/validate.rs) refuses the same shapes first and
+    // keeps the user-facing diagnostics - which statement index, which dialect, what
+    // to write instead. It owns those messages because it has the authoring context;
+    // this check owns only the precondition, so the two do not compete.
+    let parsed = pg_query::parse(body).map_err(|_| denied(rule::VIEW_BODY_NOT_A_SELECT, raw))?;
+    let [only] = parsed.protobuf.stmts.as_slice() else {
+        return Err(denied(rule::VIEW_BODY_NOT_A_SELECT, raw));
+    };
+    if !matches!(
+        only.stmt.as_ref().and_then(|stmt| stmt.node.as_ref()),
+        Some(NodeEnum::SelectStmt(_))
+    ) {
+        return Err(denied(rule::VIEW_BODY_NOT_A_SELECT, raw));
+    }
+
     // This compatibility scanner evaluates the supplied validation scope directly.
     // It does not turn that scope into an EffectivePolicy or invent policy grants.
     let decisions = BodyScopeDecisions { scope };
