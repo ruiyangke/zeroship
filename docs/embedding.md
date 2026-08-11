@@ -391,6 +391,43 @@ Current JavaScript boundaries:
   end-to-end custom-policy executor configuration is not public yet;
 - scoped approvals are Rust integration features.
 
+## Rust boundaries
+
+The list above runs one way. This one runs the other, because a reader comparing
+the two hosts needs both.
+
+The **pending-schema projection is a property of the Node host lowering, not of
+the engine**. Before applying an envelope, that lowering folds the pending ops
+onto the catalog snapshot and refuses anything the fold cannot resolve, reporting
+`failed to project pending schema after envelope "<name>": ...`. A host embedding
+`zero-migrate` directly never builds one: `ProjectionGuardVerdict` exists only in
+`crates/zero-migrate-node/src/lower.rs`, and nothing in `zero-migrate`,
+`zero-migrate-guard`, `zero-migrate-ir` or `zero-migrate-policy` references it.
+
+That is a difference in strategy rather than a missing check. `MigrationEngine`
+re-reads the live catalog as it goes, so it decides each envelope against the
+database rather than against a projection built ahead of time.
+
+What it means in practice, measured rather than assumed
+(`a_rust_embedding_refuses_an_absent_view_drop_at_the_database` in
+`crates/zero-migrate/tests/drop_view_rollback_pg.rs`): a migration dropping a view
+nothing created is refused on both hosts. The Node host refuses it during
+lowering; a Rust host refuses it when PostgreSQL rejects the statement. **The
+refusal moves layers; it does not disappear.**
+
+The consequence worth planning for is therefore about *when* and *in what words* a
+host learns, not about whether the migration is caught:
+
+- a Rust host discovers this class of problem at apply time, against a live
+  connection, in the database's vocabulary;
+- the Node host discovers it during lowering, before any statement is sent, in the
+  engine's vocabulary, naming the envelope;
+- a host that matches on message text will not see the projection wording.
+
+No case is currently known where the projection refuses something the database
+then accepts. If you find one, it is a genuine gap and worth reporting rather than
+working around.
+
 ## Next
 
 - [Node API](node-api.md)
