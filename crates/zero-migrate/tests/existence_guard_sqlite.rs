@@ -30,8 +30,8 @@ use zero_migrate::apply::executor::ApplyError;
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::ir::{
-    ColType, ExistenceGuard, IndexElement, IrColumn, MigrationIr, Op, SelectAst, SelectItem,
-    TableRef, ViewQuery,
+    ColType, ExistenceGuard, IndexElement, IrColumn, IrIndex, MigrationIr, Op, SelectAst,
+    SelectItem, TableRef, ViewQuery,
 };
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
@@ -1225,5 +1225,142 @@ async fn create_index_unguarded_name_owned_by_another_table_fails_closed() {
     assert!(
         index_exists(&be, "b", "idx_free", false).await,
         "the re-run left b's index in place"
+    );
+}
+
+/// An UNGUARDED `createTable` whose INLINE index names one another table owns must
+/// fail closed on the SQLite leg too.
+///
+/// The sibling above covers the collision reached through `Op::CreateIndex`. A
+/// `createTable` carrying `indexes: [...]` never reaches that op: its indexes are
+/// emitted inside `lower_create_table`, which stamped a probe only when the author
+/// wrote a guard. The PostgreSQL arm of this exact shape is
+/// `packages/zero-migrate-cli/tests/host/unguarded-create-table-index-collision.test.ts`;
+/// this is the SQLite half, which that file names as uncovered.
+///
+/// SQLite matters here for the same reason PostgreSQL does and MySQL does not: it
+/// scopes an index name across the whole `main` schema, so a second table can claim
+/// a name the first already owns, and the emitter writes `IF NOT EXISTS` either way.
+///
+/// The control is the free index name in the same test: without it, this arm would
+/// pass just as well against a createTable path that had stopped creating indexes at
+/// all.
+#[compio::test]
+async fn create_table_unguarded_inline_index_name_owned_by_another_table_fails_closed() {
+    let p = paths("sq_inline_idx_bare_scope");
+    let be = backend(&p);
+
+    let make_table = |name: &str, index: Option<&str>| Op::CreateTable {
+        name: name.into(),
+        columns: vec![col("bucket", ColType::Int)],
+        primary_key: None,
+        constraints: vec![],
+        indexes: index
+            .map(|idx| IrIndex {
+                name: Some(idx.into()),
+                columns: vec![IndexElement::Column {
+                    name: "bucket".into(),
+                    order: None,
+                    opclass: None,
+                    collation: None,
+                }],
+                unique: Some(false),
+                using: None,
+                r#where: None,
+                include: vec![],
+                with: None,
+                only: None,
+                nulls_not_distinct: None,
+            })
+            .into_iter()
+            .collect(),
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        // No guard: the author wrote a plain `createTable`.
+        existence_guard: None,
+    };
+
+    // `lower` derives the migration name from the CALL SITE line, so each op gets
+    // its own `lower` call and therefore its own stable version.
+    for m in lower(make_table("a", Some("idx_inline"))) {
+        apply_one(&be, &m).await.expect("table a applies");
+    }
+    assert!(
+        index_exists(&be, "a", "idx_inline", false).await,
+        "table a owns idx_inline before the colliding createTable"
+    );
+
+    let collide = lower(make_table("c", Some("idx_inline")));
+    let mut versions = Vec::new();
+    for m in &collide {
+        versions.push(m.version.as_str().to_string());
+        // The CREATE TABLE unit itself is fine - `c` does not exist yet. The refusal
+        // belongs to the inline index unit, so take the first error the plan raises
+        // rather than asserting every unit fails.
+        if let Err(err) = apply_one(&be, m).await {
+            let (object, field) = expect_drift(err);
+            assert_eq!(object, "index idx_inline");
+            assert_eq!(field, "table");
+            assert!(
+                !index_exists(&be, "c", "idx_inline", false).await,
+                "the refused inline create left c without the index"
+            );
+            assert!(
+                index_exists(&be, "a", "idx_inline", false).await,
+                "the refused inline create left a's index intact"
+            );
+            return;
+        }
+    }
+    panic!(
+        "the colliding inline index was accepted; versions applied: {versions:?}. A green \
+         journal over an index another table owns is the defect this arm exists for"
+    );
+}
+
+/// CONTROL for the arm above: the same unguarded `createTable` with a FREE inline
+/// index name still creates both the table and its index.
+///
+/// Separate test rather than a tail on the negative arm, because that arm returns
+/// early on the refusal it is looking for and a control after it would never run.
+#[compio::test]
+async fn create_table_unguarded_inline_index_free_name_still_creates() {
+    let p = paths("sq_inline_idx_free");
+    let be = backend(&p);
+
+    for m in lower(Op::CreateTable {
+        name: "solo".into(),
+        columns: vec![col("bucket", ColType::Int)],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![IrIndex {
+            name: Some("idx_solo".into()),
+            columns: vec![IndexElement::Column {
+                name: "bucket".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            unique: Some(false),
+            using: None,
+            r#where: None,
+            include: vec![],
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        }],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }) {
+        apply_one(&be, &m)
+            .await
+            .expect("an unclaimed inline index name still reaches the CREATE");
+    }
+    assert!(
+        index_exists(&be, "solo", "idx_solo", false).await,
+        "the table carries the inline index it declared"
     );
 }
