@@ -429,6 +429,103 @@ impl PgDevSession {
     }
 }
 
+/// Drops the schemas a live-PG test created, on the way out of scope, whether the
+/// test returned or unwound.
+///
+/// A test that calls `DROP SCHEMA` as its last statement only cleans up when it
+/// reaches that statement. Every `assert!` between the CREATE and the DROP is a
+/// point where a failing run abandons a schema on the server forever, and the leak
+/// is silent: the run reports one failed test, not a database that now carries a
+/// permanent `proj_<pid>_<nanos>_<n>` nobody will ever recognise or reclaim. A
+/// single measured panic left exactly one schema behind (85 -> 86 on a server that
+/// had already accumulated 85).
+///
+/// Constructed where the CREATE happens; the DROP then rides `Drop` and needs no
+/// statement at the end of the test.
+///
+/// The DROP goes over the test's own pinned connection, NOT a fresh one. A test
+/// that unwinds mid-transaction leaves that transaction open until its `Client` is
+/// dropped, and `DROP SCHEMA ... CASCADE` from a second connection would block on
+/// its locks for as long as the guard lives - a hung suite in place of a leaked
+/// schema. Reusing the pinned connection sees those locks as its own.
+pub struct SchemaGuard<'a> {
+    session: &'a PgDevSession,
+    dsn: String,
+    schemas: Vec<String>,
+}
+
+impl<'a> SchemaGuard<'a> {
+    /// Take responsibility for dropping `schemas` when the guard goes out of scope.
+    ///
+    /// `dsn` is only used if the pinned connection cannot run the DROP.
+    #[must_use]
+    pub fn arm<I, S>(session: &'a PgDevSession, dsn: &str, schemas: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            session,
+            dsn: dsn.to_string(),
+            schemas: schemas.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// `DROP SCHEMA IF EXISTS` for every guarded schema, as one batch.
+    fn drop_sql(&self) -> String {
+        use std::fmt::Write as _;
+        let mut sql = String::new();
+        for schema in &self.schemas {
+            let _ = write!(sql, "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE;");
+        }
+        sql
+    }
+}
+
+impl Drop for SchemaGuard<'_> {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+
+        if self.schemas.is_empty() {
+            return;
+        }
+        let sql = self.drop_sql();
+
+        // `try_borrow_mut`, never `borrow_mut`: a panic raised while the seam holds
+        // the client leaves the cell borrowed, and a panicking `Drop` during an
+        // unwind aborts the process instead of failing the test.
+        if let Ok(mut client) = self.session.client.try_borrow_mut() {
+            // An unwind can land inside a failed transaction, where every later
+            // statement is rejected until the block ends. Outside one this is a
+            // warning and nothing else.
+            let _ = client.batch_execute("ROLLBACK");
+            if client.batch_execute(&sql).is_ok() {
+                return;
+            }
+        }
+
+        // The pinned connection could not do it. Timeouts are set first so a lock the
+        // test still holds turns into an error we can report rather than a suite that
+        // hangs here.
+        let fallback = Client::connect(&self.dsn, NoTls).and_then(|mut client| {
+            client.batch_execute(&format!(
+                "SET lock_timeout = '5s'; SET statement_timeout = '15s'; {sql}"
+            ))
+        });
+        if let Err(e) = fallback {
+            // Straight to the process stderr handle: libtest captures the print
+            // macros, and a cleanup failure that only shows on `--nocapture` is the
+            // silent leak this guard exists to end. Never a panic - see above.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SchemaGuard: {} left behind on {}: {e}",
+                self.schemas.join(", "),
+                self.dsn
+            );
+        }
+    }
+}
+
 /// Map a `postgres::Error` → the neutral [`DbError`] (message + real SQLSTATE), so
 /// the seam's error contract (`role.rs` transient-retry classifier, `#[source]`
 /// wraps, the conformance `error-sqlstate-mapping` check) sees the true DB error.

@@ -138,6 +138,13 @@ async fn an_over_long_fts_index_name_re_diffs_clean() {
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
+    // Armed BEFORE the CREATE, not after: anything armed afterwards leaves the CREATE
+    // itself outside the guard, and the meta schema is created later still, by apply.
+    let _schemas = support::SchemaGuard::arm(
+        &session,
+        &url,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     ensure_project_schema(&session, &cfg).await;
 
     // 57 bytes of collection name: the table name itself fits, but the derived
@@ -233,6 +240,4 @@ async fn an_over_long_fts_index_name_re_diffs_clean() {
          server's own spelling is {truncated_idx:?}, and the plan carried: {statements:#?}",
         authored_idx.len(),
     );
-
-    drop_schemas(&session, &cfg).await;
 }
