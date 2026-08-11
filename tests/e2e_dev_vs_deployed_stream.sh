@@ -86,6 +86,27 @@ CONTROL_PORT="${CONTROL_PORT:-9394}"
 WORKER_PORT="${WORKER_PORT:-8394}"
 GATE_PORT="${GATE_PORT:-8304}"
 DEV_PORT="${DEV_PORT:-3061}"
+# VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
+# binds, and the only one the app's vite.config names. Left undeclared until
+# 2026-08-11, vite silently took its :5173 GLOBAL default: nothing here knew
+# that port, so cleanup could not free it and vite outlived every run orphaned
+# at PPID 1. Measured on the workflows harness before its identical fix
+# (590aeab85) -- one such process, 38 minutes old, still holding 127.0.0.1:5173.
+# :5173 is also every other vite's default, so two harnesses at once fought over
+# it (#173's class). Private, and --strictPort at the call so a conflict fails
+# loudly rather than moving to a port nobody watches. See #272.
+#
+# 5062, NOT 5061. The other harnesses mirror DEV_PORT 30NN -> 50NN, and 3061
+# would give 5061 -- which is a BLOCKED PORT. The runtime's own fetch enforces
+# the WHATWG bad-ports list (crates/runtime/src/web/fetch/bad_ports.rs:30 lists
+# 5060 and 5061, sip/sips), and the dev runtime fetches modules FROM vite, so
+# the app never loads. Measured, not guessed: with 5061 this harness failed
+#     FAIL dev app never came up
+# and the runtime logged, twenty times,
+#     Network request failed: network error: blocked port 5061
+# Checked the rest of the mapping against that list too -- 5011, 5021, 5081,
+# 5091, 5092, 5093, 5097 are all clear; 5061 was the only collision.
+VITE_PORT="${VITE_PORT:-5062}"
 export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
 APP_NAME="streamp"
@@ -99,7 +120,12 @@ ok() { PASS=$((PASS+1)); echo "  ok   $1"; }
 no() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan. Freeing DEV_PORT alone kills
+  # `zeroship serve` and leaves vite holding its own port forever.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   # A mutation edited a TRACKED SDK source and rebuilt its dist. Put both back
   # before anything else can read them -- a half-restored bootstrap would make
   # every later run in this tree report on the mutation instead of the product.
@@ -259,8 +285,10 @@ grep -q "2 server functions" "$WORK/build.log" && ok "server bundle carries both
   || no "server bundle did not report 2 server functions (missing \"use server\"?)"
 
 echo "=== dev side"
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-( cd "$APP_DIR" && ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+( cd "$APP_DIR" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 20); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' && break
