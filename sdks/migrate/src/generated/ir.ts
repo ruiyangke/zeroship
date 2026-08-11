@@ -10,9 +10,30 @@
 // here, while the closed STRING-ENUM tokens (`BinaryOp`, `SynthFn`, `CastTarget`,
 // …) are GENERATED into `./enums.ts` and imported below.
 //
-// DRIFT GUARD: `tests/ir-types-drift.test.ts` pins every enum token, every `Op`
-// variant tag, and every `Expr` node tag in THIS file against the schema, so the
-// manual transcription cannot silently drift from the engine contract.
+// DRIFT GUARD, AND WHAT IT DOES NOT GUARD. `tests/ir-types-drift.test.ts` pins
+// every enum token, every `Op` variant tag and every `Expr` node tag declared by
+// the SCHEMA against hand-transcribed lists kept IN THAT TEST FILE. It does not
+// read the union declarations in this file. So the edge it enforces is
+// schema <-> the test's lists; keeping THIS file in step with those lists is a
+// manual convention with nothing checking it.
+//
+// MEASURED 2026-08-11, mutation applied and confirmed present before each run:
+// adding `| { node: "zsProbeNode"; expr: Expr }` to `Expr` below - precisely what
+// the previous wording claimed was pinned - leaves the drift suite at 28/28 pass
+// and `tsc --noEmit` at 0 errors. The same holds for a new `PerRowGenerator`
+// member. Nothing in the repo objects.
+//
+// Two of those tests DO read this file, and neither closes that edge: one regex-
+// matches a single `createTable.primaryKey` field, the other extracts `export
+// interface|type` NAMES to catch orphan types with no schema counterpart.
+// Neither inspects the members of a union.
+//
+// The direction that IS caught: the engine schema gaining or renaming a tag,
+// because the hand list then stops matching. Note that the fix it forces is to
+// the hand list - a developer who updates the list and forgets this file leaves
+// the suite green and this file stale. Reading the lists out of this file was
+// tried and rejected deliberately: a scraper over the TS text reported four
+// false drifts on its first run (see the note beside the lists in the test).
 //
 // These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
 // + the `Checksum::of_ir` round-trip are the contract source of truth (§4.3/PR3).
