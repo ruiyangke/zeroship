@@ -75,6 +75,15 @@ CONTROL_PORT="${CONTROL_PORT:-9395}"
 WORKER_PORT="${WORKER_PORT:-8395}"
 GATE_PORT="${GATE_PORT:-8305}"
 DEV_PORT="${DEV_PORT:-3051}"
+# VITE's OWN port, which is NOT the runtime port above. Left implicit until
+# 2026-08-11, and that cost a leaked process every run: cleanup frees DEV_PORT
+# by listener, but DEV_PORT is what `zeroship serve` binds - vite was silently
+# taking its global default :5173, which nothing here tracked and nothing freed.
+# Measured: one orphaned `node ./node_modules/.bin/../vite/bin/vite.js`, PPID 1,
+# holding 127.0.0.1:5173 38 minutes after the run that spawned it exited.
+# Explicit AND private, for the second reason too: :5173 is shared by every vite
+# in the repo, so two harnesses at once would have fought over it (see #173).
+VITE_PORT="${VITE_PORT:-5051}"
 REDIS_PORT="${REDIS_PORT:-6399}"
 REDIS_CONTAINER="zs-devdeploy-wf-redis"
 CONTROL_KEY="dd-wf-ck"; MASTER_KEY="dd-wf-mk"
@@ -97,7 +106,11 @@ pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, and by LISTENER not by recorded PID: `( cd x && vite )&` records
+  # the subshell, and vite outlives it as an orphan (PPID 1) - the same lesson
+  # golden_path.sh cleanup already carries. DEV_PORT alone frees `zeroship serve`
+  # and leaves vite holding its own port forever.
+  for p in "$DEV_PORT" "$VITE_PORT"; do lsof -ti :"$p" 2>/dev/null | xargs -r kill 2>/dev/null || true; done
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
   [ -f "${MUTATE_BAK:-}" ] && cp "$MUTATE_BAK" "$APP/src/index.ts"
   [ "${KEEP_WORK:-0}" = "1" ] && { echo "  work dir kept: $WORK"; return; }
@@ -255,11 +268,11 @@ for wf in BasicCase SleepCase SignalCase ChildCase CompensateCase DoubleChild; d
 done
 
 # --- 2. dev side ---
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+for p in "$DEV_PORT" "$VITE_PORT"; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 # A stale dev journal would let a previous run's rows resolve and mask a
 # regression, so start from an empty local state directory.
 rm -rf "$APP/.zeroship"
-( cd "$APP" && ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 25); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/wf.ping" -d '{"json":{}}' && break
