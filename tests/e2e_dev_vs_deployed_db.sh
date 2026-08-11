@@ -695,12 +695,23 @@ fi
   ZEROSHIP_STORAGE_URL="file://$DEVSTATE/storage" \
   ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
-for _ in $(seq 1 30); do
-  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
+# Readiness: a deadline plus a log-derived diagnosis, not a fixed 30 x 2s count
+# sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
+# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# assign when unset, so sourcing it above this harness's own port block would
+# hand it the library's ports.
+#
+# The probe is unchanged and is READ-ONLY -- todos.count for a user id that
+# cannot exist -- so calling it while waiting cannot disturb the seeded rows the
+# assertions below count.
+# shellcheck source=/dev/null
+source "$ROOT/tests/lib/e2e_stack.sh"
+_dev_ping() {
+  curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/todos.count" \
-    -d '{"json":{"userId":"user_doesNotExist0000000"}}' && break
-  sleep 2
-done
+    -d '{"json":{"userId":"user_doesNotExist0000000"}}'
+}
+stack_wait_dev "dev server" "$WORK/dev.log" _dev_ping || true
 RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
 probe "http://localhost:$DEV_PORT"
 grep -q '^seedA .*"id":"user_' "$WORK/dev.raw" && pass "dev server answered the probe" \
