@@ -69,6 +69,13 @@ export GATE_PORT="${GATE_PORT:-8308}"
 export PG_PORT="${PG_PORT:-5458}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-auth-pg}"
 DEV_PORT="${DEV_PORT:-3091}"   # examples/auth-probe AUTH_PROBE_API_PORT default
+# VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
+# its :5173 global default, which nothing here declared, tracked or freed, so a
+# second harness on this machine fought it for the port and the cleanup trap
+# could never reclaim it. --strictPort at the call so a conflict fails loudly
+# rather than moving to a port nobody watches. Checked against the runtime's
+# bad-ports list before choosing it (see #272 and the stream harness). See #272.
+VITE_PORT="${VITE_PORT:-5091}"
 APP_SLUG="auth-probe-dd"
 HOST="$APP_SLUG.localhost"
 # OAC (the app's OAuth client id) is NOT set here on purpose -- it is READ from
@@ -102,7 +109,11 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 source "$ROOT/tests/lib/e2e_stack.sh"
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan the PID loop cannot reach.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   [ -f "${MUTATE_BAK:-}" ] && cp "$MUTATE_BAK" "$APP/src/server/config.ts"
   if [ "${KEEP_WORK:-0}" = "1" ]; then
     echo "  work dirs kept: dev=${DEV_WORK:-${WORK_EARLY:-<none>}} deployed=${WORK:-<none>}"
@@ -294,8 +305,10 @@ assert_identity_pair
 #    that child (sdks/bootstrap/src/dev-auth.ts, reached via dev-entry.ts), so
 #    DEV_PORT is the AUTH_PROBE_API_PORT the vite plugin gave the child.
 # ---------------------------------------------------------------------------
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-( cd "$APP" && ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 25); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/probe.public" -d '{"json":{}}' && break
