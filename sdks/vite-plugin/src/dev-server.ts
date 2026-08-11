@@ -328,11 +328,17 @@ async function regenTypesDev(
       console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
     } else {
       // Everything else is OUR bug or their environment: a missing native
-      // addon, an engine panic, an unwritable generated/ dir. Those used to be
-      // distinguishable by brute force — before zero-migrate's `bc4d1c9b` added
-      // catch_unwind to all 14 napi exports, an engine panic killed the process
-      // outright. Now it arrives here, and treating it like a typo leaves the
-      // creator serving a STALE OR ABSENT descriptor with one line of warning.
+      // addon, an unparseable descriptor, an unwritable generated/ dir. Treating
+      // any of those like a creator's typo leaves them serving a STALE OR ABSENT
+      // descriptor with one line of warning, so every type error afterwards is
+      // a lie.
+      //
+      // AN ENGINE PANIC IS NOT ONE OF THEM AT OUR PIN, and the first version of
+      // this comment said it was. `third_party/zero-migrate` @ cb1bcb59 has ZERO
+      // `catch_unwind` in the addon crate, so a panic aborts the process before
+      // this arm can run; the upstream fix that would change that is not an
+      // ancestor of our pin. Verified, not assumed - see the long note on
+      // `MigrationSourceError` in gen-types/index.ts and task #271.
       //
       // At boot nothing has been served yet, so refusing to start costs the
       // creator nothing and names the fault while it is still the only thing on

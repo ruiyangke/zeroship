@@ -76,8 +76,32 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * arrive as a plain `Error` with `code === undefined`, and so — by reading —
  * do `addonLoadError`, the missing-`runtimeJson` arm below, and
  * `parseRuntimeDescriptor`. `code` therefore separates neither class from the
- * other; only three of the eight producers set one at all (`EACCES` from the
- * write, `GenericFailure` from a napi panic). See task #269.
+ * other; only two of the eight producers set one at all, and both are ours or
+ * the environment's: `EACCES` from the write, and `ERR_MODULE_NOT_FOUND`-class
+ * codes from the recorder. See task #269.
+ *
+ * AN ENGINE PANIC IS NOT IN THAT TABLE, and an earlier version of this comment
+ * wrongly put it there with `GenericFailure`. At OUR PIN a panic never reaches
+ * this catch at all -- it aborts the process. Verified in our own
+ * `third_party/zero-migrate` @ cb1bcb59: `catch_unwind` appears ZERO times in
+ * the whole `zero-migrate-node` crate src, and the export is a bare
+ * `#[napi(js_name = "genArtifacts")]` (bridge.rs:132; that same grep returning
+ * line 132 is the positive control that the file was read). Without
+ * `catch_unwind` a Rust panic crossing an `extern "C"` shim aborts rather than
+ * becoming a catchable Error.
+ *
+ * The upstream fix (`bc4d1c9b`, "a panicking export throws instead of killing
+ * the Node process") is NOT in our object store and NOT an ancestor of our pin
+ * -- checked, not assumed. It postdates cb1bcb59 by about ten hours on the same
+ * day, which is exactly the window where "they fixed it" and "we have it" come
+ * apart; task #29 records the same shape. Whether to bump the pin is an
+ * operator call (see task #271); the range is unaudited.
+ *
+ * So the loud arm below is REAL for every fault that arrives as a JS Error --
+ * a missing addon, an unparseable descriptor, an unwritable dir, a caller-shape
+ * bug -- and INERT for a panic, which kills the process before any of our code
+ * runs. A core dump is arguably loud enough; what it is not is our code
+ * deciding.
  *
  * WHERE THIS TAG STOPS, and it is a boundary not a guarantee. The tag covers
  * the SYNC verb, `genArtifacts`, because every creator-content fault comes back
