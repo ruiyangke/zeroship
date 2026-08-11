@@ -94,6 +94,26 @@ const TS = {
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["fk", "unique", "check", "exclusion"].sort(),
+  // Unions that were schema-backed but pinned by NOTHING until 2026-08-11.
+  // Found by asking the reciprocal of the Precondition question: which types
+  // does the hand-written ir.ts declare that no assertion in this file names?
+  // Ten had zero mentions; seven of those have a schema $defs entry with a
+  // readable variant set, and are pinned below. Each list is TRANSCRIBED BY
+  // HAND from the declaration in src/generated/ir.ts, deliberately: a scraper
+  // over the TS text reported four false drifts on its first run (it required
+  // `{ Name: {` so `{ expr: Expr }` vanished, and required a leading `|` so the
+  // first member of `= "cosine" | ...` vanished). Hand lists also give the
+  // property a byte-comparison cannot: a new variant cannot go green until a
+  // human writes its name here.
+  IrDefaultVariants: ["literal", "expr", "container", "json", "nextval"].sort(),
+  VectorMetric: ["cosine", "l2", "innerProduct"].sort(),
+  ColumnOrExprKinds: ["column", "expr"].sort(),
+  CursorStabilityModes: ["guardUpdates", "externalInvariant"].sort(),
+  AlterPrimaryKeyActionKinds: ["add", "replace", "drop"].sort(),
+  PerRowGeneratorStrings: ["uuidV4", "uuidV7", "ulid"].sort(),
+  PerRowGeneratorVariants: ["typeId"].sort(),
+  ValueFormatStrings: ["ulid"].sort(),
+  ValueFormatVariants: ["typeId"].sort(),
   // Precondition variant names. EXTERNALLY tagged (`{ TableExists: {...} }`),
   // so the variant name is the branch's single property KEY, not a `const` tag
   // field -- which is why `variantTags` cannot read it and this union went
@@ -264,6 +284,49 @@ test("IrConstraintKind tags match the schema", () => {
 // The orphan-type test below ("every exported interface/type ... has a schema
 // counterpart") does NOT cover this: `Precondition` exists on both sides, so it
 // passes whatever the variant sets are.
+// The rest of the previously-ungated set, one test per union so a failure names
+// the union rather than a list index. Each uses the extractor that matches that
+// union's tagging shape -- which is the whole reason they were missed: the file
+// had one extractor (`variantTags`, internally tagged) and everything it could
+// not read was simply absent rather than failing.
+test("IrDefault variant names match the schema (externally tagged)", () => {
+  const got = externalVariantNames(schema.$defs.IrDefault);
+  assert.ok(got.length > 0, "extractor read no variants; the comparison would pass vacuously");
+  assert.deepEqual(got, TS.IrDefaultVariants);
+});
+
+test("VectorMetric tokens match the schema", () => {
+  assert.deepEqual(enumTokens(schema.$defs.VectorMetric), TS.VectorMetric);
+});
+
+test("ColumnOrExpr kinds match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.ColumnOrExpr, "kind"), TS.ColumnOrExprKinds);
+});
+
+test("CursorStability modes match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.CursorStability, "mode"), TS.CursorStabilityModes);
+});
+
+test("AlterPrimaryKeyAction kinds match the schema", () => {
+  assert.deepEqual(
+    variantTags(schema.$defs.AlterPrimaryKeyAction, "kind"),
+    TS.AlterPrimaryKeyActionKinds,
+  );
+});
+
+// MIXED unions: string tokens AND externally-tagged object members in the same
+// oneOf. Both halves are asserted, because pinning one leaves the other free to
+// drift -- and the object half is the one no existing extractor could see.
+test("PerRowGenerator tokens and variants match the schema", () => {
+  assert.deepEqual(enumTokens(schema.$defs.PerRowGenerator), TS.PerRowGeneratorStrings);
+  assert.deepEqual(externalVariantNames(schema.$defs.PerRowGenerator), TS.PerRowGeneratorVariants);
+});
+
+test("ValueFormat tokens and variants match the schema", () => {
+  assert.deepEqual(enumTokens(schema.$defs.ValueFormat), TS.ValueFormatStrings);
+  assert.deepEqual(externalVariantNames(schema.$defs.ValueFormat), TS.ValueFormatVariants);
+});
+
 test("Precondition variant names match the schema (externally tagged)", () => {
   const fromSchema = externalVariantNames(schema.$defs.Precondition);
   assert.ok(
