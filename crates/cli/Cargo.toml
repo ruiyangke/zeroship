@@ -17,6 +17,7 @@ zeroship-plugin-storage = { workspace = true, features = ["s3"] }
 zeroship-plugin-kv = { workspace = true }
 zeroship-plugin-workflow = { workspace = true }
 zeroship-metering = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 url = { workspace = true }

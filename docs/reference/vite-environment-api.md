@@ -119,9 +119,19 @@ The child process receives:
 - `ZEROSHIP_VITE_ORIGIN=http://localhost:<vite-port>`
 - `ZEROSHIP_ENTRY=<absolute-path-to-server-entry>` when a server entry is known
 - `DATABASE_URL=<resolved value>` per the precedence above
+- `ZEROSHIP_DIE_WITH_PARENT=<vite's pid>`
 
 `ZEROSHIP_VITE_ORIGIN` is a plain HTTP origin. It is not a WebSocket URL and
 does not include a path suffix.
+
+`ZEROSHIP_DIE_WITH_PARENT` makes the runtime ask the kernel to kill it when the
+dev server dies (`PR_SET_PDEATHSIG`). Without it, a dev server killed by pid -
+a harness, a crash, the OOM killer - leaves the runtime alive holding the
+project's `.zeroship/kv.redb`, and the next `pnpm dev` in that directory then
+fails on **any** port, because the contended resource is the state directory
+and not the port. The variable carries the parent's pid so the child can also
+detect a parent that died before the guard was armed. It is opt-in: a
+`zeroship serve` run by hand, with the variable unset, is unaffected.
 
 ## Main Files
 

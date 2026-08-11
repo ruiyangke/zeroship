@@ -776,6 +776,73 @@ else
   fi
 fi
 
+# 7d. THE ORPHAN. Kill the dev server BY PID and its runtime must go with it.
+#
+# THE SEAM, and why neither side's own suite can see it. `zeroship serve` is a
+# child of vite, and a vite killed by its recorded pid runs no teardown code at
+# all -- so the runtime survives, keeps its socket, and keeps an EXCLUSIVE redb
+# lock on this example's `.zeroship/kv.redb`. Measured on 2026-08-10 (task
+# #221): four such survivors on ports 3151/3161/3171/3181, aged 10 to 34
+# minutes, after which no dev server for this example could boot on ANY port,
+# because the contended resource is the state dir and not the port.
+#
+# The fix is a kernel guard the CHILD arms (PR_SET_PDEATHSIG, gated on
+# ZEROSHIP_DIE_WITH_PARENT -- crates/cli/src/parent_death.rs), and it only works
+# if the vite plugin actually sets that variable, spelled identically, on the
+# child it spawns. Those are two repos' worth of suites that cannot see each
+# other: the Rust test proves the kernel behaviour with a hand-written env var,
+# and the vite-plugin test proves the variable is set to a node stub that has
+# never heard of prctl. ONLY A REAL DEV SERVER JOINS THEM, which is this.
+#
+# 7a's dev server is the subject: it has been up since 7a, and 7c has just
+# proved its runtime is healthy and respawning. Nothing after this step needs
+# it.
+#
+# BY LISTENER, not by $!. `( cd x && vite )&` records the SUBSHELL, and killing
+# a subshell is not killing vite -- the assertion below would then be measuring
+# a kill that never landed on the process it names.
+SUP_A_VITE=$(lsof -ti :"$SUP_V1" -sTCP:LISTEN 2>/dev/null | head -1)
+SUP_A_RT2=$(lsof -ti :"$SUP_RT" -sTCP:LISTEN 2>/dev/null | head -1)
+# `comm` is what makes "the pid vanished" mean "the runtime vanished": a pid
+# checked by existence alone reads as ALIVE the moment the kernel reuses it, so
+# the after-check below would go red for a reason that has nothing to do with
+# this. Read here as the positive control, and again after the kill.
+gp_is_runtime() { [ -n "${1:-}" ] && [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "zeroship" ]; }
+if [ -z "$SUP_A_VITE" ] || ! gp_is_runtime "$SUP_A_RT2"; then
+  fail "7d: could not identify the pair (vite=${SUP_A_VITE:-none} on :$SUP_V1, runtime=${SUP_A_RT2:-none} on :$SUP_RT) - nothing below was tested"
+else
+  pass "7d control: vite $SUP_A_VITE and its runtime $SUP_A_RT2 are two live processes before the kill"
+  # SIGKILL specifically. SIGTERM would let the supervisor's own killChild run,
+  # which is the path that ALREADY works and is not the one that stranded four
+  # processes.
+  kill -9 "$SUP_A_VITE" 2>/dev/null || true
+  SUP_ORPHAN=1
+  for _ in $(seq 1 20); do
+    gp_is_runtime "$SUP_A_RT2" || { SUP_ORPHAN=0; break; }
+    sleep 1
+  done
+  if [ "$SUP_ORPHAN" = "0" ]; then
+    pass "7d: the runtime ($SUP_A_RT2) died with the vite that spawned it"
+  else
+    fail "7d: runtime $SUP_A_RT2 SURVIVED vite $SUP_A_VITE for 20s - this is task #221"
+    echo "    It still holds $STARTER/.zeroship/kv.redb, so the next \`pnpm dev\` in that"
+    echo "    directory cannot boot on ANY port. Check that the vite plugin sets"
+    echo "    ZEROSHIP_DIE_WITH_PARENT (sdks/vite-plugin/src/dev-server.ts) and that the"
+    echo "    zeroship binary on PATH is new enough to arm the guard."
+    echo "    holders: $(lsof -t "$STARTER/.zeroship/kv.redb" 2>/dev/null | tr '\n' ' ')"
+  fi
+  # The symptom a creator actually reports is not a stray pid, it is that the
+  # next dev server will not start. That is the LOCK, so assert on the lock
+  # directly rather than inferring it from the pid. (Cheaper than booting a
+  # second dev server, and it fails for the same reason.)
+  KV_HOLDERS=$(lsof -t "$STARTER/.zeroship/kv.redb" 2>/dev/null | tr '\n' ' ')
+  if [ -z "$KV_HOLDERS" ]; then
+    pass "7d: nothing holds $APP_NAME's kv.redb any more - the next dev server can boot"
+  else
+    fail "7d: kv.redb is still held by pid(s) $KV_HOLDERS after the dev server was killed"
+  fi
+fi
+
 # --- 8. The same failure on the DEPLOYED tier, measured rather than assumed ---
 #
 # Step 6 diffs dev vs deployed on the HAPPY path. This is the same diff on the
@@ -2088,7 +2155,25 @@ gp_close_step
 # mutation touches only the deployed path. Reverted (clean `git diff` on
 # runtime-entry.ts) and rebuilt again; the re-run matched the unmutated
 # numbers above exactly, including the per-step outcome list.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-54}"
+# RAISED 54 -> 57 on 2026-08-10 for step 7d (the orphaned dev runtime, task
+# #221). PROVENANCE OF THE +3, stated because it is weaker than the numbers
+# above and a reader must not mistake it for a full-run measurement: 7d was run
+# as a STANDALONE reproduction (7a's dev server plus the 7d block, lifted
+# verbatim), because the full script needs a control plane, worker, gateway,
+# migrated and Postgres that were not available on the machine that added it.
+# That reproduction is a REAL dev server on the real example - it is the step's
+# own environment, minus the deployed tier that 7d does not touch:
+#
+#     with the plugin setting ZEROSHIP_DIE_WITH_PARENT:  4 passed, 0 failed
+#     with that one line mutated out and dist rebuilt:   2 passed, 2 failed
+#
+# (the 4 and 2 include 7a's own control, which is not new; the new outcomes are
+# 3 and they are the delta.) The mutation was confirmed absent from BOTH
+# `src/dev-server.ts` and the rebuilt `dist/dev-server.js` before the red run,
+# because a mutation that never applied prints the same green as a surviving
+# one. Under the mutation the orphan was pid 679607, still holding
+# `examples/starter/.zeroship/kv.redb` 20 seconds after its vite was SIGKILLed.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-57}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.

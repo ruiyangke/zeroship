@@ -16,9 +16,15 @@ use std::sync::Arc;
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
+mod parent_death;
 mod secrets;
 
 fn main() {
+    // FIRST, before the port probe and before any state dir is opened: from
+    // here on this process holds resources whose owner must not outlive the dev
+    // server that spawned it. See `parent_death` for what happened when it did.
+    parent_death::arm_from_env();
+
     // CLI's stdout/stderr is the user's product (e.g. `zeroship deploy`
     // prints the deploy hash for scripts to capture). Library tracing
     // emissions (runtime, plugin crates) are kept quiet by default —

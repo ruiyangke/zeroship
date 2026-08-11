@@ -68,6 +68,7 @@ interface RuntimeLog {
     ZEROSHIP_ENTRY?: string;
     ZEROSHIP_RUNTIME_DESCRIPTOR?: string;
     ZEROSHIP_VITE_ORIGIN?: string;
+    ZEROSHIP_DIE_WITH_PARENT?: string;
   };
 }
 
@@ -242,6 +243,17 @@ describe("devServerPlugin", () => {
         runtime.env.ZEROSHIP_VITE_ORIGIN ?? "",
         /^http:\/\/localhost:\d+$/,
       );
+      // The child is told OUR pid so the kernel can reap it when we die by
+      // SIGKILL, which is the one teardown `killChild` can never run. Asserted
+      // on the VALUE, not on presence: a wrong pid is worse than an absent one
+      // (the runtime treats "recorded parent is not my parent" as "my parent
+      // already exited" and refuses to start at all).
+      //
+      // WHAT THIS DOES NOT PROVE: that anything actually dies. The child here
+      // is a node stub that has never heard of PR_SET_PDEATHSIG. The kernel
+      // half is crates/cli/tests/parent_death_test.rs; the two of them meeting
+      // on a real dev server is step 7d of tests/golden_path.sh.
+      assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
       assert.deepEqual(runtime.argv.slice(0, 4), [
         "serve",
         BOOTSTRAP_SHIM_PATH,
@@ -418,6 +430,7 @@ async function startHarness(options: {
       "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",
       "    ZEROSHIP_RUNTIME_DESCRIPTOR: process.env.ZEROSHIP_RUNTIME_DESCRIPTOR,",
       "    ZEROSHIP_VITE_ORIGIN: process.env.ZEROSHIP_VITE_ORIGIN,",
+      "    ZEROSHIP_DIE_WITH_PARENT: process.env.ZEROSHIP_DIE_WITH_PARENT,",
       "  },",
       "}, null, 2));",
       "const stop = () => {",
