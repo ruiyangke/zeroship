@@ -53,10 +53,30 @@
 #      ONLY -- one variable, one side -- and must drive the diff RED on exactly
 #      the 5xx rows. That is the red-before-green for the relative half.
 #   3. MUTATE=drop-status, which removes `status: 403` from the shared source so
-#      err.status4xx lands at 500 on BOTH sides. The relative diff stays green;
-#      the ABSOLUTE verdict for that row must flip. That is the row-level
-#      sensitivity control for the absolute half -- it proves the leak verdict
-#      tracks the status class rather than being hardcoded per procedure name.
+#      err.status4xx lands at 500 on BOTH sides. The relative diff stays green,
+#      and the row is RE-JUDGED UNDER THE NEW STATUS CLASS. That is the
+#      row-level sensitivity control for the absolute half -- it proves the leak
+#      verdict tracks the status class rather than being hardcoded per procedure
+#      name.
+#
+#      WHAT TO LOOK FOR, and read this before concluding the control is broken.
+#      The observable is the ROW LABEL, not the pass/fail totals. Measured
+#      2026-08-11, both modes run by me on the same HEAD:
+#
+#        MUTATE=none         ok deployed err.status4xx (HTTP 403) ships NO "stack"
+#        MUTATE=drop-status  ok deployed err.status4xx (HTTP 500) ships NO "stack"
+#
+#      403 -> 500 is the control firing: the harness read the ACTUAL status and
+#      re-derived the verdict from it. Both totals are `24 passed, 0 failed,
+#      0 deployed rows leaking a stack` and both exit 0, because the platform
+#      correctly ships no stack on the 500 either -- that is the platform being
+#      right, not the control being inert.
+#
+#      THIS LINE USED TO SAY "the ABSOLUTE verdict for that row must flip",
+#      which is false and actively misleading: nothing flips to FAIL, so anyone
+#      running the control as documented sees a green and concludes the control
+#      proves nothing. I nearly filed exactly that. Diff the ROWS between the
+#      two modes, not the verdict lines -- the totals are equal by design.
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
