@@ -194,6 +194,21 @@ fn precondition_variant_names_from_schema() {
         .collect();
     found.sort();
 
+    // Every branch must be SEEN, not just some of them. Non-emptiness only rules
+    // out the all-or-nothing case; a branch the extractor cannot read is dropped
+    // here and absent from the expected list below, so both sides agree and the
+    // branch ships ungated. A unit variant is the concrete way in - externally
+    // tagged, serde emits it as a bare string with a `const` and no `required`,
+    // which this extractor returns `None` for.
+    assert_eq!(
+        found.len(),
+        branches.len(),
+        "the extractor read {} of {} Precondition branches, so the unread ones are \
+         absent from both sides of the comparison below and would ship ungated",
+        found.len(),
+        branches.len()
+    );
+
     // The assertion that stops this passing vacuously. Without it, an extractor
     // that matched nothing would compare empty against empty and report success,
     // which is the failure mode this test exists to avoid rather than repeat.
