@@ -8372,10 +8372,31 @@ fn render_view_op(
             } else {
                 "DROP VIEW"
             };
+            // A create that BROUGHT THE VIEW INTO BEING is undone by dropping it. A
+            // REPLACE is not that: the view predates the migration, so dropping it would
+            // destroy an object this migration never created, which is what rolling one
+            // back used to do.
+            //
+            // The faithful inverse is the PREVIOUS body, and rendering it needs more than
+            // this slot holds: `down` is one statement, and SQLite has no
+            // `CREATE OR REPLACE VIEW` - its replace is carried by a prelude that drops
+            // first. Until that is worth widening, a replace is IRREVERSIBLE rather than
+            // destructive.
+            //
+            // Irreversible is a refusal an operator sees, not a silent skip: the rollback
+            // planner returns `RollbackError::Irreversible` naming the version
+            // (`apply/executor.rs:2563`), and only a `force` carrying an explicit
+            // `backup_acknowledged` proceeds past it, recording the version in
+            // `skipped_irreversible`.
+            let down = if replace {
+                None
+            } else {
+                Some(format!("{drop_kw} IF EXISTS {qname}"))
+            };
             Ok(ViewStatement {
                 name: format!("create_view_{name}"),
                 up,
-                down: Some(format!("{drop_kw} IF EXISTS {qname}")),
+                down,
             })
         }
         Op::DropView {

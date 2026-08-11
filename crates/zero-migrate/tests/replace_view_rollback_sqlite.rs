@@ -3,17 +3,26 @@
 //! A replace changes an existing view's body. Its inverse is therefore "put the previous
 //! body back", not "remove the view" - the view predates the migration being undone.
 //!
-//! `crates/zero-migrate/src/render/lower.rs` synthesises the `createView` statement's
-//! `down` as `DROP VIEW IF EXISTS` unconditionally; `replace` reaches the `up` prefix and
-//! the replace prelude but never the `down`. That was harmless while the fold refused a
-//! replace against a view an applied migration had created, because the arm could only be
-//! reached when the create had brought the view into being and dropping really was the
-//! inverse. Commit a1fe1047 made the across-deploys replace applicable, which made this
-//! arm reachable in the case it gets wrong.
+//! `crates/zero-migrate/src/render/lower.rs` used to synthesise the `createView`
+//! statement's `down` as `DROP VIEW IF EXISTS` unconditionally, with `replace` reaching
+//! the `up` prefix and the replace prelude but never the `down`. That was harmless while
+//! the fold refused a replace against a view an applied migration had created: the arm
+//! could only be reached when the create had brought the view into being, and dropping
+//! really was the inverse. Commit a1fe1047 made the across-deploys replace applicable,
+//! which made the arm reachable in the one case it gets wrong - a rollback that reported
+//! success while deleting a view the migration never created.
 //!
-//! This asserts the CORRECT behaviour rather than the current one, so the failure names
-//! the real state of the database instead of pinning a defect in place. Everything is
-//! read from `sqlite_master`, never from the plan the engine meant to run.
+//! TWO ARMS, and the pair is the point:
+//!
+//!   - what SHIPS: a replace carries no `down`, so a rollback is REFUSED. Safety, not
+//!     capability - strictly better than destroying, strictly worse than restoring.
+//!   - what is AIMED AT: a replace restores the previous body. Ignored, because reaching
+//!     it means widening `ViewStatement.down` past a single statement.
+//!
+//! Keeping both means the shipped behaviour is pinned AND the gap it leaves is legible,
+//! rather than the refusal reading as the finished answer.
+//!
+//! Everything is read from `sqlite_master`, never from the plan the engine meant to run.
 
 mod support;
 
@@ -21,7 +30,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
+use zero_migrate::apply::executor::{
+    rollback, LockMode, RollbackError, RollbackRequest, RollbackTarget,
+};
 use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
@@ -187,20 +198,17 @@ async fn apply_doc(
         .collect()
 }
 
-/// MEASURED FAILING. Ignored so the gate stays honest rather than red, NOT because the
-/// behaviour is acceptable: rolling back this migration removes a view the migration
-/// never created.
+/// The END STATE this area is aimed at: a replace is reversible and restores the previous
+/// body. NOT what ships today - today a replace is refused as irreversible, which the
+/// sibling test below pins.
 ///
-/// It is carried here rather than deleted because the measurement was the expensive part
-/// and the assertion states the contract the fix has to meet. Un-ignore it with the fix.
-///
-/// The fix is not a one-liner, which is why this is ignored rather than repaired in the
-/// same commit. `ViewStatement.down` holds ONE statement, and SQLite has no
+/// Kept ignored rather than deleted because it states the contract a restoring fix has to
+/// meet, and because the measurement behind it was the expensive part. Reaching it means
+/// widening `ViewStatement.down` past one statement: SQLite has no
 /// `CREATE OR REPLACE VIEW` - `view_create_prefix` ignores the flag
-/// (`render/renderer.rs:444-452`) and the replace is carried by a separate prelude that
-/// drops first. So restoring a prior body needs either a `down` that can hold several
-/// statements or a per-dialect split, and that is a design decision rather than a patch.
-#[ignore = "measured failing: rolling back a view replace drops the view (#209)"]
+/// (`render/renderer.rs:444-452`) and its replace is carried by a prelude that drops
+/// first - so a faithful restore is DROP + CREATE there and one statement on PostgreSQL.
+#[ignore = "aspirational: a restoring fix would make this pass; today the replace is refused (#209)"]
 #[compio::test]
 async fn rolling_back_a_replace_restores_the_previous_body() {
     let p = paths();
@@ -266,5 +274,81 @@ async fn rolling_back_a_replace_restores_the_previous_body() {
         view_sql(&be, VIEW).await,
         original,
         "rolling back a replace must restore the body the view had before it"
+    );
+}
+
+/// What ships: a replace is IRREVERSIBLE, so the rollback is refused rather than run.
+///
+/// This is the safety half of the pair above. Refusing is strictly better than the
+/// behaviour it replaces - a rollback that reported success while deleting a view the
+/// migration never created - and it is strictly worse than restoring, which is why the
+/// aspirational arm stays in the file.
+///
+/// The refusal is one an operator sees. `apply/executor.rs:2563` returns
+/// `RollbackError::Irreversible` naming the version, and only a `force` carrying an
+/// explicit `backup_acknowledged` proceeds past it, recording the version under
+/// `skipped_irreversible` rather than passing silently.
+#[compio::test]
+async fn a_replace_is_refused_as_irreversible_rather_than_dropping_the_view() {
+    let p = paths();
+    let be = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let mut history: Vec<Op> = Vec::new();
+
+    let mut migrations = apply_doc(
+        &be,
+        &create_doc(),
+        &BTreeMap::new(),
+        &mut history,
+        Approval::None,
+    )
+    .await;
+    let original = view_sql(&be, VIEW).await;
+    assert!(
+        !original.is_empty(),
+        "the view must exist before the replace"
+    );
+
+    let registry: BTreeMap<String, String> = [("users".to_string(), APP.to_string())]
+        .into_iter()
+        .collect();
+    migrations.extend(
+        apply_doc(
+            &be,
+            &replace_doc(),
+            &registry,
+            &mut history,
+            Approval::Approved,
+        )
+        .await,
+    );
+    assert_ne!(
+        view_sql(&be, VIEW).await,
+        original,
+        "the replace must change the stored body, or this proves nothing about undoing one"
+    );
+
+    let request = RollbackRequest::new(RollbackTarget::Steps(1));
+    let error = rollback(
+        &be,
+        &exec_cfg(),
+        &request,
+        &migrations,
+        Approval::Approved,
+        APP,
+        &zero_migrate::SqliteDescriptorGuard::new(),
+    )
+    .await
+    .expect_err("a replace carries no faithful inverse, so the rollback must refuse");
+
+    assert!(
+        matches!(&error, RollbackError::Irreversible { .. }),
+        "the refusal must name irreversibility rather than failing for some other reason: {error:?}"
+    );
+
+    // The point of refusing: the view is untouched. A rollback that ran would have
+    // removed it.
+    assert!(
+        view_exists(&be, VIEW).await,
+        "a refused rollback must leave the view standing"
     );
 }
