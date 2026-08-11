@@ -256,15 +256,19 @@ if [ "${#DEV_ENV[@]}" -gt 0 ]; then
 else
   ( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 fi
-for _ in $(seq 1 25); do
-  curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
-    "http://localhost:$DEV_PORT/__zeroship/v1/err.ok" -d '{"json":{}}' && break
-  sleep 2
-done
-curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
-  "http://localhost:$DEV_PORT/__zeroship/v1/err.ok" -d '{"json":{}}' \
-  && pass "dev app reachable on :$DEV_PORT" \
-  || { fail "dev app never came up"; tail -30 "$WORK/dev.log"; exit 1; }
+# Readiness: a deadline plus a log-derived diagnosis, not a fixed 25 x 2s count
+# sized on an idle machine (#273). This harness already sources e2e_stack.sh
+# above, after its own port block, so the helper is in scope here.
+_dev_ping() {
+  curl -sf -o /dev/null -m 5 -X POST -H 'content-type: application/json' \
+    "http://localhost:$DEV_PORT/__zeroship/v1/err.ok" -d '{"json":{}}'
+}
+if stack_wait_dev "dev app" "$WORK/dev.log" _dev_ping; then
+  pass "dev app reachable on :$DEV_PORT"
+else
+  fail "dev app never became ready -- see the diagnosis and log tail above"
+  exit 1
+fi
 
 RAWFILE="$WORK/dev.raw"; : > "$RAWFILE"
 probe "http://localhost:$DEV_PORT" > "$WORK/dev.txt" 2>&1

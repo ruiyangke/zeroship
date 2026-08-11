@@ -224,10 +224,17 @@ done
   cd "$APP" && env "$CANARY_KEY=$CANARY_VAL" "ZS_VAR_$CONTROL_KEY=$CONTROL_VAL" \
     ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
-for _ in $(seq 1 25); do
-  [ "$(probe "http://localhost:$DEV_PORT" "$WORK/dev.json")" = "200" ] && break
-  sleep 2
-done
+# Readiness: a deadline plus a log-derived diagnosis, not a fixed 25 x 2s count
+# sized on an idle machine (#273). This harness sources e2e_stack.sh at line
+# 121, after its own port block at 79, so the helper is in scope and the
+# library's `: "${CONTROL_PORT:=9120}"` defaults are already no-ops.
+#
+# The probe is this harness's own `probe`, unchanged -- it prints the HTTP code
+# and writes the body to dev.json -- wrapped so a 200 is an exit status the
+# waiter can read. The final DEV_CODE call below is deliberately kept: it is
+# what the assertion reports, and re-reading it costs one request.
+_dev_ping() { [ "$(probe "http://localhost:$DEV_PORT" "$WORK/dev.json")" = "200" ]; }
+stack_wait_dev "dev app" "$WORK/dev.log" _dev_ping || true
 DEV_CODE="$(probe "http://localhost:$DEV_PORT" "$WORK/dev.json")"
 [ "$DEV_CODE" = "200" ] && pass "dev app reachable on :$DEV_PORT (HTTP $DEV_CODE)" \
   || { fail "dev app never came up (HTTP $DEV_CODE)"; tail -30 "$WORK/dev.log"; exit 1; }
