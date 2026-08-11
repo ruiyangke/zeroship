@@ -137,6 +137,8 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
     let url = skip_if_no_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("uuid_v4_{}", token());
+    // Dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
     let table = "samples";
     session
         .batch(&format!("CREATE SCHEMA \"{schema}\""))

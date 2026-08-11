@@ -183,6 +183,8 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
     let url = skip_if_no_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = pg_token();
+    // Dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
     session
         .batch(&format!("CREATE SCHEMA \"{schema}\""))
         .await

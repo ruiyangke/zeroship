@@ -807,6 +807,8 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
     let url = skip_if_no_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("typed_refs_{}", live_pg_token());
+    // Dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
     session
         .batch(&format!("CREATE SCHEMA \"{schema}\""))
         .await

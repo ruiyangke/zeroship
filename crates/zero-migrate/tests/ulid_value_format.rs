@@ -279,6 +279,8 @@ async fn postgres_enforces_ulid_fixtures_order_and_case_distinction() {
     let url = skip_if_no_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("ulid_{}", token());
+    // Dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
     session
         .batch(&format!("CREATE SCHEMA \"{schema}\""))
         .await

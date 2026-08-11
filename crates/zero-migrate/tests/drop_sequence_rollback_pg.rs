@@ -166,6 +166,11 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
     );
     let quoted_schema = quote_ident(&cfg.project_schema);
     let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    // Both schemas, dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await
@@ -262,6 +267,11 @@ async fn a_guarded_sequence_drop_keeps_no_inverse() {
     );
     let quoted_schema = quote_ident(&cfg.project_schema);
     let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    // Both schemas, dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await

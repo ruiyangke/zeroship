@@ -153,6 +153,11 @@ async fn rolling_back_a_dropped_schema_restores_it() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
     let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    // Both schemas, dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     let quoted_target = quote_ident(&target);
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -242,6 +247,11 @@ async fn a_cascading_schema_drop_keeps_no_inverse() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
     let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    // Both schemas, dropped on an unwind that skips the explicit cleanup below.
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     let quoted_target = quote_ident(&target);
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

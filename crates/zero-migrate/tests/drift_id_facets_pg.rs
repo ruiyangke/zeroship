@@ -495,6 +495,18 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);
+    // The same four schemas the explicit cleanup below removes, dropped on an unwind
+    // that never reaches it. The three shadows are created inside later blocks, so
+    // their names are derived once here rather than guarded where they appear.
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [
+            schema.clone(),
+            format!("{schema}_clean_shadow"),
+            format!("{schema}_reference_shadow"),
+            format!("{schema}_shadow"),
+        ],
+    );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await
