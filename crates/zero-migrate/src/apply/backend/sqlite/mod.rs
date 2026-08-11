@@ -492,7 +492,11 @@ impl MigrationBackend for SqliteBackend {
                 self.project_lock_path.display()
             )));
         }
-        let timeout = Duration::from_millis(cfg.lock_timeout_ms());
+        // The project-lock budget, NOT the DDL budget. Queueing behind a peer
+        // deploy is not competing with live application traffic, so tightening
+        // `lock_timeout` to protect that traffic must not shorten how long this
+        // deploy is willing to wait for its turn.
+        let timeout = Duration::from_millis(cfg.project_lock_timeout_ms());
         let started = Instant::now();
         loop {
             match self.project_lock.try_lock() {
@@ -500,7 +504,7 @@ impl MigrationBackend for SqliteBackend {
                 Err(std::fs::TryLockError::WouldBlock) if started.elapsed() >= timeout => {
                     return Err(ApplyError::Backend(format!(
                         "timed out after {} ms acquiring sqlite project lock {}",
-                        cfg.lock_timeout_ms(),
+                        cfg.project_lock_timeout_ms(),
                         self.project_lock_path.display()
                     )));
                 }
@@ -1221,7 +1225,7 @@ mod lock_tests {
             .expect("second backend");
         let mut cfg =
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
-        cfg.pg.lock_timeout = Duration::from_millis(25);
+        cfg.pg.project_lock_timeout = Duration::from_millis(25);
 
         first.acquire_project_lock(&cfg).await.expect("first lock");
         let started = Instant::now();
@@ -1233,6 +1237,46 @@ mod lock_tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "lock acquisition must remain bounded"
+        );
+        first.release_project_lock(&cfg).await.expect("release");
+    }
+
+    /// The project-lock wait is its own budget, not the DDL one. An operator who
+    /// tightens `lock_timeout` to keep a blocking statement off live traffic must
+    /// not thereby shorten how long a deploy queues behind a peer deploy - the two
+    /// numbers answer different questions, and 3 seconds is shorter than many real
+    /// migrations.
+    #[compio::test]
+    async fn the_project_lock_wait_is_not_bounded_by_the_ddl_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join("app.sqlite");
+        let first =
+            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
+        let second = SqliteBackend::open(&app, &dir.path().join("journal-b.sqlite"))
+            .expect("second backend");
+        let mut cfg =
+            ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
+        // A DDL budget far SHORTER than the project-lock budget. If the two are
+        // coupled the second acquire gives up after 25ms.
+        cfg.pg.lock_timeout = Duration::from_millis(25);
+        cfg.pg.project_lock_timeout = Duration::from_millis(300);
+
+        first.acquire_project_lock(&cfg).await.expect("first lock");
+        let started = Instant::now();
+        let error = second
+            .acquire_project_lock(&cfg)
+            .await
+            .expect_err("the second backend must still time out eventually");
+        let waited = started.elapsed();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            waited >= Duration::from_millis(150),
+            "the deploy queued for {waited:?}, which is the 25ms DDL budget rather than the \
+             300ms project-lock budget"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "still bounded by the project-lock budget, waited {waited:?}"
         );
         first.release_project_lock(&cfg).await.expect("release");
     }

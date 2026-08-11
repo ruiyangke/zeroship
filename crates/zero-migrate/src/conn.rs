@@ -75,6 +75,22 @@ pub struct PgConfinement {
     /// `timeout_ms`), so the conservative fail-fast default stays in force for
     /// every other migration in the same deploy.
     pub lock_timeout: Duration,
+    /// How long a deploy waits for the PROJECT lock another deploy already
+    /// holds. Separate from [`Self::lock_timeout`] because the two answer
+    /// different questions: `lock_timeout` is a DDL availability budget, bounding
+    /// how long ONE statement blocks live application traffic, so it is
+    /// deliberately short. This one bounds how long a whole deploy queues behind
+    /// a peer deploy, where the right answer is longer than most migrations take.
+    ///
+    /// Coupling them meant tightening the DDL budget to protect application
+    /// traffic also shortened the deploy queue, and 3 seconds is shorter than
+    /// many real migrations. The default matches the value MySQL already used for
+    /// this concept (`PROJECT_LOCK_TIMEOUT_SECS`, apply/backend/mysql/session.rs).
+    ///
+    /// Read by the SQLite application-file lock. PostgreSQL's `pg_advisory_lock`
+    /// takes no timeout and waits, which is the open question in the queue-versus-
+    /// fail-fast ticket rather than something this field decides.
+    pub project_lock_timeout: Duration,
     /// The least-privilege `migrator` role the apply flow runs each migration's
     /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the
     /// DB-privilege defense layer). `None` runs as the connecting
@@ -123,6 +139,10 @@ impl PgConfinement {
             // `lock_timeout` field doc for the full rationale.
             statement_timeout: Duration::from_secs(60),
             lock_timeout: Duration::from_secs(3),
+            // Ten seconds, matching the value MySQL already hardcoded for the
+            // same concept. A deploy queueing behind a peer is not competing with
+            // live application traffic, so it does not want the 3s DDL budget.
+            project_lock_timeout: Duration::from_secs(10),
             // Defaults to no SET ROLE; the platform sets this to the provisioned
             // deterministic per-project migrator role. Tests opt in explicitly.
             migrator_role: None,
@@ -392,11 +412,21 @@ impl ExecutorConfig {
         u64::try_from(self.pg.statement_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Lock-acquisition timeout in whole milliseconds. PostgreSQL sends this to
-    /// `SET lock_timeout`; SQLite uses it for the application-file lock.
+    /// Lock-acquisition timeout in whole milliseconds, sent to PostgreSQL as
+    /// `SET lock_timeout`. This is the DDL availability budget: how long one
+    /// statement may block live traffic. It does NOT bound how long a deploy
+    /// queues for the project lock - see [`Self::project_lock_timeout_ms`].
     #[must_use]
     pub fn lock_timeout_ms(&self) -> u64 {
         u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Project-lock wait budget in whole milliseconds - how long a deploy queues
+    /// behind a peer deploy holding the same project. Read by the SQLite
+    /// application-file lock.
+    #[must_use]
+    pub fn project_lock_timeout_ms(&self) -> u64 {
+        u64::try_from(self.pg.project_lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 }
 
