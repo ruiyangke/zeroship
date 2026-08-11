@@ -965,3 +965,93 @@ jobs:
             tail -120 "$f"
             echo "::endgroup::"
           done
+
+  # The billing & metering pipeline end to end: real gateway traffic -> worker
+  # platform counters + env.db primitive metrics -> Redpanda -> control's
+  # recompute -> usage_aggregates -> priced charge -> spend Block/Degrade ->
+  # Stripe invoice-item + finalize -> idempotent re-trigger. It is the only
+  # harness that walks the whole commercial chain, and until 2026-08-11 it ran
+  # in NO workflow.
+  #
+  # WHY IT IS WIRED NOW, and why it was not before: three things had to be true
+  # first, and none of them was.
+  #   eda51b973  its two env.db guards could not fail. One matched the STRING
+  #              "db_writes" anywhere in the response (the probe prints that
+  #              name regardless), the other had a bare `echo` for an else arm.
+  #              Both were green over a property that had never held.
+  #   e03f00353  the property itself was false: examples/metering-probe had no
+  #              migrations/, so env.db installed nothing and every insert
+  #              failed. db_writes now reaches usage_aggregates.
+  #   a70280f4c  under load the harness SILENTLY DROPPED an assertion (38 of
+  #              39, reported as "0 failed") because Postgres readiness was
+  #              keyed on pg_isready and the consequence hid behind `|| true`.
+  #   ae3943862  a floor on assertions that RAN, so the next such loss is a red
+  #              rather than a quiet 38.
+  # Wiring it before those would have put a hollow gate into CI.
+  #
+  # MEASURED AGAINST THE STANDARD THIS FILE ALREADY SETS for the
+  # dev-vs-deployed family - idle AND against 12 busy cores, because a
+  # GitHub-hosted runner is 2-4 shared vCPUs and "green on an idle 16-core
+  # workstation" is not the question CI asks:
+  #     idle          39 passed, 0 failed
+  #     12 busy cores 39 passed, 0 failed   (38 before a70280f4c - the criterion
+  #                                          caught a real defect on first use)
+  #
+  # Postgres and Redpanda are BOTH started by the harness itself (it docker-runs
+  # its own `zs-e2e-billing-pg` and `zs-e2e-billing-redpanda` on a dedicated
+  # port band), so this job provisions neither. That is also why there is no
+  # `services:` block: the harness reaches its containers by NAME through
+  # `docker exec`, and GitHub generates the name of a `services:` container -
+  # the same reason golden-path and billing-gate start theirs as steps.
+  billing-pipeline-e2e:
+    runs-on: ubuntu-latest
+    # A bound for the reason golden-path carries one: a service that never binds
+    # hangs rather than fails and would otherwise burn the 6h default. The
+    # harness itself took ~4 min on a 16-core box and ~5 min under 12-core load;
+    # 60 minutes is well clear of that plus a cold Rust build on a 2-vCPU runner.
+    #
+    # NOT a retry, deliberately. A flaky step is a defect to diagnose; re-running
+    # until green is how a real intermittent failure becomes invisible.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      # lsof because the harness frees its port band with `lsof -ti :$PORT`
+      # before binding; without it a stale listener is not cleared and the
+      # failure reads as a service that would not start.
+      - name: Install harness prerequisites
+        run: sudo apt-get update && sudo apt-get install -y lsof postgresql-client
+      - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/ and the vite-plugin imports it, so it
+      # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.
+      - run: pnpm --filter zero-migrate build
+      # `pnpm build` before cargo is load-bearing: the runtime crate
+      # include_str!s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      - run: pnpm build
+      # zeroship-migrated is in this list because e03f00353 wired a migration
+      # apply into the harness - the probe is migration-first now, and without
+      # that binary its env.db has no table.
+      - name: Build the release binaries the harness starts
+        run: |
+          cargo build --release -p zeroship-control -p zeroship-worker \
+            -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
+          cargo build --release -p zeroship-migrate-adapter \
+            --features platform-cli --bin zeroship-platform-migrate
+      # The harness refuses to start without a built probe and says so; building
+      # it here rather than letting that refusal read as a CI misconfiguration.
+      - name: Build the metering probe
+        run: pnpm --filter metering-probe build
+      # `set -o pipefail` before the tee for the reason the rust job documents:
+      # GitHub's default shell is `bash -e` WITHOUT pipefail, so `script | tee`
+      # reports tee's status and a failing harness would sail through as a pass.
+      - name: Billing and metering pipeline (traffic -> usage -> charge -> invoice)
+        run: |
+          set -o pipefail
+          tests/e2e_metering_billing.sh 2>&1 | tee "$RUNNER_TEMP/billing-pipeline.log"
