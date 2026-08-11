@@ -194,6 +194,12 @@ services:
       PROVISION_DATABASE_URL: postgres://postgres:zeroship@postgres:5432/zeroship
       ZEROSHIP_CONTROL_KEY: platform-key
       ZEROSHIP_MASTER_KEY: master-key
+      # control ALSO needs WORKER_KEY: deploy/ops/zeroship.toml:63 maps
+      # `worker_key` to this env var, and crates/control/src/main.rs:878
+      # refuses to start without it. It was set on gateway and worker only,
+      # so control crash-looped with `secret reference env var
+      # 'ZEROSHIP_WORKER_KEY' is not set`. MUST match the worker's value.
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
       # byte-identical on control + gateway — both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
@@ -288,14 +294,14 @@ services:
       # `--worker-key` MUST match the worker's WORKER_KEY.
       ZEROSHIP_DATABASE_URL: postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship
       ZEROSHIP_CONTROL_KEY: platform-key
-      ZEROSHIP_WORKER_KEY: worker-key
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
       # OAuth2 client_secret for the `gateway` client. The gateway exchanges
       # this on the per-app OIDC code-exchange (Phase 3 §10.2).
       GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
       # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
-      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
+      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-signing-key-not-for-production}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST equal the
       # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
       # rotate without a per-app `pws_` migration.
@@ -377,7 +383,7 @@ services:
       # from control/gateway roles under the same shared `database_url` reference.
       ZEROSHIP_DATABASE_URL: postgres://postgres:zeroship@postgres:5432/zeroship
       ZEROSHIP_CONTROL_KEY: platform-key
-      ZEROSHIP_WORKER_KEY: worker-key
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
