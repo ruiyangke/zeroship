@@ -374,6 +374,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
     charter_layers: &[&str],
     snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
+    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
     let effective = effective_policy_from_charter_layers(charter_layers)?;
@@ -385,16 +386,24 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
     let mut artifacts = Vec::with_capacity(envelope_json.len());
 
     for envelope in envelope_json {
-        let effective_registry = serde_json::to_string(&registry)
-            .map_err(|e| format!("effective ownership registry failed to serialize: {e}"))?;
-        let (artifact, _resolved) = lower_envelope_to_plan_with_live_and_resolved_ir(
+        let raw: MigrationIr = serde_json::from_str(envelope)
+            .map_err(|error| format!("envelope is not a MigrationIr document: {error}"))?;
+        // Rollback replays history that is already applied, so a rename in it may
+        // have been contracted away since. Same recovery the apply and status
+        // lowerings use, and the same unconditional journal-evidence gate.
+        let (artifact, _resolved) = lower_envelope_recovering_historical_renames(
             envelope,
+            &raw.ops,
             owner_app,
             project_schema,
-            dialect_name(dialect),
-            &effective_registry,
+            dialect,
+            &registry,
             charter_layers,
             &live,
+            journal_entries,
+            resolved_contracts,
+            &effective,
+            false,
         )?;
 
         let contributed = executed_history_ops(&artifact, journal_entries)?;
@@ -574,85 +583,20 @@ fn lower_ordered_envelopes_to_plans_inner(
     for envelope in envelope_json {
         let raw: MigrationIr = serde_json::from_str(envelope)
             .map_err(|error| format!("envelope is not a MigrationIr document: {error}"))?;
-        let historical_contracts: Vec<_> = resolved_contracts
-            .iter()
-            .filter(|terminal| {
-                terminal.contract.owner_app.as_deref() == Some(owner_app)
-                    && ops_contain_contract_rename(&raw.ops, dialect, &terminal.contract)
-            })
-            .collect();
-        let effective_registry = serde_json::to_string(&registry)
-            .map_err(|e| format!("effective ownership registry failed to serialize: {e}"))?;
-        let initial = lower_envelope_to_plan_with_live_and_resolved_ir(
+        let (artifact, resolved) = lower_envelope_recovering_historical_renames(
             envelope,
+            &raw.ops,
             owner_app,
             project_schema,
-            dialect_name(dialect),
-            &effective_registry,
+            dialect,
+            &registry,
             charter_layers,
             &live,
-        );
-        let (artifact, resolved) = match initial {
-            Ok(lowered) => lowered,
-            Err(original_error)
-                if dialect == SqlDialect::Postgres
-                    && (is_historical_rename_lower_error(&original_error)
-                        || !historical_contracts.is_empty()) =>
-            {
-                // A rename that has already expanded legitimately sees both old
-                // and new columns; after contract completion it sees only the new
-                // column. Reconstruct the pre-rename catalog view solely for
-                // status lowering, then require journal evidence for the derived
-                // plan before accepting it. A genuinely fresh collision or absent
-                // source therefore still returns the original fail-closed error.
-                let mut historical_live = live.clone();
-                if !normalize_historical_renames(
-                    &mut historical_live,
-                    &raw.ops,
-                    dialect,
-                    project_schema,
-                    owner_app,
-                    resolved_contracts,
-                    &effective,
-                )? {
-                    return Err(original_error);
-                }
-                let mut historical_registry = registry.clone();
-                for terminal in historical_contracts {
-                    historical_registry
-                        .insert(terminal.contract.table.clone(), owner_app.to_string());
-                }
-                let historical_registry_json = serde_json::to_string(&historical_registry)
-                    .map_err(|error| {
-                        format!("historical ownership registry failed to serialize: {error}")
-                    })?;
-                let lowered = lower_envelope_to_plan_with_live_and_resolved_ir(
-                    envelope,
-                    owner_app,
-                    project_schema,
-                    dialect_name(dialect),
-                    &historical_registry_json,
-                    charter_layers,
-                    &historical_live,
-                )?;
-                if strict_historical_apply {
-                    validate_historical_apply_evidence(
-                        &lowered.0,
-                        &live,
-                        journal_entries,
-                        resolved_contracts,
-                    )
-                    .map_err(|evidence_error| {
-                        format!("{original_error}; historical replay refused: {evidence_error}")
-                    })?;
-                }
-                if plan_has_no_journal_evidence(&lowered.0, journal_entries)? {
-                    return Err(original_error);
-                }
-                lowered
-            }
-            Err(error) => return Err(error),
-        };
+            journal_entries,
+            resolved_contracts,
+            &effective,
+            strict_historical_apply,
+        )?;
 
         let projection_ops = ops_without_completed_journal_evidence(&artifact, journal_entries)?;
         if !projection_ops.is_empty() {
@@ -897,6 +841,126 @@ pub fn validate_historical_apply_evidence(
         return Err("historical apply fallback derived no PostgreSQL online rename".to_string());
     }
     Ok(())
+}
+
+/// Lower one envelope, recovering when a PostgreSQL rename it carries has already
+/// been contracted away.
+///
+/// After a rename completes, the catalog holds only the destination column, so
+/// lowering the same op again fails looking for the source. That is correct for a
+/// fresh migration and wrong for one already in the history, which both the status
+/// and rollback paths replay. The recovery rebuilds the pre-rename view, retries
+/// against it, and then has to prove the result describes something that really ran.
+///
+/// TWO gates stand between the reconstruction and an accepted plan, and only one of
+/// them is optional:
+///
+/// - `validate_historical_apply_evidence` runs only under `strict_historical_apply`.
+///   Apply asks for it; it is a stronger check layered on top.
+/// - `plan_has_no_journal_evidence` runs for EVERY caller. It is what backs
+///   [`normalize_historical_renames`]'s promise that a reconstruction is accepted
+///   only when the derived plan already has journal evidence, and it is the reason a
+///   new caller inherits that promise by construction rather than by argument.
+///
+/// Shared rather than copied into each loop: two gates duplicated across two call
+/// sites is how one copy later loses one, and the one that would go missing is the
+/// unconditional one, because it reads like a detail next to the flagged check above
+/// it.
+#[allow(clippy::too_many_arguments)]
+fn lower_envelope_recovering_historical_renames(
+    envelope: &str,
+    raw_ops: &[Op],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: SqlDialect,
+    registry: &BTreeMap<String, String>,
+    charter_layers: &[&str],
+    live: &LiveSchema,
+    journal_entries: &[AppliedEntry],
+    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    effective: &EffectivePolicy,
+    strict_historical_apply: bool,
+) -> Result<(LoweredArtifact, MigrationIr), String> {
+    let historical_contracts: Vec<_> = resolved_contracts
+        .iter()
+        .filter(|terminal| {
+            terminal.contract.owner_app.as_deref() == Some(owner_app)
+                && ops_contain_contract_rename(raw_ops, dialect, &terminal.contract)
+        })
+        .collect();
+    let registry_json = serde_json::to_string(registry)
+        .map_err(|e| format!("effective ownership registry failed to serialize: {e}"))?;
+
+    let initial = lower_envelope_to_plan_with_live_and_resolved_ir(
+        envelope,
+        owner_app,
+        project_schema,
+        dialect_name(dialect),
+        &registry_json,
+        charter_layers,
+        live,
+    );
+
+    match initial {
+        Ok(lowered) => Ok(lowered),
+        Err(original_error)
+            if dialect == SqlDialect::Postgres
+                && (is_historical_rename_lower_error(&original_error)
+                    || !historical_contracts.is_empty()) =>
+        {
+            // A rename that has already expanded legitimately sees both old and new
+            // columns; after contract completion it sees only the new column.
+            // Reconstruct the pre-rename catalog view, then require journal evidence
+            // for the derived plan before accepting it. A genuinely fresh collision
+            // or absent source therefore still returns the original fail-closed
+            // error.
+            let mut historical_live = live.clone();
+            if !normalize_historical_renames(
+                &mut historical_live,
+                raw_ops,
+                dialect,
+                project_schema,
+                owner_app,
+                resolved_contracts,
+                effective,
+            )? {
+                return Err(original_error);
+            }
+            let mut historical_registry = registry.clone();
+            for terminal in historical_contracts {
+                historical_registry.insert(terminal.contract.table.clone(), owner_app.to_string());
+            }
+            let historical_registry_json =
+                serde_json::to_string(&historical_registry).map_err(|error| {
+                    format!("historical ownership registry failed to serialize: {error}")
+                })?;
+            let lowered = lower_envelope_to_plan_with_live_and_resolved_ir(
+                envelope,
+                owner_app,
+                project_schema,
+                dialect_name(dialect),
+                &historical_registry_json,
+                charter_layers,
+                &historical_live,
+            )?;
+            if strict_historical_apply {
+                validate_historical_apply_evidence(
+                    &lowered.0,
+                    live,
+                    journal_entries,
+                    resolved_contracts,
+                )
+                .map_err(|evidence_error| {
+                    format!("{original_error}; historical replay refused: {evidence_error}")
+                })?;
+            }
+            if plan_has_no_journal_evidence(&lowered.0, journal_entries)? {
+                return Err(original_error);
+            }
+            Ok(lowered)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn is_historical_rename_lower_error(error: &str) -> bool {

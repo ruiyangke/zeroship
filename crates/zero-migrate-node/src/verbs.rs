@@ -563,6 +563,7 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
             &charter_refs,
             snapshot,
             &journal_entries,
+            &resolved_contracts,
         )?;
         let set = rollback_migration_set(&artifacts)?;
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);
