@@ -255,6 +255,56 @@ done
 GBS="$WORK/gateway-broker-secret"
 printf '%s' "wfadvz-gateway-broker-secret-32-bytes-minimum-ok" > "$GBS"; chmod 0600 "$GBS"
 
+# --- provision the workflow scheduler store, using the SHIPPED provisioner ----
+# Every arm below starts a run, and the workflow instance API writes through
+# `workflow_scheduler.inflight`. That schema is created by
+# `WorkflowSchedulerStore::provision()` (crates/workflow-scheduler/src/store.rs),
+# whose only non-test callers are control's workflow CRON loops
+# (crates/control/src/cron/workflow_engine.rs). The platform migrations do NOT
+# create it - `grep -rln workflow_scheduler db/migrations-ts/` finds nothing.
+#
+# This harness runs control with `--disable-workflow-engine`, which
+# crates/control/src/main.rs maps to workflow_scan/reaper/sweeps = false. So it
+# disabled the only thing that provisions the store it needs, and MEASURED
+# 2026-08-11 the first run creation died:
+#
+#   create_run HTTP 500 ({"error":"internal error"})
+#   control.log: SqlState(E42P01) relation "workflow_scheduler.inflight" does not exist
+#   FAIL create_run HTTP 500 and NO queued run row exists -> pre-commit failure
+#
+# THE ENGINE STAYS OFF, and that is not fussiness. Arm A's verdict is state
+# mutation ATTRIBUTED to the unauthenticated call - `state=completed` or
+# `steps > pre-steps`. A live engine advances runs on its own schedule, so the
+# mutation could no longer be attributed to the exploit and the probe would
+# measure nothing. Hence: boot control once WITH the engine purely to let it
+# provision, wait for the relation to appear, stop it, then boot the real one.
+#
+# The wait is on the CATALOG, not on a sleep, and the DDL is not restated here -
+# duplicating it would make this harness a second expression of the schema and
+# put the two out of step the first time the real one changed.
+"$BIN/zeroship-control" \
+  --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
+  --gateway-url "http://localhost:$GATE_PORT" --dev-insecure \
+  > "$WORK/control-provision.log" 2>&1 &
+PROVISION_PID=$!
+PROVISIONED=0
+for _ in $(seq 1 60); do
+  if [ "$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At \
+        -c "SELECT to_regclass('workflow_scheduler.inflight') IS NOT NULL;" 2>/dev/null)" = "t" ]; then
+    PROVISIONED=1; break
+  fi
+  sleep 1
+done
+kill "$PROVISION_PID" 2>/dev/null || true
+wait "$PROVISION_PID" 2>/dev/null || true
+if [ "$PROVISIONED" = "1" ]; then
+  pass "workflow_scheduler store provisioned by control's own engine, which is now stopped"
+else
+  fail "workflow_scheduler.inflight never appeared; every arm would die at create_run"
+  tail -30 "$WORK/control-provision.log"
+  exit 1
+fi
+
 "$BIN/zeroship-control" \
   --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$GATE_PORT" --dev-insecure \
