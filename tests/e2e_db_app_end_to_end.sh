@@ -419,6 +419,40 @@ done
 echo "    usage_aggregates: requests=$REQ db_reads=$DBR db_writes=$DBW db_rows_written=$DBROWS"
 echo "    driver-side truth:  app requests=$APP_REQUESTS ($READY_TRIES readiness + $N_REQ), Postgres rows=$ROW_COUNT"
 
+# EVERY metric that reached the table, not only the four this stage names.
+# The billing seed above declares eight, five of them platform counters, and
+# nothing here had ever looked at whether the other four ARRIVE. A counter that
+# never lands cannot be billed no matter what the plan prices it at, and the
+# seed deliberately weights cpu_us/wall_us/ingress_bytes/egress_bytes at 0
+# units_per_op to keep the charge arithmetic simple -- which means a zero
+# charge is exactly what a missing counter also produces.
+echo "    all metrics that landed for this app:"
+psql_exec -tA -F' ' -c "SELECT metric, SUM(total) FROM zeroship.usage_aggregates WHERE app_id='$APP' GROUP BY metric ORDER BY metric" 2>/dev/null | sed 's/^/      /'
+
+# A COUNTER THAT STOPS ARRIVING IS INVISIBLE HERE, which is why this exists.
+# The seed weights cpu_us/wall_us/egress_bytes at 0 units_per_op to keep the
+# charge arithmetic simple, so a vanished counter moves neither the charge nor
+# any assertion above it. In production those weights are not zero.
+#
+# ingress_bytes is EXCLUDED, and this is measured rather than assumed. It is
+# request BODY bytes (`crates/worker/src/handler.rs:336`,
+# `ingress_bytes = request_body.len()`), this harness drives only bodyless
+# GETs, and `crates/metering/src/meter.rs` `push_metric` skips a zero value, so
+# no row is ever written. Absent is CORRECT here, not a defect -- I checked
+# before filing it as one. `tests/e2e_metering_billing.sh:445` already asserts
+# it present and non-zero on traffic that carries a body.
+#
+# MEASURED 2026-08-11, one run: cpu_us=15090 wall_us=5175687 egress_bytes=3129
+# requests=32, and no ingress_bytes row at all.
+PLATFORM_MISSING=""
+for m in requests cpu_us wall_us egress_bytes; do
+  v="$(usage_of "$m")"
+  { [ -n "$v" ] && [ "$v" -gt 0 ]; } 2>/dev/null || PLATFORM_MISSING="$PLATFORM_MISSING $m"
+done
+[ -z "$PLATFORM_MISSING" ] \
+  && pass "all four body-independent platform counters reached usage_aggregates (requests, cpu_us, wall_us, egress_bytes)" \
+  || { fail "platform counters missing or zero:$PLATFORM_MISSING"; tail -50 "$WORK/control.log"; exit 1; }
+
 # TWO-SIDED, AND AGAINST AN INDEPENDENT SOURCE. What stood here was
 # `DBR >= N_REQ && DBW >= N_REQ`: a floor, and one whose ceiling nothing
 # supplied. A worker that counted every db op TWICE satisfied it, and so did
