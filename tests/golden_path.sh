@@ -21,6 +21,38 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+
+# A MISSING TOOL MUST SAY SO, not fail somewhere in the middle.
+#
+# This file had no prerequisite check at all, and its failures on a missing tool
+# are actively misleading rather than merely unhelpful: `tar --zstd -xOf ...
+# 2>/dev/null` (:289 and two more) swallows the error and yields an EMPTY
+# manifest, so absent zstd reads as a malformed artifact. The CI job installs
+# only lsof, zstd and postgresql-client, so the set below is not hypothetical -
+# it is the difference between "install zstd" and an afternoon on a phantom
+# bundle defect.
+#
+# The list is MEASURED, by enumerating the commands this file invokes in
+# pipeline-head position, not guessed. Coreutils (grep/awk/sed/cut/xargs/paste)
+# are deliberately excluded: checking things that cannot be missing is noise
+# that trains readers to skip the check.
+#
+# jq is NOT here on purpose. Its only use is inside step 3's `if [ -n "$TOKEN" ]`
+# branch, which CI never takes, so requiring it up front would refuse to run a
+# harness that does not need it. It is checked at that branch instead.
+#
+# exit 2, matching the convention at :241 and :253 - "could not run" is a
+# distinct outcome from "ran and something failed", and must not be counted as
+# either a pass or a failure.
+gp_missing=""
+for _t in docker curl node pnpm lsof tar openssl zstd; do
+  command -v "$_t" >/dev/null 2>&1 || gp_missing="$gp_missing $_t"
+done
+if [ -n "$gp_missing" ]; then
+  echo "FAIL: golden_path cannot run - missing required tool(s):$gp_missing" >&2
+  echo "      Nothing was asserted. This is not a pass and not a failure." >&2
+  exit 2
+fi
 # Dedicated, freshly-migrated DB per run (isolated from the shared `zeroship`
 # db) so the run is self-contained + reproducible and never re-provisions a
 # stale app.
@@ -743,6 +775,16 @@ fi
 step 3 "Create app + deploy"
 TOKEN="${ZEROSHIP_TOKEN:-}"
 if [ -n "$TOKEN" ]; then
+  # Scoped prerequisite: jq is used ONLY on this arm, so it is checked here
+  # rather than in the top-of-file list. Without it the two `jq -r` calls below
+  # print nothing, APP_ID comes out empty, and the harness reports
+  # "create app: <the full JSON body>" - a message that points at the server
+  # response when the actual fault is a missing tool on this machine.
+  command -v jq >/dev/null 2>&1 || {
+    echo "FAIL: ZEROSHIP_TOKEN is set, which selects the PAT arm, but jq is not installed." >&2
+    echo "      Install jq, or unset ZEROSHIP_TOKEN to use the dev-provision arm." >&2
+    exit 2
+  }
   APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $TOKEN" -d "{\"name\":\"$APP_NAME\"}")
   APP_ID=$(echo "$APP" | jq -r '.id'); API_KEY=$(echo "$APP" | jq -r '.api_key')
