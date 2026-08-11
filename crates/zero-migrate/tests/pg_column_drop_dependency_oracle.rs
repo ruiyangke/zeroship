@@ -28,41 +28,26 @@
 mod support;
 
 use zero_migrate::driver::SqlSession;
+use zero_migrate::{ExecutorConfig, MigrationBackend, PostgresBackend};
 
-/// Refuse iff a NORMAL dependency exists that the same object does NOT also hold an
-/// AUTO edge for, or an AUTO dependency from an index that a constraint internally
-/// owns exists WITHOUT the constraint itself depending on the column.
+/// The shipped predicate's own answer for one column: the blockers it would name, and
+/// whether naming any of them means refusal.
 ///
-/// The AUTO qualifier on the NORMAL leg is what a CHECK constraint needs: it reports
-/// BOTH edges on its column, and the AUTO one is PostgreSQL's own record that it will
-/// drop the constraint rather than block on it. A view's rewrite rule and a generated
-/// column's default report NORMAL alone and do block.
-fn predicate_sql(table: &str) -> String {
-    format!(
-        "WITH dep AS (
-  SELECT d.deptype, d.classid, d.objid
-    FROM pg_attribute att
-    LEFT JOIN pg_depend d ON d.refobjid = att.attrelid AND d.refobjsubid = att.attnum
-                         AND d.refclassid = 'pg_class'::regclass
-   WHERE att.attrelid = '{table}'::regclass AND att.attname = $1
-     AND att.attnum > 0 AND NOT att.attisdropped
-)
-SELECT (
-  coalesce(bool_or(deptype = 'n' AND NOT EXISTS (
-    SELECT 1 FROM dep auto_edge
-     WHERE auto_edge.deptype = 'a'
-       AND auto_edge.classid = dep.classid
-       AND auto_edge.objid = dep.objid)), false)
-  OR (
-    coalesce(bool_or(deptype = 'a' AND classid = 'pg_class'::regclass
-      AND EXISTS (SELECT 1 FROM pg_depend i
-                   WHERE i.classid = 'pg_class'::regclass AND i.objid = dep.objid
-                     AND i.deptype = 'i' AND i.refclassid = 'pg_constraint'::regclass)), false)
-    AND NOT coalesce(bool_or(deptype = 'a' AND classid = 'pg_constraint'::regclass), false)
-  )
-) AS refuse
-FROM dep"
-    )
+/// This calls `PostgresBackend::blocking_column_dependents` rather than re-spelling its
+/// SQL. An earlier version of this test carried a second copy of the query, which made
+/// the agreement it reported an agreement about the COPY: the shipped function's doc
+/// comment said so outright, that changing the query here would not fail the oracle. A
+/// measurement of code that never runs certifies nothing.
+async fn shipped_blockers(
+    session: &support::PgDevSession,
+    schema: &str,
+    column: &str,
+) -> Vec<String> {
+    let cfg = ExecutorConfig::new(schema.to_string(), schema, support::no_inject(schema));
+    PostgresBackend::new_generic(session)
+        .blocking_column_dependents(&cfg, "t", column)
+        .await
+        .unwrap_or_else(|e| panic!("blocking_column_dependents for {column}: {e}"))
 }
 
 /// One column per dependent shape, and what the server is expected to do with it.
@@ -107,6 +92,20 @@ const SHAPES: &[(&str, bool)] = &[
     ("chk_single", false),
     ("chk_multi_a", false),
     ("chk_multi_b", false),
+    // Two SEPARATE exclusions on one column: one reading it only through an
+    // expression, one naming it plainly. Each is already covered alone - `excl_expr`
+    // refuses, `excl_plain` allows - and `excl_mixed` covers both readings inside ONE
+    // constraint, which allows. This is the composition none of them reach, and the
+    // server refuses it: the plain constraint drops with the column, but the
+    // expression-only constraint's index still reads it and nothing may drop that
+    // index on its own.
+    //
+    // It is the shape that shows the difference between "some constraint on this
+    // column also depends on it directly" and "the constraint OWNING THE BLOCKING
+    // INDEX also depends on it directly". Only the second is the question worth
+    // asking, and `excl_mixed` cannot tell them apart because there the two are the
+    // same constraint.
+    ("excl_sep", true),
 ];
 
 #[compio::test]
@@ -138,6 +137,7 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                chk_single int CHECK (chk_single > 0),
                chk_multi_a int, chk_multi_b int,
                CONSTRAINT c_multi CHECK (chk_multi_a > 0 AND chk_multi_b > 0),
+               excl_sep text,
                plain int
              );
              CREATE VIEW {schema}.v AS SELECT view_src FROM {schema}.t;
@@ -149,6 +149,10 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
                EXCLUDE USING btree (excl_mixed WITH =, lower(excl_mixed) WITH =);
              ALTER TABLE {schema}.t ADD CONSTRAINT c_pred
                EXCLUDE USING btree (excl_pred_key WITH =) WHERE (excl_pred IS NOT NULL);
+             ALTER TABLE {schema}.t ADD CONSTRAINT c_sep_expr
+               EXCLUDE USING btree (lower(excl_sep) WITH =);
+             ALTER TABLE {schema}.t ADD CONSTRAINT c_sep_plain
+               EXCLUDE USING btree (excl_sep WITH =);
              CREATE INDEX i_pred ON {schema}.t (idx_key) WHERE (idx_pred > 0);
              CREATE INDEX i_expr ON {schema}.t ((idx_expr + 1))"
         ))
@@ -158,13 +162,9 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
     let table = format!("{schema}.t");
     let mut checked = 0usize;
     for (column, expected_refusal) in SHAPES {
-        // What the predicate the gate will use says.
-        let predicted = session
-            .query_one(&predicate_sql(&table), &[(*column).into()])
-            .await
-            .unwrap_or_else(|e| panic!("predicate query for {column}: {e}"))
-            .try_get::<_, bool>("refuse")
-            .unwrap_or_else(|e| panic!("decode predicate for {column}: {e}"));
+        // What the shipped gate says, by running it.
+        let blockers = shipped_blockers(&session, &schema, column).await;
+        let predicted = !blockers.is_empty();
 
         // What PostgreSQL actually does. Rolled back so the next shape still has its
         // fixture, and so a column that DOES drop cannot remove a later dependent.
@@ -184,9 +184,8 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
         assert_eq!(
             predicted,
             refused,
-            "the catalog predicate disagrees with the server for {column}: predicted \
-             refuse={predicted}, actual refuse={refused}. A gate on this predicate would \
-             {} here",
+            "blocking_column_dependents disagrees with the server for {column}: it named \
+             {blockers:?}, actual refuse={refused}. The shipped gate would {} here",
             if predicted {
                 "reject a migration PostgreSQL accepts"
             } else {

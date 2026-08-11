@@ -270,19 +270,17 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         crate::apply::precondition::evaluate_all(self.conn, cfg, m).await
     }
 
-    /// The blocking-dependency predicate. The RULE below is MEASURED against a live
-    /// server by `tests/pg_column_drop_dependency_oracle.rs` (15 shapes, 15
-    /// agreements), which attempts a real drop per shape and compares.
+    /// The blocking-dependency predicate, MEASURED against a live server by
+    /// `tests/pg_column_drop_dependency_oracle.rs` (16 shapes, 16 agreements), which
+    /// calls THIS function and attempts a real drop per shape.
     ///
-    /// What that oracle checks is the RULE, not this query: it runs its own SQL
-    /// spelling of the same predicate, so the two are independently maintained
-    /// expressions of one rule and an edit here would not fail it. Change this query
-    /// and the oracle's `predicate_sql` together, or the agreement it reports stops
-    /// being about the code that ships.
+    /// The oracle used to run its own SQL spelling of the same rule, which made an
+    /// edit here invisible to it. It executes the shipped function now, so changing
+    /// this query is what the oracle reports on.
     ///
     /// Refuse iff a NORMAL dependency exists whose own object does NOT also hold an
-    /// AUTO edge on the column, or an AUTO dependency from an index a constraint
-    /// internally owns exists WITHOUT that constraint also depending on the column.
+    /// AUTO edge on the column, or an AUTO dependency comes from an index whose
+    /// OWNING constraint does not itself depend on the column.
     ///
     /// Both qualifiers are counterexamples the server supplied, not caution. "Any
     /// NORMAL dependency" is too NARROW for an EXCLUDE whose expression reads the
@@ -295,6 +293,13 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     /// directly" question answers both legs, which is why an exclusion naming the
     /// column both plainly and in an expression is droppable while the
     /// expression-only form is not.
+    ///
+    /// The second leg asks about the OWNING constraint specifically, read from the
+    /// internal edge's `refobjid`, rather than about any constraint on the column.
+    /// Two separate exclusions on one column - one expression-only, one plain -
+    /// otherwise cancel each other: the plain one supplies an unrelated AUTO
+    /// `pg_constraint` edge, the expression-only one's index still blocks, and the
+    /// uncorrelated form waved the drop through. That is the `excl_sep` shape.
     ///
     /// `pg_describe_object` renders each blocker the way PostgreSQL's own error
     /// DETAIL does, so the refusal names what the server would have named.
@@ -336,11 +341,12 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                          SELECT 1 FROM pg_depend i
                           WHERE i.classid = 'pg_class'::regclass AND i.objid = dep.objid
                             AND i.deptype = 'i' AND i.refclassid = 'pg_constraint'::regclass
-                       )
-                       AND NOT EXISTS (
-                         SELECT 1 FROM dep other
-                          WHERE other.deptype = 'a'
-                            AND other.classid = 'pg_constraint'::regclass
+                            AND NOT EXISTS (
+                              SELECT 1 FROM dep owner_edge
+                               WHERE owner_edge.deptype = 'a'
+                                 AND owner_edge.classid = 'pg_constraint'::regclass
+                                 AND owner_edge.objid = i.refobjid
+                            )
                        )
                      )
                   ORDER BY blocker",
