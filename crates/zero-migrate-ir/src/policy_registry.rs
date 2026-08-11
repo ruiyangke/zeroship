@@ -650,6 +650,74 @@ mod tests {
     }
 
     #[test]
+    fn every_enforced_knob_is_named_with_the_path_that_reads_it() {
+        // `Enforced` is what `bool_grant`, `posture_grant` and `bool_require` produce by
+        // default, so a knob added tomorrow claims enforcement without anyone deciding
+        // it does. The two tests above pin the DeclaredOnly and HostEnforced sets, which
+        // leaves Enforced as an unenumerated residual: a new knob nothing reads changes
+        // neither of those sets and passes both. That is the shape of the defect the
+        // classification was introduced to remove.
+        //
+        // Pinning the residual by name closes it. Adding a knob now fails here until
+        // someone writes it into this list, and the list is the place they have to state
+        // which path reads it.
+        //
+        // Two reader routes exist, and the second is why a grep for the constant
+        // under-reports. Keys marked (cap) are resolved generically through
+        // `knob_key_for_capability`, so they carry no direct reference outside this file
+        // and are still read on every op that names the capability.
+        let reg = builtin_registry();
+        let enforced = reg
+            .iter()
+            .filter(|d| d.enforcement == Enforcement::Enforced)
+            .map(|d| d.key.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            enforced,
+            [
+                KEY_ACCESS_GRANT,           // guard/mod.rs + (cap) Grant
+                KEY_ACCESS_POLICY,          // guard/mod.rs + (cap) Policy
+                KEY_ACCESS_RLS,             // guard/mod.rs + (cap) Rls
+                KEY_ACCESS_ROLE,            // guard/mod.rs, conn.rs + (cap) Role
+                KEY_CODE_EXTENSION,         // guard/mod.rs, policy_capability.rs
+                KEY_CODE_FUNCTION,          // (cap) Function
+                KEY_CODE_MATERIALIZED_VIEW, // (cap) MaterializedView
+                KEY_SAFETY_DESTRUCTIVE_OPS, // guard/mod.rs
+                KEY_SAFETY_REQUIRE_RLS,     // guard/mod.rs
+                KEY_SCHEMA_ALTER_INJECTED,  // guard/mod.rs
+                KEY_SCHEMA_CREATE_SCHEMA,   // guard/mod.rs + (cap) Schema
+                KEY_SCHEMA_CREATE_TABLE,    // guard/mod.rs, conn.rs
+                KEY_SCHEMA_CROSS_SCHEMA,    // guard/mod.rs
+                KEY_SCHEMA_PARTITION,       // (cap) Partition
+                KEY_SCHEMA_RENAME,          // guard/mod.rs
+                KEY_SQL_RAW,                // guard/mod.rs + (cap) RawSql
+                KEY_SQL_RAW_VIEW_BODY,      // (cap) RawViewBody
+            ]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect::<BTreeSet<_>>(),
+            "an Enforced knob must be listed here with the path that reads it - a new \
+             one defaults to Enforced and would otherwise advertise a control the \
+             engine never applies"
+        );
+        // The three classes account for the whole registry, so no knob can be added
+        // outside all of them.
+        let declared_only = reg
+            .iter()
+            .filter(|d| d.enforcement == Enforcement::DeclaredOnly)
+            .count();
+        let host_enforced = reg
+            .iter()
+            .filter(|d| d.enforcement == Enforcement::HostEnforced)
+            .count();
+        assert_eq!(
+            enforced.len() + declared_only + host_enforced,
+            reg.iter().count(),
+            "Enforced + DeclaredOnly + HostEnforced must cover every registered knob"
+        );
+    }
+
+    #[test]
     fn a_charter_raising_a_declared_only_knob_is_refused_at_load() {
         // The classification is not decoration: the loader's II.6 gate turns it into a
         // refusal, so an operator cannot author, compose and SEAL a policy advertising
