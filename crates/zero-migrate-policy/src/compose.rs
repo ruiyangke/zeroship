@@ -521,6 +521,23 @@ impl EffectivePolicy {
         }
     }
 
+    /// Refuse a composed policy that can create tables outside a mandatory inject's
+    /// scope, so the mandatory column cannot be escaped by creating elsewhere.
+    ///
+    /// The same question [`finalize_charter`] asks, asked of a policy composed the way
+    /// the product composes one. It had only the charter-algebra caller, and nothing
+    /// ships that, so a charter granting `schema.create_table` over everything beside a
+    /// mandatory inject scoped to one prefix composed clean.
+    ///
+    /// # Errors
+    /// [`ComposeError::CreatableEscapesMandatoryInject`], naming the inject scope the
+    /// creatable grant escaped.
+    pub fn check_creatable_escape(&self) -> Result<(), ComposeError> {
+        creatable_escape_scope(&self.layers).map_or(Ok(()), |inject_scope| {
+            Err(ComposeError::CreatableEscapesMandatoryInject { inject_scope })
+        })
+    }
+
     /// Crate-internal constructor from a LAYER STACK (top-first). Used by the
     /// `boundary::admit` trust-crossing to mint the layered `[draft] over [charter]`
     /// [`EffectivePolicy`] (H-4). Not public: an `EffectivePolicy` is only obtainable
@@ -1180,27 +1197,39 @@ pub fn finalize_charter(assembled: AssembledCharter) -> Result<Charter, Finalize
 /// EFFECTIVE `core.create_table` granted scope (across its layers) must be `⊑` every
 /// mandatory charter inject's scope.
 fn check_charter_creatable_lint(assembled: &AssembledCharter) -> Result<(), FinalizeError> {
+    creatable_escape_scope(&assembled.layers).map_or(Ok(()), |inject_scope| {
+        Err(FinalizeError::CreatableEscapesMandatoryInject { inject_scope })
+    })
+}
+
+/// The creatable-escape question, asked of a composed layer stack: is the effective
+/// `schema.create_table` scope contained by every MANDATORY inject's scope? Answers
+/// with the inject scope that was escaped, or `None` when nothing escapes.
+///
+/// ONE definition, deliberately, because two composition paths ask it. The charter
+/// algebra asks through [`finalize_charter`], and the layer fold the product runs asks
+/// through [`EffectivePolicy::check_creatable_escape`]. When the check lived in only one
+/// of them the other silently stopped enforcing it, which is the state this repairs.
+fn creatable_escape_scope(layers: &[Layer]) -> Option<String> {
     let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else {
-        return Ok(());
+        return None;
     };
-    // The charter's effective creatable scope: the ⊒-conservative join of each layer's
-    // granted create_table scope (over-approx is the fail-closed direction for a ⊑
-    // containment check — it can only turn a pass into a reject).
+    // The effective creatable scope: the ⊒-conservative join of each layer's granted
+    // create_table scope (over-approx is the fail-closed direction for a ⊑ containment
+    // check — it can only turn a pass into a reject).
     let mut creatable = Scope::Nothing;
-    for layer in &assembled.layers {
+    for layer in layers {
         if let Some(km) = layer.grants.keys.get(&create_key) {
-            let g =
-                km.granted_scope()
-                    .map_err(|_| FinalizeError::CreatableEscapesMandatoryInject {
-                        inject_scope: "<unrepresentable creatable scope>".to_string(),
-                    })?;
-            creatable = creatable.join(&g);
+            let Ok(granted) = km.granted_scope() else {
+                return Some("<unrepresentable creatable scope>".to_string());
+            };
+            creatable = creatable.join(&granted);
         }
     }
     if matches!(creatable, Scope::Nothing) {
-        return Ok(());
+        return None;
     }
-    for layer in &assembled.layers {
+    for layer in layers {
         for rule in &layer.injects {
             let RuleKind::Inject { spec } = &rule.kind else {
                 continue;
@@ -1209,13 +1238,11 @@ fn check_charter_creatable_lint(assembled: &AssembledCharter) -> Result<(), Fina
                 continue;
             }
             if !creatable.subset(&rule.scope) {
-                return Err(FinalizeError::CreatableEscapesMandatoryInject {
-                    inject_scope: render_scope(&rule.scope),
-                });
+                return Some(render_scope(&rule.scope));
             }
         }
     }
-    Ok(())
+    None
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

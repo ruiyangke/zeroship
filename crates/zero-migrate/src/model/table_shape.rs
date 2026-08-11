@@ -763,7 +763,8 @@ pub fn effective_policy_from_charter_layers(layers: &[&str]) -> Result<Effective
         return Err("at least one policy charter is required".to_string());
     };
     if layers.len() == 1 {
-        return effective_policy_from_charter_toml(root);
+        let composed = effective_policy_from_charter_toml(root)?;
+        return creatable_escape_checked(composed);
     }
 
     let registry = policy_registry::builtin_registry();
@@ -778,7 +779,25 @@ pub fn effective_policy_from_charter_layers(layers: &[&str]) -> Result<Effective
         acc = zero_migrate_policy::admit(&acc, &draft, &registry)
             .map_err(|e| format!("policy layer {} rejected: {e:?}", index + 1))?;
     }
-    Ok(acc)
+    creatable_escape_checked(acc)
+}
+
+/// Refuse a composed policy whose create-table grant escapes a mandatory inject.
+///
+/// Applied to the FINAL composition rather than to each layer, because the escape is a
+/// property of the stack: a later layer can narrow the creatable scope back inside the
+/// inject, and an earlier layer's grant only escapes if nothing after it pulls it in.
+///
+/// This check has a charter-algebra twin in `finalize_charter`, which no shipped call
+/// site reaches. Both now ask one shared function, so the two composition paths cannot
+/// answer differently.
+fn creatable_escape_checked(
+    composed: zero_migrate_policy::EffectivePolicy,
+) -> Result<zero_migrate_policy::EffectivePolicy, String> {
+    composed
+        .check_creatable_escape()
+        .map_err(|e| format!("policy charter rejected: {e:?}"))?;
+    Ok(composed)
 }
 
 fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
