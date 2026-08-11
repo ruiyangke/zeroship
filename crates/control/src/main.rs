@@ -18,8 +18,8 @@ use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
 use zeroship_control::{
-    admin_handlers, api, bootstrap_console, device_handlers, env_handlers,
-    internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
+    admin_handlers, api, device_handlers, env_handlers,
+    internal, oauth_grants_handlers, oauth_handlers, plan_catalog, stripe_handlers, token_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
@@ -247,40 +247,6 @@ struct ControlCli {
     )]
     trust_proxy: Option<bool>,
 
-    // NOTE: the `--bootstrap-builder-client` / `--builder-redirect-uri` /
-    // `--builder-client-secret-file` flags were retired in the R5 cutover. The
-    // separate `zeroship-builder` Vite service (and its confidential OAuth
-    // client) is gone — the AI app-builder IS the console, seeded by
-    // `--bootstrap-console` as a public-PKCE gateway-fronted app.
-
-    /// Seed the console (`apps/zeroship-builder`) as a platform-owned regular
-    /// app at startup: upsert its `control.apps` row (enterprise plan), its
-    /// public-PKCE OAuth client (explicit `sector_identifier` = console host),
-    /// ingest the prebuilt `.zship`, and forward the console's sandbox runtime
-    /// env (`OPENAI_API_KEY`, `SANDBOX_*`, `ZEROSHIP_SDK_REGISTRY`). The console
-    /// is a pure creator app — it holds no control credential, so the seed mints
-    /// no PAT. In-process + idempotent; NEVER an HTTP route. Off by default.
-    #[arg(long = "bootstrap-console", action = clap::ArgAction::SetTrue)]
-    bootstrap_console: bool,
-
-    /// Environment half of `--bootstrap-console`; `1`/`true` are truthy.
-    #[arg(skip = env_is_truthy("BOOTSTRAP_CONSOLE"))]
-    bootstrap_console_env: bool,
-
-    /// Path to the prebuilt console `.zship` ingested by `--bootstrap-console`.
-    #[arg(
-        long = "console-zship",
-        env = "CONSOLE_ZSHIP",
-        default_value = bootstrap_console::DEFAULT_CONSOLE_ZSHIP
-    )]
-    console_zship: PathBuf,
-
-    /// The console host (explicit OAuth `sector_identifier`) seeded by
-    /// `--bootstrap-console`. Defaults to the dev host under `--dev-insecure`
-    /// and the prod host otherwise (resolved in `main`).
-    #[arg(long = "console-host", env = "CONSOLE_HOST")]
-    console_host: Option<String>,
-
     /// Directory for in-flight deploy bodies; empty means the OS temp dir.
     #[arg(long = "deploy-tmp-dir", env = "DEPLOY_TMP_DIR", default_value = "")]
     deploy_tmp_dir: String,
@@ -432,12 +398,6 @@ struct ControlCli {
     audit_retention_check_secs: u64,
 }
 
-impl ControlCli {
-    fn bootstrap_console(&self) -> bool {
-        self.bootstrap_console || self.bootstrap_console_env
-    }
-}
-
 // S2: hand-written `Debug` that redacts every raw-secret field. The derive is
 // intentionally dropped so a stray `{:?}` (e.g. in a clap parse error or a test
 // `.unwrap_err()`) can never echo a DSN, master key, control key, worker key,
@@ -459,10 +419,6 @@ impl std::fmt::Debug for ControlCli {
             .field("legacy_master_keys", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("trust_proxy", &self.trust_proxy)
-            .field("bootstrap_console", &self.bootstrap_console)
-            .field("bootstrap_console_env", &self.bootstrap_console_env)
-            .field("console_zship", &self.console_zship)
-            .field("console_host", &self.console_host)
             .field("deploy_tmp_dir", &self.deploy_tmp_dir)
             .field("config_path", &self.config_path)
             .field("no_config", &self.no_config)
@@ -693,7 +649,6 @@ fn main() -> std::io::Result<()> {
     // `ZEROSHIP_DEV_INSECURE=1`.
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let bootstrap_console = cli.bootstrap_console();
 
     let auth_provider_name = cli.auth_provider.clone();
     let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
@@ -848,17 +803,6 @@ fn main() -> std::io::Result<()> {
             })
             .collect()
     };
-    let console_zship = cli.console_zship;
-    // The console host is the explicit OAuth sector_identifier. Default to the
-    // dev host under --dev-insecure (compose / *.zeroship.localhost) and the
-    // prod host otherwise; an explicit --console-host / CONSOLE_HOST wins.
-    let console_host = cli.console_host.unwrap_or_else(|| {
-        if insecure_dev {
-            bootstrap_console::DEV_CONSOLE_HOST.to_string()
-        } else {
-            bootstrap_console::PROD_CONSOLE_HOST.to_string()
-        }
-    });
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
     let stash_signing_key = zeroship_core::config::obtain_secret(
         "STASH_SIGNING_KEY / --stash-signing-key",
@@ -1084,14 +1028,6 @@ fn main() -> std::io::Result<()> {
         report.field("log_format", CheckValue::Plain(log_format_str));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
-        report.field("bootstrap_console", CheckValue::Flag(bootstrap_console));
-        if bootstrap_console {
-            report.field("console_host", CheckValue::Plain(console_host.clone()));
-            report.field(
-                "console_zship",
-                CheckValue::Plain(console_zship.display().to_string()),
-            );
-        }
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
@@ -1291,51 +1227,12 @@ fn main() -> std::io::Result<()> {
     // into `zeroship.plans`, `create_app`/`set_plan` (and the console seed) all
     // require the built-in plans to exist. Idempotent (ON CONFLICT DO UPDATE on
     // the deterministic `pln_…` ids), so a re-boot is a no-op.
-    bootstrap_console::seed_plans(&registry)
+    plan_catalog::seed_plans(&registry)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "control: plan-catalog seed failed");
             std::io::Error::other(err.to_string())
         })?;
-
-    if bootstrap_console {
-        let console_scheme = if insecure_dev { "http" } else { "https" };
-        let cfg = bootstrap_console::ConsoleBootstrapConfig {
-            enabled: true,
-            console_host: console_host.clone(),
-            console_zship,
-            scheme: console_scheme.to_string(),
-        };
-        // The seed's per-app OAuth client upsert (`ensure_app_client`) needs an
-        // owned, MUTABLE control-schema connection (it runs a transaction). Open
-        // a dedicated one on the control DSN; it is dropped at the end of the
-        // seed (Terminate sent on drop).
-        let mut control_pg = {
-            let (pg_client, pg_conn) =
-                compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                    .await
-                    .expect("control: console-seed control-pg connect");
-            compio::runtime::spawn(async move {
-                if let Err(e) = pg_conn.run().await {
-                    tracing::error!(error = %e, "control/console-seed-pg connection ended");
-                }
-            })
-            .detach();
-            pg_client
-        };
-        bootstrap_console::bootstrap_console(
-            &cfg,
-            &registry,
-            &env_store,
-            &blob_store,
-            &mut control_pg,
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: console bootstrap failed");
-            std::io::Error::other(err.to_string())
-        })?;
-    }
 
     let provider_config_json: serde_json::Value = match serde_json::from_str(&cli.provider_config) {
         Ok(v) => v,

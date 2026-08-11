@@ -37,7 +37,7 @@ async fn raw_conn(dsn: &str) -> compio_postgres::Client {
 async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
     // Unique app so parallel runs don't collide; the count assertion is
@@ -57,7 +57,7 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     .expect("seed owner user");
     let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let app = registry
-        .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
         .await
         .expect("create_app")
         .id;

@@ -210,7 +210,7 @@ async fn deploy_round_trip() {
     let url = db_url();
     use zeroship_control::Registry;
     let registry = Registry::new(&url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
     // create_app binds an owner membership (FK → zeroship.users); seed one.
@@ -236,7 +236,7 @@ async fn deploy_round_trip() {
     let record = registry
         .create_app(
             &name,
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
         )
         .await

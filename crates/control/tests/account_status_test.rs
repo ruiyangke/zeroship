@@ -347,7 +347,7 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
 
     // `apps.plan_id` has an FK to `plans` — seed the built-in plans and pick one
     // real plan id to satisfy it.
-    zeroship_control::bootstrap_console::seed_plans(&f.registry)
+    zeroship_control::plan_catalog::seed_plans(&f.registry)
         .await
         .expect("seed built-in plans");
     let plan_id: String = f

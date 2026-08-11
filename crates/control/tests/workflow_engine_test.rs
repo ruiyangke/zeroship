@@ -419,9 +419,9 @@ async fn build_fixture_with_gateway(
             "UPDATE zeroship.plans SET workflows_allowed = true \
               WHERE id IN ($1, $2, $3)",
             &[
-                &zeroship_control::bootstrap_console::free_plan_id(),
-                &zeroship_control::bootstrap_console::pro_plan_id(),
-                &zeroship_control::bootstrap_console::unlimited_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
+                &zeroship_control::plan_catalog::pro_plan_id(),
+                &zeroship_control::plan_catalog::unlimited_plan_id(),
             ],
         )
         .await
@@ -502,7 +502,7 @@ async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (Uuid, String) {
     seed_app_and_deploy_on_plan(
         fx,
         label,
-        &zeroship_control::bootstrap_console::free_plan_id(),
+        &zeroship_control::plan_catalog::free_plan_id(),
     )
     .await
 }

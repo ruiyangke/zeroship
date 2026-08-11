@@ -297,3 +297,202 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
         assignable_by_creator: row.get("assignable_by_creator"),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Built-in tiers
+// ---------------------------------------------------------------------------
+//
+// These lived in `bootstrap_console.rs` until the console stopped being a
+// built-in app. They were never console-specific: `main.rs` seeds them on every
+// boot regardless of any flag, `api.rs` uses `free_plan_id()` as the default
+// plan for a new app, and `apps.plan_id` is an FK into `zeroship.plans`, so the
+// tiers must exist before any app row can be written.
+
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+/// Deterministic `pln_<base62>` id for a built-in tier.
+///
+/// The hash input is FROZEN: SHA-256(label || 0x00 || "builtin"), with the
+/// RFC-4122 variant and version-8 nibbles stamped in. Changing any part of it
+/// mints different ids, and `apps.plan_id` is an FK onto these values, so a
+/// change would orphan every existing app row. The literal `"builtin"` is the
+/// old host argument, kept verbatim for that reason.
+fn builtin_plan_id(tier: &str) -> String {
+    let label = format!("zeroship:plan:{tier}:v1");
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update([0u8]); // explicit separator so label/host can't run together
+    hasher.update(b"builtin");
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0F) | 0x80;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    let uuid = Uuid::from_bytes(bytes);
+    zeroship_core::typed_id::from_uuid_string(zeroship_core::typed_id::PLAN_PREFIX, &uuid.to_string())
+        .expect("derived uuid is a valid uuid string")
+}
+
+/// The built-in free tier id (`spend_limit ~= base` so it is quota-capped and
+/// needs no card).
+#[must_use]
+pub fn free_plan_id() -> String {
+    builtin_plan_id("free")
+}
+
+/// The built-in pro tier id (pay-go overage into a configured cap).
+#[must_use]
+pub fn pro_plan_id() -> String {
+    builtin_plan_id("pro")
+}
+
+/// The built-in unlimited/enterprise tier id (no CPU/wall cap). Operator-only:
+/// `assignable_by_creator` is false, so a creator cannot self-assign it.
+#[must_use]
+pub fn unlimited_plan_id() -> String {
+    builtin_plan_id("unlimited")
+}
+
+/// Build the three built-in tiers, `[free, pro, unlimited]`.
+///
+/// `runtime_limits_json` reproduces the matrix the deleted
+/// `registry.rs::runtime_limits_for_plan` hardcoded: free = 50ms/5s/64MB,
+/// pro = 30s/30s/256MB, unlimited = None/None/None. Under compute-unit pricing
+/// the price model is scalar: `base_fee_cents`, `included_units`, and an FX
+/// where `None` inherits the global `pricing_config` default.
+fn builtin_plans() -> Vec<Plan> {
+    // Free: spend_limit == base (0) means quota-capped with no card. Runtime
+    // limits come from the shared const so the seed and the registry's
+    // missing-plan fallback cannot drift.
+    let free = Plan {
+        id: free_plan_id(),
+        name: "free".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 0,
+            included_units: 100_000,
+            fx_pico_cents_per_unit: None,
+            spend_limit_default_cents: 0,
+        },
+        runtime: FREE_TIER_RUNTIME_LIMITS,
+        net: FREE_TIER_NET_POLICY_LIMITS,
+        archived: false,
+        assignable_by_creator: true,
+    };
+
+    let pro = Plan {
+        id: pro_plan_id(),
+        name: "pro".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 500,
+            included_units: 1_000_000,
+            fx_pico_cents_per_unit: None,
+            spend_limit_default_cents: 5_000,
+        },
+        runtime: AppRuntimeLimits {
+            cpu_limit_ms: Some(30_000),
+            wall_timeout_ms: Some(30_000),
+            heap_limit_mb: Some(256),
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 32,
+            egress_ceiling_bytes: 256 * 1024 * 1024,
+        },
+        archived: false,
+        assignable_by_creator: true,
+    };
+
+    // Unlimited / enterprise: no runtime caps, no included CU, no spend cap.
+    // OPERATOR-only: a creator self-assigning it would escape every cap.
+    let unlimited = Plan {
+        id: unlimited_plan_id(),
+        name: "unlimited".to_string(),
+        price: PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: None,
+            spend_limit_default_cents: 0,
+        },
+        runtime: AppRuntimeLimits {
+            cpu_limit_ms: None,
+            wall_timeout_ms: None,
+            heap_limit_mb: None,
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 256,
+            egress_ceiling_bytes: 1024 * 1024 * 1024,
+        },
+        archived: false,
+        assignable_by_creator: false,
+    };
+
+    vec![free, pro, unlimited]
+}
+
+/// A built-in tier could not be written to the catalog.
+#[derive(Debug)]
+pub enum PlanSeedError {
+    /// The catalog upsert failed; carries the plan id and the driver error.
+    Db(String),
+}
+
+impl std::fmt::Display for PlanSeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Db(e) => write!(f, "database: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PlanSeedError {}
+
+/// Idempotently seed the built-in plan tiers into the catalog.
+///
+/// Every write is an `ON CONFLICT (id) DO UPDATE` keyed on the deterministic
+/// `pln_<base62>` ids, so re-running is a no-op. `main.rs` calls this on every
+/// boot, before anything can write an app row, because `apps.plan_id` is an FK
+/// into `zeroship.plans`.
+///
+/// # Errors
+/// [`PlanSeedError::Db`] if the catalog upsert fails.
+pub async fn seed_plans(registry: &Registry) -> Result<(), PlanSeedError> {
+    let catalog = PlanCatalog::new(registry.clone());
+    for plan in builtin_plans() {
+        catalog
+            // Built-in tiers are always unarchived; assert it explicitly.
+            .upsert(&plan, Some(plan.archived))
+            .await
+            .map_err(|e| PlanSeedError::Db(format!("seed plan '{}': {e}", plan.id)))?;
+    }
+    tracing::info!(
+        free = %free_plan_id(),
+        pro = %pro_plan_id(),
+        unlimited = %unlimited_plan_id(),
+        "control: built-in plan tiers seeded"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod builtin_tier_tests {
+    use super::{free_plan_id, pro_plan_id, unlimited_plan_id};
+
+    /// The built-in tier ids are a FROZEN wire value, not an implementation
+    /// detail: `zeroship.apps.plan_id` is an FK onto them, so a change orphans
+    /// every existing app row in every deployed database.
+    ///
+    /// These literals were read out of a live platform database that had been
+    /// seeded by the pre-refactor binary, so they are an observation, not a
+    /// copy of what this code happens to produce. Moving this derivation out of
+    /// `bootstrap_console.rs` had to preserve them exactly, and this is what
+    /// proves it did.
+    ///
+    /// What this does NOT check: that the ids are correct in any absolute
+    /// sense, only that they have not moved.
+    #[test]
+    fn builtin_plan_ids_are_frozen() {
+        assert_eq!(free_plan_id(), "pln_0MgUI3oStlZHqAUhhcPFQT");
+        assert_eq!(pro_plan_id(), "pln_3nxwAuzO7Wr5LYwwyIi5Ww");
+        assert_eq!(unlimited_plan_id(), "pln_2EchEFipZZLsHlnE6BkZXJ");
+    }
+}

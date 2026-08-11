@@ -64,7 +64,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
@@ -337,7 +337,7 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
         .registry
         .create_app(
             &format!("net-grants-{}", Uuid::new_v4().simple()),
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &owner,
         )
         .await
@@ -450,7 +450,7 @@ async fn admin_can_audit_lock_app() {
         .registry
         .create_app(
             &format!("audit-lock-{}", Uuid::new_v4().simple()),
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &pat.user_id,
         )
         .await
@@ -488,7 +488,7 @@ async fn admin_can_suspend_app() {
     let app_record = fx
         .state
         .registry
-        .create_app(&format!("suspend-{}", Uuid::new_v4().simple()), &zeroship_control::bootstrap_console::free_plan_id(), &pat.user_id)
+        .create_app(&format!("suspend-{}", Uuid::new_v4().simple()), &zeroship_control::plan_catalog::free_plan_id(), &pat.user_id)
         .await
         .expect("create app");
 

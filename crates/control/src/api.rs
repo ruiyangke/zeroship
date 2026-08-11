@@ -33,7 +33,7 @@ pub struct CreateAppBody {
 /// free tier's catalog id (`pln_…`). The plan must be a real catalog id so
 /// the FK + server-side gate accept it.
 fn default_plan() -> String {
-    crate::bootstrap_console::free_plan_id()
+    crate::plan_catalog::free_plan_id()
 }
 
 #[derive(Debug, Deserialize)]

@@ -62,7 +62,7 @@ impl Fixture {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
         let env_store =
             EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
@@ -714,7 +714,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
             &[
                 &app_id,
                 &format!("app-{}", app_id.simple()),
-                &zeroship_control::bootstrap_console::free_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
                 &format!("ak_{}", Uuid::new_v4().simple()),
             ],
         )
@@ -1231,7 +1231,7 @@ async fn app_delete_returns_200_atomic() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

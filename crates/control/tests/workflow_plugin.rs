@@ -126,7 +126,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry)
+    zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed builtin plans");
     // The DW-24 rollout gate is `apps.workflows_enabled AND plans.workflows_allowed`
@@ -141,9 +141,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             .execute(
                 "UPDATE zeroship.plans SET workflows_allowed = true WHERE id IN ($1, $2, $3)",
                 &[
-                    &zeroship_control::bootstrap_console::free_plan_id(),
-                    &zeroship_control::bootstrap_console::pro_plan_id(),
-                    &zeroship_control::bootstrap_console::unlimited_plan_id(),
+                    &zeroship_control::plan_catalog::free_plan_id(),
+                    &zeroship_control::plan_catalog::pro_plan_id(),
+                    &zeroship_control::plan_catalog::unlimited_plan_id(),
                 ],
             )
             .await
@@ -217,7 +217,7 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
             &[
                 &app_id,
                 &app_name,
-                &zeroship_control::bootstrap_console::free_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
             ],
         )
         .await

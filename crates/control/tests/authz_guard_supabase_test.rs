@@ -119,7 +119,7 @@ impl Fixture {
                 return None;
             }
         };
-        zeroship_control::bootstrap_console::seed_plans(&registry)
+        zeroship_control::plan_catalog::seed_plans(&registry)
             .await
             .expect("seed built-in plans");
         let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
@@ -240,7 +240,7 @@ impl Fixture {
             .registry
             .create_app(
                 &format!("{label}-{}", Uuid::new_v4().simple()),
-                &zeroship_control::bootstrap_console::free_plan_id(),
+                &zeroship_control::plan_catalog::free_plan_id(),
                 &owner_id,
             )
             .await

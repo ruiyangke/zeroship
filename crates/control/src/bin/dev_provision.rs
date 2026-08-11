@@ -15,7 +15,7 @@ use compio_postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_bundle::{build_blob_store, StoreUrl};
-use zeroship_control::bootstrap_console::{free_plan_id, seed_plans};
+use zeroship_control::plan_catalog::{free_plan_id, seed_plans};
 use zeroship_control::registry::{Registry, RegistryError};
 
 #[derive(Parser, Debug)]

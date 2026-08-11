@@ -15,15 +15,20 @@
 # browser-enforced `frame-ancestors` allowlist; see
 # [auth].frame_ancestor_origins below.)
 #
-# Value = client_id_for_app(console_app_id("console.zeroship.localhost")), the
-# deterministic per-app PKCE client id for THIS compose's --console-host
-# (deploy/compose/docker-compose.yml: control `--console-host console.zeroship.localhost`).
-# Derivation (crates/control/src/{bootstrap_console.rs,app_oauth_client.rs}):
+# STALE, and it can no longer be recomputed from the tree. The value below was
+# derived as client_id_for_app(console_app_id("console.zeroship.localhost")):
 #   console_app_id(host)   = uuid8(SHA-256("zeroship:console:app:v1\0" || host))
 #                          = 5819848e-dc81-819a-bb81-7ef736a413d5
 #   client_id_for_app(uuid)= "oac_" + base62(uuid) = oac_2gEz9tHlodeyWPNRtQsLsT
-# Verify against control's `--bootstrap-console` log line (it prints the seeded
-# console client_id). If --console-host changes, recompute this value.
+# `console_app_id` lived in the console seed, which was REMOVED when the console
+# stopped being a built-in app, so there is no `--bootstrap-console` log line to
+# verify it against and no code that reproduces the first line. The console is
+# now deployed like any other creator app, and `ensure_app_client`
+# (crates/control/src/app_oauth_client.rs) mints its client id at deploy time.
+# OPERATOR DECISION, deliberately not made here: either drop this entry, or
+# replace it with the client id the console's own deploy actually produces.
+# Trusting a client id nothing mints is inert today, not dangerous, but it will
+# read as configured trust to the next person.
 trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
 # Console origin(s) the auth-service login/signup/consent documents admit via CSP
 # `frame-ancestors` so the console's immersive iframe login can embed them

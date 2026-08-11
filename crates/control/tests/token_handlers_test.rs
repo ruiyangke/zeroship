@@ -355,7 +355,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
         .registry
         .create_app(
             &app_name,
-            &zeroship_control::bootstrap_console::free_plan_id(),
+            &zeroship_control::plan_catalog::free_plan_id(),
             &fx.user_id,
         )
         .await
