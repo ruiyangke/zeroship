@@ -216,7 +216,7 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
         table.columns.push(ColumnSnapshot {
             name: column_name,
             data_type: crate::schema::query::mysql_canonical_type(&raw_type),
-            mysql_physical_type: Some(mysql_physical_type_from_column_type(&raw_type)),
+            mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             default: default.clone(),
             ddl_type_override: None,
@@ -692,121 +692,11 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
     })
 }
 
-/// Parse a live `COLUMN_TYPE` into the physical identity the differ compares.
-///
-/// Reads VALUES, never a normalised spelling. `DECIMAL(65, 30)` and `decimal(65,30)`
-/// are the same type and must not be told apart by a space, and a family this engine
-/// does not model yet becomes [`MysqlPhysicalType::Unknown`] rather than guessing.
-///
-/// The base family is taken from the text BEFORE the first `(`, so quoted enum
-/// members can never be mistaken for it. Members are split on the top level only,
-/// leaving commas and spaces inside a quoted member intact - blanket lowercasing
-/// would fold `enum('a','A')` into one member.
-fn mysql_physical_type_from_column_type(raw: &str) -> MysqlPhysicalType {
-    let trimmed = raw.trim();
-    let unsigned = trimmed.to_ascii_lowercase().contains(" unsigned");
-    let head = trimmed.split('(').next().unwrap_or(trimmed);
-    let family = head.trim().to_ascii_lowercase();
-    let family = family
-        .split_whitespace()
-        .next()
-        .unwrap_or(&family)
-        .to_string();
-
-    let args = trimmed
-        .find('(')
-        .zip(trimmed.rfind(')'))
-        .filter(|(open, close)| close > open)
-        .map(|(open, close)| &trimmed[open + 1..close]);
-
-    let numeric_args: Vec<u32> = args
-        .map(|a| {
-            a.split(',')
-                .filter_map(|part| part.trim().parse::<u32>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    match family.as_str() {
-        "varchar" | "char" => numeric_args.first().map_or_else(
-            || MysqlPhysicalType::Unknown {
-                raw: raw.to_string(),
-            },
-            |length| MysqlPhysicalType::Character {
-                fixed: family == "char",
-                length: *length,
-            },
-        ),
-        "tinytext" | "text" | "mediumtext" | "longtext" | "tinyblob" | "blob" | "mediumblob"
-        | "longblob" => MysqlPhysicalType::Lob { tier: family },
-        "tinyint" | "smallint" | "mediumint" | "int" | "bigint" => MysqlPhysicalType::Integer {
-            // MySQL 8 no longer stores a display width, with `tinyint(1)` the one
-            // exception it keeps - and that exception is the boolean the renderer
-            // emits, so it is carried as a flag rather than discarded as a width.
-            boolean: family == "tinyint" && numeric_args.first() == Some(&1),
-            kind: family,
-            unsigned,
-        },
-        "decimal" | "numeric" => MysqlPhysicalType::Decimal {
-            precision: numeric_args.first().copied().unwrap_or(10),
-            scale: numeric_args.get(1).copied().unwrap_or(0),
-            unsigned,
-        },
-        "datetime" | "timestamp" | "time" => MysqlPhysicalType::Temporal {
-            // An absent precision means zero: MySQL omits `(0)` entirely.
-            fsp: numeric_args.first().copied().unwrap_or(0),
-            kind: family,
-        },
-        "date" | "year" => MysqlPhysicalType::Temporal {
-            kind: family,
-            fsp: 0,
-        },
-        "enum" | "set" => MysqlPhysicalType::Members {
-            kind: family,
-            members: args.map(split_quoted_members).unwrap_or_default(),
-        },
-        "json" | "float" | "double" | "bit" | "boolean" => {
-            MysqlPhysicalType::Plain { kind: family }
-        }
-        _ => MysqlPhysicalType::Unknown {
-            raw: raw.to_string(),
-        },
-    }
-}
-
-/// Split an `ENUM`/`SET` member list into decoded values.
-///
-/// Members are single-quoted and may contain commas, spaces and doubled quotes, so
-/// splitting on a bare comma corrupts them.
-fn split_quoted_members(args: &str) -> Vec<String> {
-    let mut members = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut chars = args.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' if in_quotes && chars.peek() == Some(&'\'') => {
-                current.push('\'');
-                chars.next();
-            }
-            '\'' => {
-                in_quotes = !in_quotes;
-                if !in_quotes {
-                    members.push(std::mem::take(&mut current));
-                }
-            }
-            _ if in_quotes => current.push(ch),
-            _ => {}
-        }
-    }
-    members
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        case_sensitive_from_collation, has_auto_increment, mysql_physical_type_from_column_type,
-        mysql_text_storage, recover_mysql_id_default, split_quoted_members,
+        case_sensitive_from_collation, has_auto_increment, mysql_text_storage,
+        recover_mysql_id_default,
     };
     use crate::model::snapshot::MysqlPhysicalType;
 
@@ -815,15 +705,15 @@ mod tests {
     #[test]
     fn a_varchar_keeps_the_length_the_portable_type_discards() {
         assert_eq!(
-            mysql_physical_type_from_column_type("varchar(64)"),
+            MysqlPhysicalType::parse("varchar(64)"),
             MysqlPhysicalType::Character {
                 fixed: false,
                 length: 64
             }
         );
         assert_ne!(
-            mysql_physical_type_from_column_type("varchar(64)"),
-            mysql_physical_type_from_column_type("varchar(255)"),
+            MysqlPhysicalType::parse("varchar(64)"),
+            MysqlPhysicalType::parse("varchar(255)"),
             "the whole point is that these two stop comparing equal"
         );
     }
@@ -831,8 +721,8 @@ mod tests {
     #[test]
     fn a_decimal_is_not_told_apart_by_the_space_the_renderer_emits() {
         assert_eq!(
-            mysql_physical_type_from_column_type("decimal(65,30)"),
-            mysql_physical_type_from_column_type("DECIMAL(65, 30)"),
+            MysqlPhysicalType::parse("decimal(65,30)"),
+            MysqlPhysicalType::parse("DECIMAL(65, 30)"),
             "MySQL stores decimal(65,30) and the renderer emits DECIMAL(65, 30)"
         );
     }
@@ -840,7 +730,7 @@ mod tests {
     #[test]
     fn tinyint_1_is_the_boolean_and_a_wider_int_is_not() {
         assert_eq!(
-            mysql_physical_type_from_column_type("tinyint(1)"),
+            MysqlPhysicalType::parse("tinyint(1)"),
             MysqlPhysicalType::Integer {
                 kind: "tinyint".to_string(),
                 unsigned: false,
@@ -848,7 +738,7 @@ mod tests {
             }
         );
         assert_eq!(
-            mysql_physical_type_from_column_type("int unsigned"),
+            MysqlPhysicalType::parse("int unsigned"),
             MysqlPhysicalType::Integer {
                 kind: "int".to_string(),
                 unsigned: true,
@@ -860,15 +750,18 @@ mod tests {
     #[test]
     fn enum_members_survive_their_interior_spaces_and_case() {
         assert_eq!(
-            mysql_physical_type_from_column_type("enum('a','b c')"),
+            MysqlPhysicalType::parse("enum('a','b c')"),
             MysqlPhysicalType::Members {
                 kind: "enum".to_string(),
                 members: vec!["a".to_string(), "b c".to_string()]
             }
         );
         assert_eq!(
-            split_quoted_members("'a','A'"),
-            vec!["a".to_string(), "A".to_string()],
+            MysqlPhysicalType::parse("enum('a','A')"),
+            MysqlPhysicalType::Members {
+                kind: "enum".to_string(),
+                members: vec!["a".to_string(), "A".to_string()]
+            },
             "a blanket lowercase would fold these two into one member"
         );
     }
@@ -876,14 +769,14 @@ mod tests {
     #[test]
     fn an_absent_temporal_precision_means_zero_rather_than_unknown() {
         assert_eq!(
-            mysql_physical_type_from_column_type("timestamp"),
+            MysqlPhysicalType::parse("timestamp"),
             MysqlPhysicalType::Temporal {
                 kind: "timestamp".to_string(),
                 fsp: 0
             }
         );
         assert_eq!(
-            mysql_physical_type_from_column_type("datetime(3)"),
+            MysqlPhysicalType::parse("datetime(3)"),
             MysqlPhysicalType::Temporal {
                 kind: "datetime".to_string(),
                 fsp: 3
@@ -894,7 +787,7 @@ mod tests {
     #[test]
     fn an_unmodelled_family_is_named_rather_than_guessed() {
         assert_eq!(
-            mysql_physical_type_from_column_type("point"),
+            MysqlPhysicalType::parse("point"),
             MysqlPhysicalType::Unknown {
                 raw: "point".to_string()
             },

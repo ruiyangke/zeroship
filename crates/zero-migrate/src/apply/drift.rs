@@ -48,8 +48,9 @@ use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IdDefaultSnapshot, IndexElementSnapshot,
-    IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot,
-    SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
+    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 use crate::render::value_format::{
     catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
@@ -2315,6 +2316,28 @@ fn introspected_table_dialect(table: &TableSnapshot) -> Option<SqlDialect> {
 }
 
 fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> bool {
+    // A MySQL physical contract, when BOTH sides carry one, is the authority. The
+    // portable `data_type` cannot be: `mysql_canonical_type` folds every `varchar(n)`
+    // to the literal `text`, so a declared 255 and a live 64 are the same string here.
+    //
+    // Both sides, not either: a snapshot from another dialect carries none, and so
+    // does one written before the contract existed. Comparing a contract against an
+    // absent one would report a difference that says nothing about the database.
+    if let (Some(expected_type), Some(actual_type)) =
+        (&expected.mysql_physical_type, &actual.mysql_physical_type)
+    {
+        // An unmodelled family cannot ESTABLISH a difference, so this declines to
+        // report one. That is the differ's safe direction and not a general rule -
+        // an existence guard asking the same question must refuse to adopt instead,
+        // because being wrong costs it a silently adopted column rather than a
+        // missed drift line.
+        if matches!(expected_type, MysqlPhysicalType::Unknown { .. })
+            || matches!(actual_type, MysqlPhysicalType::Unknown { .. })
+        {
+            return true;
+        }
+        return expected_type == actual_type;
+    }
     if expected.data_type == actual.data_type {
         return true;
     }
@@ -2869,6 +2892,65 @@ impl DriftReport {
             && self.unexpected_objects.is_empty()
             && self.altered_objects.is_empty()
             && self.orphan_journal.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod mysql_physical_type_tests {
+    use super::{column_data_types_eq, ColumnSnapshot, MysqlPhysicalType};
+
+    /// Both sides fold to the portable `text` on MySQL, so `data_type` alone reports
+    /// agreement. The contract is what tells them apart.
+    fn column(data_type: &str, physical: Option<MysqlPhysicalType>) -> ColumnSnapshot {
+        ColumnSnapshot {
+            name: "c".to_string(),
+            data_type: data_type.to_string(),
+            mysql_physical_type: physical,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_varchar_length_change_is_seen_where_the_portable_type_is_blind() {
+        let expected = column("text", Some(MysqlPhysicalType::parse("varchar(255)")));
+        let actual = column("text", Some(MysqlPhysicalType::parse("varchar(64)")));
+        assert!(
+            column_data_types_eq(&column("text", None), &column("text", None)),
+            "without contracts the two are indistinguishable, which is the defect"
+        );
+        assert!(
+            !column_data_types_eq(&expected, &actual),
+            "with contracts the length change is a difference"
+        );
+    }
+
+    #[test]
+    fn the_renderer_spelling_and_the_catalog_spelling_agree() {
+        // The renderer emits DECIMAL(65, 30); MySQL stores decimal(65,30). Reporting
+        // drift on that pair would be a false red on a database nobody touched.
+        let expected = column("numeric", Some(MysqlPhysicalType::parse("DECIMAL(65, 30)")));
+        let actual = column("numeric", Some(MysqlPhysicalType::parse("decimal(65,30)")));
+        assert!(column_data_types_eq(&expected, &actual));
+    }
+
+    #[test]
+    fn one_side_without_a_contract_keeps_the_portable_comparison() {
+        // A PostgreSQL or SQLite snapshot carries no contract, and neither does one
+        // written before it existed. Comparing present against absent must not
+        // manufacture a difference.
+        let expected = column("text", Some(MysqlPhysicalType::parse("varchar(255)")));
+        assert!(column_data_types_eq(&expected, &column("text", None)));
+        assert!(column_data_types_eq(&column("text", None), &expected));
+    }
+
+    #[test]
+    fn an_unmodelled_family_does_not_assert_a_difference_it_cannot_establish() {
+        let expected = column("point", Some(MysqlPhysicalType::parse("point")));
+        let actual = column("point", Some(MysqlPhysicalType::parse("geometry")));
+        assert!(
+            column_data_types_eq(&expected, &actual),
+            "the differ declines rather than reporting a difference from two Unknowns"
+        );
     }
 }
 

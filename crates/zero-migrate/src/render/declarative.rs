@@ -46,7 +46,7 @@ use crate::model::ir::{
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
-    IndexElementSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
+    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, SchemaSnapshot, TableSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{
@@ -2821,7 +2821,7 @@ pub(crate) fn column_snapshot_for_field(
     } else {
         None
     };
-    Ok(ColumnSnapshot {
+    let mut column = ColumnSnapshot {
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
@@ -2840,7 +2840,24 @@ pub(crate) fn column_snapshot_for_field(
         encryption_sentinel,
         comment_sentinel,
         ..Default::default()
-    })
+    };
+    if matches!(dialect, SqlDialect::Mysql) {
+        // Derived from what the renderer DECIDES, not from `data_type`, so it accounts
+        // for `ddl_type_override` and the unbounded-text spelling the same way the
+        // emitted DDL does. Reading the renderer's input instead would describe a
+        // column this engine never creates.
+        //
+        // `inline_pk` is false because it is read only on the SQLite rowid-alias leg
+        // (`sqlite_auto_increment_identity_pk`); the MySQL arm never consults it.
+        //
+        // The live side parses MySQL's own `COLUMN_TYPE` through the same function.
+        // That is what lets the two sides agree despite spelling apart: the renderer
+        // emits `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`, and both parse
+        // to the same values.
+        let rendered = column_type_for_render(&column, dialect, false);
+        column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
+    }
+    Ok(column)
 }
 
 /// Stamp a named primary-key constraint and its backing index onto a snapshot.

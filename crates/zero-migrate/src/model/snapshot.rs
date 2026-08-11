@@ -510,6 +510,119 @@ pub enum MysqlPhysicalType {
     },
 }
 
+impl MysqlPhysicalType {
+    /// Parse a MySQL type spelling into its physical identity.
+    ///
+    /// Deliberately accepts BOTH spellings the engine has to reconcile: MySQL's own
+    /// `COLUMN_TYPE` (`decimal(65,30)`) and the renderer's emitted DDL type
+    /// (`DECIMAL(65, 30)`). Because it reads values rather than normalising text,
+    /// those two produce the same result and a space cannot be mistaken for a type
+    /// change. That is the whole reason both sides can share one function.
+    ///
+    /// The base family is taken from the text BEFORE the first `(`, so quoted enum
+    /// members can never be mistaken for it. A family this engine does not model
+    /// becomes [`MysqlPhysicalType::Unknown`] rather than a guess.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        let unsigned = trimmed.to_ascii_lowercase().contains(" unsigned");
+        let head = trimmed.split('(').next().unwrap_or(trimmed);
+        let family = head.trim().to_ascii_lowercase();
+        let family = family
+            .split_whitespace()
+            .next()
+            .unwrap_or(&family)
+            .to_string();
+
+        let args = trimmed
+            .find('(')
+            .zip(trimmed.rfind(')'))
+            .filter(|(open, close)| close > open)
+            .map(|(open, close)| &trimmed[open + 1..close]);
+
+        let numeric_args: Vec<u32> = args
+            .map(|a| {
+                a.split(',')
+                    .filter_map(|part| part.trim().parse::<u32>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        match family.as_str() {
+            "varchar" | "char" => numeric_args.first().map_or_else(
+                || Self::Unknown {
+                    raw: raw.to_string(),
+                },
+                |length| Self::Character {
+                    fixed: family == "char",
+                    length: *length,
+                },
+            ),
+            "tinytext" | "text" | "mediumtext" | "longtext" | "tinyblob" | "blob"
+            | "mediumblob" | "longblob" => Self::Lob { tier: family },
+            "tinyint" | "smallint" | "mediumint" | "int" | "bigint" => Self::Integer {
+                // MySQL 8 no longer stores a display width, with `tinyint(1)` the one
+                // exception it keeps - and that exception is the boolean the renderer
+                // emits, so it is carried as a flag rather than discarded as a width.
+                boolean: family == "tinyint" && numeric_args.first() == Some(&1),
+                kind: family,
+                unsigned,
+            },
+            "decimal" | "numeric" => Self::Decimal {
+                precision: numeric_args.first().copied().unwrap_or(10),
+                scale: numeric_args.get(1).copied().unwrap_or(0),
+                unsigned,
+            },
+            "datetime" | "timestamp" | "time" => Self::Temporal {
+                // An absent precision means zero: MySQL omits `(0)` entirely.
+                fsp: numeric_args.first().copied().unwrap_or(0),
+                kind: family,
+            },
+            "date" | "year" => Self::Temporal {
+                kind: family,
+                fsp: 0,
+            },
+            "enum" | "set" => Self::Members {
+                kind: family,
+                members: args.map(split_quoted_members).unwrap_or_default(),
+            },
+            "json" | "float" | "double" | "bit" | "boolean" => Self::Plain { kind: family },
+            _ => Self::Unknown {
+                raw: raw.to_string(),
+            },
+        }
+    }
+}
+
+/// Split an `ENUM`/`SET` member list into decoded values.
+///
+/// Members are single-quoted and may contain commas, spaces and doubled quotes, so
+/// splitting on a bare comma corrupts them, and lowercasing the whole string folds
+/// `enum('a','A')` into one member.
+fn split_quoted_members(args: &str) -> Vec<String> {
+    let mut members = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = args.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if in_quotes && chars.peek() == Some(&'\'') => {
+                current.push('\'');
+                chars.next();
+            }
+            '\'' => {
+                in_quotes = !in_quotes;
+                if !in_quotes {
+                    members.push(std::mem::take(&mut current));
+                }
+            }
+            _ if in_quotes => current.push(ch),
+            _ => {}
+        }
+    }
+    members
+}
+
 /// Exact MySQL character-set and collation metadata for one catalog column.
 ///
 /// MySQL requires both sides of a character foreign key to use compatible
