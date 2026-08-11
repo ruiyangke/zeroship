@@ -87,9 +87,12 @@ pub struct PgConfinement {
     /// many real migrations. The default matches the value MySQL already used for
     /// this concept (`PROJECT_LOCK_TIMEOUT_SECS`, apply/backend/mysql/session.rs).
     ///
-    /// Read by the SQLite application-file lock. PostgreSQL's `pg_advisory_lock`
-    /// takes no timeout and waits, which is the open question in the queue-versus-
-    /// fail-fast ticket rather than something this field decides.
+    /// Read by the SQLite application-file lock directly, and by MySQL's
+    /// `GET_LOCK` rounded UP to whole seconds (MySQL's unit) - so a value under a
+    /// second still waits a second there, while a zero stays a single attempt on
+    /// both. PostgreSQL's `pg_advisory_lock` takes no timeout and waits, which is
+    /// the open question in the queue-versus-fail-fast ticket rather than
+    /// something this field decides.
     pub project_lock_timeout: Duration,
     /// The least-privilege `migrator` role the apply flow runs each migration's
     /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the

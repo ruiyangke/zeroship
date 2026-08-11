@@ -55,11 +55,25 @@ use crate::render::step::BindValue;
 
 use super::MysqlSessionSnapshot;
 
-/// How long `GET_LOCK` waits (seconds) for the project apply lock before the
-/// acquire is treated as contended. Mirrors the "serialize concurrent deploys"
-/// intent of the PG advisory lock — a second apply waits here, then sees the
+/// The `GET_LOCK` wait (whole seconds) for the project apply lock, from the
+/// executor's project-lock budget. Mirrors the "serialize concurrent deploys"
+/// intent of the PG advisory lock: a second apply waits here, then sees the
 /// first's committed journal and no-ops.
-const PROJECT_LOCK_TIMEOUT_SECS: i64 = 10;
+///
+/// Rounds UP, because for a QUEUE the safe direction is longer - an extra
+/// fraction of a second costs nothing, while rounding 1200ms down to 1s would
+/// let MySQL give up before the deadline the operator asked for.
+///
+/// NO floor, and that is the difference from [`effective_lock_timeout_secs`],
+/// which caps the same unit conversion with `.max(1)`. There a zero means NO
+/// LIMIT, so a sub-second budget collapsing into it would substitute "unbounded"
+/// for a finite request. Here a zero means TRY ONCE - the SQLite loop returns on
+/// the first `WouldBlock` at zero, and `GET_LOCK(name, 0)` is likewise a single
+/// attempt - so flooring at 1s would silently convert an explicit try-once into
+/// a one-second wait. The two conversions look identical and are not.
+fn project_lock_timeout_secs(cfg: &ExecutorConfig) -> u64 {
+    cfg.project_lock_timeout_ms().div_ceil(1000)
+}
 
 /// Live MySQL settings required to safely use a nondeterministic UUIDv4
 /// expression default.
@@ -184,13 +198,20 @@ pub(crate) async fn ensure_idle_for_journal<D: SqlSession>(
 
 pub(crate) async fn acquire_journal_bootstrap_lock<D: SqlSession>(
     conn: &D,
+    cfg: &ExecutorConfig,
     project_id: &str,
 ) -> Result<(), journal::JournalError> {
     let name = journal_bootstrap_lock_name(project_id);
+    // The same budget the project lock takes: bootstrapping the journal is part
+    // of the deploy that queues, not a separate wait an operator tunes apart.
+    let secs = project_lock_timeout_secs(cfg);
     let row = conn
         .query_one(
             "SELECT GET_LOCK(?, ?) AS got",
-            &[name.as_str().into(), PROJECT_LOCK_TIMEOUT_SECS.into()],
+            &[
+                name.as_str().into(),
+                i64::try_from(secs).unwrap_or(i64::MAX).into(),
+            ],
         )
         .await?;
     let got: Option<i64> = row.try_get("got").map_err(|error| {
@@ -201,7 +222,7 @@ pub(crate) async fn acquire_journal_bootstrap_lock<D: SqlSession>(
     match got {
         Some(1) => Ok(()),
         Some(0) => Err(journal::JournalError::Backend(format!(
-            "mysql journal bootstrap GET_LOCK('{name}') timed out after {PROJECT_LOCK_TIMEOUT_SECS}s"
+            "mysql journal bootstrap GET_LOCK('{name}') timed out after {secs}s"
         ))),
         _ => Err(journal::JournalError::Backend(format!(
             "mysql journal bootstrap GET_LOCK('{name}') returned NULL (lock error)"
@@ -235,13 +256,18 @@ pub(crate) async fn release_journal_bootstrap_lock<D: SqlSession>(
 /// than silently proceeding without the lock.
 pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
+    cfg: &ExecutorConfig,
     project_id: &str,
 ) -> Result<(), ApplyError> {
     let name = project_lock_name(project_id);
+    let secs = project_lock_timeout_secs(cfg);
     let row = conn
         .query_one(
             "SELECT GET_LOCK(?, ?) AS got",
-            &[name.as_str().into(), PROJECT_LOCK_TIMEOUT_SECS.into()],
+            &[
+                name.as_str().into(),
+                i64::try_from(secs).unwrap_or(i64::MAX).into(),
+            ],
         )
         .await?;
     // GET_LOCK returns 1 (acquired), 0 (timeout), or NULL (error). mysql2 surfaces
@@ -254,7 +280,7 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
     match got {
         Some(1) => Ok(()),
         Some(0) => Err(ApplyError::Backend(format!(
-            "mysql GET_LOCK('{name}') timed out after {PROJECT_LOCK_TIMEOUT_SECS}s — \
+            "mysql GET_LOCK('{name}') timed out after {secs}s - \
              another apply holds the project lock"
         ))),
         _ => Err(ApplyError::Backend(format!(
@@ -1097,5 +1123,47 @@ pub(crate) async fn rollback_one<D: SqlSession>(
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(error)) => Err(RollbackError::Db(error.into())),
         (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod project_lock_timeout_tests {
+    use super::project_lock_timeout_secs;
+    use crate::conn::ExecutorConfig;
+    use std::time::Duration;
+
+    fn cfg_with(ms: u64) -> ExecutorConfig {
+        let mut cfg =
+            ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
+        cfg.pg.project_lock_timeout = Duration::from_millis(ms);
+        cfg
+    }
+
+    /// Whole seconds is MySQL's unit, so the millisecond budget rounds UP: a queue
+    /// that waits a fraction longer costs nothing, one that gives up early fails a
+    /// deploy that would have succeeded.
+    #[test]
+    fn a_millisecond_budget_rounds_up_to_whole_seconds() {
+        assert_eq!(project_lock_timeout_secs(&cfg_with(1)), 1);
+        assert_eq!(project_lock_timeout_secs(&cfg_with(999)), 1);
+        assert_eq!(project_lock_timeout_secs(&cfg_with(1000)), 1);
+        assert_eq!(project_lock_timeout_secs(&cfg_with(1001)), 2);
+        assert_eq!(project_lock_timeout_secs(&cfg_with(1500)), 2);
+        // The shipped default, and the value the host suite pins in the contention
+        // message. It must survive the conversion unchanged.
+        assert_eq!(project_lock_timeout_secs(&cfg_with(10_000)), 10);
+    }
+
+    /// Zero means TRY ONCE for a project lock, which is the opposite of what it
+    /// means for the DDL budget next door - there it means "no limit", which is why
+    /// `effective_lock_timeout_secs` floors at 1s. Flooring here would take an
+    /// operator's explicit single attempt and turn it into a one-second wait.
+    #[test]
+    fn a_zero_budget_stays_zero_rather_than_becoming_a_one_second_wait() {
+        assert_eq!(
+            project_lock_timeout_secs(&cfg_with(0)),
+            0,
+            "zero is try-once on a project lock; a floor would substitute a wait for it"
+        );
     }
 }

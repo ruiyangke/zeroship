@@ -388,7 +388,7 @@ impl<'a, D: SqlSession> MysqlBackend<'a, D> {
         }
 
         <Self as MigrationBackend>::ensure_journal(self, cfg).await?;
-        session::acquire_project_lock(self.conn, &cfg.project_id).await?;
+        session::acquire_project_lock(self.conn, cfg, &cfg.project_id).await?;
         let result =
             recover_inflight_locked(self.conn, cfg, migration, resolution, recovered_by, reason)
                 .await;
@@ -662,7 +662,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 
     async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-        session::acquire_project_lock(self.conn, &cfg.project_id).await
+        session::acquire_project_lock(self.conn, cfg, &cfg.project_id).await
     }
 
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
@@ -787,7 +787,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
         session::ensure_idle_for_journal(self.conn).await?;
-        session::acquire_journal_bootstrap_lock(self.conn, &cfg.project_id).await?;
+        session::acquire_journal_bootstrap_lock(self.conn, cfg, &cfg.project_id).await?;
         let result = journal_sql::ensure_journal(self.conn, cfg).await;
         let unlock = session::release_journal_bootstrap_lock(self.conn, &cfg.project_id).await;
         match (result, unlock) {
