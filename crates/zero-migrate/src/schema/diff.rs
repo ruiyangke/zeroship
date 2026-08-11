@@ -253,14 +253,6 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub default_expr: Option<String>,
-    /// `pg_proc.provolatile` for the default expression's function, if
-    /// the default is a function call. `i`/`s`/`v`. `None` if the default
-    /// is a plain literal.
-    #[allow(
-        dead_code,
-        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
-    )]
-    pub default_volatility: Option<char>,
     /// Vector dimensionality observed from the live
     /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
     /// BLOB column with a `length("col") = 4 * N` CHECK constraint
@@ -344,7 +336,6 @@ impl Default for ColumnInfo {
             pg_type: String::new(),
             not_null: false,
             default_expr: None,
-            default_volatility: None,
             vector_dims: None,
             is_fts_source: false,
             is_geopoint: false,
@@ -690,12 +681,6 @@ SELECT c.relname AS table_name,
        format_type(a.atttypid, a.atttypmod) AS pg_type,
        a.attnotnull AS not_null,
        pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
-       (SELECT MIN(p.provolatile::text)
-          FROM pg_depend d
-          JOIN pg_proc p ON p.oid = d.refobjid
-         WHERE d.classid = 'pg_attrdef'::regclass
-           AND d.objid = ad.oid
-           AND d.refclassid = 'pg_proc'::regclass) AS default_volatility,
        pgd.description AS pg_comment
   FROM pg_attribute a
   JOIN pg_class c ON c.oid = a.attrelid
@@ -728,10 +713,6 @@ SELECT c.relname AS table_name,
         let pg_type: String = row.try_get("pg_type").unwrap_or_default();
         let not_null: bool = row.try_get("not_null").unwrap_or(false);
         let default_expr: Option<String> = row.try_get::<_, String>("default_expr").ok();
-        let default_volatility = row
-            .try_get::<_, String>("default_volatility")
-            .ok()
-            .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
         // Column comments carry TWO sentinel families:
         //   - `zero-migrate:mask:…` on a `<col>_masked` sibling → deferred to the second
@@ -787,7 +768,6 @@ SELECT c.relname AS table_name,
                 pg_type,
                 not_null,
                 default_expr,
-                default_volatility,
                 encryption,
                 // remaining fields default; vector/fts/geo are populated from
                 // `information_schema` + `pg_indexes` introspection.
@@ -1708,7 +1688,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -1718,7 +1697,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -1728,7 +1706,6 @@ mod tests {
                 pg_type: "timestamptz".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -1738,7 +1715,6 @@ mod tests {
                 pg_type: "timestamptz".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2018,7 +1994,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2028,7 +2003,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2058,7 +2032,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2068,7 +2041,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2112,7 +2084,6 @@ mod tests {
                 pg_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
-                default_volatility: None,
                 ..Default::default()
             },
         );
@@ -2184,7 +2155,6 @@ mod tests {
                     pg_type: "text".into(),
                     not_null: false,
                     default_expr: None,
-                    default_volatility: None,
                     ..Default::default()
                 },
             );
@@ -2247,7 +2217,6 @@ mod tests {
                     pg_type: "text".into(),
                     not_null: false,
                     default_expr: None,
-                    default_volatility: None,
                     ..Default::default()
                 },
             );
