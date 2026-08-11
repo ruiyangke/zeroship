@@ -161,7 +161,7 @@ fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11"
+GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 12"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -2178,7 +2178,13 @@ else
   # share. The .zship carries the DESCRIPTOR only; migrations travel through
   # zeroship-migrated, which is the real deployed path -- a hand-rolled CREATE
   # TABLE here would test nothing.
-  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+  # `apps:delete` is here for step 12 (teardown) and for nothing else. It was
+  # ABSENT until 2026-08-11 and its absence read as a product defect: step 12's
+  # DELETE came back `403 {"error":"forbidden"}` and the harness reported "a
+  # creator cannot delete their own app", which would have been a serious and
+  # entirely false finding. The token simply did not carry the action. The four
+  # assertions after the DELETE all cascaded off that 403 and measured nothing.
+  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
   SC_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$SC_POLICY")"
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
   SC_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
@@ -2737,6 +2743,122 @@ fi
 
 gp_close_step
 
+# --- 12. The creator DELETES the app, and everything it created goes away ---
+#
+# Rows 1-18 of docs/pilot/e2e-scenarios.md all cover an app being created,
+# deployed, driven or enforced. NOTHING covered tearing one down, and nothing in
+# tests/ has ever called `DELETE /api/apps/<id>` -- the only two `-X DELETE` in
+# this tree hit Stripe's own API from e2e_stripe_connect_live.sh.
+#
+# `purge_app` (crates/control/src/api.rs) opens with "Tear down an app and all
+# of its side-effecting state" and then enumerates exactly two steps: the
+# manifest keyspace, and `registry.delete_app` (which DELETEs zeroship.apps +
+# zeroship.oauth_clients in one txn and nothing else). The app's own Postgres
+# schema -- the creator's tables and rows, created by zeroship-migrated -- is
+# named in neither step. The teardown that WOULD remove it exists
+# (crates/plugin-db/src/drop_namespace.rs, 7 steps, slot -> publication ->
+# schema -> role) and has no production caller: its only callers are plugin-db's
+# own integration tests.
+#
+# So this step asserts what a creator is entitled to assume, not what the code
+# currently does. The schema assertion is EXPECTED RED at HEAD; the expected-
+# failure block below carries it, so a run stays classifiable.
+#
+# THE VEHICLE IS scaffoldapp, deliberately, and it must be the LAST thing this
+# file touches: it is the only app here that has a real per-app schema applied
+# through the real zeroship-migrated (step 10c) AND an owner PAT that can
+# authorize AppsDelete (SC_PAT, the app_members row written at step 10c).
+step 12 "Teardown: the creator deletes the app, and its state goes with it"
+if [ -z "${SC_APP_ID:-}" ] || [ -z "${SC_PAT:-}" ]; then
+  fail "no scaffold app id or PAT, so the deletion path could not be exercised at all --
+      this is a FAILED SETUP, not a passing teardown check"
+else
+  # --- BEFORE: prove the vehicle can discriminate ---------------------------
+  # Without these three, every assertion after the DELETE would pass over an app
+  # that was already gone, or a schema that never existed.
+  DEL_ROW_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  DEL_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from information_schema.tables where table_schema = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  DEL_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    "http://localhost:$GATE_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+  echo "  before delete: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE gateway=$DEL_SRV_PRE"
+
+  if [ "${DEL_ROW_PRE:-0}" = "1" ] && [ "${DEL_TBL_PRE:-0}" -ge 1 ] 2>/dev/null; then
+    pass "vehicle discriminates: the app row exists and its per-app schema holds $DEL_TBL_PRE table(s)"
+  else
+    fail "vehicle does NOT discriminate: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE.
+      Every assertion below would pass over an app that was already gone or a
+      schema that was never created. FAILED SETUP, not a pass. If this recurs,
+      the per-app schema is no longer named by app_id -- check
+      crates/plugin-db/src/drop_namespace.rs and the migrated apply path."
+  fi
+
+  # --- THE DELETE, over the real HTTP surface with the creator's own PAT -----
+  DEL_BODY=$(curl -s -o /tmp/gp-delete.json -w '%{http_code}' --max-time 20 \
+    -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$SC_APP_ID" \
+    -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+  echo "  DELETE /api/apps/$SC_APP_ID -> $DEL_BODY $(head -c 120 /tmp/gp-delete.json)"
+  if [ "$DEL_BODY" = "200" ] && grep -q '"deleted":true' /tmp/gp-delete.json 2>/dev/null; then
+    pass "the creator's own PAT can delete the creator's own app (200 deleted:true)"
+  else
+    fail "DELETE /api/apps/<id> did not succeed for the app's OWNER (http=$DEL_BODY): $(head -c 200 /tmp/gp-delete.json)
+      A creator who cannot delete their own app has no workaround, so this is a
+      finding about the creator path, not about this harness."
+  fi
+
+  # --- AFTER: four things the creator is entitled to assume are gone --------
+  DEL_ROW_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  [ "${DEL_ROW_POST:-1}" = "0" ] \
+    && pass "the zeroship.apps row is gone" \
+    || fail "the zeroship.apps row SURVIVED the delete (count=$DEL_ROW_POST)"
+
+  # The gateway pulls routes from control on a 5s poll, so this is a WAIT, not a
+  # single probe -- a one-shot check here would measure the poll interval rather
+  # than the product. 30s is 6 polls.
+  DEL_SRV_POST=""
+  for _i in $(seq 1 30); do
+    DEL_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://localhost:$GATE_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    [ "$DEL_SRV_POST" = "200" ] || break
+    command sleep 1
+  done
+  if [ "$DEL_SRV_PRE" = "200" ] && [ "$DEL_SRV_POST" != "200" ]; then
+    pass "the gateway stopped serving the deleted app (was $DEL_SRV_PRE, now $DEL_SRV_POST)"
+  elif [ "$DEL_SRV_PRE" != "200" ]; then
+    fail "the gateway was NOT serving this app before the delete (got $DEL_SRV_PRE), so
+      'it stopped' proves nothing. FAILED SETUP, not a pass."
+  else
+    fail "the gateway is STILL serving the deleted app after 30s (6 route-sync polls):
+      before=$DEL_SRV_PRE after=$DEL_SRV_POST"
+  fi
+
+  DEL_MAN=$(ls -1 "/tmp/gp-bundles/manifests/$SC_APP_ID" 2>/dev/null | wc -l | tr -d ' ')
+  [ "${DEL_MAN:-1}" = "0" ] \
+    && pass "the app's manifest keyspace is gone from the blob store" \
+    || fail "manifests/$SC_APP_ID still holds $DEL_MAN object(s) after the delete"
+
+  # THE ONE THAT IS RED AT HEAD. Deleting an app leaves the creator's own tables
+  # and every row in them in Postgres forever, because no production code path
+  # calls drop_namespace. See #330.
+  DEL_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from information_schema.tables where table_schema = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  DEL_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from pg_namespace where nspname = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  if [ "${DEL_NSP_POST:-1}" = "0" ] && [ "${DEL_TBL_POST:-1}" = "0" ]; then
+    pass "the app's per-app Postgres schema was dropped with the app"
+  else
+    fail "the per-app Postgres schema SURVIVED the delete -- schema=$DEL_NSP_POST table(s)=$DEL_TBL_POST
+      (was $DEL_TBL_PRE before). purge_app deletes the manifest keyspace and the
+      zeroship.apps/oauth_clients rows and stops; nothing calls
+      crates/plugin-db/src/drop_namespace.rs, whose only callers are plugin-db's
+      own integration tests. The creator's data outlives the app. See #330."
+  fi
+fi
+
+gp_close_step
+
 # --- The verdict, and the two guards against a green run over nothing -------
 #
 # THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
@@ -2987,7 +3109,11 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-85}"
+# RAISED 85 -> 87 on 2026-08-11 for step 12 (teardown). Arithmetic is 85 + 2, and
+# 2 is the whole point: step 12 emits SIX outcomes and only two of them pass at
+# HEAD. The four reds are #331 and are carried in GOLDEN_EXPECTED_FAILURES below.
+# MEASURED on this tree: 87 passed / 12 failed.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-87}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -3072,9 +3198,18 @@ rc=0
 #   - a pattern matching NO failure means the defect was FIXED and the list was
 #     not updated, which is a bookkeeping error the same way an unexplained drop
 #     below GOLDEN_MIN_PASSED is
-# Both set rc=1. The second will fire the day #260 or #255 lands, and updating
-# this list belongs in that same change - exactly as lowering the floor does.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering"}
+# Both set rc=1. The second will fire the day #260, #255 or #331 lands, and
+# updating this list belongs in that same change - exactly as lowering the floor
+# does.
+#
+# NOT ALL FOUR CATEGORIES ARE "BY DESIGN". #260 and #255 are decisions waiting on
+# an operator. Step 12's four are a KNOWN DEFECT (#331) that this harness found:
+# an app that has ever applied a migration cannot be deleted at all, because
+# `migrated_migration_audit.app_id -> zeroship.apps` is ON DELETE CASCADE and
+# that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
+# the whole transaction. They are listed here for the same reason as the others
+# -- so a NEW failure is still visible -- and not because anyone chose them.
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete"}
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
