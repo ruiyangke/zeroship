@@ -8,7 +8,7 @@ use crate::driver::SqlSession;
 use crate::model::ir::{IdentityCol, IndexSortOrder};
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
-    MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
+    MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
@@ -629,19 +629,56 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
     // PostgreSQL-only"). Populating them would be inventing readers for objects the
     // engine will not author.
     //
-    // NOT IMPLEMENTED - `views` is a real gap. MySQL carries plain views
-    // (`Capability::CreateOrReplaceView` is true for this dialect; only MATERIALIZED
-    // views are PostgreSQL-only), so a live MySQL database CAN hold a view this
-    // snapshot will not report.
+    // Views. `materialized` is false rather than defaulted: MySQL has none, and
+    // `model::op_support` makes the materialized variants PostgreSQL-only, so no MySQL
+    // catalog can hold one.
     //
-    // Nothing reads the gap today: `existence_probe::decide` has no MySQL call site, and
-    // the dropView inverse is recovered from the authored history rather than the
-    // catalog. It stops being harmless the moment a MySQL existence probe exists -
-    // `decide_view` answers from `live.views`, so a guarded `dropView` against a view
-    // this map omits reads as absent, returns SatisfiedNoop, and skips a drop that
-    // MySQL's own native `DROP VIEW IF EXISTS` performs correctly today.
+    // `authored_query` and `authored_schema` stay `None`, which the field's own doc calls
+    // for: "A snapshot built by introspection leaves it None, because a live catalog
+    // cannot yield a typed query - and a drop with no typed body correctly stays
+    // irreversible rather than guessing one." The typed body a `dropView` inverse needs
+    // comes from replaying the authored history, not from here.
+    //
+    // `definition` is diagnostic only, per the same doc - PostgreSQL stores a bare SELECT
+    // from `pg_get_viewdef` and SQLite the whole CREATE statement, so the text is already
+    // not one format across backends and nothing executes it.
+    let view_rows = conn
+        .query(
+            "SELECT TABLE_NAME AS view_name,
+                    VIEW_DEFINITION AS view_definition
+               FROM information_schema.VIEWS
+              WHERE TABLE_SCHEMA = ?
+              ORDER BY TABLE_NAME",
+            &[schema.into()],
+        )
+        .await?;
+    let mut views = BTreeMap::<String, ViewSnapshot>::new();
+    for row in view_rows {
+        let view_name: String = row.try_get("view_name")?;
+        let definition: Option<String> = row.try_get("view_definition")?;
+        views.insert(
+            view_name,
+            ViewSnapshot {
+                materialized: false,
+                columns: None,
+                definition,
+                authored_query: None,
+                authored_schema: None,
+                comment: None,
+            },
+        );
+    }
+
+    // POPULATED, and it was a real defect rather than a latent one. This map used to be
+    // empty, with a comment here claiming nothing read it. The fold reads it: a
+    // `dropView` naming a view an ALREADY-APPLIED migration created found nothing in the
+    // projection and failed the deploy with `fold: view <name> does not exist`
+    // (`render/fold.rs:2348`), because an applied migration's create carries journal
+    // evidence and so is absent from `pending_ops` too. PostgreSQL and SQLite never had
+    // it because both populate their views.
     Ok(SchemaSnapshot {
         tables,
+        views,
         ..Default::default()
     })
 }

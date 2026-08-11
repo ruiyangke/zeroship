@@ -2486,6 +2486,8 @@ mod render_tests {
                 && all.contains("POSITION_IN_UNIQUE_CONSTRAINT")
                 && all
                     .contains("ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION")
+                && all.contains("information_schema.VIEWS")
+                && all.contains("VIEW_DEFINITION AS view_definition")
                 && !all.contains("information_schema.CHECK_CONSTRAINTS")
                 && !all.contains("INDEX_NAME <> 'PRIMARY'"),
             "snapshot must use schema-scoped authoritative catalog reads and gate CHECK_CONSTRAINTS below MySQL 8.0.16: {all}"
@@ -2496,7 +2498,7 @@ mod render_tests {
                 .iter()
                 .filter(|binds| binds.as_slice() == [Bind::Text("proj_x".to_string())])
                 .count(),
-            4,
+            5,
             "every catalog query scopes itself with the project database bind"
         );
     }

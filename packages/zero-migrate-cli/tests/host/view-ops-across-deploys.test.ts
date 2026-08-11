@@ -1,61 +1,37 @@
 // View operations that span two deploys - where the object was created by a migration
 // that is already applied and journaled, rather than by one in the same batch.
 //
-// Two defects were found here. One is fixed, one is not:
+// Two defects were found here, and both are now fixed:
 //
 //                                 MySQL          PostgreSQL     SQLite
-//   dropView across deploys       FAILS          works          works
+//   dropView across deploys       works          works          works
 //   createView replace across     works          works          works
 //
-// The replace row was FAILS on PostgreSQL and SQLite until the fold learned to read
-// `replace` (crates/zero-migrate/src/render/fold.rs, the Op::CreateView arm). MySQL
-// passed that row even before the fix, for the wrong reason: its catalog views map is
-// always empty, so the duplicate check the fold applied had nothing to trip on.
+// The DROP row was FAILS on MySQL. Its catalog snapshot left the `views` map empty, the
+// Node apply lowering seeds its pending-schema fold from exactly that snapshot
+// (`crates/zero-migrate-node/src/lower.rs:578`, folded at `:607`), and the fold's
+// `DropView` arm treats an absent view as an error rather than a no-op
+// (`crates/zero-migrate/src/render/fold.rs:2348`). The deploy failed with
+// `fold: view <name> does not exist`. MySQL now populates the map from
+// `information_schema.VIEWS`.
 //
-// The rows stay in one file because they are coupled. Populating MySQL's empty views
-// map to fix the drop row would have given MySQL the replace defect the other two
-// dialects had; the MySQL replace arm is what would have caught that. Fixing `replace`
-// first removed the coupling, and the arm is kept to keep it removed.
+// The REPLACE row was FAILS on PostgreSQL and SQLite until the fold learned to read
+// `replace` (the `Op::CreateView` arm). MySQL passed that row even before that fix, for
+// the wrong reason: with an empty views map the duplicate check had nothing to trip on.
 //
-// The arms that PASS are not padding. Each rules out a wrong diagnosis the failing arm
-// alone would also fit - see the comments on each.
+// The rows stay in one file because they were coupled. Populating MySQL's views map
+// while the fold still ignored `replace` would have handed MySQL the replace defect the
+// other two dialects had - and the MySQL replace arm is what would have caught it.
+// Fixing `replace` first removed the coupling; the arms are kept to keep it removed.
 //
-// WHY MySQL REFUSES. Its catalog snapshot never populates the `views` map -
-// `crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:643` returns
-// `Ok(SchemaSnapshot { tables, ..Default::default() })`, where the PostgreSQL and SQLite
-// builders both fill theirs in. The Node apply lowering seeds its pending-schema fold
-// from exactly that snapshot (`crates/zero-migrate-node/src/lower.rs:578`, folded at
-// `:607`), and the fold's `DropView` arm treats an absent view as an error rather than a
-// no-op (`crates/zero-migrate/src/render/fold.rs:2348`):
-//
-//     Op::DropView { name, .. } => {
-//         if views.remove(name).is_none() {
-//             return Err(FoldError::MissingView(name.clone()));
-//         }
-//     }
-//
-// The create is not in the fold either: `ops_without_completed_journal_evidence`
-// (`lower.rs:601`) excludes ops that already carry journal evidence, which an applied
-// migration's create does. So the drop has nowhere to find its target.
-//
-// WHY THE TWO MIGRATIONS MUST BE SEPARATE DEPLOYS. Within one deploy the fold re-folds
-// every pending op from the base snapshot, so a create and a drop in the same batch
-// resolve against each other and this passes for the wrong reason. The create has to be
-// journaled complete before the drop is planned, which is what the first `apply` in each
-// arm establishes.
-//
-// TWO HANDLERS LOOK LIKE THEY COVER THIS AND DO NOT.
-// `inflight_projection_already_reflected` (`lower.rs:1381`) carries an arm for this exact
-// op-and-error pair at `:1561`, and on MySQL its `!snapshot.views.contains_key(name)` test
-// is unconditionally true because the map is always empty - but its call site at `:616`
-// is gated on `inflight`, so it serves crash recovery only. The arm an ordinary drop
-// reaches hardcodes `ProjectionGuardVerdict::NotSatisfied` for this dialect (`:643`), for
-// a reason written about guarded ops absorbing a duplicate rather than about an unguarded
-// drop of an object that exists.
-//
-// The MySQL assertion pins the CURRENT behaviour, which is believed wrong, against the
-// exact message the engine produces today. A fix that lets the drop through fails here
-// and has to come back and change this file deliberately.
+// WHY THE TWO MIGRATIONS MUST BE SEPARATE DEPLOYS, and why every arm here applies twice:
+// within ONE deploy the fold re-folds every pending op from the base snapshot, so a
+// create and a drop in the same batch resolve against each other and the arm passes
+// without touching the catalog at all. The create has to be journaled complete before the
+// second migration is planned - `ops_without_completed_journal_evidence`
+// (`lower.rs:601`) then excludes it from `pending_ops`, leaving the catalog as the only
+// place the drop can find its target. The same-migration arm below pins that distinction
+// so it cannot quietly rot back.
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -137,7 +113,7 @@ function applyOne(
   });
 }
 
-test("MySQL: dropping a view an applied migration created is refused by the projection", async (ctx) => {
+test("MySQL: dropping a view an applied migration created reaches the database", async (ctx) => {
   if (!MYSQL_URL) {
     ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL view-drop projection skipped");
     return;
@@ -169,26 +145,12 @@ test("MySQL: dropping a view an applied migration created is refused by the proj
     await applyOne(created, database, driver, []);
     assert.equal(await liveViewCount(), 1, "the first migration really created the view");
 
-    // The refusal names the fold error, so a future failure for some unrelated reason
-    // cannot pass as this one.
-    await assert.rejects(
-      applyOne(dropTheView(), database, driver, [created]),
-      (error: unknown) => {
-        assert.equal(
-          String((error as Error)?.message ?? error),
-          'failed to project pending schema after envelope "view_drop_drop": ' +
-            "fold: view `" +
-            VIEW +
-            "` does not exist",
-        );
-        return true;
-      },
-    );
+    await applyOne(dropTheView(), database, driver, [created]);
 
     assert.equal(
       await liveViewCount(),
-      1,
-      "the refusal is a planning failure, so the view outlives the migration meant to remove it",
+      0,
+      "the drop reaches the database rather than being refused by the projection",
     );
   } finally {
     await admin
@@ -391,7 +353,7 @@ function dropTheViewIfExists(): NamedMigration {
   });
 }
 
-test("MySQL: an ifExists drop across two deploys is refused too, so the guard is not a workaround", async (ctx) => {
+test("MySQL: an ifExists drop across two deploys removes the view, like the unguarded one", async (ctx) => {
   if (!MYSQL_URL) {
     ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded view-drop arm skipped");
     return;
@@ -423,11 +385,18 @@ test("MySQL: an ifExists drop across two deploys is refused too, so the guard is
     );
     assert.equal(
       outcome,
-      'failed to project pending schema after envelope "view_drop_guarded": ' +
-        "fold: view `" +
-        VIEW +
-        "` does not exist",
-      "the guarded drop is refused the same way the unguarded one is",
+      "ran",
+      "the guard has a populated views map to resolve against, so the drop is planned"
+    );
+    const [rows] = await admin.query(
+      `SELECT TABLE_NAME FROM information_schema.VIEWS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+      [database, VIEW],
+    );
+    assert.equal(
+      (rows as unknown[]).length,
+      0,
+      "the guarded drop reaches the database rather than resolving to a no-op",
     );
   } finally {
     await admin
@@ -494,7 +463,7 @@ test("SQLite: both view operations across two deploys", async () => {
   }
 });
 
-test("PostgreSQL: the same authored pair drops the view, so the MySQL refusal is not about views", async (ctx) => {
+test("PostgreSQL: the same authored pair drops the view, the parity the MySQL arm is measured against", async (ctx) => {
   if (!PG_URL) {
     ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; view-drop control skipped");
     return;
