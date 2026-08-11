@@ -178,6 +178,20 @@ services:
       # In-cluster control-plane base URL the deployed console's control-client
       # calls (the localhost default is wrong inside the compose network).
       ZEROSHIP_CONTROL_URL: http://control:9090
+    # DELIBERATELY STILL ON 0.0.0.0, and this is the one that needs an operator
+    # decision rather than a one-line fix. tests/compose_port_exposure_gate.sh
+    # is RED on exactly this line and is meant to be.
+    #
+    # Unlike gateway and auth, the control plane has NO Caddy site block at all
+    # - `api.zeroship.co` proxies to `gateway:8000`, not here - so this
+    # published port is the ONLY way a creator's `zeroship deploy --control=...`
+    # can reach it. Loopback-binding it would break the primary creator flow,
+    # which is why it is not done here.
+    #
+    # That leaves app CRUD, deploy, env/secrets and billing reachable by IP on
+    # an internet-facing host, outside TLS. The fix is a control route at the
+    # edge (so Cloudflare terminates TLS in one place) plus loopback here, and
+    # that is a deploy-topology change, not a port tweak. See task #186.
     ports:
       - "9090:9090"
     volumes:
@@ -245,8 +259,15 @@ services:
       # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
       # rotate without a per-app `pws_` migration.
       PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
+    # LOOPBACK, and this costs the documented path nothing. Caddy reaches the
+    # gateway by SERVICE NAME over the compose network (`reverse_proxy
+    # gateway:8000`, three site blocks in deploy/ops/Caddyfile), never through
+    # this published port. Publishing on 0.0.0.0 therefore bought only a SECOND
+    # entrance - one that skips Caddy, and so skips Cloudflare, which is where
+    # TLS terminates for zeroship.co. 127.0.0.1 keeps every host-side `curl
+    # localhost:8000` and every local harness working; only remote reach goes.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -431,8 +452,11 @@ services:
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${AUTH_PUBLIC_URL}/oauth2`.
       AUTH_PUBLIC_URL: https://auth.zeroship.co
+    # LOOPBACK, same reasoning as the gateway: Caddy reaches auth by service
+    # name (`reverse_proxy auth:9092`, three site blocks), so this published
+    # port was a second entrance to the OIDC provider that bypassed the edge.
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     volumes:
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.
