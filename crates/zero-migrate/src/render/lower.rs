@@ -3011,7 +3011,44 @@ impl IrAuthor {
     #[must_use]
     pub fn resolved_touched_tables(ir: &MigrationIr, live: &LiveSchema) -> Vec<String> {
         let mut touched_tables = ir.touched_tables();
+        // Descends `Op::Dialectal` because the BASE above already does: `touched_tables`
+        // claims every leg's tables, so a supplement that read the top level only left
+        // one function disagreeing with itself, and a bare-name drop authored inside a
+        // leg contributed nothing to the interlock set.
+        //
+        // Every leg, which is forced rather than chosen here: this takes no dialect, so
+        // there is no leg to select. Over-claiming a touched table costs a conservative
+        // interlock; under-claiming loses one.
+        //
+        // One level deep is complete: a leg cannot hold a wrapper.
         for op in &ir.ops {
+            let effective: &[Op] = match op {
+                Op::Dialectal {
+                    default,
+                    pg,
+                    sqlite,
+                    mysql,
+                } => {
+                    for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+                        Self::supplement_bare_index_drops(leg, live, &mut touched_tables);
+                    }
+                    &[]
+                }
+                other => std::slice::from_ref(other),
+            };
+            Self::supplement_bare_index_drops(effective, live, &mut touched_tables);
+        }
+        touched_tables
+    }
+
+    /// Fold each bare-name `dropIndex` in `ops` into `touched_tables`, resolved to its
+    /// live owner or to the fail-closed unknown sentinel.
+    fn supplement_bare_index_drops(
+        ops: &[Op],
+        live: &LiveSchema,
+        touched_tables: &mut Vec<String>,
+    ) {
+        for op in ops {
             if let Op::DropIndex {
                 name, table: None, ..
             } = op
@@ -3023,7 +3060,6 @@ impl IrAuthor {
                 }
             }
         }
-        touched_tables
     }
 
     /// Resolve a `dropIndex`'s owning TABLE from the LIVE schema by index name,
