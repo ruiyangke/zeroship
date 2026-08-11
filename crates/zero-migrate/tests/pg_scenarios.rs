@@ -5468,3 +5468,96 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+// The converse of the guard above: a rename whose OLD column carries a CHECK
+// constraint is NOT refused, because PostgreSQL drops that column and takes the
+// constraint with it.
+//
+// This is the case the predicate got wrong until the NORMAL leg learned to ask
+// whether the same object also holds an AUTO edge (docs/review-log.md F300). A
+// CHECK reports BOTH edges on its column; a view's rewrite rule and a generated
+// column's default report NORMAL alone. Keyed on "any NORMAL dependency", the
+// guard refused this rename, and the twelve-shape oracle agreed with the server
+// on every shape it enumerated because none of them was a CHECK.
+//
+// The second half is what this pins beyond "no error came back": the EXPAND half
+// actually ran, so `quantity` exists alongside `qty`. That is the shape the
+// refusal test asserts the absence of - it checks `quantity` was never added - so
+// the two together separate "refused before E1" from "allowed and expanded".
+//
+// `qty` is still present on purpose. Expand and contract are different deploys:
+// the contract half drops the old column at N+1, once no running code reads it.
+// Asserting a completed rename here would be asserting the wrong contract.
+#[compio::test]
+async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".chk_rename_items (\
+                 id bigint PRIMARY KEY, qty int NOT NULL CHECK (qty >= 0)\
+             )",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create a table whose rename source carries a CHECK constraint");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "chk_rename_items".into(),
+            from: "qty".into(),
+            to: "quantity".into(),
+            ty: "int".into(),
+        })
+        .expect("author the rename");
+    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+
+    engine
+        .apply_plan_with_touched_and_depends(
+            std::slice::from_ref(&step),
+            &["chk_rename_items".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("a CHECK constraint does not stop PostgreSQL dropping the old column");
+
+    let columns = session
+        .query(
+            "SELECT column_name FROM information_schema.columns \
+              WHERE table_schema = $1 AND table_name = 'chk_rename_items' \
+              ORDER BY column_name",
+            &[cfg.project_schema.clone().into()],
+        )
+        .await
+        .expect("read back the table shape");
+    let names: Vec<String> = columns
+        .iter()
+        .map(|row| {
+            row.try_get::<_, String>("column_name")
+                .expect("column_name")
+        })
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "quantity"),
+        "the expand half ran, so the new column exists: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "qty"),
+        "the old column survives the expand half and is dropped by the contract at N+1: {names:?}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
