@@ -40,6 +40,21 @@ const ADDON_PATH = resolve(
   HERE,
   `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
+/**
+ * A charter that INJECTS NOTHING, for the arms that only need author-shaped output.
+ *
+ * NOT interchangeable with `noInjectPolicy(schema)` imported above, despite the names.
+ * That one grants `schema.cross_schema` over a LITERAL schema, so the migration OWNS
+ * something and the guard's confinement scope resolves to it. This one grants nothing,
+ * so it owns nothing and `GuardConfig::schema_scope` collapses to `Single("")` - which
+ * permits no schema at all.
+ *
+ * Correct where it is used because those arms never apply against a live project
+ * schema: they preview or lint, where the charter shapes INJECTION and confinement is
+ * never consulted. Swapping in `noInjectPolicy` would silently change what they assert,
+ * and swapping this into an apply arm would deny every create. The distinction is
+ * inject-shape versus ownership, and only the names make them look alike.
+ */
 const NO_INJECT_POLICY = "policy_version = 1\n";
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
