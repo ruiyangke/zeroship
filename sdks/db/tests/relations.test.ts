@@ -259,7 +259,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
     const { data, error } = await db.todos.find({}, { with: { bogus: true } as { bogus: true } });
     assert.equal(data, null);
     assert.ok(error);
-    assert.match(error!.message, /is not a t\.ref field/);
+    assert.match(error!.message, /is not a reference field/);
   });
 
   test("with: { id: true } — clear error when field is not a ref", async () => {
@@ -268,7 +268,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
     const { data, error } = await db.todos.find({}, { with: { id: true } as { id: true } });
     assert.equal(data, null);
     assert.ok(error);
-    assert.match(error!.message, /is not a t\.ref field/);
+    assert.match(error!.message, /is not a reference field/);
   });
 
   test("with: { title: true } — clear error when field exists but isn't a ref", async () => {
@@ -276,7 +276,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
     const { data, error } = await db.todos.find({}, { with: { title: true } as { title: true } });
     assert.equal(data, null);
     assert.ok(error);
-    assert.match(error!.message, /is not a t\.ref field/);
+    assert.match(error!.message, /is not a reference field/);
   });
 
   test("paginate({...}) honours `.with(...)`", async () => {
