@@ -4384,6 +4384,7 @@ fn fts_objects_pg(
         case_sensitive: None,
         collation: None,
         mysql_text_storage: None,
+        mysql_physical_type: None,
         encryption_sentinel: None,
         comment_sentinel: None,
         comment: None,

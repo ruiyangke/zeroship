@@ -161,6 +161,24 @@ pub struct ColumnSnapshot {
     /// drift equality and hashing because the portable schema surface records
     /// collation intent, not a server-default MySQL collation name.
     pub mysql_text_storage: Option<MysqlTextStorageSnapshot>,
+    /// The parsed physical identity of a MySQL column, when the snapshot came from
+    /// a MySQL catalog. `None` on every other dialect and on author-built desired
+    /// snapshots that have not derived it yet.
+    ///
+    /// This exists because `data_type` cannot carry it: `mysql_canonical_type` folds
+    /// every `varchar(n)` to the literal `text`, so a live `varchar(64)` and a
+    /// declared `varchar(255)` are the same string by the time they are compared.
+    ///
+    /// Like [`MysqlTextStorageSnapshot`] above it is excluded from this type's
+    /// `PartialEq` and `Hash`, but for the OPPOSITE reason. That one is excluded
+    /// because it is not part of the portable schema surface at all. This one is
+    /// excluded because it is dialect-specific: folding it into the general equality
+    /// would change what every consumer of `ColumnSnapshot` equality means by "the
+    /// same column", including the fold and the dedup paths, when only a
+    /// MySQL-aware comparator should be asking. The comparison belongs in one
+    /// dialect-aware place that structural drift and the existence guard both call,
+    /// so the two cannot disagree about one column.
+    pub mysql_physical_type: Option<MysqlPhysicalType>,
     /// The inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
     /// `/* zero-migrate:enc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
@@ -228,6 +246,9 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         if self.mysql_text_storage.is_some() {
             s.field("mysql_text_storage", &self.mysql_text_storage);
+        }
+        if self.mysql_physical_type.is_some() {
+            s.field("mysql_physical_type", &self.mysql_physical_type);
         }
         if self.mysql_default_generated.is_some() {
             s.field("mysql_default_generated", &self.mysql_default_generated);
@@ -388,6 +409,105 @@ impl ColumnCollationSnapshot {
             |schema| format!("{schema}.{}", self.name),
         )
     }
+}
+
+/// The physical identity of one MySQL column, as parsed VALUES rather than as
+/// rendered type text.
+///
+/// The portable `data_type` cannot answer this: `mysql_canonical_type` folds every
+/// `varchar(n)` to the literal `text` (`schema/query.rs`), so a live `varchar(64)`
+/// and a declared `varchar(255)` are indistinguishable once stored. Both sides of a
+/// comparison fold the same way, so the blindness is symmetric and silent.
+///
+/// COMPARING RENDERED TEXT INSTEAD WAS REJECTED, and the reason is measured rather
+/// than stylistic. The engine emits `DECIMAL(65, 30)` where MySQL stores
+/// `decimal(65,30)`, and emits `POINT SRID 4326` where MySQL stores bare `point`
+/// because the SRID is a separate catalog column. A string comparison turns each of
+/// those into a reported difference on a database that never changed, and every
+/// future type spelling is another chance to add a third. Parsed values make both
+/// disappear: precision and scale are integers, so spacing is not a concept, and a
+/// facet MySQL does not put in `COLUMN_TYPE` is simply not part of the type.
+///
+/// The variants are FAMILY-GATED on purpose. Comparing every populated catalog facet
+/// regardless of family is itself a source of false differences, because MySQL
+/// populates numeric precision for temporal columns and character length for binary
+/// ones.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MysqlPhysicalType {
+    /// `VARCHAR(n)` / `CHAR(n)`, carrying the character length MySQL enforces.
+    Character {
+        /// `true` for the fixed-width `CHAR` spelling.
+        fixed: bool,
+        /// Declared length in characters.
+        length: u32,
+    },
+    /// A `TEXT`/`BLOB` storage tier, which changes the capacity the column accepts.
+    Lob {
+        /// The catalog `DATA_TYPE`, e.g. `tinytext`, `text`, `mediumblob`.
+        tier: String,
+    },
+    /// An integer family member. Display width is dropped because MySQL 8 no longer
+    /// stores it - EXCEPT for `tinyint(1)`, which is how the renderer spells a
+    /// boolean and which MySQL does preserve, so it is carried as its own flag
+    /// rather than as a width.
+    Integer {
+        /// The catalog `DATA_TYPE`, e.g. `int`, `bigint`, `tinyint`.
+        kind: String,
+        /// `UNSIGNED` changes both the range and foreign-key compatibility.
+        unsigned: bool,
+        /// The `tinyint(1)` boolean spelling.
+        boolean: bool,
+    },
+    /// `DECIMAL(p, s)` and friends, where both parameters are semantic.
+    Decimal {
+        /// Total digits.
+        precision: u32,
+        /// Digits after the point.
+        scale: u32,
+        /// `UNSIGNED` changes the representable range.
+        unsigned: bool,
+    },
+    /// A date/time family member with its fractional-seconds precision. MySQL omits
+    /// the precision entirely when it is zero, so an absent one means zero.
+    Temporal {
+        /// The catalog `DATA_TYPE`, e.g. `datetime`, `timestamp`, `time`.
+        kind: String,
+        /// Fractional-seconds precision, zero when MySQL stores none.
+        fsp: u32,
+    },
+    /// `ENUM`/`SET` members, in declaration order. Members are compared as decoded
+    /// values, so quoting and interior spaces cannot corrupt them.
+    Members {
+        /// `enum` or `set`.
+        kind: String,
+        /// Members in declaration order.
+        members: Vec<String>,
+    },
+    /// A spatial column. The SRID is read from its own catalog column, never from
+    /// the type text, because MySQL does not put it there.
+    Spatial {
+        /// The catalog `DATA_TYPE`, e.g. `point`, `geometry`.
+        kind: String,
+        /// `SRS_ID`, absent when the column is unconstrained.
+        srid: Option<u32>,
+    },
+    /// A family carrying no parameters worth comparing, e.g. `json`, `double`.
+    Plain {
+        /// The catalog `DATA_TYPE`.
+        kind: String,
+    },
+    /// A type this engine does not model yet.
+    ///
+    /// Deliberately NOT equal to itself in the comparators' sense: a consumer must
+    /// decide what an unmodelled type means for it, because the safe direction
+    /// differs. A guard must refuse to treat it as a match and adopt the object; a
+    /// differ must refuse to report a difference it cannot actually establish.
+    /// Collapsing both into one answer is what makes an unknown type either
+    /// silently adopted or loudly false-reported.
+    Unknown {
+        /// The catalog `DATA_TYPE` as MySQL spelled it.
+        raw: String,
+    },
 }
 
 /// Exact MySQL character-set and collation metadata for one catalog column.

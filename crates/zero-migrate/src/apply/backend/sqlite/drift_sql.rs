@@ -481,6 +481,7 @@ async fn introspect_columns(
             case_sensitive: recover_case_sensitive(stored_create_sql, &name),
             collation: recover_column_collation(stored_create_sql, &name),
             mysql_text_storage: None,
+            mysql_physical_type: None,
             comment: None,
         });
     }
