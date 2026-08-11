@@ -803,6 +803,19 @@ fn main() -> std::io::Result<()> {
         // published in this source tree, so anyone can mint a session for any
         // user. That is not a warning-level condition, so refuse it - matching
         // the worker, which already refuses a non-loopback bind without a key.
+        //
+        // WHAT THIS CHECK DOES NOT COVER, stated because it is the only
+        // bind-safety check here and reads as though it vets the bind in
+        // general: it is scoped to WAIVED SECRETS. It cannot fire when
+        // `insecure_dev` is false, so a fully-configured deployment that sets
+        // every key and binds 0.0.0.0 passes it silently - and that deployment
+        // still exposes `/__zeroship/internal/workflow-advance`, which is
+        // registered on this one bound server and gated only by
+        // `extract_app_name(..).is_some()` (router/dispatch.rs), i.e. served to
+        // any caller whose Host does not resolve to an app. There is no
+        // signature on it yet; see the TODO(DW-signed-transport) at that site.
+        // No key check can cover that route, because its exposure is not tied
+        // to a key. Tracked as tasks #186/#199.
         let waived: Vec<&str> = [
             ("CONTROL_KEY", control_key_unset),
             ("WORKER_KEY", worker_key_unset),
