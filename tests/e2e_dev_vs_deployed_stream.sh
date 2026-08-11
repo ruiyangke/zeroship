@@ -386,7 +386,11 @@ tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 STREAM_MIN_PASSED="${STREAM_MIN_PASSED:-24}"
 
 echo ""
-echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $STREAM_MIN_PASSED)"
+# MUTATE_BUFFERED is named in this line too. It is a SEPARATE variable from
+# MUTATE, so a buffered run used to close with `(mutation: none)` beside two
+# failures -- the one line a reader skips to, telling them an unmutated run had
+# regressed. The banner above says it, but the banner is 50 lines up.
+echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE, MUTATE_BUFFERED=$MUTATE_BUFFERED)  (floor $STREAM_MIN_PASSED)"
 echo "  MUTATION: re-run with MUTATE_BUFFERED=1 to drop curl -N; both sides must then FAIL"
 echo "  MUTATIONS (wire format): MUTATE=no-terminator | no-sse-ctype -- each edits"
 echo "    sdks/bootstrap/src/fetch-handler.ts; the DEPLOYED side carries the defect"
@@ -395,11 +399,26 @@ echo "    green (dev keeps its prebuilt dev-bootstrap.js -- see the header note)
 
 # A MUTATION run is EXPECTED to fail assertions, so the floor is the only thing
 # that still has to hold there: the point of MUTATE_BUFFERED=1 is that the
-# timing rows go red, not that fewer rows run.
+# timing rows go red, not that fewer rows run. The floor must therefore count
+# assertions that RAN. A failing assertion is already caught by `FAIL -eq 0`
+# below; the floor exists for the other failure, where an assertion stops
+# running at all and its absence reads as a pass. A mutation moves an outcome
+# between columns and leaves the sum alone.
+#
+# MEASURED 2026-08-11, both runs mine, same HEAD:
+#   unmutated          24 passed, 0 failed  -> 24 ran
+#   MUTATE_BUFFERED=1  22 passed, 2 failed  -> 24 ran
+# The two are the incremental-arrival rows, one per tier, exactly the pair the
+# mutation names. Counting PASS alone reported `only 22 assertions passed,
+# fewer than the 24` on that run -- a third failure that is not one, on the one
+# run this harness is designed to be told apart by.
+RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$PASS" -lt "$STREAM_MIN_PASSED" ]; then
-  echo "FAIL: only $PASS assertions passed, fewer than the $STREAM_MIN_PASSED this gate expects." >&2
+if [ "$RAN" -lt "$STREAM_MIN_PASSED" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $STREAM_MIN_PASSED this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above.)" >&2
   echo "      Assertions do not vanish by accident: either a tier stopped being probed" >&2
   echo "      (judge/frames/headers are each called once per side) or one was removed." >&2
   echo "      If the removal was deliberate, lower STREAM_MIN_PASSED in the same change" >&2
