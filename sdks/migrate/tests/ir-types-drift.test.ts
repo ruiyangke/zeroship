@@ -20,28 +20,38 @@ const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 
+// The SELECTION RULE of each extractor, factored out so that the
+// extractor-coverage test near the bottom of this file tests the rules the
+// extractors actually use. Defining the predicates separately would let the two
+// drift, and a coverage test that certifies coverage it does not have is worse
+// than none: it would answer the auditor's question before it was asked.
+const isStringToken = (b: any): boolean => typeof b?.const === "string";
+const isExternallyTagged = (b: any): boolean => Object.keys(b?.properties ?? {}).length === 1;
+const hasTag = (tagField: string) => (b: any): boolean =>
+  typeof b?.properties?.[tagField]?.const === "string";
+
 /** The `const` tokens of a `oneOf` string-enum def. */
 function enumTokens(def: any): string[] {
-  return def.oneOf.map((b: any) => b.const).filter((constant: any) => typeof constant === "string").sort();
+  return def.oneOf.filter(isStringToken).map((b: any) => b.const).sort();
 }
-/** The internally-tagged variant tags of an internally-tagged `oneOf` def
- *  (the const of the `tagField` property in each branch). */
+
 /** Variant names of an EXTERNALLY tagged enum (`{ VariantName: {...} }`), where
  *  the name is the branch's single property key rather than a `const` tag field.
  *  `variantTags` returns [] for these, which is silent rather than loud -- an
  *  empty list compared against an empty list passes. */
 function externalVariantNames(def: any): string[] {
   return def.oneOf
-    .map((b: any) => Object.keys(b?.properties ?? {}))
-    .filter((keys: string[]) => keys.length === 1)
-    .map((keys: string[]) => keys[0])
+    .filter(isExternallyTagged)
+    .map((b: any) => Object.keys(b.properties)[0])
     .sort();
 }
 
+/** The internally-tagged variant tags of an internally-tagged `oneOf` def
+ *  (the const of the `tagField` property in each branch). */
 function variantTags(def: any, tagField: string): string[] {
   return def.oneOf
-    .map((b: any) => b?.properties?.[tagField]?.const)
-    .filter((constant: any) => typeof constant === "string")
+    .filter(hasTag(tagField))
+    .map((b: any) => b.properties[tagField].const)
     .sort();
 }
 
@@ -325,6 +335,62 @@ test("PerRowGenerator tokens and variants match the schema", () => {
 test("ValueFormat tokens and variants match the schema", () => {
   assert.deepEqual(enumTokens(schema.$defs.ValueFormat), TS.ValueFormatStrings);
   assert.deepEqual(externalVariantNames(schema.$defs.ValueFormat), TS.ValueFormatVariants);
+});
+
+// COVERAGE OF THE EXTRACTORS THEMSELVES, not of any one union.
+//
+// Every assertion above compares an extractor's output against a hand list. That
+// catches a variant being ADDED or RENAMED in a shape the extractor can read. It
+// cannot catch a branch the extractor cannot read AT ALL: such a branch is
+// absent from both sides, so the comparison passes and the branch is ungated.
+//
+// The failure mode is specific to how these extractors select. `enumTokens`
+// keeps branches with a string `const`; `externalVariantNames` keeps branches
+// whose `properties` has exactly ONE key; `variantTags` keeps branches with a
+// `const` under a named tag field. A branch that satisfies none of the
+// extractors used for its union -- a `$ref`, an untagged multi-property object,
+// an externally-tagged branch that grows a second sibling property -- is
+// invisible, and nothing above would notice.
+//
+// This test names, per union, exactly which extractor(s) the assertions above
+// use, and requires that those extractor(s) can see EVERY branch. Measured
+// 2026-08-11: all 8 unions, 0 invisible branches. Prompted by zero-migrate
+// (ZERO-MIGRATE-2026-08-11-018) flagging mixed unions as the risk; the general
+// property turned out to be the checkable one.
+const EXTRACTOR_COVERAGE: Record<string, ((b: any) => boolean)[]> = {
+  IrDefault: [isExternallyTagged],
+  VectorMetric: [isStringToken],
+  ColumnOrExpr: [hasTag("kind")],
+  CursorStability: [hasTag("mode")],
+  AlterPrimaryKeyAction: [hasTag("kind")],
+  PerRowGenerator: [isStringToken, isExternallyTagged],
+  ValueFormat: [isStringToken, isExternallyTagged],
+  Precondition: [isExternallyTagged],
+};
+
+test("every pinned union's extractors can see all of its branches", () => {
+  const invisible: string[] = [];
+  let unionsChecked = 0;
+  for (const [name, predicates] of Object.entries(EXTRACTOR_COVERAGE)) {
+    const def: any = (schema.$defs as any)[name];
+    assert.ok(def?.oneOf, `${name} has no oneOf in the schema -- the pin above is reading nothing`);
+    unionsChecked++;
+    def.oneOf.forEach((branch: any, i: number) => {
+      if (!predicates.some((p) => p(branch))) {
+        invisible.push(`${name}.oneOf[${i}] props=${JSON.stringify(Object.keys(branch?.properties ?? {}))}`);
+      }
+    });
+  }
+  // Guard against the vacuous pass: an empty map would satisfy the assert below
+  // while proving nothing, which is the exact shape this test exists to catch.
+  assert.equal(unionsChecked, Object.keys(EXTRACTOR_COVERAGE).length);
+  assert.ok(unionsChecked > 0, "no unions were checked");
+  assert.deepEqual(
+    invisible,
+    [],
+    `these branches are gated by NOTHING -- no extractor used for their union can read them, ` +
+      `so they could change freely and every assertion above would stay green:\n  ${invisible.join("\n  ")}`,
+  );
 });
 
 test("Precondition variant names match the schema (externally tagged)", () => {
