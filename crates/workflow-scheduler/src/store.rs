@@ -13,7 +13,7 @@ pub struct WorkflowSchedulerStore {
 impl WorkflowSchedulerStore {
     #[must_use]
     pub fn new(db_url: impl Into<String>) -> Self {
-        Self::new_with_schema(db_url, "workflow_scheduler")
+        Self::new_with_schema(db_url, "zeroship")
     }
 
     #[must_use]
@@ -38,11 +38,56 @@ impl WorkflowSchedulerStore {
         Ok(client)
     }
 
+    /// Create the scheduler schema and tables. TEST AND LOCAL SETUP ONLY.
+    ///
+    /// Production establishes these objects from
+    /// `db/migrations-ts/20260811000100_workflow_scheduler_store.ts`, like every
+    /// other platform table. Services must not call this: the first statement is
+    /// `CREATE SCHEMA IF NOT EXISTS`, and Postgres checks the database-level
+    /// CREATE privilege BEFORE the existence short-circuit, so under any
+    /// least-privilege role it fails with SQLSTATE 42501 whether or not the
+    /// schema is already there. Use [`Self::ensure_ready`] on a service path.
+    ///
+    /// The DDL here and the migration are two spellings of the same objects, so
+    /// they can drift. `tests/golden_path.sh` is what catches that: it asserts
+    /// the columns against a database built by migrations alone.
+    #[doc(hidden)]
     #[allow(clippy::future_not_send)]
     pub async fn provision(&self) -> Result<(), WorkflowSchedulerStoreError> {
         let conn = self.open_conn().await?;
         conn.batch_execute(&self.provision_sql()).await?;
         Ok(())
+    }
+
+    /// Verify the migration-owned scheduler store is present.
+    ///
+    /// Replaces the former per-tick `provision()` call on service paths. It
+    /// reads rather than writes, so it needs no privilege the store's own
+    /// queries do not already need.
+    #[allow(clippy::future_not_send)]
+    pub async fn ensure_ready(&self) -> Result<(), WorkflowSchedulerStoreError> {
+        let conn = self.open_conn().await?;
+        let schema = self.quoted_schema();
+        let rows = conn
+            .query(
+                "SELECT to_regclass($1) IS NOT NULL AS timers, \
+                        to_regclass($2) IS NOT NULL AS inflight",
+                &[
+                    &format!("{schema}.workflow_scheduler_timers"),
+                    &format!("{schema}.workflow_scheduler_inflight"),
+                ],
+            )
+            .await?;
+        let ready = rows
+            .first()
+            .is_some_and(|row| row.get::<_, bool>("timers") && row.get::<_, bool>("inflight"));
+        if ready {
+            Ok(())
+        } else {
+            Err(WorkflowSchedulerStoreError::NotProvisioned {
+                schema: self.schema.clone(),
+            })
+        }
     }
 
     #[allow(clippy::future_not_send)]
@@ -76,17 +121,17 @@ impl WorkflowSchedulerStore {
     where
         C: GenericClient + Sync,
     {
-        conn.execute(&format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()), &[&run_id])
+        conn.execute(&format!("DELETE FROM {}.workflow_scheduler_inflight WHERE run_id = $1", self.quoted_schema()), &[&run_id])
             .await?;
         let row = conn
             .query_one(
-                &format!("INSERT INTO {}.timers \
+                &format!("INSERT INTO {}.workflow_scheduler_timers \
                     (run_id, app_id, wake_at, generation, registered_at) \
                  VALUES ($1, $2, $3, 0, now()) \
                  ON CONFLICT (run_id) DO UPDATE \
                     SET app_id = EXCLUDED.app_id, \
                         wake_at = EXCLUDED.wake_at, \
-                        generation = {schema}.timers.generation + 1, \
+                        generation = {schema}.workflow_scheduler_timers.generation + 1, \
                         registered_at = now() \
                  RETURNING run_id, app_id, wake_at, generation, registered_at",
                     self.quoted_schema(),
@@ -111,7 +156,7 @@ impl WorkflowSchedulerStore {
         let rows = conn
             .query(
                 &format!("SELECT run_id, app_id, wake_at, generation, registered_at \
-                   FROM {}.timers \
+                   FROM {}.workflow_scheduler_timers \
                   WHERE wake_at <= $1 \
                   ORDER BY wake_at, run_id \
                   LIMIT $2", self.quoted_schema()),
@@ -131,7 +176,7 @@ impl WorkflowSchedulerStore {
         let tx = conn.transaction().await?;
         let rows = tx
             .query(
-                &format!("DELETE FROM {}.timers \
+                &format!("DELETE FROM {}.workflow_scheduler_timers \
                   WHERE run_id = $1 AND generation = $2 AND wake_at <= now() \
                   RETURNING run_id, app_id, wake_at, generation", self.quoted_schema()),
                 &[&entry.run_id, &entry.generation],
@@ -146,7 +191,7 @@ impl WorkflowSchedulerStore {
         let wake_at: DateTime<Utc> = row.get("wake_at");
         let generation: i64 = row.get("generation");
         tx.execute(
-            &format!("INSERT INTO {}.inflight \
+            &format!("INSERT INTO {}.workflow_scheduler_inflight \
                 (run_id, app_id, deadline, dispatch_generation, dispatched_at) \
              VALUES ($1, $2, $3, $4, now()) \
              ON CONFLICT (run_id) DO UPDATE \
@@ -183,18 +228,18 @@ impl WorkflowSchedulerStore {
             .query(
                 &format!("WITH due AS ( \
                     SELECT run_id \
-                      FROM {schema}.timers \
+                      FROM {schema}.workflow_scheduler_timers \
                      WHERE wake_at <= $1 \
                      ORDER BY wake_at, run_id \
                      LIMIT $2 \
                      FOR UPDATE SKIP LOCKED \
                  ), moved AS ( \
-                    DELETE FROM {schema}.timers timers \
+                    DELETE FROM {schema}.workflow_scheduler_timers timers \
                      USING due \
                      WHERE timers.run_id = due.run_id \
                      RETURNING timers.run_id, timers.app_id, timers.wake_at, timers.generation \
                  ), upserted AS ( \
-                    INSERT INTO {schema}.inflight \
+                    INSERT INTO {schema}.workflow_scheduler_inflight \
                         (run_id, app_id, deadline, dispatch_generation, dispatched_at) \
                     SELECT run_id, app_id, $3, generation, now() \
                       FROM moved \
@@ -260,7 +305,7 @@ impl WorkflowSchedulerStore {
     {
         let rows = conn
             .query(
-                &format!("DELETE FROM {}.inflight \
+                &format!("DELETE FROM {}.workflow_scheduler_inflight \
                   WHERE run_id = $1 \
                   RETURNING dispatch_generation", self.quoted_schema()),
                 &[&run_id],
@@ -271,13 +316,13 @@ impl WorkflowSchedulerStore {
             .map_or(0, |row| row.get::<_, i64>("dispatch_generation") + 1);
         let row = conn
             .query_one(
-                &format!("INSERT INTO {}.timers \
+                &format!("INSERT INTO {}.workflow_scheduler_timers \
                     (run_id, app_id, wake_at, generation, registered_at) \
                  VALUES ($1, $2, $3, $4, now()) \
                  ON CONFLICT (run_id) DO UPDATE \
                     SET app_id = EXCLUDED.app_id, \
                         wake_at = EXCLUDED.wake_at, \
-                        generation = GREATEST({schema}.timers.generation + 1, EXCLUDED.generation), \
+                        generation = GREATEST({schema}.workflow_scheduler_timers.generation + 1, EXCLUDED.generation), \
                         registered_at = now() \
                  RETURNING run_id, app_id, wake_at, generation, registered_at",
                     self.quoted_schema(),
@@ -307,12 +352,12 @@ impl WorkflowSchedulerStore {
         C: GenericClient + Sync,
     {
         conn.execute(
-            &format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()),
+            &format!("DELETE FROM {}.workflow_scheduler_inflight WHERE run_id = $1", self.quoted_schema()),
             &[&run_id],
         )
         .await?;
         conn.execute(
-            &format!("DELETE FROM {}.timers WHERE run_id = $1", self.quoted_schema()),
+            &format!("DELETE FROM {}.workflow_scheduler_timers WHERE run_id = $1", self.quoted_schema()),
             &[&run_id],
         )
         .await?;
@@ -337,7 +382,7 @@ impl WorkflowSchedulerStore {
         C: GenericClient + Sync,
     {
         conn.execute(
-            &format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()),
+            &format!("DELETE FROM {}.workflow_scheduler_inflight WHERE run_id = $1", self.quoted_schema()),
             &[&run_id],
         )
         .await?;
@@ -354,7 +399,7 @@ impl WorkflowSchedulerStore {
         let tx = conn.transaction().await?;
         let rows = tx
             .query(
-                &format!("DELETE FROM {}.inflight \
+                &format!("DELETE FROM {}.workflow_scheduler_inflight \
                   WHERE run_id = $1 \
                   RETURNING run_id, app_id, dispatch_generation", self.quoted_schema()),
                 &[&run_id],
@@ -369,13 +414,13 @@ impl WorkflowSchedulerStore {
         let generation: i64 = row.get::<_, i64>("dispatch_generation") + 1;
         let row = tx
             .query_one(
-                &format!("INSERT INTO {}.timers \
+                &format!("INSERT INTO {}.workflow_scheduler_timers \
                     (run_id, app_id, wake_at, generation, registered_at) \
                  VALUES ($1, $2, $3, $4, now()) \
                  ON CONFLICT (run_id) DO UPDATE \
                     SET app_id = EXCLUDED.app_id, \
                         wake_at = EXCLUDED.wake_at, \
-                        generation = GREATEST({schema}.timers.generation + 1, EXCLUDED.generation), \
+                        generation = GREATEST({schema}.workflow_scheduler_timers.generation + 1, EXCLUDED.generation), \
                         registered_at = now() \
                  RETURNING run_id, app_id, wake_at, generation, registered_at",
                     self.quoted_schema(),
@@ -394,7 +439,7 @@ impl WorkflowSchedulerStore {
         let rows = conn
             .query(
                 &format!("SELECT run_id, app_id, wake_at, generation, registered_at \
-                   FROM {}.timers \
+                   FROM {}.workflow_scheduler_timers \
                   WHERE run_id = $1", self.quoted_schema()),
                 &[&run_id],
             )
@@ -411,7 +456,7 @@ impl WorkflowSchedulerStore {
         let rows = conn
             .query(
                 &format!("SELECT run_id, app_id, deadline, dispatch_generation, dispatched_at \
-                   FROM {}.inflight \
+                   FROM {}.workflow_scheduler_inflight \
                   WHERE run_id = $1", self.quoted_schema()),
                 &[&run_id],
             )
@@ -435,13 +480,13 @@ impl WorkflowSchedulerStore {
             .query(
                 &format!("WITH due AS ( \
                     SELECT run_id \
-                      FROM {schema}.inflight \
+                      FROM {schema}.workflow_scheduler_inflight \
                      WHERE deadline <= $1 \
                      ORDER BY deadline, run_id \
                      LIMIT $2 \
                      FOR UPDATE SKIP LOCKED \
                  ) \
-                 UPDATE {schema}.inflight inflight \
+                 UPDATE {schema}.workflow_scheduler_inflight inflight \
                     SET deadline = $3, dispatched_at = now() \
                    FROM due \
                   WHERE inflight.run_id = due.run_id \
@@ -461,7 +506,7 @@ impl WorkflowSchedulerStore {
     pub async fn clear_for_tests(&self) -> Result<(), WorkflowSchedulerStoreError> {
         let conn = self.open_conn().await?;
         conn.batch_execute(
-            &format!("TRUNCATE TABLE {}.inflight, {}.timers", self.quoted_schema(), self.quoted_schema()),
+            &format!("TRUNCATE TABLE {}.workflow_scheduler_inflight, {}.workflow_scheduler_timers", self.quoted_schema(), self.quoted_schema()),
         )
         .await?;
         Ok(())
@@ -476,22 +521,22 @@ impl WorkflowSchedulerStore {
         format!(
             "\
 CREATE SCHEMA IF NOT EXISTS {schema};
-CREATE TABLE IF NOT EXISTS {schema}.timers (
+CREATE TABLE IF NOT EXISTS {schema}.workflow_scheduler_timers (
   run_id text PRIMARY KEY,
   app_id uuid NOT NULL,
   wake_at timestamptz NOT NULL,
   generation bigint NOT NULL DEFAULT 0,
   registered_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS timers_due_idx ON {schema}.timers (wake_at);
-CREATE TABLE IF NOT EXISTS {schema}.inflight (
+CREATE INDEX IF NOT EXISTS workflow_scheduler_timers_due_idx ON {schema}.workflow_scheduler_timers (wake_at);
+CREATE TABLE IF NOT EXISTS {schema}.workflow_scheduler_inflight (
   run_id text PRIMARY KEY,
   app_id uuid NOT NULL,
   deadline timestamptz NOT NULL,
   dispatch_generation bigint NOT NULL,
   dispatched_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS inflight_deadline_idx ON {schema}.inflight (deadline);
+CREATE INDEX IF NOT EXISTS workflow_scheduler_inflight_deadline_idx ON {schema}.workflow_scheduler_inflight (deadline);
 "
         )
     }
@@ -573,6 +618,11 @@ pub struct FiredTimer {
 pub enum WorkflowSchedulerStoreError {
     #[error(transparent)]
     Postgres(#[from] compio_postgres::Error),
+    #[error(
+        "workflow scheduler store is missing: schema `{schema}` has no timers/inflight tables. \
+         Apply db/migrations-ts (20260811000100_workflow_scheduler_store.ts) against this database"
+    )]
+    NotProvisioned { schema: String },
 }
 
 fn assert_valid_schema_name(schema: &str) {

@@ -350,6 +350,44 @@ auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_auth can DELETE token_revocations (its sweep needs it)" \
   || fail "zeroship_auth lacks DELETE on token_revocations: token_sweep cannot succeed (#319)"
 
+# Platform tables must come from migrations, not from a service doing DDL.
+#
+# The workflow scheduler store was created at runtime by
+# crates/workflow-scheduler/src/store.rs provision_sql(), which control called on
+# every tick. Its first statement is `CREATE SCHEMA IF NOT EXISTS`, and Postgres
+# checks database-level CREATE BEFORE the existence short-circuit, so it fails
+# under any least-privilege role even when the schema is already there. MEASURED
+# against the live deployment before 20260811000100_workflow_scheduler_store.ts:
+# CREATE privilege false, schema absent, 56 tick ERRORs in 60 seconds, every one
+# SQLSTATE 42501.
+#
+# The tables sit in `zeroship`, not a schema of their own: the platform migration
+# charter admits exactly ["public", "zeroship"], and a first draft creating a
+# `workflow_scheduler` schema was refused at lower time with CROSS_SCHEMA.
+#
+# Asserted BEFORE any service starts, on purpose. Run after control boots and it
+# would pass for the wrong reason -- this harness hands control a privileged DSN,
+# so the old runtime DDL succeeds here and hides a defect that only appears under
+# a restricted role.
+#
+# The columns are checked, not just the table names, because the migration and
+# the Rust provision_sql() are two spellings of the same objects and can drift;
+# store.rs reads these columns by name.
+#
+# WHAT THIS DOES NOT CATCH: it says nothing about whether workflows RUN. Empty
+# tables with the right columns satisfy it. It also does not check the indexes.
+sched_cols=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from information_schema.columns where table_schema='zeroship' and ((table_name='workflow_scheduler_timers' and column_name in ('run_id','app_id','wake_at','generation','registered_at')) or (table_name='workflow_scheduler_inflight' and column_name in ('run_id','app_id','deadline','dispatch_generation','dispatched_at')))" 2>/dev/null | tr -d '[:space:]')
+[ "$sched_cols" = "10" ] \
+  && pass "workflow scheduler store built by migrations (10/10 columns)" \
+  || fail "workflow scheduler store missing after migrate: $sched_cols of 10 columns - control cannot CREATE SCHEMA under its own role, so env.workflows is dead (#320)"
+
+sched_dml=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) p(v) where n.nspname='zeroship' and c.relname in ('workflow_scheduler_timers','workflow_scheduler_inflight') and has_table_privilege('zeroship_control',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$sched_dml" = "8" ] \
+  && pass "zeroship_control holds the scheduler store DML (8/8)" \
+  || fail "zeroship_control lacks scheduler store privileges: $sched_dml of 8 - the tick would fail even with the tables present (#320)"
+
 # Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
 # --kv-url is empty (crates/worker/src/main.rs), by design -- so an app calling
 # @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
@@ -2586,7 +2624,12 @@ gp_close_step
 # config death looks like. The fourth requires the positive evidence -- control
 # logged a connect failure, so it demonstrably reached the CLI DSN. Arithmetic is
 # 70 + 1.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-72}"
+# RAISED 72 -> 74 on 2026-08-11 for the two workflow-scheduler-store assertions
+# (#320): the migration-built columns and control's DML on them. Arithmetic is
+# 72 + 2. Both were measured RED on a database carrying every other migration
+# (cols 0 of 10, dml 0 of 8) and GREEN after the new migration alone, so they
+# discriminate rather than merely count.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-74}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.

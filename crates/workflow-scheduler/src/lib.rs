@@ -83,7 +83,11 @@ pub async fn fire_once(
 /// Run the timer wheel forever.
 #[allow(clippy::future_not_send)]
 pub async fn run(store: WorkflowSchedulerStore, config: SchedulerConfig) -> Result<(), SchedulerError> {
-    store.provision().await?;
+    // Verify, never create: the store is migration-owned (see
+    // WorkflowSchedulerStore::provision). Called by the standalone
+    // `zeroship-workflow-scheduler` binary (src/main.rs), which is a service
+    // path and must not hold DDL privilege.
+    store.ensure_ready().await?;
     let wake = WakeHandle::new();
     let mut wheel = TimerWheel::new(wake.clone());
     loop {

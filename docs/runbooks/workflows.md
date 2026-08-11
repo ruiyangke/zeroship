@@ -51,15 +51,23 @@ Run a separate workflow scheduler process for timer authority:
 ```bash
 zeroship-workflow-scheduler \
   --db "$DATABASE_URL" \
-  --scheduler-schema workflow_scheduler \
+  --scheduler-schema zeroship \
   --gateway-url "$GATEWAY_URL" \
   --control-apply-url "$CONTROL_APPLY_URL" \
   --tick-secs 1 \
   --reaper-interval-secs 30
 ```
 
-The scheduler self-provisions `workflow_scheduler.timers` and
-`workflow_scheduler.inflight`. On process start it performs one cutover/recovery
+The scheduler does NOT provision its own tables. `zeroship.workflow_scheduler_timers`
+and `zeroship.workflow_scheduler_inflight` come from
+`db/migrations-ts/20260811000100_workflow_scheduler_store.ts`, like every other
+platform table; the scheduler only verifies they exist and refuses to start
+otherwise, naming that migration. It used to create them, which no least-privilege
+deployment can do: the first statement was `CREATE SCHEMA IF NOT EXISTS`, and
+Postgres checks database-level CREATE before the existence short-circuit, so it
+failed with SQLSTATE 42501 even when the schema was already there.
+
+On process start it performs one cutover/recovery
 reconcile from non-terminal workflow runs with `wake_at` set, then switches to
 the register model:
 
@@ -72,7 +80,7 @@ the register model:
 The startup reconcile is not a polling loop. In steady state, the scheduler does
 not scan `zeroship.workflow_runs` for due work. Lost dispatch/apply/register acks
 are recovered by the inflight reaper, which reads only
-`workflow_scheduler.inflight` rows whose deadline has elapsed and re-dispatches
+`zeroship.workflow_scheduler_inflight` rows whose deadline has elapsed and re-dispatches
 those runs through the normal claim path.
 
 Control still owns the workflow schedules, signal fan-out, blob reference GC,
@@ -262,7 +270,7 @@ SELECT
 - `stuck_strikes` / stalled rate: query rows with `stuck_strikes > 0` and count
   terminal `state = 'stalled'` per window. Alert on any unexplained stalled run.
 - Sweep lag: track oldest due item for scheduler timers, schedules, fan-out,
-  and GC sweeps. Timer lag is `min(wake_at)` in `workflow_scheduler.timers`;
+  and GC sweeps. Timer lag is `min(wake_at)` in `zeroship.workflow_scheduler_timers`;
   schedule lag is `min(next_fire_at)` for eligible schedules; fan-out lag is
   oldest pending broadcast; GC lag is oldest unreferenced blob past grace. To
   add: per-sweep lag gauges emitted after each tick.

@@ -17,7 +17,12 @@ struct Cli {
     #[arg(
         long = "scheduler-schema",
         env = "WORKFLOW_SCHEDULER_SCHEMA",
-        default_value = "workflow_scheduler"
+        // Matches WorkflowSchedulerStore::new and the migration that owns the
+        // tables (db/migrations-ts/20260811000100_workflow_scheduler_store.ts).
+        // They live in the platform schema because the migration charter admits
+        // only ["public", "zeroship"]; the old `workflow_scheduler` schema no
+        // longer exists anywhere.
+        default_value = "zeroship"
     )]
     scheduler_schema: String,
     #[arg(
