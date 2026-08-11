@@ -69,6 +69,18 @@ function pgIdent(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
+/** A table and no view, so a later drop of the view has a prior applied migration to
+ *  project onto. The projection is skipped entirely for an empty history, so without
+ *  this the guard is never reached and MySQL's native IF EXISTS answers instead. */
+function createTableOnly(): NamedMigration {
+  return authoredMigration("view_guard_priors", () => {
+    table(TABLE).create({
+      columns: { id: t.int().notNull(), label: t.string().notNull() },
+      primaryKey: ["id"],
+    });
+  });
+}
+
 /** Creates the table and the view over it. Applied on its own so both carry completed
  *  journal evidence before the drop is planned. */
 function createTableAndView(): NamedMigration {
@@ -411,18 +423,15 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
 });
 
 /** What `ifExists` is actually FOR: a view that was never created. The arm above drops
- *  a view that exists, which the populated snapshot resolves without consulting the
- *  guard, so it cannot tell whether the guard works. This one can.
+ *  a view that EXISTS, which the populated snapshot resolves without consulting the
+ *  guard, so it cannot tell whether the guard works. These two can, and they disagree
+ *  with each other - which is the point.
  *
- *  BEHAVIOUR OF RECORD, MECHANISM UNKNOWN. The drop succeeds, which is the outcome an
- *  operator wants. I predicted a refusal from reading the code and was wrong, and I
- *  cannot yet name what produces the success: `ops_without_completed_journal_evidence`
- *  (crates/zero-migrate-node/src/lower.rs:1259) does queue an unjournalled op, and the
- *  NotSatisfied arm (:713) does return an error, so something between them either
- *  honours the guard or drops the op. Those differ in whether the guard is alive, which
- *  is why this asserts only the operator-visible outcome and #212 holds the question.
- *  If a change makes this refuse, that is a real regression, not a stale expectation. */
-test("MySQL: an ifExists drop of a view that never existed succeeds", async (ctx) => {
+ *  The outcome turns on whether the history has a prior applied migration, because that
+ *  is what decides whether the pending-schema projection runs at all. With a prior, the
+ *  projection folds the drop, the fold reports the view absent, and MySQL's guard leg
+ *  refuses. That is every real deployment. */
+test("MySQL: an ifExists drop of a view that never existed is refused", async (ctx) => {
   if (!MYSQL_URL) {
     ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL absent-view guard arm skipped");
     return;
@@ -440,8 +449,60 @@ test("MySQL: an ifExists drop of a view that never existed succeeds", async (ctx
 
   try {
     await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    // A prior applied migration, so the projection actually runs. With an empty history
+    // it is skipped and the guard is never consulted at all.
+    const priors = createTableOnly();
+    await applyOne(priors, database, driver, []);
     // No createView anywhere in this history, so the guard is the only thing that could
     // let the drop through.
+    const outcome = await applyOne(dropTheViewIfExists(), database, driver, [priors]).then(
+      () => "ran",
+      (error: unknown) => String((error as Error)?.message ?? error),
+    );
+    assert.match(
+      outcome,
+      /view `view_drop_active` does not exist/,
+      "the guard leg refuses on MySQL, so ifExists does not absorb a genuinely absent view",
+    );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(meta)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+/** The same drop against an EMPTY history succeeds, and the difference is not the guard.
+ *  With no prior applied migration the pending-schema projection is skipped entirely, so
+ *  the fold never sees the op and MySQL's native DROP VIEW IF EXISTS answers instead.
+ *
+ *  This arm exists because that difference cost a wrong conclusion: the first version of
+ *  the arm above applied against an empty history, passed, and read as "ifExists works
+ *  on MySQL now". Traced with a temporary eprintln on the projection loop, the empty
+ *  history produced NO trace line at all while the one-prior history produced
+ *  `fold-dropview name=view_drop_active present=false` followed by the refusal. A
+ *  fixture with no priors measures a path no deployed application takes. */
+test("MySQL: the same ifExists drop succeeds when no prior migration was applied", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL empty-history guard arm skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueNamespace("viewdropempty_my");
+  const meta = `${database}_migrations`;
+  const driver: DriverConfig = { kind: "mysql", url: MYSQL_URL };
+
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
     const outcome = await applyOne(dropTheViewIfExists(), database, driver, []).then(
       () => "ran",
       (error: unknown) => String((error as Error)?.message ?? error),
@@ -449,13 +510,8 @@ test("MySQL: an ifExists drop of a view that never existed succeeds", async (ctx
     assert.equal(
       outcome,
       "ran",
-      "an ifExists drop of an absent view is what the guard exists for, and it does not fail",
+      "no priors means no projection, so the fold never refuses what it never sees",
     );
-    const [rows] = await admin.query(
-      `SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?`,
-      [database],
-    );
-    assert.equal((rows as unknown[]).length, 0, "no view is created by a drop");
   } finally {
     await admin
       .query(
