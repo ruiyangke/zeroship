@@ -78,7 +78,13 @@ DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT $PF_V $PF
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
-fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
+# The LABEL is recorded, not just the count. Exit status cannot distinguish a
+# new regression from the known red-at-HEAD set, because this harness already
+# exits 1 on those: a ninth failure changes 8 to 9 in one summary line and
+# nothing else. Keeping identities is what lets the block at the bottom say
+# which failures were expected and which are new.
+declare -a GP_FAILURES=()
+fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 
 # --- The gate must not be able to pass over zero assertions ----------------
 #
@@ -2997,6 +3003,65 @@ echo "============================================"
 # already failed cannot warn anyone.
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
+
+# WHICH failures, not just how many.
+#
+# This harness is RED AT HEAD by design, so `rc` carries no information about
+# regressions: it is already 1 before anything new breaks. A ninth failure moves
+# one digit in one summary line. That is the same shape as a gate that cannot
+# tell a filtered-green from a real one, and it is why the identities are
+# recorded above.
+#
+# Each pattern below is a substring of a failure label that is red BY DESIGN and
+# attributed to an open ticket. The check is TWO-SIDED on purpose:
+#   - a failure matching NO pattern is a REGRESSION, and is what this exists for
+#   - a pattern matching NO failure means the defect was FIXED and the list was
+#     not updated, which is a bookkeeping error the same way an unexplained drop
+#     below GOLDEN_MIN_PASSED is
+# Both set rc=1. The second will fire the day #260 or #255 lands, and updating
+# this list belongs in that same change - exactly as lowering the floor does.
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering"}
+IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
+# FIXED-STRING matching, both directions, and this is not stylistic. The first
+# draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
+# NOT creation order` - is not a valid ERE: `{id:-1}` is a malformed interval,
+# so that pattern silently matched nothing and its own known failure was
+# reported as UNEXPECTED. Caught by running the classifier over a synthetic set
+# of the known 8 before wiring it, where the correct answer is 0 unexpected and
+# it said 1.
+gp_expected_hit() {
+  local _p
+  for _p in "${_pats[@]}"; do printf '%s' "$1" | grep -qF "$_p" && return 0; done
+  return 1
+}
+gp_unexpected=0
+for _f in "${GP_FAILURES[@]}"; do
+  gp_expected_hit "$_f" || {
+    gp_unexpected=$((gp_unexpected+1))
+    echo "  UNEXPECTED FAILURE (not in the red-at-HEAD set): $_f" >&2
+  }
+done
+gp_stale=0
+for _p in "${_pats[@]}"; do
+  printf '%s\n' "${GP_FAILURES[@]}" | grep -qF "$_p" || {
+    gp_stale=$((gp_stale+1))
+    echo "  STALE EXPECTATION (declared red-at-HEAD, did not fail): $_p" >&2
+  }
+done
+echo "  failures: $FAIL total, $((FAIL - gp_unexpected)) expected, $gp_unexpected unexpected, $gp_stale stale expectation(s)"
+if [ "$gp_unexpected" -gt 0 ]; then
+  echo "FAIL: $gp_unexpected failure(s) are NOT in the documented red-at-HEAD set." >&2
+  echo "      This gate is red at HEAD by design, so the exit status alone could not" >&2
+  echo "      have told you that. Each line above is a regression or a new defect." >&2
+  rc=1
+fi
+if [ "$gp_stale" -gt 0 ]; then
+  echo "FAIL: $gp_stale declared red-at-HEAD failure(s) did not occur." >&2
+  echo "      Either the defect was fixed and GOLDEN_EXPECTED_FAILURES was not updated" >&2
+  echo "      in the same change, or the assertion stopped running. Both need saying;" >&2
+  echo "      do not delete the pattern without checking which one it was." >&2
+  rc=1
+fi
 if [ "$gp_silent" -gt 0 ]; then
   # Wording covers BOTH guard-2 arms and guard 2b. Saying "declared step(s)"
   # here was wrong for the undeclared-step case - the complaint there is
