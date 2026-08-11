@@ -31,7 +31,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { connectLivePg, pgUrl } from "./live-db.js";
-import { createSchemaPolicy, noInjectPolicy } from "./policy.js";
+import { createExtensionPolicy, createSchemaPolicy, noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -322,6 +322,93 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
     await client
       .query(
         `DROP SCHEMA IF EXISTS "${authored}" CASCADE; DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
+
+/** Create an extension, then drop it, so a one-step rollback has a dropExtension to
+ *  reverse. The last empty cell in the verb matrix: view, sequence and schema are
+ *  covered above and in the SQLite addon suite.
+ *
+ *  `citext` rather than `pgcrypto` or `hstore` for no reason beyond it being available
+ *  and absent in the container, so the create is real and the drop leaves no residue.
+ *  It is not on FORBIDDEN_EXTENSIONS (crates/zero-migrate-guard/src/guard/denylist.rs:18),
+ *  which the guard applies over the allowlist regardless of any grant. */
+function scaffoldExtensionDrop(projectSchema: string, extensionName: string): string {
+  const dir = mkdtempSync(join(HERE, "rollback-live-ext-"));
+  writeFileSync(
+    join(dir, "20260101000000_create_ext.ts"),
+    `import { extension } from "zero-migrate";
+export const name = "create_ext";
+export function up() {
+  extension(${JSON.stringify(extensionName)}).create({});
+}
+`,
+  );
+  writeFileSync(
+    join(dir, "20260101000001_drop_ext.ts"),
+    `import { extension } from "zero-migrate";
+export const name = "drop_ext";
+export function up() {
+  extension(${JSON.stringify(extensionName)}).drop({});
+}
+`,
+  );
+  writeFileSync(join(dir, "policy.toml"), createExtensionPolicy(projectSchema, extensionName));
+  return dir;
+}
+
+test("PostgreSQL: rolling back a dropExtension reinstalls the extension its create authored", async (t) => {
+  const client = await connectLivePg(t);
+  if (!client) return;
+
+  const schemaName = uniqueSchema("rb_live_ext");
+  const metaSchema = `${schemaName}_migrations`;
+  const extensionName = "citext";
+  const extensionInstalled = async (): Promise<boolean> => {
+    const result = await client.query(`SELECT 1 FROM pg_extension WHERE extname = $1`, [
+      extensionName,
+    ]);
+    return result.rows.length > 0;
+  };
+
+  let dir: string | undefined;
+  try {
+    // An extension is database-wide, so a copy left by anything else would make the
+    // assertions read backwards. Start from absent, and say so if it is not.
+    assert.equal(
+      await extensionInstalled(),
+      false,
+      `${extensionName} is already installed in this database, so this arm cannot tell its own create from a pre-existing one`,
+    );
+    await client.query(`CREATE SCHEMA "${schemaName}"`);
+    dir = scaffoldExtensionDrop(schemaName, extensionName);
+
+    const applied = spawnCli([...baseArgs(schemaName, pgUrl()), "apply", "--approve"], dir);
+    assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
+    assert.equal(
+      await extensionInstalled(),
+      false,
+      "both migrations ran, so the extension is installed and then dropped",
+    );
+
+    const rolledBack = spawnCli(
+      [...baseArgs(schemaName, pgUrl()), "rollback", "--steps", "1", "--approve"],
+      dir,
+    );
+    assert.equal(rolledBack.status, 0, `rollback failed: ${rolledBack.stderr}`);
+    assert.ok(
+      await extensionInstalled(),
+      "the reversed dropExtension reinstalls the extension the earlier migration authored",
+    );
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    await client.query(`DROP EXTENSION IF EXISTS "${extensionName}"`).catch(() => {});
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,
       )
       .catch(() => {});
     await client.end().catch(() => {});
