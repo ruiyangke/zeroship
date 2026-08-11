@@ -36,7 +36,13 @@ fn cfg_for(token: &str) -> ExecutorConfig {
     cfg
 }
 
-async fn setup(session: &PgDevSession, cfg: &ExecutorConfig) {
+// Hands back the guard rather than dropping the schemas itself, so a panic in the
+// caller still removes them. The explicit `cleanup` below stays as the happy path.
+async fn setup<'a>(session: &'a PgDevSession, cfg: &ExecutorConfig) -> support::SchemaGuard<'a> {
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))
         .await
@@ -45,6 +51,7 @@ async fn setup(session: &PgDevSession, cfg: &ExecutorConfig) {
         .ensure_journal(cfg)
         .await
         .expect("create primary-key test journal");
+    guard
 }
 
 async fn cleanup(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -162,7 +169,7 @@ async fn add_installs_an_exact_candidate_on_a_table_without_a_primary_key() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".items (
@@ -201,7 +208,7 @@ async fn replace_accepts_only_exact_order_and_supports_single_composite_round_tr
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".items (
@@ -298,7 +305,7 @@ async fn drop_and_replace_require_declared_identity_removal_and_drop_identity_tr
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".replace_identity (
@@ -433,7 +440,7 @@ async fn inbound_fk_refuses_missing_or_stale_alternate_and_accepts_prebound_alte
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".unsafe_parent (

@@ -34,7 +34,13 @@ fn cfg_for(token: &str) -> ExecutorConfig {
     cfg
 }
 
-async fn setup(session: &PgDevSession, cfg: &ExecutorConfig) {
+// Hands back the guard rather than dropping the schemas itself, so a panic in the
+// caller still removes them. The explicit `cleanup` below stays as the happy path.
+async fn setup<'a>(session: &'a PgDevSession, cfg: &ExecutorConfig) -> support::SchemaGuard<'a> {
+    let guard = support::SchemaGuard::arm(
+        session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))
         .await
@@ -43,6 +49,7 @@ async fn setup(session: &PgDevSession, cfg: &ExecutorConfig) {
         .ensure_journal(cfg)
         .await
         .expect("create identity test journal");
+    guard
 }
 
 async fn cleanup(session: &PgDevSession, cfg: &ExecutorConfig) {
@@ -136,7 +143,7 @@ async fn advances_an_uncalled_identity_sequence_by_its_non_unit_increment() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".items (
@@ -165,7 +172,7 @@ async fn never_moves_an_already_ahead_sequence_backward() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".items (
@@ -194,7 +201,7 @@ async fn already_ahead_out_of_bounds_imports_are_noops_in_both_directions() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".ascending_items (
@@ -235,7 +242,7 @@ async fn respects_a_descending_owned_sequence() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".descending_items (
@@ -264,7 +271,7 @@ async fn supports_serial_and_rejects_a_column_without_an_owned_sequence() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
-    setup(&session, &cfg).await;
+    let _schema_guard = setup(&session, &cfg).await;
     session
         .batch(&format!(
             "CREATE TABLE \"{}\".serial_items (id bigserial PRIMARY KEY);
