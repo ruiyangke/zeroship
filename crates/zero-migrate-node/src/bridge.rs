@@ -792,6 +792,16 @@ pub fn apply_ir_sqlite(
             applied: outcome.applied,
             skipped: outcome.skipped,
             recovered: outcome.recovered,
+            // Empty because SQLite HAS no cross-deploy contracts, not because this
+            // path drops them. `SqliteBackend::pending_contracts` returns `None`
+            // (apply/backend/sqlite/mod.rs:1155): a rebuild rename is one atomic
+            // offline step, so no obligation is ever opened. The networked verb
+            // reaches the same value by asking - `None => Vec::new()` at
+            // verbs.rs:296 - so the two replies agree today.
+            //
+            // They agree by coincidence of the answer, not by sharing the question.
+            // Giving SQLite a contract partition would make verbs.rs report them and
+            // leave this constant silently empty, so that change has to reach here.
             pending_contracts: Vec::new(),
         })
     })
