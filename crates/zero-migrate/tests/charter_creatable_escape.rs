@@ -82,3 +82,52 @@ fn an_optional_inject_does_not_bound_the_creatable_scope() {
         "a non-mandatory inject must not constrain where tables may be created: {composed:?}"
     );
 }
+
+/// Two injects in ONE layer, same scope, same column name, incompatible shapes. Nothing
+/// examined this pair: `admit` compares the accumulated charter against an incoming
+/// DRAFT, and a single-layer charter never passes through it as one.
+///
+/// Measured before the refusal existed: `resolve_create_table_policy` under this charter
+/// returned columns `["created_at", "created_at", "body"]`, because the resolver
+/// contributes every covering spec's columns and does not dedupe. That is a CREATE TABLE
+/// no database accepts.
+const SAME_LAYER_CONFLICT: &str = r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "created_at", type = "text", nullable = true } ]
+"#;
+
+/// The same two injects on scopes that cannot both cover one table. Two injects may
+/// contribute the same column name to different tables, so this must keep composing.
+const DISJOINT_SCOPES: &str = r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+[[inject]]
+scope = { include = ["ops_*"] }
+columns = [ { name = "created_at", type = "text", nullable = true } ]
+"#;
+
+#[test]
+fn two_conflicting_injects_in_one_layer_are_refused() {
+    let composed = effective_policy_from_charter_layers(&[SAME_LAYER_CONFLICT]);
+    let Err(message) = composed else {
+        panic!("two same-scope injects contributing one column with different shapes build a table carrying it twice, so the charter must be refused");
+    };
+    assert!(
+        message.contains("CharterInjectCollision"),
+        "the refusal must name the collision rather than failing for another reason: {message}"
+    );
+}
+
+#[test]
+fn the_same_column_on_disjoint_scopes_still_composes() {
+    let composed = effective_policy_from_charter_layers(&[DISJOINT_SCOPES]);
+    assert!(
+        composed.is_ok(),
+        "injects that cannot both cover one table do not collide: {composed:?}"
+    );
+}

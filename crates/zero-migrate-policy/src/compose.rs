@@ -538,6 +538,21 @@ impl EffectivePolicy {
         })
     }
 
+    /// Refuse a composed policy carrying two conflicting injects in one layer.
+    ///
+    /// Two same-scope injects contributing the same column with different shapes are
+    /// not a lint: the resolver contributes BOTH, so the table is built carrying that
+    /// column twice and no database will create it. Refusing here names the two injects
+    /// instead of failing later against a live database with a duplicate-column error.
+    ///
+    /// # Errors
+    /// [`ComposeError::CharterInjectCollision`], describing the collision.
+    pub fn check_same_layer_inject_conflicts(&self) -> Result<(), ComposeError> {
+        same_layer_inject_conflict(&self.layers).map_or(Ok(()), |detail| {
+            Err(ComposeError::CharterInjectCollision { detail })
+        })
+    }
+
     /// Crate-internal constructor from a LAYER STACK (top-first). Used by the
     /// `boundary::admit` trust-crossing to mint the layered `[draft] over [charter]`
     /// [`EffectivePolicy`] (H-4). Not public: an `EffectivePolicy` is only obtainable
@@ -1200,6 +1215,48 @@ fn check_charter_creatable_lint(assembled: &AssembledCharter) -> Result<(), Fina
     creatable_escape_scope(&assembled.layers).map_or(Ok(()), |inject_scope| {
         Err(FinalizeError::CreatableEscapesMandatoryInject { inject_scope })
     })
+}
+
+/// Conflicting injects WITHIN one layer, which nothing else asks about.
+///
+/// Scoped to a single layer on purpose. Cross-layer pairs are already `admit`'s
+/// business - the layer fold admits each new layer against the accumulated charter, so
+/// a conflict between two layers is caught there. What no path examines is two injects
+/// inside the SAME layer, and the root layer is the sharpest case because a
+/// single-layer charter never passes through `admit` as a draft at all.
+///
+/// Widening this to all-pairs over the composed stack would re-ask questions `admit`
+/// has already answered, and would newly reject a cross-layer pair only if the two
+/// predicates disagree - a difference worth establishing before relying on it, not
+/// while fixing something else.
+fn same_layer_inject_conflict(layers: &[Layer]) -> Option<String> {
+    for layer in layers {
+        for (index, first) in layer.injects.iter().enumerate() {
+            let RuleKind::Inject { spec: first_spec } = &first.kind else {
+                continue;
+            };
+            for second in layer.injects.iter().skip(index + 1) {
+                let RuleKind::Inject { spec: second_spec } = &second.kind else {
+                    continue;
+                };
+                // Disjoint scopes cannot collide: two injects may contribute the same
+                // column name to different tables.
+                if matches!(first.scope.meet(&second.scope), Scope::Nothing) {
+                    continue;
+                }
+                if let Some(detail) = inject_column_conflict(first_spec, second_spec) {
+                    return Some(detail);
+                }
+                if let Some(detail) = inject_pk_conflict(first_spec, second_spec) {
+                    return Some(detail);
+                }
+                if let Some(detail) = inject_index_conflict(first_spec, second_spec) {
+                    return Some(detail);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The creatable-escape question, asked of a composed layer stack: is the effective

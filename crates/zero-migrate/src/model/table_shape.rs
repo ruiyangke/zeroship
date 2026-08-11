@@ -797,6 +797,9 @@ fn creatable_escape_checked(
     composed
         .check_creatable_escape()
         .map_err(|e| format!("policy charter rejected: {e:?}"))?;
+    composed
+        .check_same_layer_inject_conflicts()
+        .map_err(|e| format!("policy charter rejected: {e:?}"))?;
     Ok(composed)
 }
 
