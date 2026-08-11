@@ -123,7 +123,7 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 9b 10 11"
+GP_EXPECTED_STEPS="1 2 2b 3 4 5 6 7 8 9 9b 10 11"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -152,6 +152,11 @@ cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
   sleep 1
   free_ports $DEV_PORTS
+  # Step 2b's two extra control instances. Freed here as well as inline: the
+  # failure that matters is the abort BETWEEN the launch and the inline kill,
+  # which would leave a control holding :9391 and make the next run's step 2b
+  # green against a process this script never started.
+  free_ports "${CFG_PORT:-9391}" "${CFG_PORT_B:-9392}"
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
   # Step 10's CONTROL leg writes a policy file into the scaffold copy and must
   # not leave it there: the copy's whole value is being byte-identical to the
@@ -389,6 +394,80 @@ curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control hea
 curl -sf "http://localhost:$WORKER_PORT/health"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
 curl -sf "http://localhost:$GATE_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
 curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
+
+# --- 2b. The OPERATOR config seam: control's DSN through the [secrets] overlay ---
+#
+# Step 2 hands control its DSN on the COMMAND LINE (`--db "$DB_URL"`), which is
+# the one tier that always worked. Every deployed zeroship stack uses the other
+# one: deploy/ops/zeroship.toml carries
+# `[secrets] database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"` and the
+# compose services set that env var, so the DSN arrives through the FILE tier
+# and `DATABASE_URL` is never set at all. Nothing in this harness -- or in any
+# crate suite, which cannot see a config file it does not mount -- exercised
+# that tier, and the tier was broken: `--db` carried a non-empty clap
+# `default_value`, `obtain_secret` takes its CLI branch on ANY non-empty string,
+# so the compiled default occupied the CLI tier and the file reference was never
+# consulted. Control dialled `postgres://localhost/zeroship` inside its own
+# container, panicked in `Registry::new`, and crash-looped forever while every
+# other binary on the same network connected with the same credentials.
+#
+# The three assertions are not three ways of saying one thing:
+#   A. the file tier RESOLVES  - overlay ref + env var, no --db, no DATABASE_URL
+#   B. the overlay was READ    - so a green A cannot be explained by some other
+#                                tier having quietly supplied a working DSN
+#   C. CLI still BEATS file    - the fix moves a default out of the CLI tier; if
+#                                it had inverted the precedence instead, A would
+#                                still be green and only this would catch it
+step 2b "Operator config: control resolves its DSN from the [secrets] overlay"
+CFG_PORT="${CFG_PORT:-9391}"
+CFG_PORT_B="${CFG_PORT_B:-9392}"
+for p in $CFG_PORT $CFG_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+GP_OVERLAY=/tmp/gp-overlay.toml
+cat > "$GP_OVERLAY" <<TOML
+[secrets]
+database_url = "urn:zeroship:env:GP_OVERLAY_DB_URL"
+TOML
+
+# `env -u DATABASE_URL` is load-bearing: with it set, the CLI tier legitimately
+# wins and this step would measure nothing.
+env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
+  "$BIN/zeroship-control" --port "$CFG_PORT" --config "$GP_OVERLAY" \
+  --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
+for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+if curl -sf "http://localhost:$CFG_PORT/health" >/dev/null 2>&1; then
+  pass "control boots with its DSN from [secrets] database_url (no --db, no DATABASE_URL)"
+else
+  fail "control did not come up on the [secrets] overlay DSN"
+  tail -5 /tmp/gp-control-overlay.log
+fi
+grep -q "loaded overlay" /tmp/gp-control-overlay.log \
+  && pass "the generated overlay was actually read (control logged it)" \
+  || fail "control never logged loading $GP_OVERLAY - assertion A proves nothing"
+
+# One variable changed against the run above: an explicit --db, deliberately
+# unreachable, while the overlay still names a WORKING DSN. CLI must win, so
+# this must NOT come up.
+env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
+  "$BIN/zeroship-control" --port "$CFG_PORT_B" --config "$GP_OVERLAY" \
+  --db "postgres://postgres:zeroship@127.0.0.1:1/$PG_DB" \
+  --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
+sleep 6
+if curl -sf "http://localhost:$CFG_PORT_B/health" >/dev/null 2>&1; then
+  fail "an explicit --db was ignored in favour of the [secrets] overlay (precedence inverted)"
+else
+  pass "an explicit --db still beats the [secrets] overlay"
+fi
+# "not healthy after 6s" is ALSO what an unrelated slow start, a busy machine or
+# a binary that died on some earlier config error looks like, so the check above
+# cannot tell "CLI won" from "control never got that far". This one requires the
+# POSITIVE evidence: control must have tried the CLI DSN and failed on it. Both
+# must hold; a green pair is the only reading that means precedence held.
+grep -q "failed to connect to database" /tmp/gp-control-cliwins.log \
+  && pass "control demonstrably tried the unreachable --db DSN and failed on it" \
+  || fail "control did not log a connect failure - it never reached the CLI DSN, so the assertion above is vacuous"
+for p in $CFG_PORT $CFG_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # --- 3. Create app + deploy the real .zship ---
 step 3 "Create app + deploy"
@@ -2472,7 +2551,19 @@ gp_close_step
 # gateway answers a raw socket, and the tier-DIRECTION assertion (deployed must
 # not bound headers at or below dev's 16 KiB). The deployed NUMBER is printed,
 # never asserted -- it is a framework default, not our contract.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-67}"
+# RAISED 67 -> 70 on 2026-08-11 for step 2b, which adds THREE passes: the
+# [secrets] overlay tier resolving control's DSN, the overlay demonstrably being
+# read, and an explicit --db still beating it. Arithmetic is 67 + 3, and the
+# three were measured on the pre-fix binary too: assertion A was RED there (that
+# is the defect this step exists for) while B and C were green, so the step is
+# discriminating, not merely present.
+# RAISED 70 -> 71 on 2026-08-11 for step 2b's FOURTH assertion, added because the
+# third one ("an explicit --db still beats the overlay") concluded from control
+# NOT being healthy, which is equally what a slow start or an unrelated early
+# config death looks like. The fourth requires the positive evidence -- control
+# logged a connect failure, so it demonstrably reached the CLI DSN. Arithmetic is
+# 70 + 1.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-71}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
