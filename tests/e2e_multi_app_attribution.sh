@@ -255,6 +255,32 @@ FLEET=$((N1+N2+N3))
   && pass "C1 is NOT over-attributed ($C1_SUM < ${ATTR_C1_CEIL:-$FLEET}) — A3's usage did not bleed onto C1" \
   || fail "over-attribution suspected — C1=$C1_SUM reached the ceiling ${ATTR_C1_CEIL:-$FLEET}; its own apps are only $C1_EXPECT, so something else's usage is on this creator"
 
+# CONSERVATION. Everything above is per-subject, and per-subject checks are
+# blind to usage that reaches the provider attributed to NOBODY. Measured
+# directly against this Lago on 2026-08-11:
+#
+#   POST /api/v1/events with external_subscription_id="nonexistent-creator-..."
+#     -> HTTP 200  {"lago_customer_id":null,"lago_subscription_id":null,...}
+#
+# Lago ACCEPTS an event for a subscription that does not exist. So if the
+# CreatorResolver ever returns a creator id with no Lago customer, the adapter
+# sees success, nothing dead-letters, and the usage is billed to nobody - while
+# C1 and C2 both keep reading their own correct totals. That is exactly the
+# state a mutated resolver produced here (C1=0, C2=0, 0 dead-letters), and no
+# assertion in this file could see it.
+#
+# The fleet sum is the one check that can: every event this run drove must land
+# on SOME subject, so the total across all subjects cannot fall below what was
+# sent.
+lago_sum_all(){ # sum of requests-event values across EVERY subject
+  lago "$LAGO_URL/api/v1/events?per_page=1000" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");process.stdout.write(String(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})'
+}
+ALL_SUM="$(lago_sum_all)"
+echo "    Lago requests-sum across ALL subjects: $ALL_SUM (fleet driven = $FLEET)"
+[ -n "$ALL_SUM" ] && [ "$ALL_SUM" -ge "$FLEET" ] 2>/dev/null \
+  && pass "conservation: every driven request reached SOME subject ($ALL_SUM >= $FLEET) — no usage accepted-and-orphaned" \
+  || fail "usage vanished: Lago holds $ALL_SUM requests across all subjects but $FLEET were driven. Lago 200s an event whose external_subscription_id does not exist, so a wrong-but-present creator id is silently billed to nobody"
+
 DL=$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.provider_dead_letter" 2>/dev/null | tr -d '[:space:]')
 [ "$DL" = "0" ] && pass "0 provider dead-letters (every app mapped to a real owning creator)" || fail "provider_dead_letter has $DL rows"
 
