@@ -120,8 +120,8 @@ master-key/dev shortcut, and a PAT can't be forged for a local control. For
 **local/CI** this is unblocked by `dev-provision` (`crates/control/src/bin/`):
 a DEV-ONLY internal provisioning tool (gated on `ZEROSHIP_DEV_INSECURE=1`,
 needs direct DB+blob access — not a network endpoint; it reuses the same
-`zeroship_bundle::ingest` + `Registry::set_deploy_with_manifest` path
-`bootstrap_console` uses, and does not touch the production `/api/apps` PAT path).
+`zeroship_bundle::ingest` + `Registry::set_deploy_with_manifest` path the deploy
+handler uses, and does not touch the production `/api/apps` PAT path).
 For the **real agent flow** against a deployed platform, the path is
 `zeroship login` (one-time) → `zeroship deploy`.
 

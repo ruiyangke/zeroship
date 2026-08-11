@@ -34,7 +34,7 @@ app".
 ## Effective limits per plan
 
 From `builtin_plans` in
-[crates/control/src/bootstrap_console.rs](../../crates/control/src/bootstrap_console.rs):
+[crates/control/src/plan_catalog.rs](../../crates/control/src/plan_catalog.rs):
 
 | Plan | `cpu_limit_ms` | `wall_timeout_ms` | `heap_limit_mb` |
 | --- | --- | --- | --- |

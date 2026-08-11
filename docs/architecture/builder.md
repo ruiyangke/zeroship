@@ -26,13 +26,13 @@ token. Two settings carry it:
 - `SANDBOX_URL` - the sandbox/preview backend base URL (non-secret config)
 - `SANDBOX_TOKEN` - the controller bearer token (credential)
 
-Control seeds both onto the console app's server-side env when it bootstraps the
-console, alongside `OPENAI_API_KEY` and `ZEROSHIP_SDK_REGISTRY`. The list of
-seeded keys and their secret/non-secret classification is in
-[bootstrap_console.rs](../../crates/control/src/bootstrap_console.rs). The
-compose stack sets both on the `control` service in
-`deploy/compose/docker-compose.yml`, where the commented-out `sandbox` service
-block records the same extraction.
+Control no longer seeds these onto the console's server-side env. The console is
+not a built-in app: the install-time seed that upserted its app row, its OAuth
+client and its runtime env (`OPENAI_API_KEY`, `SANDBOX_*`,
+`ZEROSHIP_SDK_REGISTRY`) was removed, so the console is deployed like any other
+creator app and its env is supplied the same way. The compose stack still sets
+both on the `control` service in `deploy/compose/docker-compose.yml`, where the
+commented-out `sandbox` service block records the same extraction.
 
 ## Shared database, separate deployment
 
