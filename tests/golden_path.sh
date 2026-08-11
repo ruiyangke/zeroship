@@ -561,6 +561,21 @@ sleep 2
 GATE_BROKER_SECRET=/tmp/gp-gate-broker-secret
 openssl rand -base64 48 > "$GATE_BROKER_SECRET"
 chmod 600 "$GATE_BROKER_SECRET"
+# THIS GATEWAY HAS NO DATABASE, and that is a supported mode rather than an
+# omission: crates/gateway/src/main.rs:619-622 accepts an empty DSN "for dev /
+# smoke modes that don't exercise the OIDC RP path", and its db-backed handlers
+# "gracefully return 401 when `db` is None instead of panicking".
+#
+# Harmless today, MEASURED: the only paths this file requests from the gateway
+# are /health and /apps/<name>/... dispatch and assets - seven distinct paths,
+# enumerated 2026-08-11, none of them on the db-backed auth surface. Scenario 6
+# is walked by tests/e2e_dev_vs_deployed_auth.sh, which runs a real OP.
+#
+# THE TRAP IS FOR WHOEVER ADDS THE NEXT ASSERTION. Anything here that touches
+# __zeroship/auth/*, the session exchange, backchannel logout or the anchor /
+# revocation paths would measure the db-is-None 401 rather than the real
+# behaviour, and would pass while proving nothing. Give the gateway a DSN first
+# if you need those, and check that both tiers actually reach the database.
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles \
   --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
