@@ -78,6 +78,29 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * `parseRuntimeDescriptor`. `code` therefore separates neither class from the
  * other; only three of the eight producers set one at all (`EACCES` from the
  * write, `GenericFailure` from a napi panic). See task #269.
+ *
+ * WHERE THIS TAG STOPS, and it is a boundary not a guarantee. The tag covers
+ * the SYNC verb, `genArtifacts`, because every creator-content fault comes back
+ * through its soft `{ ok:false }` arm and `unwrap` converts it here. Measured
+ * 2026-08-11 at the decode boundary itself, which is the arm most likely to
+ * reject rather than return: a non-object envelope, an unknown op token, a
+ * missing-field envelope and a malformed JSON string ALL returned
+ * `ok:false, error:"envelope[N] is not a valid IR document: ..."`. None threw.
+ *
+ * The ASYNC verb, `applyIrSqlite`, does NOT behave that way. It rejects at the
+ * napi boundary, and `Error::from_reason` hardcodes `Status::GenericFailure`,
+ * so a CREATOR's invalid migration arrives from the engine indistinguishable
+ * from an engine panic and carrying no tag of ours. (Established by
+ * zero-migrate, ZERO-MIGRATE-2026-08-11-010, with a live rejection.)
+ *
+ * That costs nothing TODAY because the only caller of `applyIrSqlite` is
+ * `cli/migrate-dev.ts`, which has no try/catch, so both classes propagate
+ * equally loudly. It stops being free the moment the apply is chained into the
+ * dev server -- which `docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`
+ * proposes doing. Under this allow-list, a creator's own bad migration would
+ * then land in the LOUD arm and refuse to boot. Whoever wires that up owes
+ * either a tag at that boundary or a deliberate decision that refusing to boot
+ * on an invalid migration is the behaviour they want.
  */
 export class MigrationSourceError extends Error {
   readonly zsFaultClass = MIGRATION_SOURCE_FAULT;
