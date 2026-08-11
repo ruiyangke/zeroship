@@ -370,3 +370,74 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
     }
 }
+
+/// A Rust host embedding the engine directly gets NO pending-schema projection, so a
+/// `dropView` naming a view nothing created reaches PostgreSQL and PostgreSQL refuses it.
+///
+/// The Node addon refuses the same authored migration one layer earlier, with
+/// `failed to project pending schema after envelope ...`, because
+/// `lower_ordered_envelopes_to_plans_for_apply` folds pending ops onto the catalog
+/// snapshot first. `ProjectionGuardVerdict` exists in exactly one file of one crate -
+/// `crates/zero-migrate-node/src/lower.rs` - so nothing on this path can produce that
+/// refusal.
+///
+/// This arm exists to make the difference concrete rather than argued. What it shows is
+/// WHERE the refusal comes from, not that one host is safer: both refuse, and the
+/// authored migration is rejected either way. A claim that a Rust embedder is less
+/// protected needs an op that the projection refuses and the database ACCEPTS, which
+/// this is not and which nobody has produced yet.
+#[compio::test]
+async fn a_rust_embedding_refuses_an_absent_view_drop_at_the_database() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token();
+    let cfg = ExecutorConfig::new(
+        format!("project_{schema}"),
+        &schema,
+        support::no_inject(&schema),
+    );
+    let quoted_schema = quote_ident(&cfg.project_schema);
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!("CREATE SCHEMA {quoted_schema}"))
+        .await
+        .expect("create isolated test schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure the journal: {error}"))?;
+
+        let reg = BTreeMap::new();
+        let mut history: Vec<Op> = Vec::new();
+        // No createView anywhere in this history, and no prior migration at all.
+        let outcome = apply_doc(
+            &session,
+            &cfg,
+            &drop_doc(false),
+            &reg,
+            &mut history,
+            Approval::Approved,
+        )
+        .await;
+
+        let error = outcome.expect_err("dropping a view nothing created must not succeed");
+        assert!(
+            !error.contains("failed to project pending schema"),
+            "a Rust embedding builds no projection, so the refusal cannot come from it: {error}"
+        );
+        assert!(
+            error.contains(VIEW),
+            "the refusal names the view PostgreSQL could not find: {error}"
+        );
+        Ok(())
+    }
+    .await;
+
+    work.expect("the Rust embedding refuses an absent view drop");
+}
