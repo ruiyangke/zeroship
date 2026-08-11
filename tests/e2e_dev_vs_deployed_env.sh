@@ -82,6 +82,13 @@ export GATE_PORT="${GATE_PORT:-8307}"
 export PG_PORT="${PG_PORT:-5457}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-env-pg}"
 DEV_PORT="${DEV_PORT:-3097}"   # examples/env-probe ENV_PROBE_API_PORT default
+# VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
+# its :5173 global default, which nothing here declared, tracked or freed, so a
+# second harness on this machine fought it for the port and the cleanup trap
+# could never reclaim it. --strictPort at the call so a conflict fails loudly
+# rather than moving to a port nobody watches. Checked against the runtime's
+# bad-ports list before choosing it (see #272 and the stream harness). See #272.
+VITE_PORT="${VITE_PORT:-5097}"
 APP_SLUG="env-probe-dd"
 HOST="$APP_SLUG.localhost"
 MUTATE="${MUTATE:-none}"
@@ -114,7 +121,11 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 source "$ROOT/tests/lib/e2e_stack.sh"
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan the PID loop cannot reach.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   if [ "${KEEP_WORK:-0}" = "1" ]; then
     echo "  work dirs kept: dev=${DEV_WORK:-${WORK_EARLY:-<none>}} deployed=${WORK:-<none>}"
     if [ -n "${PIDFILE:-}" ] && [ -f "$PIDFILE" ]; then
@@ -206,10 +217,12 @@ grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anon"' "$d/manifest.json" \
 # 2. Dev side. `pnpm dev` -> vite -> `zeroship serve` child. The canary goes in
 #    the shell that launches vite, exactly as a developer's would.
 # ---------------------------------------------------------------------------
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
 (
   cd "$APP" && env "$CANARY_KEY=$CANARY_VAL" "ZS_VAR_$CONTROL_KEY=$CONTROL_VAL" \
-    ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1
+    ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
 for _ in $(seq 1 25); do
   [ "$(probe "http://localhost:$DEV_PORT" "$WORK/dev.json")" = "200" ] && break
