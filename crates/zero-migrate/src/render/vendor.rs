@@ -673,7 +673,8 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                     .join(", "),
                 None => String::new(),
             };
-            let or_replace = if replace.unwrap_or(false) {
+            let replaces_existing = replace.unwrap_or(false);
+            let or_replace = if replaces_existing {
                 "CREATE OR REPLACE"
             } else {
                 "CREATE"
@@ -692,11 +693,31 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 "{or_replace} FUNCTION {qname}({args_sql}) RETURNS {returns} LANGUAGE {}{vol} AS {tag}\n{body}\n{tag}",
                 language.as_sql(),
             );
-            let down = format!("DROP FUNCTION IF EXISTS {qname}({args_sql})");
+            // A create that BROUGHT THE FUNCTION INTO BEING is undone by dropping it. A
+            // REPLACE is not that: it changes the body of a function that predates the
+            // migration, so dropping it destroys an object this migration never created.
+            // Rolling one back used to do exactly that and report success - the function
+            // was gone from `pg_proc` with nothing recorded as skipped.
+            //
+            // The faithful inverse is the PREVIOUS body, and nothing here holds it: the
+            // fold treats CreateFunction as a structural no-op and `SchemaSnapshot` carries
+            // no functions map, so the prior source is not recoverable at render time.
+            // Until that state exists, a replace is IRREVERSIBLE rather than destructive.
+            //
+            // Irreversible is a refusal an operator sees, not a silent skip: the rollback
+            // planner returns `RollbackError::Irreversible` naming the version
+            // (`apply/executor.rs:2563`), and only a `force` carrying an explicit
+            // `backup_acknowledged` proceeds past it, recording the version in
+            // `skipped_irreversible`.
+            let down = if replaces_existing {
+                None
+            } else {
+                Some(format!("DROP FUNCTION IF EXISTS {qname}({args_sql})"))
+            };
             vec![VendorStatement {
                 name: format!("create_function_{name}"),
                 up,
-                down: Some(down),
+                down,
             }]
         }
         Op::DropFunction {

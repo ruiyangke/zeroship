@@ -106,12 +106,20 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let policy = support::operator_charter(&cfg.project_schema);
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-    let document = zero_migrate::model::load::load_ir_document(
+    // The charter is threaded as vendor authority rather than left to the scope-derived
+    // fallback, which answers schema confinement and grants nothing outside an operator
+    // posture. `createFunction` is a privileged primitive, so the gate has to read the
+    // grant off the charter or it refuses before the rollback can be measured at all.
+    let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
         zero_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
+        Some(zero_migrate::model::validate::VendorAuthority {
+            effective: &policy,
+            default_schema: &cfg.project_schema,
+        }),
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
@@ -176,7 +184,6 @@ async fn live_function_body(
 /// The refusal is itself the useful result: it narrows #211 from "always reachable" to
 /// "reachable only from an operator/platform migration". Kept rather than deleted because
 /// the harness is correct up to that gate and states what the measurement needs.
-#[ignore = "blocked: createFunction needs an operator VendorAuthority the tests do not build (#211)"]
 #[compio::test]
 async fn rolling_back_a_function_replace_on_postgres() {
     let url = skip_if_no_pg!();
@@ -241,8 +248,11 @@ async fn rolling_back_a_function_replace_on_postgres() {
             );
         }
 
-        // Recorded rather than asserted: this arm exists to find out what the rollback
-        // does, and writing the expectation first would decide the answer.
+        // Measured before it was asserted. The recorded run reported
+        // `rollback=ok RollbackOutcome { rolled_back: [..], skipped_irreversible: [] }`
+        // with `function_after=None`: undoing a body change deleted the function and
+        // called it a success. The expectation below is that outcome corrected, not a
+        // guess written ahead of the evidence.
         let request = RollbackRequest::new(RollbackTarget::Steps(1));
         let outcome = rollback(
             &backend,
@@ -259,15 +269,40 @@ async fn rolling_back_a_function_replace_on_postgres() {
         )
         .await;
 
+        let error = match outcome {
+            Ok(outcome) => {
+                return Err(format!(
+                    "the rollback must refuse a replace it cannot invert, and it succeeded: \
+                     {outcome:?}"
+                ));
+            }
+            Err(error) => format!("{error:?}"),
+        };
+        if !error.contains("Irreversible") {
+            return Err(format!(
+                "the refusal must be the irreversible one the operator can force past, got: \
+                 {error}"
+            ));
+        }
+
+        // A refusal that still destroyed the object would be the same defect wearing an
+        // error message, so the catalog is read again rather than trusting the verdict.
         let after = live_function_body(&session, &cfg.project_schema).await?;
-        eprintln!(
-            "PROBE rollback={} function_after={:?}",
-            match &outcome {
-                Ok(outcome) => format!("ok {outcome:?}"),
-                Err(error) => format!("{error:?}"),
-            },
-            after
-        );
+        match after {
+            None => {
+                return Err(
+                    "the refused rollback left no function behind, so it dropped the object \
+                     it declined to restore"
+                        .to_string(),
+                );
+            }
+            Some(body) if Some(body.as_str()) != replaced.as_deref() => {
+                return Err(format!(
+                    "the refused rollback rewrote the body it declined to restore: {body:?}"
+                ));
+            }
+            Some(_) => {}
+        }
 
         Ok(())
     }
