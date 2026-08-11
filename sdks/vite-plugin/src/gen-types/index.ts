@@ -87,6 +87,22 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * missing-field envelope and a malformed JSON string ALL returned
  * `ok:false, error:"envelope[N] is not a valid IR document: ..."`. None threw.
  *
+ * That soft return is a GUARDED CONTRACT upstream, not four lucky samples,
+ * which is what makes it safe to build an allow-list on. Checked at OUR OWN
+ * vendored pin (`third_party/zero-migrate` @ cb1bcb59) rather than taken on
+ * report, because an upstream guarantee is only worth what the pin we compile
+ * against actually contains: `bridge.rs:129-131`, the doc comment ON the
+ * `genArtifacts` export, promises `ok=false` + `error` "on a malformed/incoherent
+ * source ... (never a throw)", and `api.rs:452`
+ * `gen_artifacts_from_a_malformed_envelope_fails_soft` asserts `!reply.ok` for an
+ * envelope whose `ops` is not an array. A change that made a malformed source
+ * throw fails that test upstream instead of silently reaching us.
+ *
+ * (zero-migrate reported this as ZERO-MIGRATE-2026-08-11-011, citing different
+ * line numbers and different prose -- their tree is AHEAD of this pin. Grepping
+ * for their sentence here returns nothing while the contract is plainly present
+ * under other words, so re-check this by concept, not by their quote.)
+ *
  * The ASYNC verb, `applyIrSqlite`, does NOT behave that way. It rejects at the
  * napi boundary, and `Error::from_reason` hardcodes `Status::GenericFailure`,
  * so a CREATOR's invalid migration arrives from the engine indistinguishable
