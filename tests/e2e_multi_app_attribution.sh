@@ -21,7 +21,8 @@
 #   * 0 provider dead-letters (every event mapped to a real creator)
 #   * per-APP enforcement usage_aggregates are correct (A1=40, A2=60, A3=70)
 #
-# Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves logs.
+# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run. KEEP_WORK=1 preserves logs.
 # Dedicated ports (distinct from the other billing e2es); cleans up on exit.
 # ============================================================================
 set -uo pipefail
@@ -33,7 +34,18 @@ fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 echo "============================================"
 echo "  zeroship E2E — multi-app -> per-creator attribution (REAL Lago)"
 echo "============================================"
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
+# Docker unavailable is a REFUSAL, not a skip. This used to `exit 0` after a
+# warning, so on any machine without docker the harness reported success having
+# asserted nothing - "0 failed over 0 assertions", the shape of tasks
+# #102/#103/#279. RED-PROVEN across all six harnesses that carried this arm:
+# with a stub `docker` returning 1 on PATH, every one of them printed
+# "SKIP: docker unavailable." and exited 0.
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  echo "  x REFUSED: docker unavailable, so NOTHING in this harness ran." >&2
+  echo "    Exiting non-zero: a run that asserted nothing is not a passing run." >&2
+  echo "    Start docker and re-run." >&2
+  exit 1
+fi
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }

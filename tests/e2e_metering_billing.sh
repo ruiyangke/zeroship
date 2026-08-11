@@ -40,7 +40,8 @@
 # consumes the stream into usage_aggregates within a couple seconds.
 #
 # DEDICATED port band + DB/dirs + redpanda container. Cleans up on exit.
-# Skips CLEANLY (exit 0) when docker is unavailable.
+# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run.
 #
 # Usage:
 #   ./tests/e2e_metering_billing.sh
@@ -68,9 +69,15 @@ echo "  zeroship E2E — billing & metering pipeline (multi-node, real Stripe-mo
 echo "============================================"
 
 # --- docker gate: skip cleanly when unavailable ----------------------------
+# Docker unavailable is a REFUSAL, not a skip. This block used to `exit 0`
+# after a warning, so on a machine (or a CI runner) without docker the
+# harness reported success having asserted nothing. RED-PROVEN before the
+# change: a stub `docker` returning 1 on PATH gave rc 0 here.
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker unavailable — billing/metering E2E needs an ephemeral Postgres."
-  exit 0
+  echo "  x REFUSED: docker unavailable - billing/metering E2E needs an ephemeral Postgres." >&2
+  echo "    NOTHING ran. Exiting non-zero: a run that asserted nothing is not" >&2
+  echo "    a passing run. Start docker and re-run." >&2
+  exit 1
 fi
 
 # --- preflight: binaries + tooling + built example -------------------------

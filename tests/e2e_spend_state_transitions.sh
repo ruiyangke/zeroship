@@ -21,7 +21,8 @@
 # anti-flap deadband). Enforcement is provider-independent, so this uses the
 # `lite` provider (no external billing account).
 #
-# Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves logs.
+# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run. KEEP_WORK=1 preserves logs.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"

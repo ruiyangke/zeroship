@@ -26,7 +26,8 @@
 # forwarder posts them to the creator's Lago customer directly. Real-traffic
 # attribution is covered by e2e_lago_billing.sh + e2e_multi_app_attribution.sh.
 #
-# Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves logs.
+# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run. KEEP_WORK=1 preserves logs.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
@@ -37,7 +38,18 @@ fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 echo "============================================"
 echo "  zeroship E2E — event re-delivery / dedup (§6, REAL Lago, produce-injected)"
 echo "============================================"
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
+# Docker unavailable is a REFUSAL, not a skip. This used to `exit 0` after a
+# warning, so on any machine without docker the harness reported success having
+# asserted nothing - "0 failed over 0 assertions", the shape of tasks
+# #102/#103/#279. RED-PROVEN across all six harnesses that carried this arm:
+# with a stub `docker` returning 1 on PATH, every one of them printed
+# "SKIP: docker unavailable." and exited 0.
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  echo "  x REFUSED: docker unavailable, so NOTHING in this harness ran." >&2
+  echo "    Exiting non-zero: a run that asserted nothing is not a passing run." >&2
+  echo "    Start docker and re-run." >&2
+  exit 1
+fi
 for b in zeroship-control zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 
