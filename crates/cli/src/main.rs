@@ -312,6 +312,12 @@ fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
         "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>] [--no-create]",
     );
+    // Before ANY flag is read, so a typo is reported as a typo rather than as
+    // the downstream symptom of its default. Mirrors cmd_serve.
+    if let Err(e) = check_unknown_deploy_flags(args) {
+        eprintln!("zeroship deploy: {e}");
+        std::process::exit(1);
+    }
     let app = flag_str(args, "--app=").expect("--app=<name> is required");
     let control_url = flag_str(args, "--control=")
         .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
@@ -770,6 +776,49 @@ pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Known flags accepted by `zeroship deploy` (bare names, no `=`).
+///
+/// This is the set `cmd_deploy` actually CONSUMES, read off the call sites
+/// rather than off the usage string: `--app=` and `--control=` via `flag_str`,
+/// `--token=` via `resolve_bearer_token`, `--no-create` via
+/// `deploy_auto_create`. Keeping it derived from behaviour matters because the
+/// usage string is a second expression of the same contract, and the gate that
+/// checks shipped deploy instructions (`tests/deploy_instructions_gate.sh`)
+/// already reads THAT - so if this list ever drifts, it should drift against
+/// the parser, not against the prose.
+const DEPLOY_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token", "--no-create"];
+
+/// Return `Err` if any `--flag` argument in `args[3..]` is not a known `deploy`
+/// flag. Positional args (no leading `--`) are left unchecked.
+///
+/// NOT a copy of `check_unknown_serve_flags`: that one consumes the token after
+/// a bare `--flag` as its value, because serve accepts the space form
+/// (`--workers 4`). Deploy has no space-form flag - `--app`, `--control` and
+/// `--token` are equals-only and `--no-create` takes no value - so skipping a
+/// token after a bare flag would swallow whatever followed `--no-create`.
+pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> {
+    // args[0] = binary, args[1] = "deploy", args[2] = <path>; flags start at 3.
+    for arg in args.iter().skip(3) {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        let flag_name = match arg.find('=') {
+            Some(idx) => &arg[..idx],
+            None => arg.as_str(),
+        };
+        if !DEPLOY_KNOWN_FLAGS.contains(&flag_name) {
+            return Err(format!(
+                "unknown flag `{flag_name}`; a typo here is silent - \
+                 `--control` falling back to its default would deploy to \
+                 http://localhost:9090 instead of the control plane you named. \
+                 Usage: zeroship deploy <path-to-.zship> --app=<name> \
+                 [--control=<url>] [--token=<PAT>] [--no-create]"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Legacy equals-only flag parser kept for callers that have not been migrated
 /// to `parse_flag`. New code should use `parse_flag` / `parse_flag_u16` etc.
 pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
@@ -903,6 +952,53 @@ mod tests {
             "--wall-timeout=2000", "--heap-limit-mb=512",
         ]);
         assert!(check_unknown_serve_flags(&args).is_ok());
+    }
+
+    /// The same guarantee for `deploy`, which did not have it. MEASURED against
+    /// the release binary on 2026-08-11, before this check existed:
+    ///
+    ///   zeroship serve  <file> --prot=3000
+    ///     -> "unknown flag `--prot`; run `zeroship serve --help` ..."
+    ///   zeroship deploy <file> --app=a --token=t --contrl=http://my-control
+    ///     -> "Deploying ... to http://localhost:9090/api/apps/a/deploy..."
+    ///
+    /// The typo'd `--contrl` was ignored and `--control` fell back to its
+    /// default, so the deploy went to whatever listens on localhost:9090 -
+    /// a working control plane on any machine running the dev stack. That is a
+    /// deploy landing on the WRONG TARGET silently, not just a poor message.
+    #[test]
+    fn unknown_deploy_flag_is_rejected() {
+        // Typo: `--contrl` instead of `--control`. This is the one with a
+        // wrong-target consequence rather than a confusing-error one.
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "app.zship",
+            "--app=myapp",
+            "--contrl=http://my-control",
+        ]);
+        let result = check_unknown_deploy_flags(&args);
+        assert!(result.is_err(), "typo'd flag should be rejected");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("--contrl"), "error should name the unknown flag: {msg}");
+
+        // Every flag the deploy path actually reads is accepted. This list is
+        // the one `cmd_deploy` consumes: --app=/--control= via flag_str,
+        // --token= via resolve_bearer_token, --no-create via deploy_auto_create.
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "app.zship",
+            "--app=myapp",
+            "--control=http://localhost:9090",
+            "--token=pat",
+            "--no-create",
+        ]);
+        assert!(check_unknown_deploy_flags(&args).is_ok());
+
+        // The positional path argument must not be mistaken for a flag.
+        let args = s(&["zeroship", "deploy", "./dist/app.zship", "--app=myapp"]);
+        assert!(check_unknown_deploy_flags(&args).is_ok());
     }
 
     fn s(v: &[&str]) -> Vec<String> {
