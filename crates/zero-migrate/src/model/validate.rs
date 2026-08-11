@@ -4684,8 +4684,13 @@ pub fn validate_op_authorized(
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. }
-        | Op::Dialectal { .. } => Ok(()),
+        | Op::PgRaw { .. } => Ok(()),
+        // Unreachable: the early return at the top of this function hands every
+        // dialectal op to `validate_dialectal_op`, which authorizes each leg's inner
+        // ops and checks the `default` leg against all three dialects. Listing it
+        // alongside the ops that genuinely need no check would tell a reader auditing
+        // this match the opposite of what happens.
+        Op::Dialectal { .. } => Ok(()),
     }
 }
 
