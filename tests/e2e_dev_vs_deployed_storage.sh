@@ -82,6 +82,13 @@ CONTROL_PORT="${CONTROL_PORT:-9396}"
 WORKER_PORT="${WORKER_PORT:-8396}"
 GATE_PORT="${GATE_PORT:-8306}"
 DEV_PORT="${DEV_PORT:-3081}"
+# VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
+# binds. vite was silently taking its :5173 global default, which nothing here
+# declared, tracked or freed, so a second harness on this machine fought it for
+# the port and the cleanup trap could never reclaim it (#173's class). Private,
+# and --strictPort at the call so a conflict fails loudly rather than moving to
+# a port nobody watches. See #272.
+VITE_PORT="${VITE_PORT:-5081}"
 MINIO_PORT="${MINIO_PORT:-9203}"
 MINIO_CONTAINER="zs-devdeploy-storage-minio"
 MINIO_ACCESS="minioadmin"; MINIO_SECRET="minioadmin"; MINIO_BUCKET="zeroship-storage-probe"
@@ -102,7 +109,11 @@ pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan the PID loop above cannot reach.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
   # Restore the config file if the no-config mutation moved it.
   [ -f "$WORK/config.ts.bak" ] && cp "$WORK/config.ts.bak" "$APP/src/server/config.ts"
@@ -237,9 +248,11 @@ authed=$(grep -oE '"rpc:[^"]+":\{[^}]*"auth":' "$d/manifest.json" | wc -l)
 # passed 11/0 -- a mutation that cannot fail proves nothing about the check it
 # is meant to be testing.
 mkdir -p "$WORK/dev-storage"
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
 ( cd "$APP" && ZEROSHIP_STORAGE_URL="file://$WORK/dev-storage" \
-    ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+    ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 20); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/probe.ping" -d '{"json":{}}' && break
