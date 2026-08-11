@@ -27,7 +27,8 @@
 # control/worker/gateway), overriding the blob-store to s3://<minio> and
 # adding the worker --storage-url s3://<minio>.
 #
-# Skips CLEANLY (exit 0) when docker is unavailable.
+# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run.
 #
 # Usage:
 #   ./tests/e2e_s3_storage.sh
@@ -54,9 +55,15 @@ echo "  zeroship E2E — S3/R2 object storage (MinIO): deploy blobs + env.storag
 echo "============================================"
 
 # --- docker gate: skip cleanly when unavailable ----------------------------
+# Docker unavailable is a REFUSAL, not a skip. This block used to `exit 0`
+# after a warning, so on a machine (or a CI runner) without docker the
+# harness reported success having asserted nothing. RED-PROVEN before the
+# change: a stub `docker` returning 1 on PATH gave rc 0 here.
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker unavailable — S3 E2E needs a MinIO container."
-  exit 0
+  echo "  x REFUSED: docker unavailable - S3 E2E needs a MinIO container." >&2
+  echo "    NOTHING ran. Exiting non-zero: a run that asserted nothing is not" >&2
+  echo "    a passing run. Start docker and re-run." >&2
+  exit 1
 fi
 
 # --- preflight: binaries + built example -----------------------------------

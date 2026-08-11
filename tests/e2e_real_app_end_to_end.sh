@@ -15,7 +15,8 @@
 #   6. the app's requests are METERED → usage_aggregates → a projected CHARGE
 #
 # Host-routed (starter.localhost) — how a deployed app is really hit. lite billing
-# provider. Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 keeps logs.
+# provider. REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
+# is not a passing run. KEEP_WORK=1 keeps logs.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
@@ -26,7 +27,18 @@ fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 echo "============================================"
 echo "  zeroship E2E — REAL app (starter) build → deploy → serve → RPC → BILLED"
 echo "============================================"
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
+# Docker unavailable is a REFUSAL, not a skip. This used to `exit 0` after a
+# warning, so on any machine without docker the harness reported success having
+# asserted nothing - "0 failed over 0 assertions", the shape of tasks
+# #102/#103/#279. RED-PROVEN across all six harnesses that carried this arm:
+# with a stub `docker` returning 1 on PATH, every one of them printed
+# "SKIP: docker unavailable." and exited 0.
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  echo "  x REFUSED: docker unavailable, so NOTHING in this harness ran." >&2
+  echo "    Exiting non-zero: a run that asserted nothing is not a passing run." >&2
+  echo "    Start docker and re-run." >&2
+  exit 1
+fi
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null && command -v pnpm >/dev/null || { echo "need node/openssl/curl/pnpm"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
