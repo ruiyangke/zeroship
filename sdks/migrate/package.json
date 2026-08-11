@@ -20,7 +20,11 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "src", "native"],
+  "files": [
+    "dist",
+    "src",
+    "native"
+  ],
   "scripts": {
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
     "gen:dialect-table": "node scripts/gen-dialect-table.mjs",
@@ -29,7 +33,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:types": "tsc --noEmit -p tsconfig.types.json",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
-    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+    "test": "pnpm build && NODE_ENV=test node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@zeroship/db": "workspace:*"
