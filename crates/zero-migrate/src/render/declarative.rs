@@ -8106,6 +8106,41 @@ impl DeclarativeAuthor {
                     expect: Some((idx.unique, idx.columns.clone())),
                     ownership_only: false,
                 });
+            } else if self.dialect.supports(Capability::SchemaWideIndexNames) {
+                // UNGUARDED createTable. Its inline indexes render the same
+                // `IF NOT EXISTS` the guarded ones do, so where an index name is
+                // schema-wide an inline create naming an index ANOTHER table owns is
+                // skipped by the engine and journaled green with the index never
+                // created. Measured before this arm existed: the journal grew
+                // `create_index_idx_inline_shared:applied/completed` while the table
+                // carried no such index. Stamp an ownership-only probe so that case
+                // fails closed naming the owner.
+                //
+                // Ownership is the whole decision: no shape verify and no satisfied
+                // no-op, so a same-table re-run stays the `IF NOT EXISTS` no-op that
+                // crash recovery replays.
+                //
+                // The peer arm for a standalone `createIndex` lives in
+                // `render/lower.rs`; this one exists because a createTable's inline
+                // indexes never reach that op. Keeping them separate is deliberate:
+                // routing these through it would reorder the CREATE TABLE and its
+                // indexes, which have to stay one ordered unit list.
+                //
+                // Does NOT cover MySQL, where nothing needs covering: index names are
+                // per-table there, the emitter writes no `IF NOT EXISTS`, and the
+                // MySQL backend evaluates no probe.
+                //
+                // Does NOT cover a collision this same migration UNIT creates before
+                // the statement runs, and nothing else covers it either: the probe
+                // reads one catalog snapshot per unit.
+                idx_mig.existence_guard = Some(crate::model::probe::GuardProbe::Index {
+                    schema: self.project_schema.clone(),
+                    table: table.to_string(),
+                    name: idx.name.clone(),
+                    direction: crate::model::probe::GuardDir::IfNotExists,
+                    expect: None,
+                    ownership_only: true,
+                });
             }
             out.push(single_stmt(idx_mig));
         }
