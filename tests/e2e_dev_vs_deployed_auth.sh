@@ -59,8 +59,17 @@
 # the unmutated count was already 20, so the pair was unreachable - the same rot
 # that made golden_path.sh ask for an impossible `49 passed, 0 failed` (ed6ae2539).
 # The delta is the invariant; the absolute pair moves whenever a divergence is
-# fixed. I have NOT run MUTATE=declare-defaulted at HEAD, so no post-mutation
-# absolute is recorded here rather than a guessed one.
+# fixed.
+#
+# NOW RUN, 2026-08-11: MUTATE=declare-defaulted gives `17 of 48 divergent`.
+# 20 -> 17, the delta is EXACTLY THE THREE rows named for it, and the control is
+# still load-bearing after the unmutated population moved 27 -> 20. That is the
+# thing worth knowing: a row-level control calibrated against an old absolute can
+# quietly stop discriminating, and this one did not.
+#
+# The mutated run scores 21 passed, not 22, because the `#163 probe is live`
+# assertion below is skipped when MUTATE != none. The floor accounts for that;
+# see the note beside AUTH_MIN_PASSED.
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
@@ -607,7 +616,28 @@ fi
 # The single FAIL is the divergence line, which is RED BY DESIGN. The floor is
 # on PASS only, so it does not encode the divergence count and does not have to
 # move when a divergence is fixed.
-AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-22}"
+# THE FLOOR DEPENDS ON THE MODE, and finding that out cost a self-inflicted bug.
+# f67834232 hardcoded 22, measured from two MUTATE=none runs. Running the
+# harness's own documented control, MUTATE=declare-defaulted, then scores 21 and
+# my floor fired:
+#
+#     FAIL: only 21 assertions passed, fewer than the 22 this harness expects.
+#
+# That is a FALSE alarm blaming absent coverage. The mutated run legitimately
+# has one assertion fewer: `probe.defaulted carries NO auth posture (the #163
+# probe is live)` is deliberately skipped when MUTATE != none, because under the
+# mutation the posture is SUPPOSED to be declared. I had turned the harness's
+# own sensitivity control into a floor failure - the same shape as the
+# unreachable expectations I have been correcting elsewhere, authored by me.
+#
+# Measured, both modes, this HEAD:
+#     MUTATE=none               22 passed, 1 failed   20 of 48 divergent
+#     MUTATE=declare-defaulted  21 passed, 1 failed   17 of 48 divergent
+if [ "${MUTATE:-none}" = "none" ]; then
+  AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-22}"
+else
+  AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-21}"
+fi
 if [ "$PASS" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only $PASS assertions passed, fewer than the $AUTH_MIN_PASSED this" >&2
   echo "      harness expects. The setup steps it counts - dev login, the ephemeral" >&2
