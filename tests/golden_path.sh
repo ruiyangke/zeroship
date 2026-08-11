@@ -112,7 +112,18 @@ fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 # expansion, which zsh does not do. Under zsh the list collapses to one bogus
 # id and the check reports every step missing - loud, not silently green, which
 # is the intended direction for a check that cannot run.
-GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 10 11"
+#
+# `9b` IS IN THIS LIST BECAUSE IT WAS MISSING FROM IT, and the omission cost
+# exactly what guard 2 exists to prevent. Measured 2026-08-11: step 9b produces
+# 14 of the harness's 75 outcomes, and with it absent from this list the guard
+# iterated only the declared ids, so 9b could go completely silent and print
+# nothing. A run with 9b's body suppressed scored `52 passed, 8 failed` and the
+# ONLY diagnosis was the floor - "either a check stopped firing or one was
+# removed" - which is the wrong explanation for a whole step asserting nothing.
+# The paragraph above about the list being load-bearing was already there; it
+# argued carefully for a list that was incomplete, which is what made it look
+# audited. Sub-step ids are easy to miss precisely because they are not numbers.
+GP_EXPECTED_STEPS="1 2 3 4 5 6 7 8 9 9b 10 11"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -2471,6 +2482,27 @@ for _s in $GP_EXPECTED_STEPS; do
   fi
 done
 
+# Guard 2b: the SYMMETRIC check - a step that ran but was never declared.
+# Without this, guard 2 only protects the ids someone remembered to list, and a
+# new step is unguarded from the moment it is written until someone notices. It
+# is not hypothetical: step 9b shipped undeclared and stayed that way, holding
+# 14 of 75 outcomes outside the guard. Adding 9b to the list fixes that one
+# step; this loop is what stops the next one, because the failure mode is
+# forgetting the list exists, and a check that depends on remembering is the
+# thing being forgotten. The report below prints declared ids only, so an
+# undeclared step is invisible there too - which is why this names it.
+for _s in "${!GP_STEP_OUTCOMES[@]}"; do
+  case " $GP_EXPECTED_STEPS " in
+    *" $_s "*) ;;
+    *)
+      echo "  ✗ step $_s ran and produced ${GP_STEP_OUTCOMES[$_s]} outcome(s) but is NOT in"
+      echo "    GP_EXPECTED_STEPS, so nothing checks whether it asserted anything and it"
+      echo "    is absent from the summary. Add it to the list."
+      gp_silent=$((gp_silent + 1))
+      ;;
+  esac
+done
+
 echo ""
 echo "============================================"
 echo "  golden path: $PASS passed, $FAIL failed (floor $GOLDEN_MIN_PASSED)"
@@ -2495,9 +2527,14 @@ echo "============================================"
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
 if [ "$gp_silent" -gt 0 ]; then
-  echo "FAIL: $gp_silent declared step(s) asserted nothing. A step that checks nothing" >&2
-  echo "      is indistinguishable from a step that passed, and this script would" >&2
-  echo "      otherwise have exited 0 over it." >&2
+  # Wording covers BOTH guard-2 arms and guard 2b. Saying "declared step(s)"
+  # here was wrong for the undeclared-step case - the complaint there is
+  # precisely that it was NOT declared - and a summary line that contradicts
+  # the detail above it is how a reader learns to skip the summary.
+  echo "FAIL: $gp_silent step accounting problem(s) above: a step that asserted" >&2
+  echo "      nothing, a declared step that never ran, or a step that ran without" >&2
+  echo "      being declared. Each is indistinguishable from a step that passed," >&2
+  echo "      and this script would otherwise have exited 0 over it." >&2
   rc=1
 fi
 if [ "$PASS" -lt "$GOLDEN_MIN_PASSED" ]; then
