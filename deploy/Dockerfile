@@ -21,10 +21,17 @@
 #      so they MUST exist before cargo touches zeroship-runtime.
 #   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
 #      deploy/policies/ tree (crates/authz/build.rs parses
-#      ../../deploy/policies/*.cedar at build time) and compiles all seven
-#      binaries.
-#   3. final (ubuntu) ships the six binaries. It ships NO console - see the
-#      apps/ note in stage 1.
+#      ../../deploy/policies/*.cedar at build time) and compiles the six
+#      binaries below plus two the control crate carries and we do not ship
+#      (zeroship-mock-stripe, dev-provision) - see the `--bin` note at the
+#      cargo line for why they come along.
+#   3. final (ubuntu) ships SIX binaries: zeroship-control, zeroship-gate,
+#      zeroship-worker, zeroship-auth, zeroship, zeroship-platform-migrate.
+#      It ships NO console - see the apps/ note in stage 1.
+#
+# This header said "all seven binaries" until 2026-08-11, which was wrong in
+# both directions: the count was never seven, and the cargo line was building
+# exactly ONE.
 
 # ---------------------------------------------------------------------------
 # Stage 1 — build the SDK dist (bootstrap runtime-entry + dispatcher).
@@ -32,6 +39,27 @@
 FROM node:22-bookworm AS sdks
 WORKDIR /build
 RUN corepack enable
+# Rust, in the NODE stage. This looks wrong and is not.
+# sdks/vite-plugin imports `zero-migrate-node`, a Rust N-API addon, and that
+# addon's build is `napi build --platform --release`. `napi` is @napi-rs/cli,
+# a NODE cli (its package.json:61 devDependency), and it compiles a Rust crate.
+# So the addon needs BOTH toolchains in ONE stage - which is why the obvious
+# fix (build it in the rust `builder` stage and copy the artifacts here) does
+# not work: rust:latest has no Node, so it cannot invoke napi at all.
+# Measured 2026-08-11 (task #318/#265).
+# The SAME native deps the rust `builder` stage installs, and for the same
+# reason: the addon's dependency tree reaches pg_query, whose build script
+# drives bindgen, which dlopens libclang. MEASURED, not guessed - without
+# these the build dies with:
+#   bindgen-0.66.1/lib.rs:604:31: Unable to find libclang: "couldn't find any
+#   valid shared libraries matching: ['libclang.so', ...]"
+# A Rust toolchain alone is not enough; -sys crates need the C side too.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang libclang-dev cmake perl nasm pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
 # Workspace manifest + lockfile first for a cache-friendly install.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # pnpm-workspace.yaml globs sdks/* and examples/*, and the lockfile pins
@@ -47,6 +75,11 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # fetching the extracted builder repo, not re-adding this COPY.
 COPY sdks/ sdks/
 COPY examples/ examples/
+# pnpm-workspace.yaml lists third_party/zero-migrate/packages/* and
+# .../crates/zero-migrate-node as workspace members, and the lockfile pins them
+# as importers - so --frozen-lockfile needs them PRESENT, and the root build
+# script now compiles the addon out of this tree.
+COPY third_party/ third_party/
 RUN pnpm install --frozen-lockfile
 # Root build script only builds sdks/* (topo: @zeroship/db →
 # @zeroship/bootstrap → rest); it does not touch apps/ or examples/.
@@ -71,6 +104,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clang libclang-dev cmake perl nasm pkg-config \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
+# The workspace's OWN linker flag, and the build cannot link without it.
+#
+# .cargo/config.toml sets `-Wl,--allow-multiple-definition` on linux, because
+# libpg_query and librdkafka each vendor a copy of xxhash and export XXH32 /
+# XXH_versionNumber with external linkage. `zeroship-platform-migrate` links
+# BOTH: pg_query arrives via zero-migrate (always), and rdkafka arrives via
+# zeroship-runtime -> zeroship-metering -> zeroship-stream, which the
+# platform-cli feature turns on for the V8 authoring front-end. Verified with
+# `cargo tree -i`, both edges.
+#
+# MEASURED on the host, without this COPY:
+#   rust-lld: error: duplicate symbol: XXH_versionNumber
+#     >>> defined at rdxxhash.c  in librdkafka_sys-*.rlib
+#     >>> defined at xxhash.c    in libpg_query-*.rlib
+#   error: could not compile `zeroship-migrate-adapter`
+#         (bin "zeroship-platform-migrate")
+#
+# The collision was already diagnosed and resolved in-repo by acd5c2d72; the
+# image simply never carried the config that resolves it. So this is NOT a
+# product defect - a host `cargo build` of the same binary links fine, and I
+# confirmed the flag reaches that link (`cargo build -v` on the host prints
+# --allow-multiple-definition, no error) - it is the same shape as the
+# third_party/ and libs/ COPYs BELOW: a root the build needs that the context
+# never received.
+COPY .cargo/ .cargo/
 COPY crates/ crates/
 # The vendored migration engine. Cargo.toml lists `third_party/zero-migrate` as a
 # WORKSPACE MEMBER (and names zero-migrate/-ir/-policy by path), so cargo cannot
@@ -79,18 +137,55 @@ COPY crates/ crates/
 COPY third_party/ third_party/
 # Cedar authz policies — crates/authz/build.rs parses these at build time
 # (and engine.rs include_str!s them), both via `../../deploy/policies`.
+# The standalone compio drivers. crates/auth (and others) depend on
+# `compio-postgres` by path into libs/, and Cargo.toml globs crates/* as
+# workspace members, so cargo cannot even LOAD the workspace without libs/.
+# MEASURED, not guessed - without this the release build dies at once with:
+#   error: failed to load manifest for workspace member `/build/crates/auth`
+#   Caused by: failed to read `/build/libs/compio-postgres/Cargo.toml`
+#   Caused by: No such file or directory (os error 2)
+COPY libs/ libs/
 COPY deploy/policies/ deploy/policies/
 # sdks/ WITH the dist emitted by the node stage, so the runtime crate's
 # include_str!("../../../../sdks/bootstrap/dist/{runtime-entry,dispatcher}.js")
 # resolves against /build/sdks/bootstrap/dist/.
 COPY --from=sdks /build/sdks/ sdks/
+# NO `--bin` HERE, and that is the whole point of this comment.
+#
+# This line used to end `-p zeroship-migrate-adapter --bin
+# zeroship-platform-migrate`. `--bin` is a TARGET FILTER for the ENTIRE
+# invocation, not for the -p it trails, so cargo built that one binary and
+# ignored the other five package selections - AND EXITED 0. The image then
+# died three stages later on a COPY of a binary nothing had produced:
+#
+#   ERROR: failed to compute cache key: "/build/target/release/zeroship":
+#          not found
+#
+# MEASURED in that build's own log, which is what identifies this rather than
+# the `Finished` line: `Finished release profile ... in 2m 39s` with ZERO
+# occurrences of `Compiling zeroship-control`, `zeroship-gateway`,
+# `zeroship-worker`, `zeroship-auth` or `zeroship v0`. The target dir was
+# empty, so every crate the build needed had to print a Compiling line. Those
+# five never did. One of six binaries, reported as success.
+#
+# Dropping `--bin` builds every target of every selected package, which is the
+# six we ship plus zeroship-control's `zeroship-mock-stripe` and
+# `dev-provision`. Two extra links against libraries already compiled, and
+# neither is COPYed into the runtime stage. The alternative - two cargo
+# invocations - is correct too but costs a second full pass over the shared
+# dependency graph, because the platform-cli feature set differs and cargo
+# fingerprints them separately.
+#
+# `required-features` still keeps zeroship-platform-migrate honest: it is
+# declared `required-features = ["platform-cli"]`, so the --features flag
+# below is what makes it build at all, not --bin.
 RUN cargo build --release \
     -p zeroship-control \
     -p zeroship-gateway \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrate-adapter --bin zeroship-platform-migrate \
+    -p zeroship-migrate-adapter \
     --features zeroship-migrate-adapter/platform-cli
 
 # ---------------------------------------------------------------------------
