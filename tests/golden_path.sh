@@ -686,7 +686,14 @@ else
     "$BIN/zeroship-control" --port "$_port" --db "$_dsn" --blob-store /tmp/gp-bundles \
       --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
       --signing-key-file "$GP_SIGNING_KEY" > "/tmp/gp-$_tag.log" 2>&1 &
-    PIDS+=($!)
+    # `disown`, and deliberately NOT PIDS+=. These two are killed a few lines
+    # below, inside this step. Registering them for the EXIT trap as well made
+    # bash report `line NNN: <pid> Killed` when it reaped them, and because the
+    # reap is asynchronous one of those notices landed in the MIDDLE of step 3's
+    # output - a line naming a step it has nothing to do with, in a harness
+    # whose whole value is a readable pass/fail list. Measured in the first full
+    # run of this step, not predicted.
+    disown $! 2>/dev/null || true
   done
   # Both must actually serve; comparing the logs of two processes that never
   # started would report 0 == 0 and read as a pass.
