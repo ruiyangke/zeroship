@@ -1,5 +1,5 @@
 # zeroship platform — full-stack LOCAL DEV stack, fronted by Caddy on the
-# *.zeroship.localhost dev domain.
+# *.zeroship.co dev domain.
 #
 # ⚠️  DEV ONLY — NOT for production. Hardcodes weak secrets (platform-key,
 #     master-key, worker-key), and runs every service with --dev-insecure
@@ -15,11 +15,11 @@
 #   docker compose down -v                        # stop + WIPE volumes (slow next boot)
 #
 # Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
-#   http://console.zeroship.localhost   — the creator console / AI app-builder
+#   http://console.zeroship.co   — the creator console / AI app-builder
 #                                         (a gateway-fronted zeroship app; needs
 #                                          OPENAI_API_KEY on the console app env)
-#   http://auth.zeroship.localhost      — login / OIDC
-#   http://<app>.zeroship.localhost     — a deployed creator app (via gateway)
+#   http://auth.zeroship.co      — login / OIDC
+#   http://<app>.zeroship.co     — a deployed creator app (via gateway)
 #
 # Caddy also carries network ALIASES for the auth/console/api hosts so
 # CONTAINERS resolve those same names to Caddy — required for server-side OIDC
@@ -140,10 +140,7 @@ services:
         --bind 0.0.0.0
         --blob-store /data/bundles
         --dev-insecure
-        --app-base-domain zeroship.localhost
-        --bootstrap-console
-        --console-host console.zeroship.localhost
-        --console-zship /opt/zeroship/console/app.zship
+        --app-base-domain zeroship.co
     environment:
       # Role-specific DSN + shared secrets, resolved from deploy/ops/zeroship.toml's
       # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
@@ -221,8 +218,8 @@ services:
           --workers "$$WORKERS" \
           --blob-store /data/bundles \
           --poll-interval 3 \
-          --auth-ui-url http://auth.zeroship.localhost \
-          --gateway-public-url http://api.zeroship.localhost \
+          --auth-ui-url https://auth.zeroship.co \
+          --gateway-public-url https://api.zeroship.co \
           --dev-insecure
     volumes:
       # Same content-addressed blob store control writes to (asset proxy).
@@ -406,7 +403,7 @@ services:
 
   # zeroship-auth — native OIDC OP + UI. The gateway redirects
   # unauthenticated end users to it (gateway's
-  # --auth-ui-url http://auth.zeroship.localhost). Binds loopback by default, so
+  # --auth-ui-url https://auth.zeroship.co). Binds loopback by default, so
   # compose passes --addr 0.0.0.0:9092 to be reachable across the network.
   auth:
     build:
@@ -433,7 +430,7 @@ services:
       AUTH_DB_URL: postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${AUTH_PUBLIC_URL}/oauth2`.
-      AUTH_PUBLIC_URL: https://auth.zeroship.localhost
+      AUTH_PUBLIC_URL: https://auth.zeroship.co
     ports:
       - "9092:9092"
     volumes:
@@ -465,18 +462,18 @@ services:
   # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
   # The AI app-builder IS the console now: a regular zeroship app built to a
   # `.zship`, seeded by control's `--bootstrap-console`, served by the gateway
-  # at console.zeroship.localhost. Its OPENAI_API_KEY / sandbox creds are
+  # at console.zeroship.co. Its OPENAI_API_KEY / sandbox creds are
   # injected as server-side app env on the seeded console app (control env
   # store), not via a standalone Vite container. The builder's confidential
   # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
-  # caddy — dev reverse proxy on :80 for the *.zeroship.localhost domain.
-  # Routes auth/console/api + the {app}.zeroship.localhost catch-all to the
+  # caddy — dev reverse proxy on :80 for the *.zeroship.co domain.
+  # Routes auth/console/api + the {app}.zeroship.co catch-all to the
   # right upstream (see deploy/ops/Caddyfile). console.* now proxies to the GATEWAY
   # (the console is a gateway-fronted app). The network ALIASES make those
   # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
   # server-side OIDC (control/gateway verifying tokens, fetching JWKS,
-  # exchanging codes against http://auth.zeroship.localhost) hits the same
+  # exchanging codes against http://auth.zeroship.co) hits the same
   # issuer the browser does.
   caddy:
     image: caddy:2-alpine
@@ -487,9 +484,9 @@ services:
     networks:
       default:
         aliases:
-          - auth.zeroship.localhost
-          - console.zeroship.localhost
-          - api.zeroship.localhost
+          - auth.zeroship.co
+          - console.zeroship.co
+          - api.zeroship.co
     depends_on:
       control:
         condition: service_started

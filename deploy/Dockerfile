@@ -23,7 +23,8 @@
 #      deploy/policies/ tree (crates/authz/build.rs parses
 #      ../../deploy/policies/*.cedar at build time) and compiles all seven
 #      binaries.
-#   3. final (ubuntu) ships the six binaries.
+#   3. final (ubuntu) ships the six binaries. It ships NO console - see the
+#      apps/ note in stage 1.
 
 # ---------------------------------------------------------------------------
 # Stage 1 — build the SDK dist (bootstrap runtime-entry + dispatcher).
@@ -33,13 +34,18 @@ WORKDIR /build
 RUN corepack enable
 # Workspace manifest + lockfile first for a cache-friendly install.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# pnpm-workspace.yaml globs sdks/*, apps/*, examples/* and the lockfile
-# pins importers for all three. `pnpm install --frozen-lockfile` validates
-# the on-disk workspace against the lockfile, so every workspace package
-# must be present or the install fails. apps/ + examples/ are tiny
-# (no committed node_modules); copying them keeps the workspace consistent.
+# pnpm-workspace.yaml globs sdks/* and examples/*, and the lockfile pins
+# importers for both. `pnpm install --frozen-lockfile` validates the on-disk
+# workspace against the lockfile, so every workspace package must be present
+# or the install fails. examples/ is tiny (no committed node_modules).
+#
+# apps/ USED to be copied here. apps/zeroship-builder - the creator console -
+# was extracted out of this repo by 8dbe4a8d4 and the COPY was left behind, so
+# this image could not build AT ALL until 2026-08-11 (task #318): the build
+# died with `"/apps": not found`. The console is NOT part of this image any
+# more and control no longer gets --bootstrap-console. Restoring it means
+# fetching the extracted builder repo, not re-adding this COPY.
 COPY sdks/ sdks/
-COPY apps/ apps/
 COPY examples/ examples/
 RUN pnpm install --frozen-lockfile
 # Root build script only builds sdks/* (topo: @zeroship/db →
@@ -48,12 +54,6 @@ RUN pnpm build
 # Sanity: the two files the runtime crate include_str!s MUST exist.
 RUN test -f sdks/bootstrap/dist/runtime-entry.js \
  && test -f sdks/bootstrap/dist/dispatcher.js
-# Build the CONSOLE (apps/zeroship-builder) to a .zship. The console is now a
-# regular gateway-fronted zeroship app; control's `--bootstrap-console` ingests
-# this artifact at boot. The root `pnpm build` only builds sdks/*, so build the
-# console app explicitly (its `build` = `tsc -b && vite build` → dist/app.zship).
-RUN pnpm --filter zeroship-builder build \
- && test -f apps/zeroship-builder/dist/app.zship
 
 # ---------------------------------------------------------------------------
 # Stage 2 — native (Rust) build of all six binaries.
@@ -109,10 +109,6 @@ COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # authors `db/migrations-ts/*.ts` in-process via zeroship-runtime's V8 and applies
 # over the native compio-postgres seam — no recorder-child subprocess.
 COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/bin/
-# The prebuilt console .zship (built in the `sdks` node stage). Control's
-# `--bootstrap-console --console-zship /opt/zeroship/console/app.zship` ingests
-# it at boot to seed the gateway-fronted console app.
-COPY --from=sdks /build/apps/zeroship-builder/dist/app.zship /opt/zeroship/console/app.zship
 
 # ---------------------------------------------------------------------------
 # Stage 4 — frontend dev image: the runtime image (so it has the `zeroship`
