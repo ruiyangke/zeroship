@@ -276,10 +276,17 @@ function replaceTheView(): NamedMigration {
   });
 }
 
-// The registry has to name both objects: the replacing migration's SELECT targets the
-// table, and a second deploy carries no adoption for it, so an empty registry is refused
-// for ownership before the fold is ever reached. That refusal is a different question
-// from the one these two arms ask.
+// The registry has to name the TABLE: the replacing migration's SELECT targets it, and a
+// second deploy carries no adoption for it, so an empty registry is refused for ownership
+// before the fold is ever reached. That refusal is a different question from the one
+// these arms ask, and a probe that stops there measures nothing about the fold.
+//
+// The VIEW entry is inert and kept only so the map reads as the whole authored surface.
+// View names are not ownership-tracked at all: `CreateView` and `DropView` return no
+// target at crates/zero-migrate-ir/src/load.rs:280, structured creation checks only the
+// SOURCE tables at :310, and the registry advance tracks tables and partitions rather
+// than views at crates/zero-migrate-node/src/lower.rs:1574. Whether one app should be
+// able to replace another app's view is an open question, not a settled permission.
 const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 
 /** SQLite has one schema, and the CLI names it `public` in the project position. */
@@ -351,9 +358,10 @@ test("MySQL: replacing a view across two deploys applies too, and did so even be
     const created = createTableAndView();
     await applyOne(created, database, driver, []);
 
-    // The same authored migration the PostgreSQL arm above refuses. It passes here for
-    // the WRONG reason: the empty catalog map means the fold's duplicate check finds
-    // nothing, so ignoring `replace` costs nothing. Populating the views map to fix the
+    // The same authored migration the PostgreSQL arm runs. This one passed even BEFORE
+    // the fold learned to read `replace`, for the wrong reason: the empty catalog map
+    // meant the duplicate check found nothing, so ignoring the flag cost nothing.
+    // Populating the views map to fix the
     // drop defect turns this into the PostgreSQL failure unless the fold learns to
     // consult `replace` first. This arm is what would catch that.
     await applyOne(replaceTheView(), database, driver, [created], OWNED);
@@ -405,7 +413,7 @@ test("MySQL: an ifExists drop across two deploys is refused too, so the guard is
     await applyOne(created, database, driver, []);
 
     // The fold's DropView arm destructures with `..`, which swallows `existenceGuard`
-    // exactly as it swallows `replace` on the create side, so the guard never reaches
+    // the way the create side swallowed `replace` until a1fe1047, so the guard never reaches
     // the decision. The guard-absorbing path that exists one layer up
     // (crates/zero-migrate-node/src/lower.rs:628-644) hardcodes NotSatisfied for this
     // dialect, so there is nowhere else for it to be honoured either.
