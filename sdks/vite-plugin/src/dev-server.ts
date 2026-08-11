@@ -20,6 +20,7 @@ import {
   ENV_RUNTIME_DESCRIPTOR,
   ENV_DEV_AUTH,
   ENV_DEV_AUTH_SECRET,
+  ENV_DIE_WITH_PARENT,
   DEFAULT_DEV_PORT,
   RUNTIME_HEALTHY_MS,
   MAX_RAPID_RESTARTS,
@@ -815,6 +816,18 @@ export function devServerPlugin(
           });
         };
 
+        // STILL THE PRIMARY PATH, and not made redundant by ENV_DIE_WITH_PARENT.
+        //
+        // The kernel guard fires on OUR death; this fires while we are alive,
+        // which is the case it exists for - `process.on("exit")` during a
+        // normal vite shutdown, where the child must be gone before we return.
+        // The two do not double-kill: on a clean shutdown the child is already
+        // dead by the time we exit, and a signal to a dead pid goes nowhere; on
+        // an unclean one this function never runs at all.
+        //
+        // The 3s SIGTERM->SIGKILL escalation is also why the kernel guard asks
+        // for SIGKILL rather than SIGTERM: a teardown that already resorts to
+        // SIGKILL has no graceful window left to protect.
         const killChild = () => {
           tornDown = true;
           if (restartTimer) {
@@ -870,6 +883,13 @@ export function devServerPlugin(
             ...process.env,
             DATABASE_URL: databaseUrl,
             [ENV_DEV]: "1",
+            // Reaping of last resort. `killChild` below covers every teardown
+            // vite gets to run; this covers the ones it does not - SIGKILL, a
+            // crash, the OOM killer - after which the runtime would otherwise
+            // hold this project's `.zeroship/kv.redb` until the machine is
+            // rebooted, and no dev server for it could boot on ANY port.
+            // See constants.ts and crates/cli/src/parent_death.rs.
+            [ENV_DIE_WITH_PARENT]: String(process.pid),
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
             ...(runtimeDescriptorJson !== undefined

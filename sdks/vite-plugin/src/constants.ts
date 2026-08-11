@@ -24,6 +24,27 @@ export const ENV_RUNTIME_DESCRIPTOR = "ZEROSHIP_RUNTIME_DESCRIPTOR";
 export const ENV_DEV_AUTH = "ZEROSHIP_DEV_AUTH";
 export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";
 
+/**
+ * Tell the spawned runtime to die when THIS process dies. Value is our pid.
+ *
+ * `killChild` below is not enough and never can be. It runs in vite; a vite
+ * killed by pid - a harness, a crash, the OOM killer - runs no code at all, and
+ * the `zeroship serve` child it forked survives holding its listening socket
+ * AND an exclusive redb lock on the project's `.zeroship/kv.redb`. Task #221
+ * measured four such survivors, aged 10 to 34 minutes, after which no dev
+ * server for that example could boot on ANY port, because the contended
+ * resource is the state dir and not the port.
+ *
+ * So the reaping is delegated to the kernel, which is the only party still able
+ * to act once we are gone (`PR_SET_PDEATHSIG`, armed by the child - see
+ * `crates/cli/src/parent_death.rs`). The pid in the value is what lets the
+ * child notice we died BEFORE it got as far as arming.
+ *
+ * OPT-IN BY CONSTRUCTION: unset means unchanged behaviour, so a `zeroship
+ * serve` typed into a terminal does not die because a shell exited.
+ */
+export const ENV_DIE_WITH_PARENT = "ZEROSHIP_DIE_WITH_PARENT";
+
 /** Default port for the zeroship dev runtime. */
 export const DEFAULT_DEV_PORT = 3001;
 
