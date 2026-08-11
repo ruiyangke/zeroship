@@ -640,6 +640,104 @@ esac
 
 rm -rf "$BODYCAP_TMP"
 
+# --- 6c. The request HEADER caps on the dev tier, at the byte and at the count -
+#
+# The sibling of 6b, and of #42. `PayloadConfig` bounds BODIES; nothing in that
+# fix bounds HEADERS, and the header side has the same inheritance shape: a
+# number the code declares, and a second number it inherits from a parser
+# without saying so.
+#
+# `serve.rs` declares `MAX_HEADER_BYTES = 16 * 1024` and checks `header_len >
+# MAX_HEADER_BYTES`, so the predicate is `>` and 16384 must be ACCEPTED. That
+# number was documented but never measured; both boundaries below are measured
+# by me (2026-08-11) against `zeroship serve` before this step was written:
+#
+#     16 384 -> 200      32 headers -> 200
+#     16 385 -> 431      33 headers -> 400 Bad Request
+#
+# THE COUNT LIMIT IS THE FINDING. `serve.rs` parses into
+# `[httparse::EMPTY_HEADER; 32]`, so a 33rd header is not a size failure at all
+# -- httparse returns `Err`, which takes the BAD_REQUEST arm, not the 431 arm.
+# A creator who sends 33 small headers gets a bare 400 with nothing naming the
+# cause, and no artifact in this repo records that 32 exists. It is not a size
+# cap wearing a different code; it is a SECOND cap, undocumented.
+#
+# WHY /dev/tcp AND NOT curl OR nc: the assertion is about the exact byte length
+# of the header block, and curl appends its own headers, so the number on the
+# wire would not be the number under test. `nc` would work but is an external
+# dependency this suite does not otherwise take on the golden path (only
+# supabase_deploy_e2e.sh uses it), and the OpenBSD build here has no `-q`. Bash
+# `/dev/tcp` is a builtin and is already the idiom in
+# tests/e2e_gateway_path_backslash.sh for exactly this reason.
+#
+# DEV TIER ONLY, deliberately. The deployed header cap is whatever ntex defaults
+# to; our code configures none, and that is an open row in
+# docs/pilot/e2e-scenarios.md rather than something this step may assert.
+hdr_probe() { # hdr_probe <total_header_block_bytes> -> echoes the status code
+  local target="$1" fixed pad resp
+  fixed=$'GET / HTTP/1.1\r\nHost: localhost:'"$DEV_RT_PORT"$'\r\nConnection: close\r\nX-Pad: \r\n\r\n'
+  pad="$(head -c $(( target - ${#fixed} )) /dev/zero | tr '\0' 'x')"
+  exec 3<>"/dev/tcp/127.0.0.1/$DEV_RT_PORT" || { echo "000"; return; }
+  printf 'GET / HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\nX-Pad: %s\r\n\r\n' \
+    "$DEV_RT_PORT" "$pad" >&3
+  resp="$(timeout 15 cat <&3)"; exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+  printf '%s' "$resp" | head -1 | awk '{print $2}'
+}
+hdr_count_probe() { # hdr_count_probe <extra_headers> -> echoes the status code
+  local n="$1" hdrs="" i resp
+  for i in $(seq 1 "$n"); do hdrs="${hdrs}X-h${i}: v"$'\r\n'; done
+  exec 3<>"/dev/tcp/127.0.0.1/$DEV_RT_PORT" || { echo "000"; return; }
+  printf 'GET / HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\n%s\r\n' \
+    "$DEV_RT_PORT" "$hdrs" >&3
+  resp="$(timeout 15 cat <&3)"; exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+  printf '%s' "$resp" | head -1 | awk '{print $2}'
+}
+
+# THE BASELINE IS THE INSTRUMENT. The accept half must NOT assert `200`: this
+# app is the starter, whose `/` is not a route, so a well-formed request answers
+# 404. Asserting 200 would encode an app-ROUTING fact in a test about HEADER
+# parsing -- and it did, on the first run of this step:
+#
+#     header cap: 16384 -> 404   16385 -> 431   32 hdrs -> 404   33 hdrs -> 400
+#     ✗ dev answered 404 for 32 headers; expected 200
+#
+# What "accepted" means here is "the header block parsed and the request reached
+# the app", and the way to say that without knowing the route is to compare
+# against a TINY request to the same URL. If the baseline and the at-cap request
+# answer the same thing, the header block was not the discriminator; if the
+# over-cap request answers 431, the cap fired. One variable.
+HDR_BASE=$(hdr_probe 200)
+HDR_AT=$(hdr_probe 16384)
+HDR_OVER=$(hdr_probe 16385)
+HDR_N32=$(hdr_count_probe 30)   # +Host +Connection = 32 total
+HDR_N33=$(hdr_count_probe 31)   # = 33 total
+
+echo "    header cap: baseline -> $HDR_BASE   16384 -> $HDR_AT   16385 -> $HDR_OVER   32 hdrs -> $HDR_N32   33 hdrs -> $HDR_N33"
+
+# The baseline itself must be a real answer. `000` is a failed connect, and a
+# comparison against it would make every row below agree for the wrong reason.
+[ -n "$HDR_BASE" ] && [ "$HDR_BASE" != "000" ] \
+  && pass "CONTROL: the dev runtime answers a tiny raw request ($HDR_BASE)" \
+  || fail "CONTROL: dev runtime gave no answer on a raw socket ($HDR_BASE); every header verdict below is meaningless"
+
+[ "$HDR_AT" = "$HDR_BASE" ] \
+  && pass "dev accepts a header block of exactly MAX_HEADER_BYTES (16384 -> $HDR_AT, same as baseline)" \
+  || fail "dev answered $HDR_AT at 16 384 header bytes but $HDR_BASE at 200; the check is \`>\` so 16384 must be accepted"
+
+[ "$HDR_OVER" = "431" ] \
+  && pass "dev refuses one byte over the header cap (16385 -> 431)" \
+  || fail "dev answered $HDR_OVER at 16 385 header bytes; expected 431 (serve.rs MAX_HEADER_BYTES)"
+
+[ "$HDR_N32" = "$HDR_BASE" ] \
+  && pass "dev accepts 32 headers, the httparse array size ($HDR_N32, same as baseline)" \
+  || fail "dev answered $HDR_N32 for 32 headers but $HDR_BASE at baseline; expected them to agree"
+
+# NOT asserted as 431: a 33rd header is a PARSE failure, not a size failure, and
+# encoding it as 431 here would record a limit the server does not have.
+[ "$HDR_N33" = "400" ] \
+  && pass "dev refuses a 33rd header with 400, NOT 431 (a second, undocumented cap)" \
+  || fail "dev answered $HDR_N33 for 33 headers; expected 400 from the httparse Err arm"
+
 # --- 7. A dev runtime that never starts must be LOUD, not silently looping ---
 #
 # THE SEAM THIS TESTS, and why it cannot live in a crate suite or a vite-plugin
@@ -2291,7 +2389,11 @@ gp_close_step
 # existing file needs permission on the FILE. That run printed "did not exit"
 # -- identical to a genuine failure to classify -- and would have been read as
 # a red proof of a fix that had never been exercised.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-60}"
+# RAISED 60 -> 65 on 2026-08-11 for step 6c, which adds FIVE passes: a control
+# that the runtime answers a raw socket at all, then the header byte cap accepted
+# at exactly 16384 and refused at 16385, and the header COUNT accepted at 32 and
+# refused at 33. Arithmetic is 60 + 5, measured on my own run, not derived.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-65}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
