@@ -260,8 +260,13 @@ export interface FieldDescriptorDto {
  *
  * Runs inline on the napi call thread (no DB, no host driver). Returns a typed
  * [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source, an
- * unknown dialect spelling, or a malformed policy charter (never a throw). Exactly
- * one of `envelopes`/`descriptors` must be populated.
+ * unknown dialect spelling, or a malformed policy charter. Exactly one of
+ * `envelopes`/`descriptors` must be populated.
+ *
+ * No INPUT reaches the caller as a throw. An engine panic does, and the two are
+ * deliberately different shapes: `ok=false` says the source was rejected, a throw
+ * says the engine broke. Folding a panic into `ok=false` would let a caller's
+ * `if (!reply.ok)` branch report an internal defect as bad schema.
  */
 export declare function genArtifacts(source: GenArtifactsSource): GenArtifactsReply
 
@@ -520,7 +525,8 @@ export interface JsRow {
 
 /**
  * Load + verify an IR document (the sync, DB-free deploy gate). Returns a
- * typed [`LoadVerifyReply`]; never throws for a malformed document.
+ * typed [`LoadVerifyReply`]; a malformed document is a reply, not a throw. An
+ * engine panic is a throw, for the reason spelled out on [`gen_artifacts`].
  */
 export declare function loadVerify(envelopeJson: string, deployingApp: string, dialect: string, registry: Record<string, string>, projectSchema: string): LoadVerifyReply
 

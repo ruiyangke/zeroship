@@ -22,6 +22,20 @@
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
 //! in the napi call). This is the fire-and-resolve topology.
 //!
+//! ## Panics never cross the FFI boundary
+//! Every export carries `catch_unwind`. Without it a panic unwinds out of the
+//! generated `extern "C"` shim and aborts the whole Node process - measured as
+//! `fatal runtime error: failed to initiate panic, error 5, aborting` and a core
+//! dump, with no JS stack and nothing for a caller to catch. napi-rs applies its
+//! own `catch_unwind` only on that opt-in, so the attribute is load-bearing on
+//! every one of these, not decoration.
+//!
+//! It covers what the worker-thread catch cannot: generated argument conversion,
+//! the handwritten decode prefix each async verb runs before spawning, and return
+//! conversion - all of which execute on the napi call thread.
+//! [`crate::runtime::run_engine_blocking`] still owns the engine's own panics,
+//! which become promise rejections rather than throws.
+//!
 //! ## The tokio-free verb bridge
 //! Each `SqlSession` verb ([`crate::session::NapiHostSession`]) calls
 //! [`TsfnDispatch::dispatch`], which: allocates a `futures::channel::oneshot`, moves
@@ -77,7 +91,7 @@ use crate::wire::{
 // ---------------------------------------------------------------------------
 
 /// The IR-format version this addon was built against (fail-closed floor).
-#[napi(js_name = "irVersion")]
+#[napi(js_name = "irVersion", catch_unwind)]
 #[must_use]
 pub const fn ir_version() -> u32 {
     api::current_ir_version()
@@ -87,15 +101,16 @@ pub const fn ir_version() -> u32 {
 /// source digest. A host that resolves the `.node` by path can log this to prove
 /// WHICH artifact it loaded, which the filename alone cannot say. Reproducible
 /// from the committed tree; it does not report the toolchain or build profile.
-#[napi(js_name = "buildInfo")]
+#[napi(js_name = "buildInfo", catch_unwind)]
 #[must_use]
 pub fn build_info() -> BuildInfo {
     api::build_info()
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate). Returns a
-/// typed [`LoadVerifyReply`]; never throws for a malformed document.
-#[napi(js_name = "loadVerify")]
+/// typed [`LoadVerifyReply`]; a malformed document is a reply, not a throw. An
+/// engine panic is a throw, for the reason spelled out on [`gen_artifacts`].
+#[napi(js_name = "loadVerify", catch_unwind)]
 #[must_use]
 pub fn load_verify(
     envelope_json: String,
@@ -127,9 +142,14 @@ pub fn load_verify(
 ///
 /// Runs inline on the napi call thread (no DB, no host driver). Returns a typed
 /// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source, an
-/// unknown dialect spelling, or a malformed policy charter (never a throw). Exactly
-/// one of `envelopes`/`descriptors` must be populated.
-#[napi(js_name = "genArtifacts")]
+/// unknown dialect spelling, or a malformed policy charter. Exactly one of
+/// `envelopes`/`descriptors` must be populated.
+///
+/// No INPUT reaches the caller as a throw. An engine panic does, and the two are
+/// deliberately different shapes: `ok=false` says the source was rejected, a throw
+/// says the engine broke. Folding a panic into `ok=false` would let a caller's
+/// `if (!reply.ok)` branch report an internal defect as bad schema.
+#[napi(js_name = "genArtifacts", catch_unwind)]
 #[must_use]
 pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
     let GenArtifactsSource {
@@ -173,7 +193,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
 /// apply/artifact generation. Each envelope is then lowered independently against
 /// an empty schema through the core preview renderer, preserving input order and
 /// its `[runtime-resolved]` labels for operations that require live catalog state.
-#[napi(js_name = "previewSql")]
+#[napi(js_name = "previewSql", catch_unwind)]
 pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     let PreviewSqlSource {
         envelopes,
@@ -601,7 +621,7 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 /// This is the entry the `zero-migrate-cli` facade's `apply` calls: the pure-JS
 /// recorder produces the envelope, this addon owns the checksum.
 /// Resolves to a typed [`ApplyReply`].
-#[napi(ts_return_type = "Promise<ApplyReply>")]
+#[napi(ts_return_type = "Promise<ApplyReply>", catch_unwind)]
 pub fn apply_ir(
     env: Env,
     #[napi(
@@ -705,7 +725,11 @@ pub fn apply_ir(
 /// and journal connections are opened on the engine worker thread, and the same
 /// high-level library deploy loop used by Rust callers owns lowering, idempotent
 /// journal skips, apply, and live-schema threading.
-#[napi(js_name = "applyIrSqlite", ts_return_type = "Promise<ApplyReply>")]
+#[napi(
+    js_name = "applyIrSqlite",
+    ts_return_type = "Promise<ApplyReply>",
+    catch_unwind
+)]
 pub fn apply_ir_sqlite(
     env: Env,
     app_path: String,
@@ -841,7 +865,7 @@ fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
 /// anything the journal stored. Resolves to a typed [`RollbackReply`].
 ///
 /// [`RollbackReply`]: crate::wire::RollbackReply
-#[napi(ts_return_type = "Promise<RollbackReply>")]
+#[napi(ts_return_type = "Promise<RollbackReply>", catch_unwind)]
 pub fn rollback(
     env: Env,
     #[napi(
@@ -916,7 +940,11 @@ pub fn rollback(
 
 /// `rollbackSqlite` - unwind applied migrations through the bundled in-process
 /// SQLite backend. There is no host-driver callback.
-#[napi(js_name = "rollbackSqlite", ts_return_type = "Promise<RollbackReply>")]
+#[napi(
+    js_name = "rollbackSqlite",
+    ts_return_type = "Promise<RollbackReply>",
+    catch_unwind
+)]
 pub fn rollback_sqlite(
     env: Env,
     app_path: String,
@@ -976,7 +1004,7 @@ pub fn rollback_sqlite(
 }
 
 /// Complete or abort one outstanding PostgreSQL online column rename.
-#[napi(ts_return_type = "Promise<ApplyReply>")]
+#[napi(ts_return_type = "Promise<ApplyReply>", catch_unwind)]
 pub fn resolve_pending(
     env: Env,
     #[napi(
@@ -1045,7 +1073,7 @@ pub fn resolve_pending(
 /// This is the status entrypoint for mixed and data-only plans. The legacy
 /// [`status`] verb remains available for callers that already hold a flat set of
 /// pre-lowered `Migration` values.
-#[napi(ts_return_type = "Promise<StatusReply>")]
+#[napi(ts_return_type = "Promise<StatusReply>", catch_unwind)]
 pub fn status_ir(
     env: Env,
     #[napi(
@@ -1122,7 +1150,11 @@ pub fn status_ir(
 /// `statusIrSqlite`: reconcile authored plans through the bundled in-process
 /// SQLite backend. The journal is bootstrapped by default, matching [`status_ir`];
 /// a request with `readOnly: true` uses the non-creating journal-existence path.
-#[napi(js_name = "statusIrSqlite", ts_return_type = "Promise<StatusReply>")]
+#[napi(
+    js_name = "statusIrSqlite",
+    ts_return_type = "Promise<StatusReply>",
+    catch_unwind
+)]
 pub fn status_ir_sqlite(
     env: Env,
     app_path: String,
@@ -1183,7 +1215,7 @@ pub fn status_ir_sqlite(
 /// `status` — the generic `ops::status::status` over the host driver.
 /// Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
 /// typed [`StatusReply`](crate::wire::StatusReply).
-#[napi(ts_return_type = "Promise<StatusReply>")]
+#[napi(ts_return_type = "Promise<StatusReply>", catch_unwind)]
 pub fn status(
     env: Env,
     #[napi(
@@ -1226,7 +1258,7 @@ pub fn status(
 
 /// `history` — the generic `ops::status::history` over the host driver.
 /// Resolves to a typed [`HistoryReply`].
-#[napi(ts_return_type = "Promise<HistoryReply>")]
+#[napi(ts_return_type = "Promise<HistoryReply>", catch_unwind)]
 pub fn history(
     env: Env,
     #[napi(
