@@ -616,6 +616,30 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
+    // Four of the five non-table maps are empty because the object kind does not exist
+    // on this dialect, and one is empty because nothing reads it here yet. The
+    // `..Default::default()` spelling makes those look identical, so the difference is
+    // written out rather than left to be rediscovered.
+    //
+    // NOT APPLICABLE - `model::op_support` refuses the authoring ops outright, so a
+    // MySQL catalog can hold none of these: `sequences` ("standalone sequence objects
+    // are PostgreSQL-only in the current engine"), `schemas` ("schema vendor primitives
+    // are PostgreSQL-only"), `extensions` ("extension vendor primitives are
+    // PostgreSQL-only"), and `partitions` ("partition lifecycle operations are
+    // PostgreSQL-only"). Populating them would be inventing readers for objects the
+    // engine will not author.
+    //
+    // NOT IMPLEMENTED - `views` is a real gap. MySQL carries plain views
+    // (`Capability::CreateOrReplaceView` is true for this dialect; only MATERIALIZED
+    // views are PostgreSQL-only), so a live MySQL database CAN hold a view this
+    // snapshot will not report.
+    //
+    // Nothing reads the gap today: `existence_probe::decide` has no MySQL call site, and
+    // the dropView inverse is recovered from the authored history rather than the
+    // catalog. It stops being harmless the moment a MySQL existence probe exists -
+    // `decide_view` answers from `live.views`, so a guarded `dropView` against a view
+    // this map omits reads as absent, returns SatisfiedNoop, and skips a drop that
+    // MySQL's own native `DROP VIEW IF EXISTS` performs correctly today.
     Ok(SchemaSnapshot {
         tables,
         ..Default::default()
