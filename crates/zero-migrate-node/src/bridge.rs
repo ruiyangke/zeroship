@@ -518,9 +518,13 @@ where
             let session = NapiHostSession::new(dispatch);
             engine(session)
         },
-        move |outcome: std::result::Result<T, String>| match outcome {
-            Ok(reply) => deferred.resolve(move |_| Ok(reply)),
-            Err(msg) => deferred.reject(Error::from_reason(msg)),
+        move |outcome| match outcome {
+            Ok(Ok(reply)) => deferred.resolve(move |_| Ok(reply)),
+            Ok(Err(msg)) => deferred.reject(Error::from_reason(msg)),
+            // A panic settles the promise too. A `JsDeferred` has no `Drop`, so
+            // dropping this one would leave the caller awaiting forever with its
+            // connection open and the project lock held.
+            Err(panicked) => deferred.reject(Error::from_reason(panicked.reason())),
         },
     );
 
@@ -538,13 +542,11 @@ where
 {
     let (deferred, promise) = env.create_deferred::<T, _>()?;
 
-    run_engine_blocking(
-        engine,
-        move |outcome: std::result::Result<T, String>| match outcome {
-            Ok(reply) => deferred.resolve(move |_| Ok(reply)),
-            Err(msg) => deferred.reject(Error::from_reason(msg)),
-        },
-    );
+    run_engine_blocking(engine, move |outcome| match outcome {
+        Ok(Ok(reply)) => deferred.resolve(move |_| Ok(reply)),
+        Ok(Err(msg)) => deferred.reject(Error::from_reason(msg)),
+        Err(panicked) => deferred.reject(Error::from_reason(panicked.reason())),
+    });
 
     detach_promise(env, promise)
 }

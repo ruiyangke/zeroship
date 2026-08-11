@@ -99,6 +99,53 @@ fn with_diagnostics<T>(body: impl FnOnce() -> T) -> T {
     }
 }
 
+/// What an engine future left behind when it panicked instead of returning.
+///
+/// A panic on the worker thread used to destroy the completion callback along with
+/// the rest of the frame. In the napi wrapper that callback owns the `JsDeferred`,
+/// which has no `Drop` impl and settles a promise only through `resolve` or
+/// `reject` - so dropping it left the JS promise pending forever. The caller's
+/// `finally` never ran, its connection was never closed, and on PostgreSQL the
+/// session-scoped advisory project lock was held until the process died. Carrying
+/// the panic to the callback is what turns that hang into an error the caller can
+/// see and clean up after.
+#[derive(Debug)]
+pub struct EnginePanic {
+    message: String,
+}
+
+impl EnginePanic {
+    /// Read the panic message out of the payload `catch_unwind` returns.
+    ///
+    /// `panic!` with a literal yields `&'static str` and with formatting yields
+    /// `String`; anything else came from a `panic_any` this crate does not use, and
+    /// says so rather than pretending to a message it cannot read.
+    fn from_payload(payload: &Box<dyn std::any::Any + Send>) -> Self {
+        let message = payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a non-string panic payload".to_string());
+        Self { message }
+    }
+
+    /// The operator-facing reason, written for someone holding a hung deploy.
+    ///
+    /// It names the panic, says the operation did not finish, and points at the
+    /// journal rather than at a retry: a panic can land after a committed step, so
+    /// what already ran is a question only the journal answers.
+    #[must_use]
+    pub fn reason(&self) -> String {
+        format!(
+            "the migration engine panicked and the operation did not complete: {}. \
+             The connection is being closed, so no lock is left held. Run `status` \
+             before retrying - a panic can land after a step has already committed, \
+             and the journal is what says which ones did.",
+            self.message
+        )
+    }
+}
+
 /// Run `make_future()`'s future to completion on a dedicated worker thread via a
 /// reactor-less `futures::executor::block_on`, then hand the result to `on_done`.
 ///
@@ -112,12 +159,20 @@ fn with_diagnostics<T>(body: impl FnOnce() -> T) -> T {
 ///
 /// This is fire-and-forget from the JS thread's perspective: the worker owns the
 /// engine future's whole lifetime.
+///
+/// `on_done` runs whether the future returned or panicked, so a caller holding a
+/// one-shot completion handle always gets to use it. `AssertUnwindSafe` is sound
+/// here because nothing that was in flight is read again: the whole operation - the
+/// session, the backend, the partial outcome - is owned by this frame and dropped
+/// during the unwind, and the only thing crossing to `on_done` afterwards is the
+/// panic message. It asserts nothing about the DATABASE, which a panic can leave
+/// mid-migration; [`EnginePanic::reason`] says so to the caller.
 pub fn run_engine_blocking<F, Fut, T, C>(make_future: F, on_done: C)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = T>,
     T: Send + 'static,
-    C: FnOnce(T) + Send + 'static,
+    C: FnOnce(std::result::Result<T, EnginePanic>) + Send + 'static,
 {
     thread::Builder::new()
         .name("zero-migrate-cli".into())
@@ -126,8 +181,13 @@ where
             // a channel receiver woken out-of-thread by the host `done` callback
             // — audited strictly-sequential (no join!/select!/spawn) in the
             // core apply path.
-            let out = with_diagnostics(|| futures::executor::block_on(make_future()));
-            on_done(out);
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_diagnostics(|| futures::executor::block_on(make_future()))
+            }));
+            // The default panic hook has already printed the payload and location to
+            // stderr by now, so the message carried here is a summary, not the only
+            // record of what happened.
+            on_done(out.map_err(|payload| EnginePanic::from_payload(&payload)));
         })
         .expect("spawn zero-migrate engine worker thread");
 }
@@ -136,6 +196,40 @@ where
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// A panicking engine future still reports, carrying the panic message.
+    ///
+    /// Before this, the panic destroyed the completion callback with the rest of
+    /// the frame and the receiver saw `Err(Disconnected)` - which in the napi
+    /// wrapper is a `JsDeferred` dropped without `resolve` or `reject`, so the JS
+    /// promise never settled, the caller's `finally` never ran, its connection was
+    /// never closed and the PostgreSQL project lock was never released.
+    #[test]
+    fn a_panicking_engine_future_reports_the_panic_instead_of_reporting_nothing() {
+        let (tx, rx) = mpsc::channel::<std::result::Result<u64, String>>();
+
+        run_engine_blocking(
+            || async { panic!("engine invariant broken while lowering") },
+            move |outcome: std::result::Result<u64, EnginePanic>| {
+                tx.send(outcome.map_err(|panicked| panicked.reason()))
+                    .expect("the callback ran, so the receiver is still alive");
+            },
+        );
+
+        let reason = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the callback runs on the panic path, not only on the return path")
+            .expect_err("a panicking future does not produce a value");
+        assert!(
+            reason.contains("engine invariant broken while lowering"),
+            "the panic's own message reaches the caller: {reason}"
+        );
+        assert!(
+            reason.contains("status"),
+            "the reason points at the journal, since a panic can land after a \
+             committed step: {reason}"
+        );
+    }
 
     #[test]
     fn block_on_runs_a_future_on_a_worker_thread_and_reports_out_of_thread() {
@@ -147,8 +241,10 @@ mod tests {
 
         run_engine_blocking(
             move || async move { fire_rx.await.unwrap_or(0) },
-            move |v| {
-                result_tx.send(v).unwrap();
+            move |v: std::result::Result<u64, EnginePanic>| {
+                result_tx
+                    .send(v.expect("the future returned rather than panicking"))
+                    .unwrap();
             },
         );
 
