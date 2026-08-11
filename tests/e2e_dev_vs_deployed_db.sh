@@ -100,6 +100,13 @@ WORKER_PORT="${WORKER_PORT:-8393}"
 GATE_PORT="${GATE_PORT:-8303}"
 MIGRATED_PORT="${MIGRATED_PORT:-9493}"
 DEV_PORT="${DEV_PORT:-3021}"
+# VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
+# its :5173 global default, which nothing here declared, tracked or freed, so a
+# second harness on this machine fought it for the port and the cleanup trap
+# could never reclaim it. --strictPort at the call so a conflict fails loudly
+# rather than moving to a port nobody watches. Checked against the runtime's
+# bad-ports list before choosing it (see #272 and the stream harness). See #272.
+VITE_PORT="${VITE_PORT:-5021}"
 PG_PORT="${PG_PORT:-5487}"
 PGC="zs-devdeploy-db-pg"
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
@@ -143,7 +150,11 @@ cleanup() {
       grep -aqs -- "$DEVSTATE" "/proc/$p/environ" 2>/dev/null && kill -9 "$p" 2>/dev/null
     done
   fi
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan the PID loop cannot reach.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  done
   docker rm -f "$PGC" >/dev/null 2>&1 || true
   [ "${KEEP_WORK:-0}" = "1" ] && { echo "  work dir kept: $WORK"; return; }
   rm -rf "$WORK"
@@ -637,7 +648,9 @@ echo "--- 2. dev (pnpm dev, SQLite) ---"
 # this harness fight it for the lock and fail with "Database already open".
 DEVSTATE="$WORK/devstate"; mkdir -p "$DEVSTATE"
 DEV_DBURL="sqlite:$DEVSTATE/dev.sqlite"
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
 
 # MIGRATE FIRST, as its own step. Since ee2c352aa `pnpm dev` applies nothing --
 # it opens the app database READONLY and names the command that fixes it. This
@@ -680,7 +693,7 @@ fi
   ZEROSHIP_KV_PATH="$DEVSTATE/kv.redb" \
   ZEROSHIP_WORKFLOW_SQLITE_PATH="$DEVSTATE/workflows.sqlite" \
   ZEROSHIP_STORAGE_URL="file://$DEVSTATE/storage" \
-  ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1
+  ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
 for _ in $(seq 1 30); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
