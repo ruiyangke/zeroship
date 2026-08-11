@@ -163,4 +163,28 @@ if [ "$((PASS + FAIL))" -eq 0 ]; then
   echo "      script would otherwise have exited 0 over it." >&2
   exit 1
 fi
+# MEASURED FLOOR, not derived and not guessed. A full green run on 2026-08-11
+# against the compose Postgres on :5440 scored `redeploy: 8 passed, 0 failed`,
+# which matches the count this file's own header recorded independently. Two
+# agreeing measurements, so 8 is the number.
+#
+# THE OUTPUT SHOWS NINE `ok` LINES AND PASS IS 8. The extra one is
+# tests/lib/binary_freshness.sh:125, which prints "ok both sides built after
+# the newest source under <crate>" with a bare echo rather than through this
+# script's ok(), so it is a precondition notice and not a counted assertion.
+# Anyone deriving a floor by counting output lines gets 9 and a permanently
+# red gate; count PASS, not `ok` lines.
+#
+# Why a floor ON TOP of the > 0 check above: > 0 catches only total collapse.
+# A run that lost the four post-redeploy assertions - exactly the ones that
+# make this harness worth having - would still report 4 passed, 0 failed and
+# exit 0.
+REDEPLOY_MIN_PASSED="${REDEPLOY_MIN_PASSED:-8}"
+if [ "$PASS" -lt "$REDEPLOY_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $REDEPLOY_MIN_PASSED this" >&2
+  echo "      harness expects. Assertions do not vanish by accident: either a check" >&2
+  echo "      stopped firing or one was removed. If the removal was deliberate, lower" >&2
+  echo "      REDEPLOY_MIN_PASSED in the same change and say why." >&2
+  exit 1
+fi
 [ "$FAIL" -eq 0 ]
