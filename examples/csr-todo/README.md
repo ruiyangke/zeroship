@@ -55,7 +55,7 @@ You should see (resources excerpt — v1 flat map shape):
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --key=<master>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --token=<PAT>
 ```
 
 ## Notes

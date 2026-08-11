@@ -9,7 +9,13 @@
  *
  * Deploy:
  *   cd examples/hr-system && npm install
- *   zeroship deploy . --app=<uuid> --control=http://localhost:9090 --key=<key>
+ *   pnpm build          # vite build -> dist/app.zship
+ *   zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>
+ *
+ * `deploy` uploads a .zship archive, so it takes the archive path rather than
+ * this directory, and the credential flag is --token (or ZEROSHIP_TOKEN, or
+ * `zeroship login`). There is no --key flag; passing one is ignored and the
+ * command fails with "no API token found".
  */
 
 import { schema, t, type Db } from "@zeroship/db";

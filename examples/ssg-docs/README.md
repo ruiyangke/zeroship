@@ -79,7 +79,7 @@ not silently rewritten — only a lone trailing slash is normalized.
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --key=<master>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --token=<PAT>
 ```
 
 Cold start: instant. Per-request work: one blob fetch from the gateway's content-addressed cache. No V8.
