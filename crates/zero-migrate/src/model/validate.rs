@@ -3305,7 +3305,48 @@ fn validate_partition_recording(
     let mut parents: std::collections::BTreeMap<String, PartitionParentFold> =
         std::collections::BTreeMap::new();
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    // Replay the SELECTED leg's ops inline, in place, carrying the OUTER op index for
+    // diagnostics. Partition recording is stateful across the whole migration - a parent
+    // created at the top level is found and mutated by a child authored inside a leg, and
+    // the key/bound/nullability/totality checks run only after the complete stream - so
+    // the legs cannot be validated as separate mini-migrations with fresh state. Doing
+    // that would lose a top-level parent and either miss a malformed child on PostgreSQL
+    // or refuse a valid one as parentless elsewhere.
+    //
+    // The SELECTED leg only, never the union: legs are mutually exclusive alternatives,
+    // so pooling children from two of them would compare siblings no target ever creates
+    // together - a false refusal on overlapping bounds, and a false accept when two legs
+    // jointly supply a totality no single target has.
+    //
+    // The dialect is already load-bearing in this function rather than decorative: an
+    // unknown parent is tolerated on PostgreSQL and refused elsewhere, a few lines below.
+    let effective: Vec<(usize, &Op)> = ir
+        .ops
+        .iter()
+        .enumerate()
+        .flat_map(|(op_index, op)| match op {
+            Op::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => {
+                let own = match target_dialect {
+                    Dialect::Postgres => pg.as_deref(),
+                    Dialect::Sqlite => sqlite.as_deref(),
+                    Dialect::Mysql => mysql.as_deref(),
+                };
+                own.or(default.as_deref())
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|inner| (op_index, inner))
+                    .collect::<Vec<_>>()
+            }
+            other => vec![(op_index, other)],
+        })
+        .collect();
+
+    for (op_index, op) in effective {
         match op {
             Op::CreateTable {
                 name,
