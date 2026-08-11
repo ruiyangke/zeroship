@@ -195,7 +195,7 @@ echo ""; echo "=== Stage 4: forwarder -> REAL Lago + enforcement (usage_aggregat
 # Events arrive async (worker outbox ~10s + forwarder), so poll (bounded).
 LAGO_REQ=0
 for _ in $(seq 1 30); do
-  LAGO_REQ=$(lago "$LAGO_URL/api/v1/events?external_subscription_id=$CREATOR&per_page=200" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");console.log(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))}catch(e){console.log(0)}})')
+  LAGO_REQ=$(lago "$LAGO_URL/api/v1/events?external_subscription_id=$CREATOR&per_page=200" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");process.stdout.write(String(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})')
   [ -n "$LAGO_REQ" ] && [ "$LAGO_REQ" -ge "$N_REQ" ] 2>/dev/null && break
   sleep 2
 done
@@ -210,7 +210,7 @@ DL=$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.provider_dead_letter" 2>/de
 [ "$DL" = "0" ] && pass "0 provider dead-letters (every event attributed to a real creator)" || fail "provider_dead_letter has $DL rows (nil-creator or reject?)"
 
 # Best-effort: Lago's own current_usage aggregation (Lago-internal, async).
-LAGO_UNITS=$(lago "$LAGO_URL/api/v1/customers/$CREATOR/current_usage?external_subscription_id=$CREATOR" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=(JSON.parse(s).customer_usage.charges_usage||[]).find(x=>x.billable_metric.code==="requests");console.log(c?Math.round(parseFloat(c.units)):0)}catch(e){console.log(0)}})')
+LAGO_UNITS=$(lago "$LAGO_URL/api/v1/customers/$CREATOR/current_usage?external_subscription_id=$CREATOR" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=(JSON.parse(s).customer_usage.charges_usage||[]).find(x=>x.billable_metric.code==="requests");process.stdout.write(String(c?Math.round(parseFloat(c.units)):0)+"\n")}catch(e){process.stdout.write("0\n")}})')
 if [ -n "$LAGO_UNITS" ] && [ "$LAGO_UNITS" -ge "$N_REQ" ] 2>/dev/null; then
   pass "Lago current_usage aggregated the usage ($LAGO_UNITS units)"
 else

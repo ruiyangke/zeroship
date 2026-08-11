@@ -50,8 +50,8 @@ WORK="$(mktemp -d -t zs-e2e-dedup-XXXXXX)"; mkdir -p "$WORK/blobs"; PIDFILE="$WO
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 lago(){ curl -s -H "Authorization: Bearer $LAGO_KEY" -H "Content-Type: application/json" "$@"; }
-lago_txids(){ lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=new Set((JSON.parse(s).events||[]).filter(e=>e.code==="requests").map(e=>e.transaction_id));console.log(t.size)}catch(e){console.log(0)}})'; }
-lago_value(){ lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const e=(JSON.parse(s).events||[]).filter(x=>x.code==="requests");console.log(e.reduce((a,x)=>a+Number((x.properties||{}).value||0),0))}catch(e){console.log(0)}})'; }
+lago_txids(){ lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=new Set((JSON.parse(s).events||[]).filter(e=>e.code==="requests").map(e=>e.transaction_id));process.stdout.write(String(t.size)+"\n")}catch(e){process.stdout.write("0\n")}})'; }
+lago_value(){ lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const e=(JSON.parse(s).events||[]).filter(x=>x.code==="requests");process.stdout.write(String(e.reduce((a,x)=>a+Number((x.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})'; }
 fwd_batch_count(){ local c; c=$(grep -ac "event_forwarder batch completed" "$WORK/control.log" 2>/dev/null); echo "${c:-0}"; }
 # Produce one UsageEvent JSON record onto the stream. Args: event_id value
 produce_event(){

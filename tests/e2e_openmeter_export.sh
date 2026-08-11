@@ -155,7 +155,7 @@ echo ""; echo "=== Stage 4: forwarder -> REAL OpenMeter (meter query) + enforcem
 FROM="$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"; TO="$(date -u -d '1 hour' +%Y-%m-%dT%H:%M:%SZ)"
 OM_UNITS=0
 for _ in $(seq 1 30); do
-  OM_UNITS=$(curl -s "$OM_URL/api/v1/meters/requests/query?subject=$CREATOR&from=$FROM&to=$TO" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const rows=j.data||j.rows||[];console.log(Math.round(rows.reduce((a,r)=>a+Number(r.value||0),0)))}catch(e){console.log(0)}})')
+  OM_UNITS=$(curl -s "$OM_URL/api/v1/meters/requests/query?subject=$CREATOR&from=$FROM&to=$TO" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const rows=j.data||j.rows||[];process.stdout.write(String(Math.round(rows.reduce((a,r)=>a+Number(r.value||0),0)))+"\n")}catch(e){process.stdout.write("0\n")}})')
   [ -n "$OM_UNITS" ] && [ "$OM_UNITS" -ge "$N_REQ" ] 2>/dev/null && break
   sleep 2
 done

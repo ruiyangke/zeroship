@@ -99,7 +99,7 @@ pick_port() {
 const net = require("node:net");
 const server = net.createServer();
 server.listen(0, "127.0.0.1", () => {
-  console.log(server.address().port);
+  process.stdout.write(String(server.address().port)+"\n");
   server.close();
 });
 '

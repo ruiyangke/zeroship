@@ -206,7 +206,7 @@ OK1="$(drive app1 $N1)"; OK2="$(drive app2 $N2)"; OK3="$(drive app3 $N3)"
 
 echo ""; echo "=== Stage 4: per-creator attribution in REAL Lago (isolation) ==="
 lago_sum(){ # $1=creator -> sum of requests-event values for that subject
-  lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");console.log(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))}catch(e){console.log(0)}})'
+  lago "$LAGO_URL/api/v1/events?external_subscription_id=$1&per_page=500" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");process.stdout.write(String(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})'
 }
 C1_EXPECT=$((N1+N2))   # 100 — app1 + app2 aggregated onto C1
 C2_EXPECT=$N3          # 70  — app3 only
