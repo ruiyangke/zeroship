@@ -15,8 +15,8 @@
 // would call a dead app healthy — that is exactly the failure mode this tier
 // exists to catch.
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { demoDir, missingRequirements, REPO_ROOT, type Demo } from "./demos.js";
@@ -116,6 +116,51 @@ export async function startDemo(demo: Demo): Promise<RunningDemo> {
     // loud bind failure, not a silent move to a port nobody is watching.
     FORCE_COLOR: "0",
   };
+
+  // APPLY MIGRATIONS BEFORE BOOTING, because since `ee2c352aa` `pnpm dev` no
+  // longer does. That commit split the dev-database apply out of dev-server.ts
+  // into its own `zeroship-dev-migrate` step, deliberately - starting a server
+  // and writing a schema have different blast radii. It updated no harness.
+  //
+  // This tier is hit HARDER by that than most, and by its own correct design:
+  // the block above deletes the state dir and points DATABASE_URL at a brand
+  // new SQLite file every run, so there is never a leftover schema to coast on.
+  // Measured before this call existed, and again by disabling this block:
+  // `db-todos` fails 5 of its 7 tests with
+  //     Error: db: no such table: default.users
+  // while `csr-todo` (7) and `starter` (5) passed, which is the control that
+  // says the browser and the tier are fine and only the schema was missing.
+  //
+  // Invoked as `node <dist>/cli/migrate-dev.js` rather than `pnpm migrate`, for
+  // the reason golden_path.sh step 9 records: the bin is declared in
+  // sdks/vite-plugin/package.json but only symlinked by an install post-dating
+  // ee2c352aa, so `pnpm migrate` is "command not found" on an older
+  // node_modules while the dist path works either way.
+  //
+  // A failure here is FATAL and named, never a skip - same rule as
+  // `missingRequirements` above. A demo whose migrations do not apply cannot
+  // produce a meaningful browser result, and silently proceeding would put the
+  // `no such table` error back where it came from: the app's own error toast.
+  const migrationsDir = resolve(cwd, "migrations");
+  if (existsSync(migrationsDir)) {
+    const migrateCli = resolve(REPO_ROOT, "sdks/vite-plugin/dist/cli/migrate-dev.js");
+    if (!existsSync(migrateCli)) {
+      throw new DemoBootError(
+        demo.name,
+        `dev-migrate CLI missing at ${migrateCli}`,
+        "(run `pnpm build` in sdks/vite-plugin; the dev server was never started)",
+      );
+    }
+    const applied = spawnSync("node", [migrateCli], { cwd, env, encoding: "utf8" });
+    if (applied.status !== 0) {
+      throw new DemoBootError(
+        demo.name,
+        `zeroship-dev-migrate exited ${applied.status ?? "null"}`,
+        `${applied.stdout ?? ""}${applied.stderr ?? ""}`.trim() ||
+          "(no output from the migrate step)",
+      );
+    }
+  }
 
   const child: ChildProcess = spawn(
     "pnpm",
