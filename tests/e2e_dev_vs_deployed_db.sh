@@ -756,12 +756,52 @@ docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship \
 # "Postgres never became ready" -- an infrastructure timeout wearing a platform
 # failure's clothes.
 PG_T0=$(date +%s)
-for _ in $(seq 1 90); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+# The predicate is `psql -d zeroship 'select 1'` THREE TIMES RUNNING, not a
+# single pg_isready -- and that is not a preference, it is measured (#274).
+#
+# The postgres entrypoint starts a TEMPORARY server to run its init, then stops
+# it and starts the real one. pg_isready answers yes to the temporary server.
+# Sampling both predicates against a fresh `postgres:16` started exactly as
+# above, 2026-08-11, printing only transitions:
+#
+#     sample 1: pg_isready=no   psql=FAIL
+#     sample 5: pg_isready=YES  psql=FAIL      <- temporary init server
+#     sample 6: pg_isready=no   psql=FAIL      <- the restart window
+#     sample 7: pg_isready=YES  psql=1         <- the real server
+#
+# So pg_isready is NOT monotonic: yes, no, yes. The old loop broke at sample 5
+# and the confirming call landed at sample 6, which is how a 90 x 1s wait
+# reported "Postgres never became ready after 1s". That is not hypothetical --
+# it is what this harness did when run alongside two others on 2026-08-11, and
+# the solo re-run passed the same leg with the same 1s timing, so a green here
+# was luck rather than waiting.
+#
+# `psql -d zeroship 'select 1'` is monotonic across that whole timeline: it
+# cannot succeed until CREATE DATABASE has completed on the real server. The
+# 3-in-a-row requirement is belt-and-braces against a future entrypoint that
+# restarts more than once, and it is copied deliberately from the shared
+# tests/lib/e2e_stack.sh stack_pg_up, whose own comment records this same bug
+# ("A single pg_isready let a run through that window and the migration step
+# then died"). This harness starts its own container -- it needs
+# max_connections=200 and log_statement=all -- so it could not just call that
+# helper, but it has no business using a weaker gate than the one beside it.
+PG_OK=0
+for _ in $(seq 1 90); do
+  if docker exec "$PGC" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+    PG_OK=$((PG_OK + 1)); [ "$PG_OK" -ge 3 ] && break
+  else
+    PG_OK=0
+  fi
+  sleep 1
+done
 # Report the elapsed seconds either way. "never became ready" with no number
 # cannot be told apart from "the wait was too short", and the first version of
 # this leg spent two runs on exactly that ambiguity.
-docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 \
-  && pass "ephemeral Postgres on :$PG_PORT (ready in $(( $(date +%s) - PG_T0 ))s)" || {
+# The confirming call asserts the SAME predicate the loop waited on. Asserting
+# pg_isready here while waiting on psql would re-open the gap by the back door:
+# the wait would be right and the verdict would come from the weaker check.
+docker exec "$PGC" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1 \
+  && pass "ephemeral Postgres query-able on :$PG_PORT (ready in $(( $(date +%s) - PG_T0 ))s)" || {
     fail "Postgres never became ready after $(( $(date +%s) - PG_T0 ))s (container state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' "$PGC" 2>&1))"
     docker logs --tail 20 "$PGC" 2>&1 | sed 's/^/    /'
     exit 1
