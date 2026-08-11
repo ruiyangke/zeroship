@@ -1125,6 +1125,28 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
         self.permits(schema)
     }
 
+    /// Answers "not injected" for every element, which is the value that LETS a
+    /// rename through. Its three readers - the rename source, the rename target and
+    /// the target primary key - each deny only when this is true, so under body
+    /// scope the injected-shape immutability rule cannot fire whatever the policy
+    /// says.
+    ///
+    /// This is not the unreachable-stub case that removed `effective_destructive_ops`
+    /// from this adapter. That one was deleted because nothing read it. This one IS
+    /// read: `check_body_text` re-parses the body as SQL and recurses into
+    /// `check_node` for every statement AND for every embedded string literal, and
+    /// `check_node` routes to `check_namespace_structural`, which owns the
+    /// immutability decision. An `EXECUTE 'ALTER TABLE t RENAME COLUMN ...'` reaches
+    /// it.
+    ///
+    /// What keeps that off the engine's own paths is the entry point, not this
+    /// value: `check_raw_view_body_text` is the sole constructor of this adapter and
+    /// has no production caller - every reference outside its definition is in
+    /// tests/guard_smoke.rs. It is `pub` though, so an embedder calling it gets a
+    /// scanner whose injected-shape rule silently never fires.
+    ///
+    /// Left as-is deliberately rather than implemented or removed: which of those is
+    /// right is a public-API question, not a local one.
     fn is_injected_shape(&self, _object: &ObjectName, _element: &ShapeElement) -> bool {
         false
     }
