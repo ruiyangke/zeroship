@@ -11,8 +11,14 @@
 // third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs
 // - spelled from the repo root because the engine is a vendored submodule with
 // its own cargo workspace, so a bare tests/ path resolves nowhere from here.
-// The TS drift test pins this file (and the Rust one) against the sidecar.
-// Nothing reads it yet.
+// The TS drift test pins THIS file against the sidecar, and nothing else. It
+// does NOT pin the Rust table: that assertion existed once and was removed as
+// false (our generator had fallen behind the submodule's own) and as not ours
+// to make, the file being in a vendored submodule we do not commit to. Its
+// remedy would have been to run our generator over the engine's file and then
+// compare our generator against itself. The engine's copy is gated engine-side;
+// the full rationale sits above the regenerate-and-diff test in
+// tests/dialect-table-drift.test.ts. Nothing reads this file yet.
 
 export type Disposition = "portable" | "transparentDegradable" | "vendor" | "unsupported";
 export type Dialect = "postgres" | "sqlite" | "mysql";

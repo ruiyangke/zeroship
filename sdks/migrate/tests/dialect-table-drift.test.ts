@@ -28,7 +28,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const sidecarPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/dialect-support.toml");
 const genScript = resolve(here, "../scripts/gen-dialect-table.mjs");
 const committedTs = resolve(here, "../src/generated/dialect-table.ts");
-const committedRust = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs");
+// NOTE: there is deliberately no `committedRust` path here. One existed and was
+// referenced by nothing after the Rust byte-comparison was removed (see the
+// rationale above the regenerate-and-diff test below). A resolved path to the
+// engine's dialect_table.rs sitting in a drift test reads as though the Rust
+// table is compared; it was not, and re-adding one is not the way to make it so.
 
 const DISPOSITIONS = new Set(["portable", "transparentDegradable", "vendor", "unsupported"]);
 
