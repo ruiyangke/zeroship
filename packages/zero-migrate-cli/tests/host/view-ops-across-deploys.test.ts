@@ -620,3 +620,60 @@ test("PostgreSQL: the same authored pair drops the view, the parity the MySQL ar
     await client.end().catch(() => {});
   }
 });
+
+
+/** SQLite apply never builds a pending-schema projection, so an applied prior does not
+ *  change which code decides the op - unlike MySQL and PostgreSQL, where a prior is
+ *  exactly what turns the projection on (`verbs.rs:303` branches on
+ *  `prior_envelope_json.is_empty()`).
+ *
+ *  `apply()` with a sqlite driver calls `applyIrSqlite`, whose `deploy_envelopes` loop
+ *  re-snapshots the live catalog after every envelope, so there is no projection to
+ *  refuse at. The refusal comes from the database instead, and its TEXT is the evidence:
+ *  `no such view` is SQLite speaking, where the other two dialects say
+ *  `failed to project pending schema`.
+ *
+ *  Worth pinning because it makes a tool that rebuilds a fresh database file per run and
+ *  a deployment that migrates a long-lived one exercise different halves of the engine,
+ *  and no count of passing migrations on the first will say anything about the second. */
+test("SQLite: apply refuses an absent view at the database, with or without a prior", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+
+  const runInFreshDir = async (priors: NamedMigration[]) => {
+    const dir = mkdtempSync(join(tmpdir(), "zm-viewproj-"));
+    const driver: DriverConfig = {
+      kind: "sqlite",
+      appPath: join(dir, "app.db"),
+      journalPath: join(dir, "app.migrations.db"),
+    };
+    try {
+      for (const prior of priors) {
+        await applyOne(prior, "main", driver, []);
+      }
+      return await applyOne(dropTheView(), "main", driver, priors).then(
+        () => "ran",
+        (error: unknown) => String((error as Error)?.message ?? error),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  for (const [label, priors] of [
+    ["with a prior", [createTableOnly()]],
+    ["with an empty history", []],
+  ] as const) {
+    const outcome = await runInFreshDir([...priors]);
+    assert.match(
+      outcome,
+      /no such view: view_drop_active/,
+      `${label}: SQLite itself refuses, so the fold is not what rejected this`,
+    );
+    assert.doesNotMatch(
+      outcome,
+      /failed to project pending schema/,
+      `${label}: SQLite apply builds no projection, so no fold refusal can appear`,
+    );
+  }
+});
