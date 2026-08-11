@@ -161,7 +161,7 @@ fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 12"
+GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 13 12"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -560,7 +560,17 @@ GP_SIGNING_KEY=/tmp/gp-signing-key.pem
 openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
 chmod 600 "$GP_SIGNING_KEY"
 
+# `--workers` is NOT optional decoration, and its absence was invisible for as
+# long as this harness existed. crates/control/src/main.rs:81 declares it with
+# `default_value = "http://localhost:8080"`, and this harness runs its worker on
+# $WORKER_PORT (8390). Every other path here goes gateway -> worker and the
+# GATEWAY is told the URL explicitly, so control's own worker list had never
+# been exercised by anything -- until step 13 asked control to fetch app logs
+# and got `502 {"error":"internal error"}` with
+# `worker log fetch failed ... "error":"parse logs JSON: EOF"` in its log,
+# because it was reading an empty body from a port nothing listens on.
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
+  --workers "http://localhost:$WORKER_PORT" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
@@ -2752,6 +2762,113 @@ fi
 
 gp_close_step
 
+# --- 13. The creator reads their deployed app's logs ------------------------
+#
+# "My app misbehaved, show me why" is an ordinary creator step and had no row
+# in the spine. GET /api/apps/{id}/logs is a real surface -- control fans out to
+# every worker (api.rs:2061-2074) and each worker keeps a 1000-line in-memory
+# ring per app (worker/src/logs.rs) fed from FetchOutcome.logs on seven dispatch
+# paths. Its ONLY test served /logs/{app_id} from a MOCK worker defined in the
+# test file, so the seam that matters -- real isolate output reaching a real
+# ring and coming back out -- was untested by construction, and no e2e harness
+# had ever called the endpoint. See #332.
+#
+# THE VEHICLE had to be built: NO app on the deploy path emitted anything.
+# examples/starter now logs one line in `getMessages` (d7c3d4cce), chosen
+# because it is `auth: "anon", publiclyAccessible` and so runs on BOTH tiers;
+# addMessage is default-user and 401s deployed, which would have manufactured a
+# divergence rather than found one.
+#
+# THE TWO ARMS ARE NOT SYMMETRIC, deliberately, and this is the honest shape
+# rather than a shortcut. The dev server is killed at the end of step 6, so the
+# dev arm cannot drive a fresh call; it reads what step 6 already produced,
+# which is exactly the terminal output a creator sees. The deployed arm CAN
+# drive a fresh call, so it uses the stronger before/after discriminator: steps
+# 4-6 have already populated the ring, so "the marker is present" would pass
+# over a stale buffer. Only an INCREASE proves this call reached it.
+step 13 "Logs: the creator can read what their deployed app printed"
+GP_LOG_MARK="[starter] getMessages"
+if [ -z "${SC_PAT:-}" ] || [ -z "${APP_ID:-}" ]; then
+  fail "no PAT or app id, so the logs surface could not be exercised at all --
+      FAILED SETUP, not a passing check"
+else
+  # Harness setup, not a product claim: give the PAT's principal membership on
+  # the starter app so the token is authorized here the same way step 10c does
+  # for the scaffold. The POLICY already carries deployments:read (1974406b0).
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+
+  # --- DEV arm: what step 6 already printed to the creator's terminal --------
+  LOG_DEV=$(grep -cF -- "$GP_LOG_MARK" /tmp/gp-dev.log 2>/dev/null || echo 0)
+  echo "  dev (/tmp/gp-dev.log): $LOG_DEV line(s) carrying the marker"
+  if [ "${LOG_DEV:-0}" -ge 1 ] 2>/dev/null; then
+    pass "dev: the app's server-side log line reached the creator's terminal"
+  else
+    fail "dev: step 6 drove getMessages on the dev tier and PASSED, but the app's
+      log line never appeared in /tmp/gp-dev.log.
+      THE CAPTURE PATH IS NOT THE EXPLANATION, and that was checked rather than
+      assumed: the same file carries the runtime's own startup lines forwarded
+      under the \`[zeroship:api]\` prefix that sdks/vite-plugin/src/dev-server.ts
+      :967 attaches to the child's stdout. So the terminal is receiving what the
+      runtime prints; the app's per-request console output is simply not among
+      it. The runtime collects per-request output into FetchOutcome.logs, which
+      the deployed worker appends to its ring buffer -- in dev there may be no
+      consumer for that vec at all. Confirm the vehicle first
+      (examples/starter/src/server.ts still contains the marker) and only then
+      read this as the dev tier discarding what a creator printed."
+  fi
+
+  # --- DEPLOYED arm: before, drive one call, after ---------------------------
+  LOG_URL="http://localhost:$CONTROL_PORT/api/apps/$APP_ID/logs"
+  LOG_CODE_A=$(curl -s -o /tmp/gp-logs-a.json -w '%{http_code}' --max-time 20 \
+    "$LOG_URL" -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+  LOG_BEFORE=$(grep -oF -- "$GP_LOG_MARK" /tmp/gp-logs-a.json 2>/dev/null | wc -l | tr -d ' ')
+
+  if [ "$LOG_CODE_A" = "200" ]; then
+    pass "the logs endpoint answers for the app's owner (HTTP 200)"
+  else
+    fail "GET /api/apps/<id>/logs returned $LOG_CODE_A for the app's OWNER: $(head -c 200 /tmp/gp-logs-a.json)
+      A creator with no way to read their deployed app's output has no
+      workaround, so this is a finding about the creator path."
+  fi
+
+  curl -s -o /dev/null --max-time 15 \
+    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
+    -H "X-Api-Key: $API_KEY" 2>/dev/null || true
+  command sleep 2
+
+  LOG_CODE_B=$(curl -s -o /tmp/gp-logs-b.json -w '%{http_code}' --max-time 20 \
+    "$LOG_URL" -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+  LOG_AFTER=$(grep -oF -- "$GP_LOG_MARK" /tmp/gp-logs-b.json 2>/dev/null | wc -l | tr -d ' ')
+  echo "  deployed (GET /api/apps/<id>/logs): http=$LOG_CODE_A/$LOG_CODE_B marker $LOG_BEFORE -> $LOG_AFTER"
+
+  if [ "${LOG_AFTER:-0}" -gt "${LOG_BEFORE:-0}" ] 2>/dev/null; then
+    pass "deployed: driving getMessages ADDED a log line the creator can read ($LOG_BEFORE -> $LOG_AFTER)"
+  elif [ "${LOG_AFTER:-0}" -ge 1 ] 2>/dev/null; then
+    fail "deployed: the marker is in the log buffer ($LOG_AFTER) but driving getMessages
+      did not increase it ($LOG_BEFORE -> $LOG_AFTER). The buffer is stale: this
+      run cannot tell a working capture path from one that stopped, which is
+      why the count and not the presence is the assertion."
+  else
+    fail "deployed: the app printed a line on every getMessages and the creator's
+      log surface shows NONE of it (marker $LOG_BEFORE -> $LOG_AFTER, http=$LOG_CODE_B).
+      Body: $(head -c 200 /tmp/gp-logs-b.json)"
+  fi
+
+  # --- THE COMPARISON, which is the reason this step exists -----------------
+  if [ "${LOG_DEV:-0}" -ge 1 ] 2>/dev/null && [ "${LOG_AFTER:-0}" -ge 1 ] 2>/dev/null; then
+    pass "dev and deployed AGREE: the same operation's output is visible on both tiers"
+  else
+    fail "dev and deployed DIVERGE on log visibility -- dev=$LOG_DEV deployed=$LOG_AFTER.
+      The same procedure ran on both tiers and only one of them let the creator
+      see what it printed. Which tier is wrong is the question; that they differ
+      is the finding."
+  fi
+fi
+
+gp_close_step
+
 # --- 12. The creator DELETES the app, and everything it created goes away ---
 #
 # Rows 1-18 of docs/pilot/e2e-scenarios.md all cover an app being created,
@@ -3152,7 +3269,7 @@ gp_close_step
 # 2 is the whole point: step 12 emits SIX outcomes and only two of them pass at
 # HEAD. The four reds are #331 and are carried in GOLDEN_EXPECTED_FAILURES below.
 # MEASURED on this tree: 87 passed / 12 failed.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-87}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-89}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -3248,7 +3365,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete"}
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility"}
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
