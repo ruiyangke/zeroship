@@ -221,6 +221,16 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
+      # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
+      # sharing a helper. The next day two of them were wired into CI by bare
+      # path, where a non-executable file is exit 126 - so those steps could not
+      # run an assertion from the moment they were gated. Restored in ac3bfd2cf.
+      # This checks the narrow invariant that actually broke: if CI runs a script
+      # as a COMMAND, it must be executable. Sourced files are outside it by
+      # construction, which matters because five tests/lib/*.sh are correctly
+      # non-executable and a blanket rule would demand the wrong thing on them.
+      - name: Scripts CI invokes by bare path are executable
+        run: tests/ci_invocable_gate.sh
       - name: Test-target enumeration floor
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
