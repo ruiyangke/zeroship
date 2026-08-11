@@ -572,7 +572,6 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Stripe Connect account link / unlink | 🟢 | POST /callback, DELETE /api/creators/{id}/stripe | `crates/control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_store.rs` | Cascades payouts. |
 | Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_webhook_test.rs` | HMAC; idempotent on event_id. |
 | Creator earnings view | 🟢 | GET /api/creators/{id}/earnings | `crates/control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | — | Cents; 50 recent payouts. |
-| Console bootstrap seed | 🟢 | --bootstrap-console / BOOTSTRAP_CONSOLE=1 | `crates/control/src/bootstrap_console.rs` | — | `crates/control/tests/bootstrap_console_test.rs` | Deterministic id; system=true. |
 | Builder OAuth client bootstrap | 🟡 | --bootstrap-builder-client | `crates/control/src/bootstrap_builder.rs` | — | `crates/control/tests/bootstrap_builder_test.rs` | Retired in R5; code retained (effectively dead). |
 | Orphaned-app reaper (cron) | 🟢 | internal | `crates/control/src/cron/orphaned_app_reaper.rs` | — | `crates/control/tests/orphaned_app_reaper_test.rs` | system=true never reaped. |
 | Audit retention sweep (cron) | 🟢 | internal | `crates/control/src/cron/audit_retention.rs` | — | `crates/control/tests/audit_retention_test.rs` | GUC flag cleared on exit. |

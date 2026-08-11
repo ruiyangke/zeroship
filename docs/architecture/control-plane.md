@@ -34,7 +34,6 @@ oauth_handlers.rs  admin OAuth-client CRUD for the native OP registry
 oauth_grants_handlers.rs  per-app OAuth grant management
 authz_guard.rs     Cedar-backed request authorization (crates/authz)
 admin_handlers.rs  platform-admin surface
-bootstrap_console.rs  R5 console seed (`--bootstrap-console`)
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
 registry.rs        PostgreSQL-backed app registry
