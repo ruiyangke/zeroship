@@ -79,6 +79,16 @@ CONTROL_PORT="${CONTROL_PORT:-9392}"
 WORKER_PORT="${WORKER_PORT:-8392}"
 GATE_PORT="${GATE_PORT:-8302}"
 DEV_PORT="${DEV_PORT:-3011}"
+# VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
+# binds, and the only one the app's vite.config names. Left undeclared until
+# 2026-08-11, vite silently took its :5173 GLOBAL default: nothing here knew
+# that port, so cleanup could not free it and vite outlived every run orphaned
+# at PPID 1. Measured on the sibling workflows harness before its identical fix
+# (590aeab85) -- one such process, 38 minutes old, still holding 127.0.0.1:5173.
+# :5173 is also every vite's default, so two harnesses at once fought over it
+# (#173's class). Private, and --strictPort at the call so a conflict fails
+# loudly rather than moving to a port nobody watches. See #272.
+VITE_PORT="${VITE_PORT:-5011}"
 REDIS_PORT="${REDIS_PORT:-6396}"
 REDIS_CONTAINER="zs-devdeploy-redis"
 CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
@@ -92,7 +102,12 @@ pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan. Freeing DEV_PORT alone kills
+  # `zeroship serve` and leaves vite holding its own port forever.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
   # The mutations edit a tracked source file. Restore it whatever happens,
   # including on the exit paths that abort mid-run.
@@ -260,8 +275,10 @@ authed=$(grep -oE '"rpc:[^"]+":\{[^}]*"auth":' "$d/manifest.json" | wc -l)
   || fail "only $authed of $total rpc resources declare auth (missing src/server/config.ts?)"
 
 # --- 2. dev side ---
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-( cd "$APP" && ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 20); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/kv.visit" -d '{"json":{}}' && break
