@@ -49,7 +49,7 @@ note() { printf '  %s\n' "$1"; }
 # narrower message and silently drop a real flag from the allowed set, still
 # printing "passed". That was found by RUNNING the refusal arm below, not by
 # reading it, which is the only reason it is not still in here.
-HELP_LINES="$(grep -oE 'zeroship deploy[^"]*--app=[^"]*' "$CLI_MAIN" || true)"
+HELP_LINES="$(grep -oE 'zeroship deploy[^"]*--app=<name>[^"]*' "$CLI_MAIN" || true)"
 if [ -z "$HELP_LINES" ]; then
   echo "FAIL: could not find any deploy help line in $CLI_MAIN." >&2
   echo "      This gate derives its allowed flags from those lines; with none it" >&2
@@ -69,7 +69,47 @@ if [ "$ALLOWED_COUNT" -lt 2 ]; then
   exit 1
 fi
 
-echo "allowed deploy flags, parsed from crates/cli/src/main.rs:"
+# --- ATTACH THE AUTHORITY TO THE PARSER, NOT TO THE PROSE --------------------
+# Everything above derives the allowed set from HELP TEXT, which is a second
+# expression of the contract. The thing that decides whether a flag works is
+# `DEPLOY_KNOWN_FLAGS` - the const `check_unknown_deploy_flags` tests against
+# (148efa04a). If those two ever disagree, this gate certifies documentation
+# against the CLI's DESCRIPTION of itself while the CLI behaves differently.
+#
+# The question that produced this block came from a peer (zero-migrate,
+# 2026-08-11): does the comparison EXECUTE the shipped code, or a second
+# expression of the same idea? Asked of THIS file, the answer was the latter.
+# Measured when asked: both sides gave {--app,--control,--no-create,--token},
+# so nothing was wrong - the check exists so that stays true by evidence rather
+# than by coincidence.
+# `|| true` for the same reason HELP_LINES above has it, and I needed the
+# reminder: this file runs under `set -euo pipefail`, so without it a grep that
+# matches nothing ABORTS here and the refusal message below never prints. The
+# first version of this block exited 1 in silence when I renamed the const to
+# test it - a guard that cannot say why it failed, in the commit that is about
+# attaching instruments to their subject.
+PARSER_FLAGS="$(grep -m1 '^const DEPLOY_KNOWN_FLAGS' "$CLI_MAIN" \
+  | grep -oE '"[-][-][a-z-]+"' | tr -d '"' | sort -u || true)"
+PARSER_COUNT="$(printf '%s\n' "$PARSER_FLAGS" | grep -c . || true)"
+if [ "$PARSER_COUNT" -lt 2 ]; then
+  echo "FAIL: parsed only $PARSER_COUNT flag(s) from DEPLOY_KNOWN_FLAGS in $CLI_MAIN." >&2
+  echo "      That const is what the CLI actually enforces; if it cannot be read" >&2
+  echo "      this gate has no authority to check the help text against, so it" >&2
+  echo "      refuses rather than falling back to the prose alone." >&2
+  exit 1
+fi
+if [ "$ALLOWED" != "$PARSER_FLAGS" ]; then
+  echo "FAIL: the deploy help text and the deploy PARSER disagree about flags." >&2
+  echo "      help text says:      $(printf '%s' "$ALLOWED" | tr '\n' ' ')" >&2
+  echo "      DEPLOY_KNOWN_FLAGS:  $(printf '%s' "$PARSER_FLAGS" | tr '\n' ' ')" >&2
+  echo "      A flag in the parser but not the help is undiscoverable; a flag in" >&2
+  echo "      the help but not the parser is now REJECTED at runtime, so the" >&2
+  echo "      instructions this gate blesses would fail for a creator." >&2
+  exit 1
+fi
+
+echo "allowed deploy flags, parsed from crates/cli/src/main.rs"
+echo "(help text and DEPLOY_KNOWN_FLAGS agree, $PARSER_COUNT flags):"
 printf '%s\n' "$ALLOWED" | sed 's/^/    /'
 echo
 
