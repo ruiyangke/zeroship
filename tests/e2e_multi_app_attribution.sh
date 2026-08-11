@@ -90,10 +90,21 @@ LAGO_ORG_API_KEY=$(openssl rand -hex 24)
 EOF
   chmod 600 "$ROOT/.env.lago"
 fi
+# Resolve the Lago API container from COMPOSE ITSELF rather than hardcoding a
+# project-prefixed name. These harnesses used to say `billing-impl-lago-api-1`,
+# a name docker compose derives from the compose FILE'S PARENT DIRECTORY - which
+# the repo reorg changed from `billing-impl/` to `deploy/compose/`. Every Lago
+# harness has been dead at `db:prepare` since, with the error swallowed by
+# `>/dev/null 2>&1` so the only symptom was the words "lago db:prepare".
+# Deriving it means the next directory move cannot break this again.
+lago_api_cid(){
+  docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" ps -q lago-api 2>/dev/null
+}
+
 docker compose --env-file "$ROOT/.env.lago" -f "$ROOT/deploy/compose/lago.yml" up -d >/dev/null 2>&1 || { fail "lago compose up"; exit 1; }
 for _ in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health" 2>/dev/null)" = "200" ] && break; sleep 3; done
-[ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health")" = "200" ] && pass "Lago api healthy on $LAGO_URL" || { fail "lago api"; docker logs billing-impl-lago-api-1 2>&1 | tail -20; exit 1; }
-docker exec billing-impl-lago-api-1 bundle exec rails db:prepare >/dev/null 2>&1 && pass "Lago DB prepared" || { fail "lago db:prepare"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$LAGO_URL/health")" = "200" ] && pass "Lago api healthy on $LAGO_URL" || { fail "lago api"; docker logs "$(lago_api_cid)" 2>&1 | tail -20; exit 1; }
+LAGO_CID="$(lago_api_cid)"; [ -n "$LAGO_CID" ] && docker exec "$LAGO_CID" bundle exec rails db:prepare > "$WORK/lago-db-prepare.log" 2>&1 && pass "Lago DB prepared" || { fail "lago db:prepare (container=${LAGO_CID:-<UNRESOLVED: compose ps -q lago-api returned nothing>})"; tail -15 "$WORK/lago-db-prepare.log" 2>/dev/null; exit 1; }
 lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/billable_metrics" -d '{"billable_metric":{"name":"Requests","code":"requests","aggregation_type":"sum_agg","field_name":"value","recurring":false}}'
 BM_ID=$(lago "$LAGO_URL/api/v1/billable_metrics/requests" | jget '.billable_metric.lago_id')
 lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/plans" -d "{\"plan\":{\"name\":\"E2E\",\"code\":\"e2e_plan\",\"interval\":\"monthly\",\"amount_cents\":0,\"amount_currency\":\"USD\",\"pay_in_advance\":false,\"charges\":[{\"billable_metric_id\":\"$BM_ID\",\"charge_model\":\"standard\",\"properties\":{\"amount\":\"0.01\"}}]}}"
