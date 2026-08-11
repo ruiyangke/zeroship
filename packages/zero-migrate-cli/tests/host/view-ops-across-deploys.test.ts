@@ -677,3 +677,71 @@ test("SQLite: apply refuses an absent view at the database, with or without a pr
     );
   }
 });
+
+/** The PostgreSQL half of the same question the SQLite arm above answers, and it lands
+ *  the other way: here an applied prior DOES decide which layer refuses.
+ *
+ *  `verbs.rs:303` branches on `prior_envelope_json.is_empty()` - an empty history lowers
+ *  through `lower_envelope_to_plan_with_live`, which builds no pending-schema projection,
+ *  and any prior lowers through `lower_ordered_envelopes_to_plans_for_apply`, which does.
+ *  MySQL was measured following that branch; this arm stops PostgreSQL from being
+ *  inferred from it, because a shared branch is not evidence that two backends reach it
+ *  the same way - SQLite proves they need not.
+ *
+ *  Both histories fail, so the error TEXT carries the result: the fold names the envelope
+ *  it was projecting, PostgreSQL names the relation. */
+test("PostgreSQL: an applied prior moves the refusal from the database into the fold", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG projection-branch arm skipped");
+    return;
+  }
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+
+  const runInFreshSchema = async (priors: NamedMigration[]) => {
+    const schema = uniqueNamespace("viewproj_pg");
+    const meta = `${schema}_migrations`;
+    const driver: DriverConfig = { kind: "postgres", url: PG_URL };
+    try {
+      await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
+      for (const prior of priors) {
+        await applyOne(prior, schema, driver, []);
+      }
+      return await applyOne(dropTheView(), schema, driver, priors).then(
+        () => "ran",
+        (error: unknown) => String((error as Error)?.message ?? error),
+      );
+    } finally {
+      await client
+        .query(
+          `DROP SCHEMA IF EXISTS ${pgIdent(schema)} CASCADE;
+           DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+        )
+        .catch(() => {});
+    }
+  };
+
+  try {
+    const withPrior = await runInFreshSchema([createTableOnly()]);
+    assert.match(
+      withPrior,
+      /failed to project pending schema/,
+      "a prior builds the projection, so the fold refuses before any SQL is sent",
+    );
+
+    const noPrior = await runInFreshSchema([]);
+    assert.doesNotMatch(
+      noPrior,
+      /failed to project pending schema/,
+      "an empty history builds no projection, so the refusal cannot come from the fold",
+    );
+    assert.match(
+      noPrior,
+      /view_drop_active/,
+      "PostgreSQL still refuses the drop, naming the relation itself",
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+});
