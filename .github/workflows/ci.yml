@@ -257,6 +257,16 @@ jobs:
       # have caught the two defects that actually happened, in under a second.
       - name: deploy/Dockerfile COPY paths resolve
         run: tests/dockerfile_copy_paths_gate.sh
+      # The platform database had NO named volume until 2026-08-11 - PGDATA lived
+      # in the container's writable layer while the Redis cache and the Redpanda
+      # log both had durable volumes. Text-only, runs no docker.
+      #
+      # Its sibling tests/compose_port_exposure_gate.sh is deliberately NOT wired:
+      # it is RED at HEAD on the control plane's 0.0.0.0 publication, which is a
+      # live exposure pending an operator decision, and allow-listing it green
+      # would be the hollow-arm shape this repo keeps removing.
+      - name: compose keeps stateful data on named volumes
+        run: tests/compose_stateful_volume_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted

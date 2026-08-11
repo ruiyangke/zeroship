@@ -64,6 +64,26 @@ services:
     # Sets the role default search_path to `zeroship` so unqualified table
     # references resolve in the single-schema platform DB.
     volumes:
+      # THE PLATFORM DATABASE, and until 2026-08-11 it was the ONE stateful
+      # service here with no durable storage. Measured while walking the
+      # operator deploy: redis (a cache) had `redis-data:/data` and redpanda (a
+      # replayable log) had `redpanda-data:/var/lib/redpanda/data`, while
+      # postgres' only volumes entry was the read-only init-script bind below.
+      # PGDATA therefore lived in the container's writable layer, so
+      # `docker compose down` - or any `up` that recreates the container after a
+      # config change - destroyed control state, auth, billing, the platform
+      # migration journal and every `app_*` schema, while the cache and the log
+      # survived. Nobody chooses to make a Redis cache durable and the system of
+      # record ephemeral; the asymmetry is what marks it as an oversight.
+      #
+      # WARNING FOR THE FIRST `up` AFTER THIS LANDS: adding this volume changes
+      # the service definition, so compose RECREATES the container, and whatever
+      # is currently in the old container layer is not carried over. On a fresh
+      # target that is nothing. On a long-lived dev box it is everything - this
+      # machine's container held 96 `app_*` schemas when the gap was found. Dump
+      # first (`pg_dump`) if the contents matter; this change does not and cannot
+      # migrate them.
+      - pgdata:/var/lib/postgresql/data
       - ../ops/postgres-init.sql:/docker-entrypoint-initdb.d/00-search-path.sql:ro
     ports:
       - "127.0.0.1:5440:5432"
@@ -541,6 +561,9 @@ services:
         condition: service_started
 
 volumes:
+  # The platform database. See the warning at the postgres service: this volume
+  # was absent until 2026-08-11, so the database lived in the container layer.
+  pgdata:
   bundles:
   # Shared object store for deployed-app env.storage (LocalFs). One volume,
   # mounted at the same path on every worker replica → cross-node-consistent.
