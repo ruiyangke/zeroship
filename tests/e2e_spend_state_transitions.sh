@@ -32,7 +32,18 @@ fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 echo "============================================"
 echo "  zeroship E2E — spend-state transitions (Allow→Warn→Degrade→Block)"
 echo "============================================"
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
+# Docker unavailable is a REFUSAL, not a skip. This used to `exit 0` after
+# printing a warning, so on any machine without docker the harness reported
+# success having driven none of the four spend bands - the same "0 failed over
+# 0 assertions" shape as tasks #102/#103/#279. Proven before changing it: with
+# a stub `docker` returning 1 on PATH, the old arm printed
+# "SKIP: docker unavailable." and exited 0.
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  echo "  ✗ REFUSED: docker unavailable, so NONE of the Allow/Warn/Degrade/Block" >&2
+  echo "    bands were driven. Exiting non-zero: a run that asserted nothing is" >&2
+  echo "    not a passing run. Start docker and re-run." >&2
+  exit 1
+fi
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
@@ -63,8 +74,26 @@ for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | 
 echo ""; echo "=== Stage 1: infra + migrate + seed + stack (lite provider) ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
 docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 -c max_connections=200 >/dev/null || { fail "pg run"; exit 1; }
-for _ in $(seq 1 40); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG on :$PG_PORT" || { fail "PG"; exit 1; }
+# Readiness = three CONSECUTIVE successful queries, not one pg_isready. This is
+# the same fix tests/lib/e2e_stack.sh's stack_pg_up carries, and the same bug
+# tests/e2e_db_app_end_to_end.sh had (task #274): the postgres entrypoint runs
+# an initdb-phase server on the unix socket and RESTARTS it, so there is a
+# window where `pg_isready` answers yes and the very next `psql` fails. This
+# harness never sourced the library, so it kept the old probe after the library
+# was fixed. Consecutive-ness is the point: a single successful select can land
+# inside the same window.
+PG_OK=0
+for _ in $(seq 1 60); do
+  if docker exec "$PGC" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1; then
+    PG_OK=$((PG_OK + 1))
+    [ "$PG_OK" -ge 3 ] && break
+  else
+    PG_OK=0
+  fi
+  sleep 1
+done
+[ "$PG_OK" -ge 3 ] && pass "ephemeral PG on :$PG_PORT (3 consecutive selects)" \
+  || { fail "PG never answered 3 consecutive selects in 60s"; exit 1; }
 
 docker rm -f "$RPC" >/dev/null 2>&1 || true
 docker run --name "$RPC" -d -p "$RP_PORT:$RP_PORT" docker.redpanda.com/redpandadata/redpanda:latest \
@@ -184,4 +213,26 @@ assert_band "RECOVER" 20 allow 200 0
 echo ""; echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
 echo "============================================"
-[ $FAIL -eq 0 ] && exit 0 || exit 1
+
+# A floor on assertions that RAN, not that PASSED. Measured 2026-08-11 on a
+# clean run: 28 assertions. The floor counts PASS+FAIL because a mutation moves
+# an outcome BETWEEN those columns; only a LOST assertion drops the sum, which
+# is the case this catches (tasks #285/#286).
+#
+# It is not decorative here. Mutating the spend engine so the Block band cannot
+# be reached (`pct >= t.block_pct * 2` in crates/control/src/spend.rs) gave
+# 25 passed / 1 failed = 26 RAN, not 27: the band's state check failed and its
+# TWO gateway-behaviour assertions never ran at all. So the denominator moves
+# when a band breaks, and a floor phrased on PASS alone would not have seen it.
+SPEND_MIN_RAN="${SPEND_MIN_RAN:-28}"
+RAN=$((PASS + FAIL))
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$RAN" -lt "$SPEND_MIN_RAN" ]; then
+  echo "FAIL: only $RAN assertions RAN, fewer than the $SPEND_MIN_RAN this gate expects." >&2
+  echo "      (passed $PASS, failed $FAIL -- the floor counts both, because a failing" >&2
+  echo "      assertion still ran and is already caught above. A band whose state check" >&2
+  echo "      fails silently drops its two behaviour assertions; that is what this sees.)" >&2
+  rc=1
+fi
+exit $rc
