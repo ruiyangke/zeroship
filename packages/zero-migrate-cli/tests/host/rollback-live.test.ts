@@ -329,8 +329,16 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
 });
 
 /** Create an extension, then drop it, so a one-step rollback has a dropExtension to
- *  reverse. The last empty cell in the verb matrix: view, sequence and schema are
- *  covered above and in the SQLite addon suite.
+ *  reverse. Sequence and schema are covered above, in this file, against PostgreSQL.
+ *
+ *  VIEW IS NOT COVERED HERE, and this comment used to say it was. What exists is
+ *  `crates/zero-migrate-node/tests/rollback_sqlite.rs`
+ *  (`a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`), which drives the
+ *  same re-lowering path this file does but against SQLite, and
+ *  `crates/zero-migrate/tests/drop_view_rollback_pg.rs`, which is PostgreSQL but calls
+ *  the engine directly and never reaches the addon's envelope loop. So the cell this
+ *  file would fill - a view rollback on PostgreSQL through the verb - is empty, and
+ *  neither of the two tests covers it between them.
  *
  *  `citext` rather than `pgcrypto` or `hstore` for no reason beyond it being available
  *  and absent in the container, so the create is real and the drop leaves no residue.
