@@ -11,7 +11,7 @@ use zeroship_core::auth_provider::{
     SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, env_is_truthy, parse_bool_flag, resolve_overlay_string,
+    bootstrap_or_exit, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_bundle::{
