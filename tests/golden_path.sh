@@ -2184,7 +2184,16 @@ else
   # creator cannot delete their own app", which would have been a serious and
   # entirely false finding. The token simply did not carry the action. The four
   # assertions after the DELETE all cascaded off that 403 and measured nothing.
-  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+  #
+  # `deployments:read` is here for the same reason, added BEFORE the step that
+  # needs it rather than after a run misread its absence. GET /api/apps/{id}/logs
+  # -- the only surface a creator has for reading a deployed app's output --
+  # requires Action::DeploymentsRead (crates/control/src/api.rs:2053), whose
+  # string is "deployments:read" (crates/authz/src/action.rs:44). NONE of this
+  # harness's PAT policies granted it, so the logs endpoint would have answered
+  # 403 for every token here and the obvious reading of that 403 is "creators
+  # cannot read their own logs". They can; the token could not ask. See #332.
+  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
   SC_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$SC_POLICY")"
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
   SC_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
