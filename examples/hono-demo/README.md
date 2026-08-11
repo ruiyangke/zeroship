@@ -21,5 +21,11 @@ curl -X POST http://localhost:3000/echo -d '{"ping":"pong"}' -H 'content-type: a
 ## Deploy
 
 ```bash
-zeroship deploy . --app=<uuid> --control=http://localhost:9090 --key=<master-key>
+pnpm build            # vite build -> dist/app.zship
+zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>
 ```
+
+`deploy` uploads a `.zship` archive, so it needs the build step first and a path
+to the archive rather than to this directory. The token comes from `--token`,
+`ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`; there is no
+`--key` flag.
