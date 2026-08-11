@@ -382,6 +382,33 @@ sweep_priv=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_control holds SELECT+DELETE on both audit tables (its retention sweep needs both)" \
   || fail "zeroship_control audit retention privileges read $sweep_priv of 4: the sweep cannot run (#324)"
 
+# Same class again, and this one was found by RUNNING control under its real role
+# rather than by reading grants.
+#
+# zeroship.connect_checkout_failures had no grant to any role, and control uses
+# it from two production paths: cron/billing_notify.rs:374 SELECTs it as one of
+# seven union sources, and stripe_store.rs:420 INSERTs into it. The SELECT is
+# unguarded, so the ENTIRE billing-notify tick failed every run -- no billing
+# notification of any kind was produced, including the six kinds sourced from
+# tables the role reads fine. Fixed by 20260811000300_control_connect_failures_grant.ts.
+#
+# MEASURED, one variable (the DSN), same binary and flags:
+#   control as zeroship_control -> ERROR "control billing-notify tick failed"
+#                                        error="database: db error"
+#   control as postgres         -> no error at all
+# and after the grant, the least-privilege boot logs zero ERROR lines.
+#
+# WHAT THIS DOES NOT CATCH: privilege, not behaviour, and only for the two
+# tables named. It proves the grant exists, not that billing_notify produces
+# correct notifications. It would also not have FOUND this -- only running a
+# service under its real role does that, which is still not done anywhere
+# (#322).
+connect_priv=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from (values ('SELECT'),('INSERT')) p(v) where has_table_privilege('zeroship_control','zeroship.connect_checkout_failures',p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$connect_priv" = "2" ] \
+  && pass "zeroship_control can read+write connect_checkout_failures (billing_notify and stripe_store both use it)" \
+  || fail "zeroship_control connect_checkout_failures privileges read $connect_priv of 2: the whole billing-notify tick fails (#324)"
+
 # Granting that DELETE must NOT weaken the append-only invariant.
 #
 # Immutability on these tables is enforced by BEFORE DELETE/UPDATE/TRUNCATE
@@ -2721,7 +2748,7 @@ gp_close_step
 # It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
 # the subject role is swapped for one that CAN do DDL, so it distinguishes the
 # property from a probe that has stopped working.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-78}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-79}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
