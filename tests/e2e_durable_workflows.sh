@@ -4,6 +4,22 @@
 # Boots disposable Postgres on :5440, applies the real platform migrations,
 # boots real control/gateway/worker processes, deploys a real workflow .zship,
 # then drives the real control workflow engine from the Rust integration test.
+#
+# NO ANTI-HOLLOW-GATE FLOOR, AND IT DOES NOT NEED ONE. The four
+# tests/e2e_dev_vs_deployed_*.sh harnesses carry a MIN_PASSED floor because they
+# iterate over CAPTURED rows: an empty capture runs no loop body, fires no
+# assertion, fails nothing, and would otherwise exit 0 having proved nothing.
+# This script has no such shape, verified 2026-08-11 by reading every site:
+#   - every one of its 13 `fail` sites is immediately followed by `exit 1`
+#     (or `exit 2` for the preflight ones), so no failure is merely printed;
+#   - `set -euo pipefail` above aborts on any unchecked command failure;
+#   - all six loops iterate a LITERAL or `seq` list (binaries, ports, retry
+#     counts) - none iterates data captured at run time, so no loop body can
+#     silently execute zero times.
+# `pass`/`fail` here are plain `echo` with no counters, which is why grepping
+# for a floor finds nothing. That is the structure providing the guarantee, not
+# an omission. If a loop over captured rows is ever added, this stops being true
+# and a floor becomes load-bearing.
 
 set -euo pipefail
 
