@@ -319,7 +319,15 @@ echo ""
 echo "=== Stage 4: deployed env.db CRUD through gateway ==="
 READY=0
 READY_RESP=""
+# COUNTED, because stage 5 bills every one of these. The readiness loop is the
+# only variable-length source of app requests in this harness -- everything else
+# is exactly N_REQ -- so without this counter the expected `requests` total is
+# unknowable and the only assertable thing is a floor. It is also why the label
+# below used to be wrong: READY_RESP holds the LAST attempt, and calling it
+# "first" hid every retry that ever happened here.
+READY_TRIES=0
 for _ in $(seq 1 30); do
+  READY_TRIES=$((READY_TRIES+1))
   READY_RESP="$(gw "http://localhost:$GATE_PORT/hit/ready")"
   WROTE="$(printf '%s' "$READY_RESP" | jget '.wrote')"
   READBACK="$(printf '%s' "$READY_RESP" | jget '.readBack')"
@@ -329,7 +337,8 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-echo "    first env.db response: $READY_RESP"
+APP_REQUESTS=$((READY_TRIES + N_REQ))
+echo "    env.db response on readiness attempt $READY_TRIES of 30: $READY_RESP"
 [ "$READY" = "1" ] && pass "probe response has wrote=true and readBack=$READBACK" || { fail "env.db probe did not succeed"; tail -50 "$WORK/worker.log"; exit 1; }
 
 OK=0
@@ -345,6 +354,22 @@ for i in $(seq 1 "$N_REQ"); do
   fi
 done
 [ "$OK" = "$N_REQ" ] && pass "drove $OK/$N_REQ gateway requests with env.db insert+find success" || { fail "only $OK/$N_REQ env.db requests succeeded"; exit 1; }
+
+# MUTATION CONTROL for the stage-5 equality below. Deleting one row makes the
+# billing tables claim one more write than the database can account for -- the
+# exact shape of over-counting, which is the direction the old floor could not
+# see. It mutates the OBSERVABLE, not the product, so it proves the ASSERTION
+# discriminates; it does not by itself prove the metering path would be caught.
+#
+# EXPECTATION, stated as the observable rather than a pass/fail total: the
+# `db_writes and db_rows_written EQUAL the Postgres row count` line must go RED
+# and name a rows= one lower than db_writes=. Measured 2026-08-11:
+#   MUTATE=none        db_writes=31 db_rows_written=31 rows=31  -> pass
+#   MUTATE=drop-a-row  db_writes=31 db_rows_written=31 rows=30  -> fail
+if [ "${MUTATE:-none}" = "drop-a-row" ]; then
+  psql_exec -tA -c "DELETE FROM \"$APP\".hits WHERE ctid IN (SELECT ctid FROM \"$APP\".hits LIMIT 1)" >/dev/null 2>&1
+  echo "    MUTATED (drop-a-row): one row deleted from \"$APP\".hits AFTER the writes were metered"
+fi
 
 ROW_COUNT="$(psql_exec -tA -c "SELECT count(*)::bigint FROM \"$APP\".hits" 2>/dev/null | tr -d '[:space:]')"
 echo "    Postgres row count in schema \"$APP\".hits = $ROW_COUNT"
@@ -366,9 +391,9 @@ for _ in $(seq 1 45); do
   DBW="$(usage_of db_writes)"
   DBROWS="$(usage_of db_rows_written)"
   {
-    [ "$REQ" -ge "$N_REQ" ] &&
-    [ "$DBR" -ge "$N_REQ" ] &&
-    [ "$DBW" -ge "$N_REQ" ] &&
+    [ "$REQ" -ge "$APP_REQUESTS" ] &&
+    [ "$DBR" -ge "$ROW_COUNT" ] &&
+    [ "$DBW" -ge "$ROW_COUNT" ] &&
     [ "$REQ" = "$pREQ" ] &&
     [ "$DBR" = "$pDBR" ] &&
     [ "$DBW" = "$pDBW" ] &&
@@ -381,10 +406,50 @@ for _ in $(seq 1 45); do
   sleep 2
 done
 echo "    usage_aggregates: requests=$REQ db_reads=$DBR db_writes=$DBW db_rows_written=$DBROWS"
-{ [ "$DBR" -gt 0 ] && [ "$DBW" -gt 0 ] && [ "$DBR" -ge "$N_REQ" ] && [ "$DBW" -ge "$N_REQ" ]; } 2>/dev/null \
-  && pass "usage_aggregates has db_reads>0 and db_writes>0" \
-  || { fail "db metrics missing from usage_aggregates"; tail -50 "$WORK/control.log"; exit 1; }
+echo "    driver-side truth:  app requests=$APP_REQUESTS ($READY_TRIES readiness + $N_REQ), Postgres rows=$ROW_COUNT"
 
+# TWO-SIDED, AND AGAINST AN INDEPENDENT SOURCE. What stood here was
+# `DBR >= N_REQ && DBW >= N_REQ`: a floor, and one whose ceiling nothing
+# supplied. A worker that counted every db op TWICE satisfied it, and so did
+# the projected-charge check below, because that charge is computed FROM these
+# same numbers. For a billing signal that is the wrong direction to be blind
+# in -- under-counting costs the platform, OVER-counting bills creators for
+# traffic they never generated, and only the second was silent.
+#
+# `ROW_COUNT` is the discriminator: it comes from Postgres, not from
+# usage_aggregates, so equality is a claim ACROSS the seam rather than within
+# one table. Every row in "$APP".hits was created by exactly one metered
+# insert, and per the metering contract the primitives emit in the SUCCESS ARM
+# ONLY, so a failed insert adds neither a row nor a count. If that equality
+# ever breaks, that IS the finding.
+#
+# MEASURED 2026-08-11 at HEAD, one full run: requests=32 db_reads=31
+# db_writes=31 db_rows_written=31, rows=31, N_REQ=30. The +1 on requests is
+# the readiness attempt; the harness now counts those instead of leaving the
+# expected total unknowable, which is what forced the floor in the first place.
+{ [ "$DBW" = "$ROW_COUNT" ] && [ "$DBROWS" = "$ROW_COUNT" ]; } 2>/dev/null \
+  && pass "db_writes and db_rows_written EQUAL the Postgres row count ($ROW_COUNT) -- not over-counted, not under-counted" \
+  || { fail "write metering does not match Postgres: db_writes=$DBW db_rows_written=$DBROWS rows=$ROW_COUNT"; tail -50 "$WORK/control.log"; exit 1; }
+
+# db_reads gets a BOUND, not an equality, and the asymmetry is deliberate. A
+# request can fail AFTER its insert -- readBack=0 is a find that ran and
+# returned nothing -- so a read without a row is legitimate and would make an
+# equality flake. The bound still refuses both directions that matter: fewer
+# reads than rows means reads went unmetered, more reads than requests means
+# reads were counted that no request made.
+{ [ "$DBR" -ge "$ROW_COUNT" ] && [ "$DBR" -le "$APP_REQUESTS" ]; } 2>/dev/null \
+  && pass "db_reads=$DBR lies within [rows=$ROW_COUNT, app requests=$APP_REQUESTS]" \
+  || { fail "db_reads=$DBR outside [$ROW_COUNT, $APP_REQUESTS]"; tail -50 "$WORK/control.log"; exit 1; }
+
+# The one counter the harness knows exactly, because it made every request.
+[ "$REQ" = "$APP_REQUESTS" ] 2>/dev/null \
+  && pass "requests=$REQ EQUALS the $APP_REQUESTS requests this harness sent" \
+  || { fail "requests=$REQ but this harness sent $APP_REQUESTS ($READY_TRIES readiness + $N_REQ)"; tail -50 "$WORK/control.log"; exit 1; }
+
+# NOT AN AMOUNT CHECK, and the pass line says so. EXPECTED_CHARGE is computed
+# from the very rows this queries, so it can only establish that db_reads and
+# db_writes are in the PRICED SET and that the pricing arithmetic agrees with
+# itself. The amount question is answered above, against Postgres.
 EXPECTED_CHARGE=$(( REQ + DBR + DBW ))
 CHARGE=""
 for _ in $(seq 1 20); do
@@ -394,7 +459,7 @@ for _ in $(seq 1 20); do
 done
 echo "    projected charge = $CHARGE cents ; expected requests + db_reads + db_writes = $REQ + $DBR + $DBW = $EXPECTED_CHARGE"
 [ "$CHARGE" = "$EXPECTED_CHARGE" ] 2>/dev/null \
-  && pass "projected charge includes priced db_reads/db_writes metrics" \
+  && pass "projected charge prices db_reads/db_writes (consistency within the billing tables, NOT an amount check)" \
   || { fail "projected charge did not include DB metrics as priced"; exit 1; }
 
 echo ""
