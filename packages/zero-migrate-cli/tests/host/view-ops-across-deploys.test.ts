@@ -1,19 +1,24 @@
 // View operations that span two deploys - where the object was created by a migration
 // that is already applied and journaled, rather than by one in the same batch.
 //
-// Two separate defects live here, and each dialect has exactly one of them:
+// Two defects were found here. One is fixed, one is not:
 //
-//   dropView across deploys      MySQL FAILS          PostgreSQL works
-//   createView replace across    MySQL works          PostgreSQL FAILS
+//                                 MySQL          PostgreSQL     SQLite
+//   dropView across deploys       FAILS          works          works
+//   createView replace across     works          works          works
 //
-// They have a common shape - the fold decides against a catalog snapshot it does not
-// fully trust - but different causes, and fixing either one naively makes the other
-// worse. Populating MySQL's empty views map to fix the drop turns the MySQL replace arm
-// into the PostgreSQL failure. That is why both live in one file: the pair is the
-// constraint on the fix, and splitting them hides it.
+// The replace row was FAILS on PostgreSQL and SQLite until the fold learned to read
+// `replace` (crates/zero-migrate/src/render/fold.rs, the Op::CreateView arm). MySQL
+// passed that row even before the fix, for the wrong reason: its catalog views map is
+// always empty, so the duplicate check the fold applied had nothing to trip on.
 //
-// The two arms that PASS are not padding. Each rules out a wrong diagnosis the failing
-// arm alone would also fit - see the comments on each.
+// The rows stay in one file because they are coupled. Populating MySQL's empty views
+// map to fix the drop row would have given MySQL the replace defect the other two
+// dialects had; the MySQL replace arm is what would have caught that. Fixing `replace`
+// first removed the coupling, and the arm is kept to keep it removed.
+//
+// The arms that PASS are not padding. Each rules out a wrong diagnosis the failing arm
+// alone would also fit - see the comments on each.
 //
 // WHY MySQL REFUSES. Its catalog snapshot never populates the `views` map -
 // `crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:643` returns
@@ -250,12 +255,23 @@ test("MySQL: creating and dropping a view within ONE migration succeeds, which i
   }
 });
 
-/** Re-creates the view with `replace: true`, the documented way to change a view's body. */
+/** Re-creates the view with `replace: true`, the documented way to change a view's body.
+ *
+ *  Keeps the SAME projection and changes only the predicate. PostgreSQL's CREATE OR
+ *  REPLACE VIEW may append columns but never remove them - narrowing (id, label) to
+ *  (id) is refused by the server with "cannot drop columns from view", which is the
+ *  database's rule and not this engine's. SQLite drops and recreates, so it accepts the
+ *  narrowing; writing the fixture that way would have made the arms measure different
+ *  things and blamed PostgreSQL for its own documented behaviour. */
 function replaceTheView(): NamedMigration {
   return authoredMigration("view_replace", () => {
     view(VIEW).create({
       replace: true,
-      as: (q) => q.from(TABLE).select(["id"]),
+      as: (q) =>
+        q
+          .from(TABLE)
+          .select(["id", "label"])
+          .where((col) => col("label").isNotNull()),
     });
   });
 }
@@ -269,7 +285,7 @@ const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 /** SQLite has one schema, and the CLI names it `public` in the project position. */
 const SQLITE_PROJECT = "public";
 
-test("PostgreSQL: replacing a view across two deploys is refused, because the fold ignores `replace`", async (ctx) => {
+test("PostgreSQL: replacing a view across two deploys applies the new body", async (ctx) => {
   if (!PG_URL) {
     ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; view-replace arm skipped");
     return;
@@ -286,24 +302,22 @@ test("PostgreSQL: replacing a view across two deploys is refused, because the fo
     const created = createTableAndView();
     await applyOne(created, schema, driver, []);
 
-    // `Op::CreateView` at crates/zero-migrate/src/render/fold.rs:2317 destructures with
-    // `..`, which swallows `replace`, then rejects on `views.contains_key(name)`
-    // unconditionally. PostgreSQL populates its catalog views, so the second deploy
-    // finds the first deploy's view and refuses - even though the renderer emits
-    // CREATE OR REPLACE VIEW (crates/zero-migrate/src/render/renderer.rs:566) and the
-    // dialect table calls the variant portable on every engine.
-    await assert.rejects(
-      applyOne(replaceTheView(), schema, driver, [created], OWNED),
-      (error: unknown) => {
-        assert.equal(
-          String((error as Error)?.message ?? error),
-          'failed to project pending schema after envelope "view_replace": ' +
-            "fold: view `" +
-            VIEW +
-            "` already exists",
-        );
-        return true;
-      },
+    // Asserting the stored definition, not merely that nothing threw: the replacing
+    // migration adds a predicate the original did not have, so the new body is
+    // distinguishable from the old one in the catalog.
+    await applyOne(replaceTheView(), schema, driver, [created], OWNED);
+
+    const { rows } = await client.query(
+      "SELECT pg_get_viewdef(c.oid, true) AS body FROM pg_class c " +
+        "JOIN pg_namespace n ON n.oid = c.relnamespace " +
+        "WHERE n.nspname = $1 AND c.relname = $2",
+      [schema, VIEW],
+    );
+    assert.equal(rows.length, 1, "the view is still there after the replace");
+    assert.match(
+      String(rows[0].body),
+      /label IS NOT NULL/,
+      "the replaced view carries the new predicate, so the replace took effect",
     );
   } finally {
     await client
@@ -316,7 +330,7 @@ test("PostgreSQL: replacing a view across two deploys is refused, because the fo
   }
 });
 
-test("MySQL: replacing a view across two deploys succeeds, but only because the catalog map is empty", async (ctx) => {
+test("MySQL: replacing a view across two deploys applies too, and did so even before the fold read `replace`", async (ctx) => {
   if (!MYSQL_URL) {
     ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL view-replace arm skipped");
     return;
@@ -463,21 +477,7 @@ test("SQLite: both view operations across two deploys", async () => {
         () => "ran",
         (error: unknown) => String((error as Error)?.message ?? error),
       );
-      // SQLite populates its catalog views like PostgreSQL does
-      // (sqlite/drift_sql.rs:289), so it carries the same `replace` defect - the
-      // fold error is identical. The WRAPPER around it is not: SQLite surfaces the
-      // projection failure through the deploy path rather than the pending-schema
-      // path, so the same defect reads differently to an operator depending on which
-      // database they run. Both texts are recorded here rather than normalised, since
-      // a reader matching on either one needs to know the other exists.
-      assert.equal(
-        replaceOutcome,
-        'IR envelope deploy failed: migration "view_replace" failed during ' +
-          "historical schema projection: fold: view `" +
-          VIEW +
-          "` already exists",
-        "SQLite refuses the replace for the same reason PostgreSQL does",
-      );
+      assert.equal(replaceOutcome, "ran", "SQLite replaces the view like PostgreSQL does");
     } finally {
       rmSync(dir2, { recursive: true, force: true });
     }

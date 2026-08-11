@@ -2320,12 +2320,21 @@ pub fn fold_ops_onto(
                 columns,
                 query,
                 materialized,
+                replace,
                 ..
             } => {
+                // A view never replaces a TABLE, whatever `replace` says: the renderer
+                // emits CREATE OR REPLACE VIEW, which PostgreSQL, MySQL and SQLite all
+                // refuse against a table of that name. So this check stays
+                // unconditional while the one below does not.
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
-                if views.contains_key(name) {
+                // `replace` is the authored way to change a view's body, and the fold
+                // used to discard it with the rest of the struct, so re-declaring a
+                // view any applied migration had created was refused before it ran.
+                // The insert below overwrites, which is what replacing means.
+                if !replace.unwrap_or(false) && views.contains_key(name) {
                     return Err(FoldError::DuplicateView(name.clone()));
                 }
                 views.insert(
