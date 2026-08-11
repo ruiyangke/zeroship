@@ -114,6 +114,11 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_d
     let url = skip_if_no_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_dep_oracle_{}", std::process::id());
+    // The fixture outlives an assertion failure without this: a panic unwinds past
+    // the explicit drop below and leaves the schema in the shared test database, one
+    // per process id, until someone notices. Five of them were sitting in the local
+    // container when this was armed.
+    let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
 
     session
         .batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
