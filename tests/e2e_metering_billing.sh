@@ -74,7 +74,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + tooling + built example -------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-platform-migrate; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-platform-migrate zeroship-migrated; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 command -v node    >/dev/null 2>&1 || { echo "node required"; exit 2; }
@@ -90,12 +90,18 @@ WORKER_PORT=8071
 GATE_PORT=8061
 PG_PORT=5471
 MOCK_PORT=9571
+# zeroship-migrated applies the probe's committed migrations to its per-app
+# schema. Without it env.db has no table and every insert fails -- which is
+# exactly the state this harness shipped in until 2026-08-11, undetected
+# because both env.db guards were unfailable (eda51b973).
+MIGRATED_PORT=9071
 REDPANDA_PORT=19171
 PG_CONTAINER="zs-e2e-billing-pg"
 RP_CONTAINER="zs-e2e-billing-redpanda"
 WORKER_THREADS=2
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$CONTROL_PORT"
+MIGRATED_URL="http://localhost:$MIGRATED_PORT"
 MOCK_URL="http://127.0.0.1:$MOCK_PORT"
 # The worker producer and control's forwarder/recompute consumers share ONE topic.
 RP_BROKERS="127.0.0.1:$REDPANDA_PORT"
@@ -116,6 +122,27 @@ PLAN_ID="pln_metering_test_e2e"
 jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
 psql_exec() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
+
+# Record the probe's committed migrations as IR for zeroship-migrated. Same
+# helper as tests/e2e_db_app_end_to_end.sh; the recorder lives in the built
+# vite-plugin, so this reads the SAME migration files the .zship was built from.
+write_apply_request() {
+  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" \
+    "$ROOT/examples/metering-probe/migrations" > "$WORK/apply-migrations.json" <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const migration of migrations) {
+  documents.push({
+    filename: migration.stem + ".ir.json",
+    body: await recordMigration(migration.path),
+  });
+}
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+}
 
 cleanup() {
   echo ""
@@ -297,6 +324,16 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/nul
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
+# The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
+"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" --dev-insecure \
+  > "$WORK/migrated.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 \
+  && pass "zeroship-migrated healthy (applies the probe's committed migrations)" \
+  || { fail "zeroship-migrated unhealthy"; tail -30 "$WORK/migrated.log"; exit 1; }
+
 # ===========================================================================
 echo ""
 echo "=== Stage 2: mint admin PAT (offline) + create creator + deploy metering-probe ==="
@@ -359,6 +396,22 @@ SQL
 
 DEP="$("$BIN/zeroship" deploy "$PROBE_ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
 echo "$DEP" | grep -q "deploy_hash" && pass "deployed metering-probe .zship → $APP" || { fail "deploy failed: $DEP"; tail -20 "$WORK/control.log"; exit 1; }
+
+# Apply the probe's migrations to its per-app schema. Deploy uploads the bundle;
+# it does NOT create tables. Without this the probe's env.db insert has nothing
+# to write to, which is the state this harness ran in until 2026-08-11.
+write_apply_request || { fail "could not record migration IR"; exit 1; }
+APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATED_URL/v1/apps/$APP/migrations/apply" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  --data-binary @"$WORK/apply-migrations.json")"
+APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
+if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
+  pass "zeroship-migrated applied the probe's migrations (applied=$APPLIED)"
+else
+  fail "migration apply failed (http=$APPLY_CODE): $(cat "$WORK/apply-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
 
 sleep 5  # let route + version sync to gateway + worker
 
