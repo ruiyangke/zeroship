@@ -130,22 +130,37 @@ function spawnCliAsync(
   });
 }
 
-// Wait for a backend to park on the project advisory lock, then terminate it.
+// Wait for a backend to park on the lock this probe holds, then terminate it.
 //
-// Polling `pg_stat_activity` is what makes the kill deterministic instead of a
-// race against a sleep: the deploy is only killable once it is actually waiting on
-// the lock, and that is the state this waits for. Terminating a session that has
-// been granted nothing and is waiting for the grant is exactly the shape
-// `drop_grant_from_failed_acquire` compensates for.
+// Polling is what makes the kill deterministic instead of a race against a sleep:
+// the deploy is only killable once it is actually waiting on the lock, and that is
+// the state this waits for. Terminating a session that has been granted nothing and
+// is waiting for the grant is exactly the shape `drop_grant_from_failed_acquire`
+// compensates for.
+//
+// The victim is chosen by joining the probe's OWN granted lock, never by wait state
+// alone. `node --test` runs the host files concurrently, and rollback-live.test.ts
+// parks a backend on its project lock deliberately to prove PostgreSQL queues rather
+// than fails. A predicate that matched any advisory waiter terminated that backend
+// instead of this test's child: the rollback died with "terminating connection due
+// to administrator command", and this test then waited on a child nobody killed --
+// forever, because `pg_advisory_lock` is unbounded. One stray kill, two casualties.
 async function killAdvisoryLockWaiter(probe: Client): Promise<number> {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     const { rows } = await probe.query<{ pid: number }>(
-      `SELECT pid FROM pg_stat_activity
-        WHERE pid <> pg_backend_pid()
-          AND wait_event_type = 'Lock'
-          AND wait_event = 'advisory'
-          AND query LIKE '%pg_advisory_lock%'`,
+      `SELECT waiter.pid
+         FROM pg_locks AS waiter
+         JOIN pg_locks AS held
+           ON held.locktype = 'advisory'
+          AND held.granted
+          AND held.pid = pg_backend_pid()
+          AND waiter.classid = held.classid
+          AND waiter.objid = held.objid
+          AND waiter.objsubid = held.objsubid
+        WHERE waiter.locktype = 'advisory'
+          AND NOT waiter.granted
+          AND waiter.pid <> pg_backend_pid()`,
     );
     if (rows.length > 0) {
       const pid = rows[0].pid;
@@ -154,7 +169,7 @@ async function killAdvisoryLockWaiter(probe: Client): Promise<number> {
     }
     await new Promise((wake) => setTimeout(wake, 25));
   }
-  throw new Error("no backend ever parked on the project advisory lock");
+  throw new Error("no backend ever parked on the project lock this probe holds");
 }
 
 function temporaryDirectory(prefix: string): string {

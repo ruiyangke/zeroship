@@ -597,18 +597,18 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
       "the test must actually hold the project lock, or it proves nothing",
     );
 
-    // MySQL's acquire is BOUNDED - GET_LOCK(name, PROJECT_LOCK_TIMEOUT_SECS) with a 10s
-    // constant - so this returns a real error rather than hanging. The PostgreSQL acquire is
-    // `pg_advisory_lock`, unbounded, which is why there is no PostgreSQL twin of this arm: it
-    // would wait forever instead of failing.
+    // MySQL's acquire is BOUNDED - GET_LOCK takes the configured project-lock budget, rounded
+    // up to the whole seconds the function accepts, and defaulting to 10s - so this returns a
+    // real error rather than hanging. The PostgreSQL acquire is `pg_advisory_lock`, unbounded,
+    // which is why the PostgreSQL twin of this arm asserts a wait rather than a failure.
     const blocked = spawnCli(
       [...baseArgs(schema, MYSQL_URL), "rollback", "--all", "--approve"],
       dir,
     );
     assert.notEqual(blocked.status, 0, "a rollback cannot proceed while a peer holds the lock");
-    // Matched in two pieces on purpose: the engine joins them with an em dash, and the source
-    // of this file stays ASCII. The lock NAME is asserted too, which is what proves the mirror
-    // above resolved to the same lock the engine took.
+    // The `.*` spans whatever the engine puts between the two halves, so the assertion pins the
+    // reported cause and not the punctuation joining it. The lock NAME is asserted too, which is
+    // what proves the mirror above resolved to the same lock the engine took.
     assert.match(
       blocked.stderr,
       new RegExp(`failed to acquire project lock: .*GET_LOCK\\('${lockName}'\\) timed out after 10s`),
