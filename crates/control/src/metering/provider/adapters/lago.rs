@@ -3,6 +3,33 @@
 //! Lago billing-provider adapter. Adding a provider requires this adapter file
 //! plus the `register_builtin` entry in `adapters/mod.rs`, with no provider
 //! trait, registry, stack-builder, forwarder, or pipeline edits.
+//!
+//! # This adapter does not provision its subject, and Stripe's does
+//!
+//! Measured 2026-08-11 by enumerating every Lago path the control plane calls:
+//! `POST /api/v1/events` (the only write), `GET /api/v1/meters/{slug}/query`,
+//! and `GET /api/v1/customers/{subject}/current_usage`. There is no POST to
+//! `/api/v1/customers` or `/api/v1/subscriptions` anywhere in
+//! `crates/control/src/` - the only things in the repo that create them are the
+//! e2e harnesses.
+//!
+//! The consequence is not lost data, and I checked which it was rather than
+//! assuming: an event for an unprovisioned subject is accepted (HTTP 200) and
+//! stays retrievable through `GET /api/v1/events?external_subscription_id=...`
+//! with null customer/subscription ids. What fails is the INVOICING read below
+//! (`current_usage`), which answers `404 resource_not_found`. Usage is recorded
+//! and unbillable.
+//!
+//! The asymmetry is the part worth knowing: `stripe_handlers.rs` DOES provision
+//! its provider-side customer - "Ensure a Customer exists (create lazily,
+//! once)" on the billing-setup path. So within one subsystem one provider has a
+//! provisioning trigger and this one has none, and
+//! `docs/reference/billing-metering.md` does not say who is meant to.
+//!
+//! Whether the control plane should ensure the Lago customer, or whether that
+//! is deliberately an operator step that wants documenting, is an open decision
+//! (task #309). `tests/e2e_multi_app_attribution.sh` asserts invoiceability and
+//! reproduces the unprovisioned state under `ATTR_SKIP_PROVISION=1`.
 
 use std::time::Duration;
 
