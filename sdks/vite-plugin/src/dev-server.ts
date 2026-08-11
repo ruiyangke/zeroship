@@ -40,6 +40,7 @@ import {
   GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
   genTypesFromMigrations,
+  isMigrationSourceError,
 } from "./gen-types/index.js";
 import { devSqlitePaths, DEV_APP_ID } from "./gen-types/dev-apply.js";
 import {
@@ -292,8 +293,10 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
 /**
  * Migration-first gen-types — REGENERATE the typed `env.db` surface from the
  * migration set in DEV via the in-process gen-types library (no subprocess).
- * Fire-and-forget: any failure is LOGGED, never thrown (a bad migration must not
- * crash the dev server).
+ * Never THROWS; it classifies instead. A fault in the creator's own migration
+ * source is logged and survived; anything else (missing addon, engine panic,
+ * unwritable out dir) is a PLATFORM fault, printed as such, and fatal at boot.
+ * See `MigrationSourceError` in `gen-types/index.ts` and task #269.
  *
  * Dev always WRITES (no `--check`; that is a CI/build generated-artifact concern).
  */
@@ -309,6 +312,7 @@ function readGeneratedRuntimeDescriptor(
 async function regenTypesDev(
   root: string,
   migrations: DevServerOptions["migrations"],
+  fatal: boolean,
 ): Promise<string | undefined> {
   const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
   const outDir = resolve(root, migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
@@ -318,8 +322,36 @@ async function regenTypesDev(
       "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
     );
   } catch (e) {
-    // Dev: never throw — a malformed migration must not take down the server.
-    console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
+    if (isMigrationSourceError(e)) {
+      // Dev: never throw on a MALFORMED MIGRATION. The creator just broke their
+      // own source and knows it; a message plus a live server is what they want.
+      console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
+    } else {
+      // Everything else is OUR bug or their environment: a missing native
+      // addon, an engine panic, an unwritable generated/ dir. Those used to be
+      // distinguishable by brute force — before zero-migrate's `bc4d1c9b` added
+      // catch_unwind to all 14 napi exports, an engine panic killed the process
+      // outright. Now it arrives here, and treating it like a typo leaves the
+      // creator serving a STALE OR ABSENT descriptor with one line of warning.
+      //
+      // At boot nothing has been served yet, so refusing to start costs the
+      // creator nothing and names the fault while it is still the only thing on
+      // screen. On a hot update there is a live session and a running app, so
+      // this stays loud but non-fatal — the descriptor already in memory is the
+      // one that was serving a moment ago.
+      console.error(
+        `[zeroship] gen-types PLATFORM FAULT (not your migrations): ${(e as Error).message}`,
+      );
+      if ((e as { stack?: string }).stack) console.error((e as Error).stack);
+      if (fatal) {
+        console.error(
+          "[zeroship] refusing to start the dev server — env.db.ts and " +
+            "schema.runtime.json would be stale, so every type error after this " +
+            "point would be a lie. Fix the fault above and re-run `pnpm dev`.",
+        );
+        process.exit(1);
+      }
+    }
   }
   return readGeneratedRuntimeDescriptor(root, migrations);
 }
@@ -578,8 +610,10 @@ export function devServerPlugin(
         // was down (`hotUpdate` only fires on a *subsequent* change, so without
         // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
         // `bootRegenDone` so the runtime is injected WITH the fresh descriptor.
-        // `regenTypesDev` logs on error and NEVER throws.
-        bootRegenDone = regenTypesDev(root, options.migrations).then(async (json) => {
+        // `regenTypesDev` never throws: a malformed migration is logged and
+        // survived, a PLATFORM fault exits the process here (`fatal: true`)
+        // rather than serving a stale descriptor for the rest of the session.
+        bootRegenDone = regenTypesDev(root, options.migrations, true).then(async (json) => {
           runtimeDescriptorJson = json;
           // Report — do NOT apply. Migrating is `pnpm migrate`, a separate step
           // run ahead of `pnpm dev`; see `reportDevSchemaState`.
@@ -1073,10 +1107,12 @@ export function devServerPlugin(
     async hotUpdate({ file }: { file: string }) {
       // Migration-first gen-types: a change under the migrations dir regenerates
       // the typed `env.db` surface. Awaited so the HMR poll that follows sees the
-      // re-injected descriptor. `regenTypesDev` logs on error and NEVER throws (a
-      // bad migration must not crash dev).
+      // re-injected descriptor. `regenTypesDev` never throws, and is NOT fatal
+      // here: a bad migration must not crash dev, and on a hot update even a
+      // platform fault leaves a live session whose in-memory descriptor was
+      // serving a moment ago.
       if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        const json = await regenTypesDev(root, options.migrations);
+        const json = await regenTypesDev(root, options.migrations, false);
         runtimeDescriptorJson = json;
         pendingRuntimeDescriptorJson = json ?? null;
         // Don't return — a migration `.ts` is still a `.ts`; fall through to the

@@ -55,6 +55,47 @@ const MANUAL_ENV_DB_BANNER =
   "// worker's `env.db` is `Db<typeof schema>`. Re-run gen-types after schema\n" +
   "// changes; the gen-types --check CI gate fails if this file drifts.\n";
 
+/**
+ * The tag a `MigrationSourceError` carries. A STRING on the instance rather
+ * than an `instanceof` check: the dev server, the build and the CLI each load
+ * this module through a different entry, and a duplicated module instance would
+ * silently make `instanceof` false — which fails in the direction that looks
+ * safe (a creator's typo classified as a platform fault, killing dev).
+ */
+const MIGRATION_SOURCE_FAULT = "migration-source";
+
+/**
+ * A fault in the CREATOR's migration source: their `.ts` failed to build, or
+ * the engine rejected the schema it declares. Distinguished from every other
+ * throw out of gen-types, all of which are OUR bug or their environment's:
+ * a missing native addon, an engine panic, an unparseable descriptor, an
+ * unwritable output dir.
+ *
+ * The distinction has to be CARRIED, not derived. Measured 2026-08-11 across
+ * four fault classes: an engine-rejected migration and an esbuild failure both
+ * arrive as a plain `Error` with `code === undefined`, and so — by reading —
+ * do `addonLoadError`, the missing-`runtimeJson` arm below, and
+ * `parseRuntimeDescriptor`. `code` therefore separates neither class from the
+ * other; only three of the eight producers set one at all (`EACCES` from the
+ * write, `GenericFailure` from a napi panic). See task #269.
+ */
+export class MigrationSourceError extends Error {
+  readonly zsFaultClass = MIGRATION_SOURCE_FAULT;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "MigrationSourceError";
+  }
+}
+
+/** Is `e` a creator-migration fault (as opposed to a platform/environment one)? */
+export function isMigrationSourceError(e: unknown): boolean {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    (e as { zsFaultClass?: unknown }).zsFaultClass === MIGRATION_SOURCE_FAULT
+  );
+}
+
 /** Options common to both sources. */
 export interface GenTypesResult {
   /** `"written"` (regenerated) or `"checked"` (drift gate passed, no write). */
@@ -126,7 +167,18 @@ export async function genTypesFromMigrations(
   outDir: string,
   opts: { check?: boolean } = {},
 ): Promise<GenTypesResult> {
-  const envelopes = await recordMigrationsDir(migrationsDir);
+  // Recording EVALUATES the creator's `.ts`, so everything that throws here is
+  // their source: an unresolvable import, a syntax error, a DSL guard. Tagged
+  // so the dev server can keep serving through it — see `MigrationSourceError`.
+  let envelopes;
+  try {
+    envelopes = await recordMigrationsDir(migrationsDir);
+  } catch (cause) {
+    throw new MigrationSourceError(
+      `gen-types: a migration under ${migrationsDir} failed to load — ${(cause as Error)?.message ?? String(cause)}`,
+      { cause },
+    );
+  }
 
   const reply = loadMigrateAddon().genArtifacts({
     envelopes,
@@ -153,9 +205,14 @@ export async function genTypesFromMigrations(
  *  a thrown build error and asserting `runtimeJson` is present. */
 function unwrap(reply: GenArtifactsReply, source: string): string {
   if (!reply.ok) {
-    throw new Error(`gen-types: ${source} failed to render — ${reply.error ?? "unknown error"}`);
+    // The engine REJECTED what the creator declared (a duplicate column, an
+    // unknown table, a facet the charter forbids). Their fault, so tagged.
+    throw new MigrationSourceError(
+      `gen-types: ${source} failed to render — ${reply.error ?? "unknown error"}`,
+    );
   }
   if (reply.runtimeJson === undefined) {
+    // Deliberately NOT tagged: `ok` with no payload is an emitter bug, ours.
     throw new Error(`gen-types: ${source} produced no schema.runtime.json`);
   }
   return reply.runtimeJson;

@@ -64,6 +64,8 @@ SUP_V1="${SUP_V1:-3142}"              # vite, 7a
 SUP_V2="${SUP_V2:-3143}"              # vite, 7b
 DB_V="${DB_V:-3144}"                  # vite, step 9 (db-todos data plane)
 DB_RT="${DB_RT:-3145}"                # dev runtime, step 9 (DB_TODOS_API_PORT)
+PF_V="${PF_V:-3148}"                  # vite, step 9b (fault classification)
+PF_RT="${PF_RT:-3149}"                # dev runtime, step 9b
 SC_V="${SC_V:-3146}"                  # vite, step 10 (scaffold)
 # 3001 is NOT a choice. The scaffold template's vite.config.ts passes no
 # `devServerPort`, so its dev runtime binds the plugin's DEFAULT_DEV_PORT --
@@ -72,7 +74,7 @@ SC_V="${SC_V:-3146}"                  # vite, step 10 (scaffold)
 # the template's port rather than moving the template to the harness's, and
 # frees 3001 first like every other port it binds.
 SC_RT="${SC_RT:-3001}"                # dev runtime, step 10 (template default)
-DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT $SC_V $SC_RT"
+DEV_PORTS="$DEV_PORT $DEV_RT_PORT $SUP_RT $SUP_V1 $SUP_V2 $DB_V $DB_RT $PF_V $PF_RT $SC_V $SC_RT"
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -146,6 +148,13 @@ cleanup() {
   # measurement into the control. Removed here too, not only on the happy path,
   # because the failure that matters is the one that aborts mid-step.
   rm -rf "$ROOT/examples/scaffold-app/src/server" 2>/dev/null || true
+  # The fault-classification leg (#269) arms a PLATFORM fault by making the
+  # generated dir read-only. Restored here as well as inline: if the script
+  # aborts between the chmod and its restore, read-only artifacts would make
+  # every LATER run of this harness -- and the creator's own `pnpm dev` in that
+  # checkout -- fail for a reason that has nothing to do with what they changed.
+  [ -n "${PF_GEN_DIR:-}" ] && chmod u+w "$PF_GEN_DIR" \
+    "$PF_GEN_DIR"/env.db.ts "$PF_GEN_DIR"/schema.runtime.json 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -1042,6 +1051,95 @@ if node -e '
   pass "the template's migrate command resolves to a bin we ship and declare"
 else
   fail "the scaffold template's migrate command does not resolve: $(cat /tmp/gp-binbind.log)"
+fi
+
+# --- The dev server must tell a creator's mistake from a platform fault ----
+#
+# `regenTypesDev` (sdks/vite-plugin/src/dev-server.ts) carries a catch written
+# for ONE fault: "a malformed migration must not take down the server". Right
+# for that fault. But since zero-migrate's bc4d1c9b put catch_unwind on all 14
+# napi exports, an ENGINE PANIC arrives at the same arm instead of killing the
+# process -- and so do a missing native addon, an unparseable descriptor, and
+# an unwritable generated/ dir. The creator got ONE console.error line and a
+# dev server that kept serving whatever descriptor was already on disk. Every
+# type error for the rest of that session is then a lie.
+#
+# `code` cannot separate the two classes; measured 2026-08-11 across four:
+#   engine rejects the migration   Error   code undefined      <- creator's
+#   migration .ts fails to build   Error   code undefined      <- creator's
+#   generated/ dir unwritable      Error   code "EACCES"       <- platform
+#   engine panic (upstream probe)  Error   code "GenericFailure"  platform
+# and by reading, addonLoadError + the missing-runtimeJson arm + the descriptor
+# parse ALSO throw code-less Errors. So the tag is CARRIED, not derived:
+# gen-types throws `MigrationSourceError` for the creator's two, plain Errors
+# for everything else, and the dev catch keeps its quiet arm for the tag only.
+#
+# ARMED WITHOUT A STUB: make the two generated artifacts unwritable. That is a
+# real platform-class fault on a real dev boot, not an injected double.
+#
+# The mode goes on the FILES, not just the directory, and that is not a detail.
+# The first version of this leg chmod'd only `generated/zeroship` to 0500 and
+# read the run as a red proof. It was not: `writeFile` over an EXISTING file
+# needs write permission on the FILE, and both artifacts are committed, so the
+# write succeeded and the log said "regenerated". The arming had not applied,
+# and a run where the fault never fired is indistinguishable from a run where
+# the code failed to classify it -- both show "did not exit". The directory
+# mode is kept anyway so a run that DELETES the artifacts first still arms.
+#
+# Both arms differ in EXACTLY one variable (the directory mode), and the
+# control is what makes the fault arm mean anything: without it, "vite exited"
+# would be equally explained by the harness misconfiguring the app.
+step 9b "Dev server: a platform fault refuses to start; a creator's own migration does not"
+PF_GEN_DIR="$TODOS/generated/zeroship"
+
+# CONTROL arm: writable dir, same command. Waits for the regeneration to be
+# REPORTED, not for a fixed delay -- otherwise a boot that never reached
+# gen-types at all would pass this arm by being slow.
+free_ports "$PF_V" "$PF_RT"
+( cd "$TODOS" && DB_TODOS_API_PORT="$PF_RT" ./node_modules/.bin/vite --port "$PF_V" --strictPort ) \
+  >/tmp/gp-faultctl.log 2>&1 &
+PF_CTL_PID=$!; PIDS+=($PF_CTL_PID)
+PF_CTL_OK=0
+for _ in $(seq 1 40); do
+  grep -q "gen-types: regenerated" /tmp/gp-faultctl.log 2>/dev/null && { PF_CTL_OK=1; break; }
+  kill -0 "$PF_CTL_PID" 2>/dev/null || break
+  sleep 1
+done
+if [ "$PF_CTL_OK" = "1" ] && kill -0 "$PF_CTL_PID" 2>/dev/null; then
+  pass "control: with a writable generated/ dir, gen-types regenerates and the dev server stays up"
+else
+  fail "control: the db-todos dev server did not reach a successful gen-types on :$PF_V (alive=$(kill -0 "$PF_CTL_PID" 2>/dev/null && echo yes || echo no)); the fault arm below cannot be read: $(tail -3 /tmp/gp-faultctl.log | tr '\n' ' ')"
+fi
+kill "$PF_CTL_PID" 2>/dev/null || true
+free_ports "$PF_V" "$PF_RT"
+
+# FAULT arm: identical, with the one variable flipped.
+chmod 0444 "$PF_GEN_DIR"/env.db.ts "$PF_GEN_DIR"/schema.runtime.json 2>/dev/null || true
+chmod 0500 "$PF_GEN_DIR"
+( cd "$TODOS" && DB_TODOS_API_PORT="$PF_RT" ./node_modules/.bin/vite --port "$PF_V" --strictPort ) \
+  >/tmp/gp-faultarm.log 2>&1 &
+PF_PID=$!; PIDS+=($PF_PID)
+PF_EXITED=0
+for _ in $(seq 1 40); do
+  kill -0 "$PF_PID" 2>/dev/null || { PF_EXITED=1; break; }
+  sleep 1
+done
+kill "$PF_PID" 2>/dev/null || true
+chmod u+w "$PF_GEN_DIR" "$PF_GEN_DIR"/env.db.ts "$PF_GEN_DIR"/schema.runtime.json
+free_ports "$PF_V" "$PF_RT"
+
+if [ "$PF_EXITED" = "1" ]; then
+  pass "a platform fault (unwritable generated/) stops the dev server instead of degrading it silently"
+else
+  fail "the dev server survived a PLATFORM fault and kept serving a stale descriptor: $(grep -c 'gen-types failed' /tmp/gp-faultarm.log) swallow line(s), still running after 40s. $(grep 'gen-types' /tmp/gp-faultarm.log | head -2 | tr '\n' ' ')"
+fi
+
+# The exit alone does not prove the fault was CLASSIFIED -- a crash for any
+# other reason exits too. This arm reads the classification the creator sees.
+if grep -q "PLATFORM FAULT" /tmp/gp-faultarm.log 2>/dev/null; then
+  pass "the failure names itself a platform fault, not the creator's migrations"
+else
+  fail "the dev server did not classify the fault; a creator sees only: $(grep -i 'gen-types' /tmp/gp-faultarm.log | head -2 | tr '\n' ' ')"
 fi
 
 free_ports "$DB_V" "$DB_RT"
@@ -2173,7 +2271,27 @@ gp_close_step
 # because a mutation that never applied prints the same green as a surviving
 # one. Under the mutation the orphan was pid 679607, still holding
 # `examples/starter/.zeroship/kv.redb` 20 seconds after its vite was SIGKILLed.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-57}"
+# RAISED 57 -> 60 on 2026-08-11 for step 9b (dev-server fault classification,
+# task #269), with the SAME provenance caveat as the +3 above: measured as a
+# standalone reproduction of the 9b block alone (the full script still needs a
+# stack this machine did not have), against the real examples/db-todos dev
+# server, one variable being which build of sdks/vite-plugin/dist was in place:
+#
+#     with the classification fix built:   3 passed, 0 failed
+#     with the two src files stashed
+#       and dist rebuilt WITHOUT it:       1 passed, 2 failed
+#
+# The surviving pass in the red run is 9b's own CONTROL (writable artifacts ->
+# gen-types succeeds, server stays up). It passing in BOTH runs is the point:
+# it shows the red is the classification failing, not the app being broken.
+#
+# The arming was confirmed to APPLY before the red run was believed, and the
+# first attempt did not: chmod 0500 on the directory alone left the write
+# succeeding, because both artifacts already exist and `writeFile` over an
+# existing file needs permission on the FILE. That run printed "did not exit"
+# -- identical to a genuine failure to classify -- and would have been read as
+# a red proof of a fix that had never been exercised.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-60}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
