@@ -374,11 +374,12 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
     const created = createTableAndView();
     await applyOne(created, database, driver, []);
 
-    // The fold's DropView arm destructures with `..`, which swallows `existenceGuard`
-    // the way the create side swallowed `replace` until a1fe1047, so the guard never reaches
-    // the decision. The guard-absorbing path that exists one layer up
-    // (crates/zero-migrate-node/src/lower.rs:628-644) hardcodes NotSatisfied for this
-    // dialect, so there is nowhere else for it to be honoured either.
+    // This passes because the snapshot now carries the view, so the fold resolves the
+    // drop without consulting the guard at all. The guard itself is still not honoured
+    // on this dialect: the fold's DropView arm destructures with `..`, which swallows
+    // `existenceGuard`, and the absorbing path one layer up
+    // (crates/zero-migrate-node/src/lower.rs:638) hardcodes NotSatisfied for MySQL.
+    // The arm below measures the case that distinction governs.
     const outcome = await applyOne(dropTheViewIfExists(), database, driver, [created]).then(
       () => "ran",
       (error: unknown) => String((error as Error)?.message ?? error),
@@ -398,6 +399,63 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
       0,
       "the guarded drop reaches the database rather than resolving to a no-op",
     );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(meta)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+/** What `ifExists` is actually FOR: a view that was never created. The arm above drops
+ *  a view that exists, which the populated snapshot resolves without consulting the
+ *  guard, so it cannot tell whether the guard works. This one can.
+ *
+ *  BEHAVIOUR OF RECORD, MECHANISM UNKNOWN. The drop succeeds, which is the outcome an
+ *  operator wants. I predicted a refusal from reading the code and was wrong, and I
+ *  cannot yet name what produces the success: `ops_without_completed_journal_evidence`
+ *  (crates/zero-migrate-node/src/lower.rs:1259) does queue an unjournalled op, and the
+ *  NotSatisfied arm (:713) does return an error, so something between them either
+ *  honours the guard or drops the op. Those differ in whether the guard is alive, which
+ *  is why this asserts only the operator-visible outcome and #212 holds the question.
+ *  If a change makes this refuse, that is a real regression, not a stale expectation. */
+test("MySQL: an ifExists drop of a view that never existed succeeds", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL absent-view guard arm skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueNamespace("viewdropabsent_my");
+  const meta = `${database}_migrations`;
+  const driver: DriverConfig = { kind: "mysql", url: MYSQL_URL };
+
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    // No createView anywhere in this history, so the guard is the only thing that could
+    // let the drop through.
+    const outcome = await applyOne(dropTheViewIfExists(), database, driver, []).then(
+      () => "ran",
+      (error: unknown) => String((error as Error)?.message ?? error),
+    );
+    assert.equal(
+      outcome,
+      "ran",
+      "an ifExists drop of an absent view is what the guard exists for, and it does not fail",
+    );
+    const [rows] = await admin.query(
+      `SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?`,
+      [database],
+    );
+    assert.equal((rows as unknown[]).length, 0, "no view is created by a drop");
   } finally {
     await admin
       .query(
