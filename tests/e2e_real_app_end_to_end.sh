@@ -184,15 +184,97 @@ fi
 echo ""; echo "=== Stage 6: the real app's traffic is METERED → usage_aggregates → a projected CHARGE ==="
 # Drive a batch of real app requests (index + RPC), all metered dispatches.
 for i in $(seq 1 60); do gw -o /dev/null "http://localhost:$GATE_PORT/__zeroship/v1/getMessages"; done
-REQ=0; for _ in $(seq 1 30); do REQ="$(psql_exec -tA -c "SELECT COALESCE(SUM(total),0) FROM zeroship.usage_aggregates WHERE app_id='$APP' AND metric='requests'" 2>/dev/null | tr -d '[:space:]')"; [ -n "$REQ" ] && [ "$REQ" -ge 50 ] 2>/dev/null && break; sleep 2; done
-echo "    usage_aggregates.requests for the deployed app = $REQ"
-[ -n "$REQ" ] && [ "$REQ" -ge 50 ] 2>/dev/null && pass "the app's requests were METERED into usage_aggregates ($REQ ≥ 50)" || fail "app usage not metered (got '$REQ')"
-CH=""; for _ in $(seq 1 20); do CH="$(curl -s "$CONTROL_URL/api/apps/$APP/projected-charge" -H "Authorization: Bearer $PAT" | jget '.projected_charge_cents')"; [ -n "$CH" ] && [ "$CH" -ge 1 ] 2>/dev/null && break; sleep 2; done
-echo "    projected charge for the app = $CH cents (1c/request)"
-[ -n "$CH" ] && [ "$CH" -ge 1 ] 2>/dev/null && pass "billing priced the real app's usage → projected charge $CH cents" || fail "no projected charge for the app (got '$CH')"
+# SETTLE the meter before reading it. Polling "is it at least N yet" stops at the
+# first read that clears the floor, which is not the same as the total having
+# stopped moving - and the identity below compares two reads of the SAME
+# quantity, so a still-growing total would make it flap. Require two CONSECUTIVE
+# equal reads instead (the #274 lesson: poll the observable you actually depend
+# on, and require consecutive agreement, not a single lucky sample).
+REQ=""; PREV="x"
+for _ in $(seq 1 30); do
+  REQ="$(psql_exec -tA -c "SELECT COALESCE(SUM(total),0) FROM zeroship.usage_aggregates WHERE app_id='$APP' AND metric='requests'" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$REQ" ] && [ "$REQ" -gt 0 ] 2>/dev/null && [ "$REQ" = "$PREV" ] && break
+  PREV="$REQ"; sleep 2
+done
+echo "    usage_aggregates.requests for the deployed app = $REQ (settled: two consecutive equal reads)"
+
+# TWO-SIDED, because a floor alone cannot see over-counting and over-counting is
+# over-BILLING. This used to be `-ge 50` with no ceiling, so a meter that emitted
+# every dispatch twice would report 126 and still pass. The ceiling is empirical,
+# not exact: it exists to catch DOUBLING, not to pin the count. Stage 6 drives 60
+# requests plus the handful stages 4-5 make, and the observed total is recorded in
+# the commit that set these bounds. Override for a modified traffic profile.
+APP_REQ_MIN="${APP_REQ_MIN:-50}"; APP_REQ_MAX="${APP_REQ_MAX:-100}"
+if [ -n "$REQ" ] && [ "$REQ" -ge "$APP_REQ_MIN" ] 2>/dev/null && [ "$REQ" -le "$APP_REQ_MAX" ] 2>/dev/null; then
+  pass "the app's requests were METERED into usage_aggregates ($APP_REQ_MIN <= $REQ <= $APP_REQ_MAX)"
+else
+  fail "app requests outside the two-sided bound (got '$REQ', want $APP_REQ_MIN..$APP_REQ_MAX; below = not metered, above = double-counted)"
+fi
+
+# ONE fetch, deliberately. The projection is memoised for PROJECTED_CHARGE_TTL_SECS
+# (60s, crates/control/src/billing_read.rs:35), so a warm-up call would pin a
+# PRE-settlement value for the whole rest of the stage. Fetch after the meter has
+# settled, and read the period back out of the SAME response.
+PC_JSON="$(curl -s "$CONTROL_URL/api/apps/$APP/projected-charge" -H "Authorization: Bearer $PAT")"
+CH="$(printf '%s' "$PC_JSON" | jget '.projected_charge_cents')"
+PERIOD="$(printf '%s' "$PC_JSON" | jget '.period')"
+echo "    projected charge for the app = $CH cents, period = $PERIOD"
+
+# Sum over the SAME window the projection priced. billing_read::projected_charge
+# prices ONE period and returns which one; the read above sums every period. On a
+# run that straddles a period boundary those are different windows, and comparing
+# them would be comparing two different questions.
+REQ_P=""
+if [ -n "$PERIOD" ]; then
+  REQ_P="$(psql_exec -tA -c "SELECT COALESCE(SUM(total),0) FROM zeroship.usage_aggregates WHERE app_id='$APP' AND metric='requests' AND period='$PERIOD'::date" 2>/dev/null | tr -d '[:space:]')"
+fi
+
+# THE CONSERVATION IDENTITY, and it is exact rather than a floor.
+#
+# This harness seeds base_fee_cents=0, included_units=0, fx=1e12 pico-cents/unit
+# and exactly ONE weighted metric (requests, units_per_op=1, per_units=1). In the
+# product: pricing.rs::total_units SKIPS unweighted metrics ("unweighted => free"),
+# FX_SCALE is 1e12 (pricing.rs:67), and charge_cents returns
+# base_fee + round(billable * fx / FX_SCALE). db/migrations-ts creates
+# metric_weights but INSERTs no rows, so `requests` really is the only weighted
+# metric at run time. Therefore the priced cents MUST EQUAL the metered requests,
+# exactly, whatever that number happens to be.
+#
+# That is why this is worth more than `CH >= 1`: it ties the priced amount to the
+# metered count, so a pricing path that dropped a metric, applied the wrong
+# weight, or billed a stale period is a FAILURE rather than a smaller pass. It is
+# the same shape as the db_writes-vs-rows check in the billing gate (#289).
+#
+# WHAT IT DOES NOT CATCH, stated because the bound above is the reason it is
+# still needed: a meter that emits every dispatch twice doubles BOTH sides and
+# this identity still holds. Over-counting is caught by APP_REQ_MAX, not here.
+if [ -n "$CH" ] && [ -n "$REQ_P" ] && [ "$CH" = "$REQ_P" ]; then
+  pass "priced cents == metered requests for period $PERIOD ($CH == $REQ_P), exact under a 1c/request plan"
+else
+  fail "CONSERVATION BROKEN: projected charge '$CH' cents != metered requests '$REQ_P' for period '$PERIOD' (plan: base 0, included 0, 1c per request, requests the only weighted metric)"
+fi
 
 echo ""; echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
-echo "  (real app: built with vite → deployed → served → RPC executed → billed)"
+echo "  (real app: built with vite -> deployed -> served -> RPC executed -> billed)"
 echo "============================================"
-[ $FAIL -eq 0 ] && exit 0 || exit 1
+# ANTI-HOLLOW FLOOR. The tail used to be `[ $FAIL -eq 0 ] && exit 0`, so a run
+# that silently dropped every assertion reported success: 0 failed over 0
+# assertions. #294 is the proof this is not theoretical - a loaded run of the
+# billing gate silently dropped one assertion (38/0 against 39/0) and only a
+# floor caught it.
+#
+# The floor counts assertions that RAN (PASS+FAIL), not that PASSED. A mutation
+# moves an outcome BETWEEN those two columns, so a floor on PASS alone goes red
+# on any deliberate red-proof and tells you nothing about coverage; only a LOST
+# assertion drops the sum.
+APP_E2E_MIN_RAN="${APP_E2E_MIN_RAN:-17}"
+RAN=$((PASS + FAIL))
+rc=0
+[ "$FAIL" -eq 0 ] || rc=1
+if [ "$RAN" -lt "$APP_E2E_MIN_RAN" ]; then
+  echo "  x FLOOR: only $RAN assertions ran, expected at least $APP_E2E_MIN_RAN." >&2
+  echo "    Assertions went MISSING - a smaller green is not a pass here." >&2
+  rc=1
+fi
+exit $rc
