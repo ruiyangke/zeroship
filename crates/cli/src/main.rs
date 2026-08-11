@@ -310,7 +310,7 @@ fn cmd_serve(args: &[String]) {
 // generated descriptor before it can install typed `env.db`.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>]",
+        "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>] [--no-create]",
     );
     let app = flag_str(args, "--app=").expect("--app=<name> is required");
     let control_url = flag_str(args, "--control=")

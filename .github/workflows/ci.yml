@@ -210,6 +210,17 @@ jobs:
       # code or config it is a dependency that resolves or does not.
       - name: No hardcoded home paths in source/config
         run: tests/home_path_gate.sh
+      # Five shipped `zeroship deploy` instructions named `--key=<master>`, a flag
+      # the CLI has never had, and two passed `.` where it takes a path to the
+      # built `.zship`. Both fail in a way that never mentions what the creator
+      # typed: the arg loop ignores the unknown flag and the command dies on a
+      # missing token. Nothing compared these instructions to the binary, so they
+      # rotted in place across a flag rename. The allowed set is parsed from the
+      # CLI's own help lines rather than listed here - a hand list beside the
+      # thing it describes is satisfiable by editing the list, which is the shape
+      # this repo has been burned by twice.
+      - name: Shipped deploy instructions match the CLI
+        run: tests/deploy_instructions_gate.sh
       - name: Test-target enumeration floor
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
