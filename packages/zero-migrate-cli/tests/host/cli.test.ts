@@ -1855,3 +1855,64 @@ test("a busy status reply reports the holder and never renders counts", () => {
   assert.equal(statusIsDirty(busy), false);
   assert.equal(statusExitCode(busy, true), 0);
 });
+
+// The identity of the LOADED addon, which `version` alone cannot report. A stale
+// prebuilt `.node` has caused real incidents here, and `buildInfo().sourceDigest` is
+// the value that separates the source in the tree from the binary in memory. The
+// default output stays a bare scalar because `$(zero-migrate version)` captures the
+// whole of stdout, so anything appended below it is a breaking change to every
+// caller that substitutes the command.
+test("version reports only the package version, and the addon identity on request", () => {
+  const bare = runCli("version");
+  assert.equal(bare.status, 0, `version exit: ${bare.stderr}`);
+  assert.match(
+    bare.stdout,
+    /^\d+\.\d+\.\d+[^\n]*\n$/,
+    `version must print one bare scalar and nothing else, got ${JSON.stringify(bare.stdout)}`,
+  );
+  const cliVersion = bare.stdout.trim();
+
+  // `--json` is parsed globally and never validated against the verb, so
+  // `version --json` already succeeds today and prints the bare scalar. Pinned so
+  // that teaching it to emit a document is a deliberate change, not a side effect.
+  const bareJson = runCli("version", "--json");
+  assert.equal(bareJson.status, 0, `version --json exit: ${bareJson.stderr}`);
+  assert.equal(
+    bareJson.stdout,
+    bare.stdout,
+    "version --json must stay byte-identical to version until a verb opts in",
+  );
+
+  const verbose = runCliWithEnv({ ZERO_MIGRATE_ADDON_PATH: ADDON_PATH }, "version", "--verbose");
+  assert.equal(verbose.status, 0, `version --verbose exit: ${verbose.stderr}`);
+  assert.match(
+    verbose.stdout,
+    new RegExp(`\\b${cliVersion.replace(/\./g, "\\.")}\\b`),
+    `version --verbose must still name the CLI version, got ${JSON.stringify(verbose.stdout)}`,
+  );
+  assert.match(
+    verbose.stdout,
+    /[0-9a-f]{64}/,
+    `version --verbose must report the addon source digest, got ${JSON.stringify(verbose.stdout)}`,
+  );
+
+  const asJson = runCliWithEnv(
+    { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+    "version",
+    "--verbose",
+    "--json",
+  );
+  assert.equal(asJson.status, 0, `version --verbose --json exit: ${asJson.stderr}`);
+  const doc = JSON.parse(asJson.stdout) as {
+    cliVersion?: string;
+    addon?: { version?: string; irVersion?: number; sourceDigest?: string };
+  };
+  assert.equal(doc.cliVersion, cliVersion, "cliVersion must match the bare output");
+  assert.equal(typeof doc.addon?.version, "string", `addon.version: ${asJson.stdout}`);
+  assert.equal(typeof doc.addon?.irVersion, "number", `addon.irVersion: ${asJson.stdout}`);
+  assert.match(
+    doc.addon?.sourceDigest ?? "",
+    /^[0-9a-f]{64}$/,
+    `addon.sourceDigest must be a lowercase sha256: ${asJson.stdout}`,
+  );
+});

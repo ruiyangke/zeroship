@@ -68,6 +68,53 @@ function packageVersion(): string {
   }
 }
 
+/** `version --verbose`: the CLI version PLUS the identity of the addon actually
+ *  loaded. `packageVersion()` names the JavaScript that is running; it says nothing
+ *  about which native binary answered, and a stale prebuilt `.node` is wrong in
+ *  exactly that gap while every other call still succeeds. `sourceDigest` is a
+ *  sha256 over the workspace source the binary was built from, so it separates the
+ *  code in the tree from the code in memory.
+ *
+ *  Loading is confined to this branch: the caller has opted in, so a missing or
+ *  broken addon is reported here rather than being allowed to break plain `version`.
+ */
+function versionVerbose(asJson: boolean): number {
+  const cliVersion = packageVersion();
+  let info;
+  try {
+    info = loadAddon().buildInfo();
+  } catch (e) {
+    process.stderr.write(
+      `zero-migrate: cannot report the addon identity: ${(e as Error).message}\n`,
+    );
+    return 1;
+  }
+  if (asJson) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          cliVersion,
+          addon: {
+            version: info.version,
+            irVersion: info.irVersion,
+            sourceDigest: info.sourceDigest,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return 0;
+  }
+  process.stdout.write(
+    `zero-migrate ${cliVersion}\n` +
+      `  addon version  ${info.version}\n` +
+      `  addon ir       ${info.irVersion}\n` +
+      `  addon source   ${info.sourceDigest}\n`,
+  );
+  return 0;
+}
+
 /** Lazily activate a TypeScript loader so `.ts`/`.mts`/`.cts` migrations can be
  *  dynamically `import()`ed under plain Node. No-op when the set is pure `.js`, when a
  *  parent loader (tsx / ts-node via `--import` or `NODE_OPTIONS`) already handles TS, or
@@ -143,6 +190,10 @@ interface Args {
   projectSchema: string;
   /** `--json` — machine-readable output where a verb supports it. */
   json: boolean;
+  /** `version --verbose` - also report the loaded addon's identity. Its own flag
+   *  rather than a change to `version`, because `$(zero-migrate version)` captures
+   *  all of stdout and `--json` is already accepted (and ignored) by `version`. */
+  verbose: boolean;
   /** `--approve` grants operator approval for reviewed destructive/data-rewrite steps. */
   approved: boolean;
   /** `lint --explain` renders SQL for every selected dialect. */
@@ -182,6 +233,7 @@ function parseArgs(argv: string[]): Args {
     projectSchema: DEFAULT_SCHEMA,
     policyPaths: [],
     json: false,
+    verbose: false,
     approved: false,
     explain: false,
     strict: false,
@@ -284,6 +336,10 @@ function parseArgs(argv: string[]): Args {
       case "json":
         rejectInlineVal();
         args.json = true;
+        break;
+      case "verbose":
+        rejectInlineVal();
+        args.verbose = true;
         break;
       case "approve":
         rejectInlineVal();
@@ -1471,8 +1527,14 @@ export async function main(argv: string[]): Promise<number> {
     return 1;
   }
   if (args.command === "version") {
-    process.stdout.write(`${packageVersion()}\n`);
-    return 0;
+    // Bare `version` stays one scalar and stays independent of the addon: it answers
+    // even when the binary is missing or ZERO_MIGRATE_ADDON_PATH points at nothing,
+    // and `$(zero-migrate version)` captures whatever is here in full.
+    if (!args.verbose) {
+      process.stdout.write(`${packageVersion()}\n`);
+      return 0;
+    }
+    return versionVerbose(args.json);
   }
   if (args.command === "" || args.command === "help") {
     process.stdout.write(USAGE);

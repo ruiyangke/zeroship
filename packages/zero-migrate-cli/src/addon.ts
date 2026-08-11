@@ -38,6 +38,7 @@ import type {
   HistoryReply,
   LoadVerifyReply,
   PreviewSqlSource,
+  BuildInfo,
 } from "zero-migrate-node";
 
 export type {
@@ -77,6 +78,12 @@ export interface MigrateAddon {
   /** The IR-format version this addon was built against — the single source of
    *  truth across the boundary. */
   irVersion(): number;
+
+  /** The identity of the loaded binary: crate version, IR floor, and a sha256 over
+   *  the workspace source it was built from. `irVersion()` answers the format floor
+   *  alone; this answers WHICH artifact is in memory, which is what a stale prebuilt
+   *  `.node` gets wrong while every other call still succeeds. */
+  buildInfo(): BuildInfo;
 
   /** Sync, DB-free load + verify of an IR envelope document. Returns a typed
    *  `LoadVerifyReply` (`registry` crosses typed, not a JSON string). */
