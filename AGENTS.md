@@ -280,7 +280,9 @@ Stable contracts, live in `docs/reference/`:
 
 ```bash
 # Build (workspace) — build the SDKs FIRST. The runtime crate
-# include_str!s `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`,
+# include_str!s `sdks/bootstrap/dist/{runtime-entry,install-schema}.js`
+# and `sdks/db/dist/internal.js` (NOT dispatcher.js -- checked
+# 2026-08-11; see the header of sdks/bootstrap/src/dispatcher.ts),
 # so `pnpm build` must run before `cargo build -p zeroship-runtime`.
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.

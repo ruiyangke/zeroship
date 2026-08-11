@@ -152,7 +152,14 @@ export function createFetchHandler(
           }
         }
       } else {
-        return errResponse(405, "FAILED_PRECONDITION", `method ${request.method} not allowed on /__zeroship/v1/`);
+        // The message names the procedure, not just the rail. The deployed
+        // tier answers this same case from the gateway's procedure-kind gate
+        // (`crates/gateway/src/router/dispatch.rs`), which knows the id and now
+        // formats it identically, so the two tiers are byte-identical here.
+        // Without the id the two could not agree without the gateway throwing
+        // information away. Verified end to end by the dispatcher leg of
+        // `tests/e2e_dev_vs_deployed_errors.sh`.
+        return errResponse(405, "FAILED_PRECONDITION", `method ${request.method} not allowed on /__zeroship/v1/${id}`);
       }
 
       return rpcAndRespond(loadNormalized, id, input, ctx);

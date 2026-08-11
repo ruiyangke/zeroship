@@ -15,11 +15,47 @@
 // bypasses this dispatcher entirely; the bootstrap calls the function
 // directly.
 //
-// SOURCE OF TRUTH: this file is the canonical dispatcher. Dev mode
-// (Vite plugin's `dev-bootstrap`) installs it via `dev-entry.ts` which
-// imports this module for its side effect; production splices it into
-// the runtime's bootstrap module via `include_str!`. Single
-// implementation; no drift between dev and prod.
+// READ THIS BEFORE AUDITING THE RPC ERROR CONTRACT.
+//
+// This header used to say: "SOURCE OF TRUTH: this file is the canonical
+// dispatcher ... production splices it into the runtime's bootstrap
+// module via `include_str!`. Single implementation; no drift between dev
+// and prod." Both halves are wrong, checked 2026-08-11.
+//
+//  1. Nothing `include_str!`s `dist/dispatcher.js`. `grep -rn
+//     'include_str!' crates/runtime/src` embeds `runtime-entry.js` and
+//     `install-schema.js` from this package, and nothing else. This file
+//     reaches the runtime by being BUNDLED into the app's own server
+//     bundle: the Vite plugin's synthetic entry imports
+//     `@zeroship/bootstrap`, whose index imports this module for its
+//     install side effect.
+//
+//  2. The UNARY RPC path never reaches this function, on either tier.
+//     The synthetic entry exports `default.rpc` as a plain dict; the
+//     bootstrap wraps that dict in `USER_RPC`
+//     (crates/runtime/src/core/init.rs, `dispatchRpc`), and the kernel's
+//     fast path calls it. `USER_RPC` delegates to `__zsDispatchRpc` -- a
+//     SECOND copy of the body below, written inline in init.rs. That
+//     copy is what answers `Method not found` and `Invalid input` for a
+//     normal query or mutation.
+//
+// The two copies HAVE already drifted in text: this one throws "No RPC
+// dispatch table installed" where init.rs throws "RPC registry is not an
+// object". That is not client-visible today only because the arm is
+// unreachable in a built app. Until the two are actually unified, a
+// change here needs the same change there in the same patch.
+//
+// What this copy DOES serve, on both tiers: stream and subscription
+// procedures, which the kernel deliberately routes through
+// `default.fetch` -> `createFetchHandler` -> here, so the SSE encoder can
+// wrap the iterator.
+//
+// Dev is not a different story: `pnpm dev` runs the same Rust runtime
+// binary, so the same split applies there. Measured rather than reasoned
+// -- `tests/e2e_dev_vs_deployed_errors.sh` sends an unparseable body and
+// dev answers with the RUST parser's text ("invalid JSON body", from
+// `crates/runtime/src/core/runtime.rs::parse_rpc_body`) and not the JS
+// one, which would have appended the underlying parse error.
 
 // Build emits this file with `export {};` to mark it as a module. The
 // post-build step in `scripts/post-build.mjs` strips that line (and
