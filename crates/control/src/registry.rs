@@ -776,9 +776,31 @@ async fn load_frontable_suffix_catalog(conn: &Client) -> FrontableSuffixCatalog 
         }
     };
     let Some(row) = rows.first() else {
-        tracing::error!(
-            "registry: frontable suffix catalog row missing; wildcard net grants fail closed"
-        );
+        // ABSENCE IS ANTICIPATED, so it is announced once rather than per
+        // refresh. This catalog is operator-supplied: which wildcard suffixes
+        // may be fronted is policy, not something a migration can seed, and
+        // this function's own contract above says a missing row "marks the
+        // catalog unavailable so wildcard entries fail closed". A correctly
+        // configured deployment that has simply not set the policy is
+        // therefore a normal state.
+        //
+        // It was logged at ERROR on every registry refresh. MEASURED against
+        // the live deployment 2026-08-11: 57 ERROR lines per minute, forever,
+        // describing a by-design condition. That is not a cosmetic problem --
+        // it buries real faults. The workflow_engine failure sitting beside it
+        // logged at a near-identical rate, and I misread this line as a
+        // deployment blocker twice before reading the contract above.
+        //
+        // The behaviour is unchanged: still fails closed, still returns the
+        // empty catalog. Only the announcement is once-per-process.
+        static ANNOUNCED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "registry: frontable suffix catalog row missing; wildcard net grants fail \
+                 closed (operator-supplied policy, logged once per process)"
+            );
+        }
         return FrontableSuffixCatalog::default();
     };
     let value: serde_json::Value = row.get("value_json");
