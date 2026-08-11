@@ -56,17 +56,30 @@ REAL vite-built `.zship` (not a hand-packed fixture):
 3. ✅ The app is provisioned + deployed (`dev-provision`, dev-only) and the
    **gateway serves it**: `GET /apps/<name>/` returns the app's `index.html` + JS
    asset, and the **RPC server function executes** in the worker
-   (`/__zeroship/v1/getMessages`). The whole in-monorepo chain passes **9/9**.
+   (`/__zeroship/v1/getMessages`).
+
+   **The chain as a whole does NOT pass, deliberately.** Measured 2026-08-11 on a
+   four-service run at HEAD: **67 passed, 8 failed, exit 1** over twelve steps
+   (1-11 plus `9b`), 75 outcomes. The eight are the by-design reds the harness
+   names on every run: step 10's six scaffold comparisons (#260) and step 11's two
+   collation reds (#255). The "9/9" this line carried was the count when only the
+   first three steps existed, and it survived every step added since - stating
+   "passes" about a script that exits non-zero.
 
    WHAT STEP 3 DOES NOT SHOW. `getMessages` is `query(async () => messages)` over
    a module-level array literal seeded in `examples/starter/src/server.ts`, and
    `addMessage` pushes to that same array. The RPC returns a value the handler
    closed over, not a value read from anywhere, so this leg proves dispatch and
-   serialization and says NOTHING about the data plane: the 9/9 would still be
-   9/9 with `env.db` broken or absent. The starter's only `env.*` call is
-   `env.auth.getUser`. For a leg that does exercise `env.db`, the corpus has
+   serialization and says NOTHING about the data plane: THIS STEP's outcomes are
+   unchanged with `env.db` broken or absent. The starter's only `env.*` call is
+   `env.auth.getUser`. Scoped to the step on purpose - the claim used to cover the
+   whole chain, which stopped being true once steps 9, 9b and 11 started driving
+   `env.db` through `examples/db-todos` (22 of the 75 outcomes).
+   For a leg that does exercise `env.db`, the corpus has
    eight examples that reach it (heaviest: `hr-system` 117 call sites,
-   `db-todos` 35, `db-e2e` 20) — none of them wired into this chain today.
+   `db-todos` 35, `db-e2e` 20). **`db-todos` IS wired into this chain** - steps 9,
+   9b and 11 - and the other seven are not. "None of them wired" was true when
+   written and was left standing after step 9 landed.
 
    Two consequences worth knowing before copying the starter: the array is
    per-isolate state, so with one isolate per (app, live deploy) plus LRU
@@ -119,8 +132,13 @@ For the **real agent flow** against a deployed platform, the path is
 - ✅ Durable workflow starter (`examples/workflows-order/`) covering steps,
   sleeps, signals, child calls, and compensation.
 - ✅ Real build → `.zship` (vite-plugin) — proven.
-- ✅ In-monorepo chain: migrate → stack → deploy → serve + RPC — **9/9**
-  (`tests/golden_path.sh`).
+- ⚠️ In-monorepo chain: migrate → stack → deploy → serve + RPC + dev-vs-deployed.
+  **67 passed, 8 failed, exit 1** (`tests/golden_path.sh`, measured 2026-08-11).
+  The eight are RED AT HEAD BY DESIGN and the harness names them on every run:
+  step 10's six scaffold comparisons (#260) and step 11's two collation reds
+  (#255). Everything the chain covers works; the two open decisions are what keep
+  it non-zero, so the CI `golden-path` job is red until they land. This row said
+  `✅ ... 9/9` long after both were true.
 - ❌ External build: registry-installed SDKs, scaffolded app builds outside the
   monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). Published
   `@zeroship/vite-plugin` requires `zero-migrate@0.1.0` +
