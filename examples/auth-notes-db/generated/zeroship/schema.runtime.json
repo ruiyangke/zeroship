@@ -5,6 +5,7 @@
       "fields": {
         "id": {
           "type": "string",
+          "maxLength": 255,
           "required": true
         },
         "created_at": {
@@ -16,10 +17,12 @@
           "required": true
         },
         "created_by": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 255
         },
         "updated_by": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 255
         },
         "version": {
           "type": "int",
