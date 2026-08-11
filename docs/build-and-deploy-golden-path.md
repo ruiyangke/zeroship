@@ -45,8 +45,25 @@ REAL vite-built `.zship` (not a hand-packed fixture):
    comes up healthy on the current HEAD binaries.
 3. ✅ The app is provisioned + deployed (`dev-provision`, dev-only) and the
    **gateway serves it**: `GET /apps/<name>/` returns the app's `index.html` + JS
-   asset, and the **RPC server function executes** in the worker and returns data
+   asset, and the **RPC server function executes** in the worker
    (`/__zeroship/v1/getMessages`). The whole in-monorepo chain passes **9/9**.
+
+   WHAT STEP 3 DOES NOT SHOW. `getMessages` is `query(async () => messages)` over
+   a module-level array literal seeded in `examples/starter/src/server.ts`, and
+   `addMessage` pushes to that same array. The RPC returns a value the handler
+   closed over, not a value read from anywhere, so this leg proves dispatch and
+   serialization and says NOTHING about the data plane: the 9/9 would still be
+   9/9 with `env.db` broken or absent. The starter's only `env.*` call is
+   `env.auth.getUser`. For a leg that does exercise `env.db`, the corpus has
+   eight examples that reach it (heaviest: `hr-system` 117 call sites,
+   `db-todos` 35, `db-e2e` 20) — none of them wired into this chain today.
+
+   Two consequences worth knowing before copying the starter: the array is
+   per-isolate state, so with one isolate per (app, live deploy) plus LRU
+   eviction an `addMessage` result can vanish and reappear depending on which
+   isolate serves the next request; and it is a placeholder, not the house
+   persistence pattern, despite `examples/starter/CLAUDE.md` being what an AI
+   coding agent reads first.
 
 ## Both halves are now proven end-to-end
 
