@@ -15,5 +15,10 @@ export default defineApp({
     "rpc:err.status4xxCode": { auth: "anon", publiclyAccessible: true },
     "rpc:err.publicCode5xx": { auth: "anon", publiclyAccessible: true },
     "rpc:err.ok": { auth: "anon", publiclyAccessible: true },
+    // The dispatcher leg. Anon for the same reason as the rest: a gated
+    // procedure is answered by the gateway's auth gate BEFORE dispatch, so an
+    // INVALID_ARGUMENT that the dispatcher would have produced never happens
+    // and the row would read as a clean 401 rather than as "never measured".
+    "rpc:err.needsInput": { auth: "anon", publiclyAccessible: true },
   },
 });

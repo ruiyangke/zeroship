@@ -10,7 +10,8 @@
   "dependencies": {
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
-    "@zeroship/vite-plugin": "workspace:*"
+    "@zeroship/vite-plugin": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@zeroship/types": "workspace:*",

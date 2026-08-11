@@ -533,6 +533,9 @@ importers:
       '@zeroship/vite-plugin':
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
+      zod:
+        specifier: 'catalog:'
+        version: 3.25.76
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*

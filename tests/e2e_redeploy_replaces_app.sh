@@ -105,9 +105,16 @@ rpc() {
   curl -sS -m 15 -X POST -H 'content-type: application/json' -H "X-Api-Key: $KEY" \
     "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/$1" -d '{"json":{}}' 2>&1
 }
-# An unknown procedure is refused by the GATEWAY at routing off the manifest
-# ("no resource matched"), not by the dispatcher, which is what dev returns
-# ("Method not found"). Accept both so this reads correctly on either side.
+# An unknown procedure is refused by the GATEWAY at routing off the manifest,
+# never reaching the dispatcher. Until 2026-08-11 the gateway said that in its
+# own envelope ("no resource matched") while dev said "Method not found", and
+# this alternation existed to paper over the difference. The dispatcher leg of
+# `tests/e2e_dev_vs_deployed_errors.sh` measured that gap (plus two more of the
+# same class) and it is now closed: the gateway answers RPC-path rejections in
+# the worker's envelope, so BOTH tiers say
+# `{"message":"Method not found: <id>","name":"Error","code":"NOT_FOUND"}`.
+# The alternation is kept only so a bisect across that fix still reads correctly;
+# the left branch is the live one.
 absent() { printf '%s' "$1" | grep -qE "Method not found|no resource matched"; }
 
 echo "=== deploy A"

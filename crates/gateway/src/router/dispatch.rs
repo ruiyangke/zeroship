@@ -1253,6 +1253,20 @@ async fn handle_request(
     // No match → 404 (the `*` catch-all in resources should always
     // match if the user wants a fallback handler).
     let Some(resolved_resource) = resolved_resource else {
+        // On the RPC rail, answer in the WORKER's error envelope rather than
+        // the gateway's generic one. Measured 2026-08-11 by
+        // `tests/e2e_dev_vs_deployed_errors.sh` (dispatcher leg): an unknown
+        // procedure id returned `{"message":"Method not found: <id>",
+        // "name":"Error","code":"NOT_FOUND"}` in `pnpm dev` and
+        // `{"error":"no resource matched"}` deployed. Different key, different
+        // text, and no `code` at all deployed - so a client that branches on
+        // `code === "NOT_FOUND"` works locally and silently stops working in
+        // production. Both shapes were defensible in isolation; two shapes for
+        // one operation is not, and the gateway is the side that has to move
+        // because the worker's envelope is what every other RPC error uses.
+        if let Some(resp) = rpc_predispatch_not_found(&dispatch_path) {
+            return resp;
+        }
         return HttpResponse::NotFound()
             .json(&serde_json::json!({"error": "no resource matched"}));
     };
@@ -1381,8 +1395,22 @@ async fn execute_resource_tree(
             ProcedureKind::Subscription => method == ntex::http::Method::GET,
         };
         if !allow {
-            return HttpResponse::MethodNotAllowed()
-                .json(&serde_json::json!({"error": "method not allowed for this procedure kind"}));
+            // Same envelope decision as the 404 arm above. Dev answers this
+            // case from `sdks/bootstrap/src/fetch-handler.ts` with
+            // `{"message":"method PUT not allowed on /__zeroship/v1/<id>",
+            // "name":"Error","code":"FAILED_PRECONDITION"}`; the gateway used to
+            // answer `{"error":"method not allowed for this procedure kind"}`.
+            // The message is built the same way on both sides so the two tiers
+            // are byte-identical, and it is NOT the old text: the old one named
+            // the procedure kind, which dev has no way to know, so keeping it
+            // would have meant the deployed tier is the only one a client can
+            // parse. The `kind` is recoverable from the manifest; the `code` is
+            // what a client actually branches on.
+            return zs_rpc_predispatch_error(
+                ntex::http::StatusCode::METHOD_NOT_ALLOWED,
+                "FAILED_PRECONDITION",
+                &format!("method {} not allowed on {}", method, dispatch_path),
+            );
         }
         if matches!(kind, ProcedureKind::Subscription) {
             // Subscription URLs only resolve over a WebSocket upgrade.
@@ -1787,6 +1815,67 @@ pub(super) struct InflightHandle {
 /// callers should only enter idempotency for `WorkerRpc` actions.
 fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
     dispatch_path.strip_prefix("/__zeroship/v1/")
+}
+
+/// The RPC error envelope the WORKER speaks:
+/// `{"message":...,"name":"Error","code":...}`, `content-type: application/json`.
+///
+/// This is deliberately NOT [`build_zs_error_response`]'s
+/// `application/zs-error+json` `{code,message,details,retryable}` shape. That one
+/// is the idempotency subsystem's; the shape here is what
+/// `crates/runtime/src/core/init.rs`'s `mkErr` and
+/// `sdks/bootstrap/src/fetch-handler.ts`'s `errResponse` produce, and therefore
+/// what a client sees for every RPC error the gateway does NOT intercept. A
+/// gateway pre-dispatch rejection is the same event to a client as a worker
+/// rejection, so it gets the same envelope.
+fn zs_rpc_predispatch_error(
+    status: ntex::http::StatusCode,
+    code: &str,
+    message: &str,
+) -> HttpResponse {
+    HttpResponse::build(status)
+        .content_type("application/json")
+        .body(
+            serde_json::to_vec(&serde_json::json!({
+                "message": message,
+                "name": "Error",
+                "code": code,
+            }))
+            .unwrap_or_default(),
+        )
+}
+
+/// Pre-dispatch 404 on the RPC rail, in the worker's envelope. `None` for any
+/// non-RPC path, so ordinary asset/page 404s keep the gateway's generic body.
+///
+/// The id-less form needs its own arm and it is easy to miss:
+/// `canonicalize_path` strips a lone trailing slash, so a request for
+/// `/__zeroship/v1/` reaches here as `/__zeroship/v1` and `strip_prefix` of the
+/// slash-terminated tag returns `None`. Without the first arm that request
+/// falls through to the generic 404 - which is exactly the divergence being
+/// fixed, one path deeper. Dev answers it 400 `INVALID_ARGUMENT`
+/// `"missing wireId"` (`fetch-handler.ts`), and 400 is the more accurate of the
+/// two: the request names no procedure, which is a malformed request rather than
+/// a missing resource.
+fn rpc_predispatch_not_found(dispatch_path: &str) -> Option<HttpResponse> {
+    const TAG: &str = "/__zeroship/v1/";
+    let id = if dispatch_path == TAG.trim_end_matches('/') {
+        ""
+    } else {
+        dispatch_path.strip_prefix(TAG)?
+    };
+    if id.is_empty() {
+        return Some(zs_rpc_predispatch_error(
+            ntex::http::StatusCode::BAD_REQUEST,
+            "INVALID_ARGUMENT",
+            "missing wireId",
+        ));
+    }
+    Some(zs_rpc_predispatch_error(
+        ntex::http::StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        &format!("Method not found: {id}"),
+    ))
 }
 
 /// Build the standard `application/zs-error+json` envelope for an
