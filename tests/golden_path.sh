@@ -2842,6 +2842,23 @@ else
   # THE ONE THAT IS RED AT HEAD. Deleting an app leaves the creator's own tables
   # and every row in them in Postgres forever, because no production code path
   # calls drop_namespace. See #330.
+  #
+  # READ THIS BEFORE CONCLUDING THAT A FIX FOR #331 DID NOT WORK. What this step
+  # observes is the FIRST blocker in a chain of at least two, and it can only
+  # ever see one at a time, because the cascade aborts the whole transaction on
+  # the first trigger that raises. MEASURED against the live golden database by
+  # walking the FK graph: exactly two DELETE-firing triggers are reachable from
+  # a `DELETE FROM zeroship.apps` cascade, and NEITHER honours the
+  # `zeroship.audit_retention` GUC (only 3 of the 17 append-only triggers in the
+  # schema do -- app_audit, audit_events, authz_decisions):
+  #   migrated_migration_audit_append_only   <- the one this run hits
+  #   plan_change_events_immutable_trg       <- invisible here, 0 rows, because
+  #                                             this app never changed plan
+  # crates/control/src/proration.rs:188 INSERTs a plan_change_events row on
+  # every plan change, so an app that has been on a paid plan carries them and
+  # would hit the second the moment the first is cleared. Giving this step's app
+  # a plan change before the delete would put both in play; that is the next
+  # increment and it is NOT done here.
   DEL_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
     "select count(*) from information_schema.tables where table_schema = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   DEL_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
