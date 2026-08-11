@@ -27,11 +27,21 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   steps. Copy it, point Claude Code/Codex at it, iterate.
 - **Workflow starter:** `examples/workflows-order/` — a raw workflow app with
   `step.run`, `step.sleep`, `step.waitForSignal`, a child workflow, and
-  compensators. It is the copyable durable-workflow counterpart to the starter
-  scaffold.
+  compensators. It is NOT on the deploy path, and the Build/Deploy bullets below
+  do not apply to it: its `build` is `tsc -p tsconfig.json`, it declares no
+  `@zeroship/vite-plugin` and has no `vite.config.*`, and it emits
+  `dist/index.js` rather than a `.zship`. Its own README is correct and says the
+  right thing — `zeroship serve examples/workflows-order/dist/index.js` — so it
+  is a SINGLE-TENANT serve example, not a copyable counterpart to the starter.
+  Copying it and following the two bullets below produces `tsc` output and then a
+  deploy pointed at a `dist/app.zship` that was never written; `zeroship deploy`
+  accepts only a `.zship` and answers by telling you to run `vite build` with a
+  plugin this example does not have. Verified 2026-08-11 by reading its
+  package.json, its README, and the deploy arg handling in crates/cli/src/main.rs.
 - **Build:** `pnpm build` (= `vite build`); the `@zeroship/vite-plugin` discovers
   `"use server"` RPC functions, bundles the server module, and writes
-  `dist/app.zship`.
+  `dist/app.zship`. Applies to `examples/starter/` and the
+  `create-zeroship-app` template.
 - **Deploy:** `zeroship deploy ./dist/app.zship --app=<id> --control=<url> --token=<PAT>`.
 
 ## What is validated today (`tests/golden_path.sh`)
