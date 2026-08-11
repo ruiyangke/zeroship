@@ -76,12 +76,52 @@ for s in "${SRCS[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# SECOND CHECK, and it points the OPPOSITE WAY from the first.
+#
+# The check above asks "does every COPY name a path that exists". By construction
+# it cannot see a path that is NEEDED and never COPYed at all. That has now
+# happened three times on the real deploy path, and each one cost a container
+# build to find:
+#
+#   blocker 2  third_party/ needed by the NODE stage for pnpm's workspace members
+#   blocker 7  libs/ never copied at all; cargo could not load the workspace
+#   blocker 8  .cargo/ never copied, so the workspace's own linker flag was
+#              absent and the release build died at LINK time:
+#                rust-lld: error: duplicate symbol: XXH_versionNumber
+#              libpg_query and librdkafka each vendor xxhash, and
+#              zeroship-platform-migrate links both.
+#
+# This checks ONLY the third one, and deliberately so. A general "every needed
+# root is copied" check needs a definition of "needed" that nothing in the repo
+# supplies - my first attempt derived cargo roots from Cargo.toml, which scooped
+# `refs` out of [workspace.exclude] and reported two failures on a correct tree.
+# A gate that lies is worse than a gate that is narrow, so this is narrow: one
+# fact, mechanically checkable, no derivation.
+#
+# WHAT IT STILL DOES NOT CATCH: any other root that is needed and uncopied. The
+# blocker-2 and blocker-7 shapes remain uncovered by anything here.
+# ---------------------------------------------------------------------------
+if [ -f "$ROOT/.cargo/config.toml" ] && grep -q "rustflags" "$ROOT/.cargo/config.toml"; then
+  BUILDER_BODY="$(awk '/^FROM .* AS builder/{f=1;next} /^FROM /{f=0} f' "$DF")"
+  if [ -z "$BUILDER_BODY" ]; then
+    echo "  x REFUSED: no 'AS builder' stage body found - this check's premise is gone." >&2
+    exit 1
+  fi
+  if printf '%s\n' "$BUILDER_BODY" | grep -qE '^COPY[[:space:]]+\.cargo/'; then
+    pass ".cargo/ (sets rustflags) is COPYed into the builder stage"
+  else
+    fail ".cargo/ sets rustflags but the builder stage never COPYs it; the release link fails on duplicate xxhash symbols (blocker 8)"
+  fi
+fi
+
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
-MIN_RAN="${DOCKERFILE_COPY_MIN_RAN:-6}"
+# MEASURED 2026-08-11: 13 context COPY sources + the .cargo/ builder-stage check.
+MIN_RAN="${DOCKERFILE_COPY_MIN_RAN:-14}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

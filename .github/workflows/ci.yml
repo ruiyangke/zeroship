@@ -243,6 +243,20 @@ jobs:
         run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
+      # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
+      # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
+      # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md
+      # documents has carried no instrument at all. It had been unbuildable since
+      # 8dbe4a8d4 extracted apps/zeroship-builder while the Dockerfile kept
+      # COPYing apps/ - `"/apps": not found`, found by running it on a real host.
+      #
+      # This is the cheap lint, NOT a substitute for building the image: it reads
+      # text, runs no docker, and proves only that the context paths resolve and
+      # that .cargo/ reaches the stage that links. Building the image in CI costs
+      # a full Rust + V8 compile and is the thorough answer; this is what would
+      # have caught the two defects that actually happened, in under a second.
+      - name: deploy/Dockerfile COPY paths resolve
+        run: tests/dockerfile_copy_paths_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
