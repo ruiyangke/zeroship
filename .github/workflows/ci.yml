@@ -973,6 +973,35 @@ jobs:
           tests/e2e_dev_vs_deployed_env.sh 2>&1 | tee "$RUNNER_TEMP/dvd-env.log"
         env:
           ZS_FRESHNESS_STRICT: 1
+      # Not a dev-vs-deployed diff, but the same KIND of test and the same
+      # expensive prerequisite, so it rides this job's build rather than paying
+      # a cold one of its own: a seam between two components that are each
+      # self-consistent. The gateway splits a request path on '/' and enforces
+      # the matched resource's auth level; the worker hands the URL to V8, whose
+      # WHATWG parser folds '\' to '/' for special schemes. A unit test on
+      # either side passes. Only a request driven end to end can see it.
+      #
+      # RAN IN NO WORKFLOW until 2026-08-11. Measured before wiring, three runs
+      # of mine: 18 passed / 0 failed idle, 18/0 against 12 busy cores with an
+      # IDENTICAL assertion set, 26s wall clock. That is the standard this job's
+      # own comment sets - a GitHub runner is 2-4 shared vCPUs, so idle-green is
+      # not the question CI asks.
+      #
+      # IT IS A NEGATIVE RESULT, and its controls are what make that worth
+      # keeping: T2 proves the target resource DOES reject anonymously (401), so
+      # a 200 on the attack would have meant something, and T3 proves the
+      # dot-segment guard is live in THIS binary, so the attack's 400 is
+      # coverage rather than a guard that never ran. The gateway rejects the
+      # literal-backslash forms today; this pins that it keeps doing so.
+      #
+      # Starts its own Postgres through tests/lib/e2e_stack.sh, so PG_CONTAINER
+      # is deliberately not set here.
+      - name: Gateway path canonicality (literal backslash must not split the gate from the worker)
+        run: |
+          set -o pipefail
+          tests/e2e_gateway_path_backslash.sh 2>&1 | tee "$RUNNER_TEMP/dvd-backslash.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
