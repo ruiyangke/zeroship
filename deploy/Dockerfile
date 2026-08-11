@@ -72,6 +72,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# The vendored migration engine. Cargo.toml lists `third_party/zero-migrate` as a
+# WORKSPACE MEMBER (and names zero-migrate/-ir/-policy by path), so cargo cannot
+# even resolve the workspace without it - this is not an optional dependency of
+# one crate, it is a member manifest the whole build needs.
+COPY third_party/ third_party/
 # Cedar authz policies — crates/authz/build.rs parses these at build time
 # (and engine.rs include_str!s them), both via `../../deploy/policies`.
 COPY deploy/policies/ deploy/policies/
