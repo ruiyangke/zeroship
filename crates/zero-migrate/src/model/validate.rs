@@ -6967,6 +6967,34 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
+        // A `dialect()` wrapper carries no scope of its own; its LEGS do. Falling
+        // through to the structural arm below validated the legs' shape but never
+        // handed them `live_columns`, so a nested Update/Delete/Backfill/Insert/
+        // SetColumnType skipped resolved-ColRef checking entirely - the caller got a
+        // weaker guarantee than the function's name promises.
+        //
+        // The SELECTED leg: this resolves authored column references against a LIVE
+        // catalog, so it judges what THIS target will run. An op in an inactive leg is
+        // never executed here and its columns are not this catalog's to satisfy.
+        //
+        // One level deep is complete: a leg cannot hold a wrapper.
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_op_resolved(inner, target_dialect, live_columns, op_index, ts)?;
+                }
+            }
+        }
         // Every other op: revalidate structurally (its own scope is already
         // resolved or has no Expr slot).
         other => validate_op(other, target_dialect, op_index, ts)?,
@@ -9235,6 +9263,89 @@ mod tests {
             "rule (c) failure is structured, not a raw DB error"
         );
         assert_eq!(err.op_index, 0);
+    }
+
+    /// The live columns of `users`, with no `ghost`.
+    fn live_users() -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut live: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        live.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        );
+        live
+    }
+
+    fn ghost_update() -> Op {
+        Op::Update {
+            table: "users".into(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("ghost")))]
+                .into_iter()
+                .collect(),
+            r#where: None,
+            schema: None,
+        }
+    }
+
+    fn dialectal_legs(pg: Option<Vec<Op>>, mysql: Option<Vec<Op>>) -> Op {
+        Op::Dialectal {
+            default: None,
+            pg,
+            sqlite: None,
+            mysql,
+        }
+    }
+
+    /// An unresolved ColRef inside the SELECTED leg is rejected.
+    ///
+    /// The wrapper carries no scope of its own, so it used to fall through to the
+    /// structural arm - which validates the legs' SHAPE but never hands them
+    /// `live_columns`. Nested DML therefore skipped resolved-ColRef checking entirely,
+    /// and a caller got a weaker guarantee than the function's name promises.
+    #[test]
+    fn validate_ir_resolved_rejects_an_unresolved_colref_inside_a_selected_leg() {
+        let ir = ir_with(vec![dialectal_legs(Some(vec![ghost_update()]), None)]);
+        let err = validate_ir_resolved(&ir, Dialect::Postgres, &live_users(), &[])
+            .expect_err("a dialect() wrapper must not hide nested DML from resolution");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(
+            err.op_index, 0,
+            "the diagnostic keeps the OUTER op index, so the author is pointed at the \
+             wrapper they wrote"
+        );
+    }
+
+    /// The control that keeps this SELECTED-leg rather than every-leg. The same broken
+    /// update sits in the MySQL leg, which PostgreSQL never runs - its columns are not
+    /// this catalog's to satisfy, and refusing would reject a migration correct here.
+    #[test]
+    fn validate_ir_resolved_ignores_an_unresolved_colref_in_an_unselected_leg() {
+        let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
+        assert!(
+            validate_ir_resolved(&ir, Dialect::Postgres, &live_users(), &[]).is_ok(),
+            "PostgreSQL never runs the mysql leg, so its columns are not resolved here"
+        );
+    }
+
+    /// A resolvable ColRef inside the selected leg still passes, so the arm above is
+    /// rejecting the unresolved NAME rather than the wrapper itself.
+    #[test]
+    fn validate_ir_resolved_accepts_a_resolvable_colref_inside_a_leg() {
+        let ir = ir_with(vec![dialectal_legs(
+            Some(vec![Op::Update {
+                table: "users".into(),
+                set: [("name".to_string(), IrValue::Expr(Expr::col("id")))]
+                    .into_iter()
+                    .collect(),
+                r#where: None,
+                schema: None,
+            }]),
+            None,
+        )]);
+        assert!(
+            validate_ir_resolved(&ir, Dialect::Postgres, &live_users(), &[]).is_ok(),
+            "`id` is a live column of `users`, so the leg's update resolves"
+        );
     }
 
     #[test]
