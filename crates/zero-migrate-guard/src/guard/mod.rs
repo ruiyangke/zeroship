@@ -1139,14 +1139,26 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     /// immutability decision. An `EXECUTE 'ALTER TABLE t RENAME COLUMN ...'` reaches
     /// it.
     ///
-    /// What keeps that off the engine's own paths is the entry point, not this
-    /// value: `check_raw_view_body_text` is the sole constructor of this adapter and
-    /// has no production caller - every reference outside its definition is in
-    /// tests/guard_smoke.rs. It is `pub` though, so an embedder calling it gets a
-    /// scanner whose injected-shape rule silently never fires.
+    /// `check_raw_view_body_text` is the sole constructor of this adapter, and it DOES
+    /// have a production caller: `validate_raw_view_body` at
+    /// crates/zero-migrate/src/model/validate.rs:5499, on every raw `viewBody`.
     ///
-    /// Left as-is deliberately rather than implemented or removed: which of those is
-    /// right is a public-API question, not a local one.
+    /// What bounds the damage is the gate directly above that call, not the caller's
+    /// absence. A raw view body is refused unless it parses as a single top-level
+    /// SELECT - "DDL, DML, COPY, and utility statements are refused" - so a rename can
+    /// never arrive as the body itself. It arrives only through the literal arm, and a
+    /// string literal inside a view body is data that never executes. That is why the
+    /// permissive answer is not a live escalation here, and it is a narrower claim than
+    /// "nothing calls this".
+    ///
+    /// Measured, not reasoned: `a_rename_inside_a_view_body_literal_is_walked_but_never
+    /// _meets_the_injected_rule` in tests/guard_smoke.rs walks a rename in through a
+    /// literal. Its cross-schema arm denies, proving the literal really is parsed and
+    /// routed here; the same rename inside the scope's own schema is admitted.
+    ///
+    /// Still unresolved, and a public-API question rather than a local one: this is
+    /// `pub`, so an embedder who calls it directly on text that is NOT gated to a single
+    /// SELECT gets a scanner whose injected-shape rule silently never fires.
     fn is_injected_shape(&self, _object: &ObjectName, _element: &ShapeElement) -> bool {
         false
     }

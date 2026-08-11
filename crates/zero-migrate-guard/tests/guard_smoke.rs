@@ -363,3 +363,37 @@ scope = "all"
         .expect("dropping the owned schema stays allowed");
     assert!(report.destructive, "DROP SCHEMA must remain destructive");
 }
+
+/// The body scanner reaches RENAME COLUMN handling through a bare string literal, and
+/// its injected-shape rule cannot fire when it gets there.
+///
+/// `check_body_text` re-parses every single-quoted fragment as SQL and recurses into
+/// `check_node`, so a literal reaches the rename checks even though a raw view body is
+/// refused unless it is a single top-level SELECT
+/// (crates/zero-migrate/src/model/validate.rs:5480). The cross-schema arm is the
+/// positive control: it proves the literal really is walked rather than ignored, which
+/// is what makes the permissive arm below a statement about the rule and not about
+/// whether the code runs.
+#[test]
+fn a_rename_inside_a_view_body_literal_is_walked_but_never_meets_the_injected_rule() {
+    let scope = SchemaScope::Single("app1".to_string());
+
+    // Positive control: the literal IS parsed and routed to the rename checks.
+    let err = check_raw_view_body_text(
+        "SELECT 'ALTER TABLE other.widgets RENAME COLUMN tenant_id TO t'",
+        "view body",
+        Some(&scope),
+    )
+    .expect_err("a rename inside a literal is walked, so its cross-schema arm fires");
+    assert!(matches!(err, GuardError::CrossSchema { .. }));
+
+    // Same shape inside the scope's own schema: admitted. `BodyScopeDecisions`
+    // answers "not injected" for every element, so the immutability rule that would
+    // otherwise protect a charter-injected column is not consulted here.
+    check_raw_view_body_text(
+        "SELECT 'ALTER TABLE app1.widgets RENAME COLUMN tenant_id TO t'",
+        "view body",
+        Some(&scope),
+    )
+    .expect("the body scanner admits a rename of an injected column under body scope");
+}
