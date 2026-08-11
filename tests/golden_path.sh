@@ -327,6 +327,29 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regclass('zeroship.apps')" 2>/dev/null | grep -q apps \
   && pass "schema migrated (fresh $PG_DB)" || { fail "schema missing after migrate"; exit 1; }
 
+# A least-privilege role must hold every privilege its own cron actually uses.
+#
+# crates/auth/src/cron/token_sweep.rs:125-128 DELETEs from
+# zeroship.token_revocations. zeroship_auth was granted only select/insert/update
+# on it (the 20260702000900_grants.ts grant that also covers oauth_grants and
+# oauth_clients), so every sweep failed and the table grew without bound. Fixed
+# by 20260811000000_auth_token_revocations_delete.ts.
+#
+# MEASURED both ways on a scratch database, one variable:
+#   migrations WITH that file    -> DELETE = true
+#   migrations WITHOUT that file -> DELETE = false
+# so this assertion is load-bearing rather than green by construction. The same
+# query returned false against the live Supabase deployment before the fix.
+#
+# WHAT THIS DOES NOT CATCH: privilege, not behaviour. It proves the GRANT
+# exists, not that the sweep runs, deletes the right rows, or is scheduled. A
+# sweep that never fires still satisfies it.
+auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select has_table_privilege('zeroship_auth','zeroship.token_revocations','DELETE')" 2>/dev/null | tr -d '[:space:]')
+[ "$auth_del" = "t" ] \
+  && pass "zeroship_auth can DELETE token_revocations (its sweep needs it)" \
+  || fail "zeroship_auth lacks DELETE on token_revocations: token_sweep cannot succeed (#319)"
+
 # Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
 # --kv-url is empty (crates/worker/src/main.rs), by design -- so an app calling
 # @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
@@ -2563,7 +2586,7 @@ gp_close_step
 # config death looks like. The fourth requires the positive evidence -- control
 # logged a connect failure, so it demonstrably reached the CLI DSN. Arithmetic is
 # 70 + 1.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-71}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-72}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
