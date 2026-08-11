@@ -36,14 +36,31 @@
 # RPC rows, plus 6 browser-endpoint rows on `/__zeroship/auth/{session,signout}`.
 # 48 total. See `probe()`.
 #
-# EXPECTED RESULT TODAY: RED, 27 of 48 rows divergent. That is the finding, not a
+# EXPECTED RESULT TODAY: RED, 20 of 48 rows divergent (28 identical). MEASURED
+# TWICE on 2026-08-11: both runs `22 passed, 1 failed`, both `20 of 48`, and the
+# 40 diff lines byte-identical between runs after normalising the app UUID -
+# stable, not flake.
+#
+# THIS NUMBER WAS 27 UNTIL 2026-08-11 and this header said so. Seven rows became
+# identical. WHICH fixes closed them is NOT established here: I measured the
+# split, not the cause, and several auth-adjacent fixes landed in between. Do not
+# read the 7 as attributed to any particular one.
+#
+# That is the finding, not a
 # broken test -- see docs/pilot/e2e-scenarios.md "Scenario 6, auth" for the
 # row-by-row verdicts (which divergences are deliberate and which are defects,
 # two of the defects being on the DEPLOYED side). Before weakening any assertion
 # here, read that section. Two guards keep the red honest: a dev-vs-dev self-diff
 # that must be EMPTY (a comparison that is red no matter what proves as little as
 # one that is green no matter what), and MUTATE=declare-defaulted, which changes
-# one posture and must move exactly the rows named for it (27 -> 24).
+# one posture and must move EXACTLY THE THREE ROWS named for it.
+#
+# The mutation is stated as a DELTA on purpose. This line read `27 -> 24` while
+# the unmutated count was already 20, so the pair was unreachable - the same rot
+# that made golden_path.sh ask for an impossible `49 passed, 0 failed` (ed6ae2539).
+# The delta is the invariant; the absolute pair moves whenever a divergence is
+# fixed. I have NOT run MUTATE=declare-defaulted at HEAD, so no post-mutation
+# absolute is recorded here rather than a guessed one.
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
@@ -566,6 +583,36 @@ if [ "$((PASS + FAIL))" -eq 0 ]; then
   echo "FAIL: reached the verdict having asserted NOTHING. A comparison that" >&2
   echo "      compared nothing is indistinguishable from one that agreed, and" >&2
   echo "      this script would otherwise have exited 0 over it." >&2
+  exit 1
+fi
+# MEASURED FLOOR. ac5df1bf0 added the > 0 check above and said a numeric floor
+# needed a live run I had not made; it also said that run needed "a live auth
+# service plus four others". THAT WAS WRONG - this script starts its own
+# ephemeral Postgres and needs no auth service, as its own prereq block says. I
+# deferred twice on a blocker I had inferred from the file's name instead of
+# reading its header.
+#
+# Two full runs, 2026-08-11, both `22 passed, 1 failed`:
+#   ok both sides built / built app.zship / postures / identity / dev reachable
+#   / dev login / dev rejects wrong password / forged cookie / dev probe 48 rows
+#   / self-diff empty / ephemeral PG / postgres-init / platform migrations
+#   / control / worker / gateway healthy / pat+jwt / deployed / OAuth client
+#   / session cookies / gateway accepts session / deployed probe 48 rows
+#
+# TWENTY-THREE `ok` LINES, PASS=22. The uncounted one is
+# tests/lib/binary_freshness.sh:125, a bare echo rather than this script's
+# pass(). Deriving a floor from output lines gives 23 and a permanently red
+# gate - the same trap recorded in e2e_redeploy_replaces_app.sh.
+#
+# The single FAIL is the divergence line, which is RED BY DESIGN. The floor is
+# on PASS only, so it does not encode the divergence count and does not have to
+# move when a divergence is fixed.
+AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-22}"
+if [ "$PASS" -lt "$AUTH_MIN_PASSED" ]; then
+  echo "FAIL: only $PASS assertions passed, fewer than the $AUTH_MIN_PASSED this" >&2
+  echo "      harness expects. The setup steps it counts - dev login, the ephemeral" >&2
+  echo "      stack, the deploy - are what make the comparison meaningful, so a" >&2
+  echo "      shortfall means the comparison ran against less than it claims." >&2
   exit 1
 fi
 [ "$FAIL" -eq 0 ]
