@@ -267,6 +267,11 @@ jobs:
       # would be the hollow-arm shape this repo keeps removing.
       - name: compose keeps stateful data on named volumes
         run: tests/compose_stateful_volume_gate.sh
+      # Derived from crates/core/src/config/secrets.rs: compose shipped a
+      # 10-byte WORKER_KEY and a 27-byte STASH_SIGNING_KEY against a 32-byte
+      # minimum, so worker and control refused to start. Text-only.
+      - name: compose secrets meet the enforced minimum
+        run: tests/compose_secret_strength_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
