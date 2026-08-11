@@ -87,14 +87,33 @@ BIN="$ROOT/target/release"
 APP="$ROOT/examples/auth-probe"
 ZSHIP="$APP/dist/app.zship"
 
-# A port band of its own (the auth leg owns 9398/8398/8308/5458/3091).
-export CONTROL_PORT="${CONTROL_PORT:-9399}"
-export WORKER_PORT="${WORKER_PORT:-8399}"
-export GATE_PORT="${GATE_PORT:-8309}"
-export PG_PORT="${PG_PORT:-5459}"
+# A port band of its own: 9400/8400/8310/5460/3092. It did NOT have one before
+# -- it declared 9399/8399/8309/5459, which is the ERRORS leg's band, byte for
+# byte, with only PG_CONTAINER differing. The comment here claimed a band of its
+# own while the four lines under it said otherwise, so the claim read as
+# protection and nothing checked it. Measured, not reasoned: running this
+# harness alongside e2e_dev_vs_deployed_errors.sh, errors won the port and this
+# one died with
+#     docker: Error response from daemon: ... Bind for 0.0.0.0:5459 failed:
+#     port is already allocated
+#     FAIL docker run postgres failed
+# Postgres binds first, so that is the collision that surfaces; the control,
+# worker and gate ports were equally shared and would have collided next.
+# 9400/8400/8310/5460 greps zero across tests/. (auth owns 9398/8398/8308/5458.)
+export CONTROL_PORT="${CONTROL_PORT:-9400}"
+export WORKER_PORT="${WORKER_PORT:-8400}"
+export GATE_PORT="${GATE_PORT:-8310}"
+export PG_PORT="${PG_PORT:-5460}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-login-pg}"
 AUTH_PORT="${AUTH_PORT:-9459}"
 DEV_PORT="${DEV_PORT:-3092}"
+# VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
+# its :5173 global default, which nothing here declared, tracked or freed, so a
+# second harness on this machine fought it for the port and the cleanup trap
+# could never reclaim it. --strictPort at the call so a conflict fails loudly
+# rather than moving to a port nobody watches. Checked against the runtime's
+# bad-ports list before choosing it (see #272 and the stream harness). See #272.
+VITE_PORT="${VITE_PORT:-5092}"
 APP_SLUG="auth-probe-login"
 # The app base domain control is started with, so the redirect_uris it brokers
 # (`{scheme}://{host}/__zeroship/auth/popup-callback`) are the ones the gateway
@@ -139,7 +158,11 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 source "$ROOT/tests/lib/e2e_stack.sh"
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-  lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  # BOTH ports, by LISTENER not by recorded PID: `( cd x && vite )&` records the
+  # subshell, and vite outlives it as an orphan the PID loop cannot reach.
+  for _p in "$DEV_PORT" "$VITE_PORT"; do
+    lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
+  done
   if [ "${KEEP_WORK:-0}" = "1" ]; then
     echo "  work dirs kept: dev=${DEV_WORK:-${WORK_EARLY:-<none>}} deployed=${WORK:-<none>}"
     if [ -n "${PIDFILE:-}" ] && [ -f "$PIDFILE" ]; then
@@ -293,8 +316,10 @@ export DATABASE_URL="sqlite:$WORK/dev.sqlite"
 export ZEROSHIP_KV_PATH="$WORK/kv.redb"
 export AUTH_PROBE_API_PORT="$DEV_PORT"
 
-lsof -ti :"$DEV_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-( cd "$APP" && ./node_modules/.bin/vite > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
+for _p in "$DEV_PORT" "$VITE_PORT"; do
+  lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 for _ in $(seq 1 25); do
   curl -sf -o /dev/null -m 2 -X POST -H 'content-type: application/json' \
     "http://localhost:$DEV_PORT/__zeroship/v1/probe.public" -d '{"json":{}}' && break
