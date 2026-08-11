@@ -197,9 +197,21 @@ fn precondition_variant_names_from_schema() {
     // Every branch must be SEEN, not just some of them. Non-emptiness only rules
     // out the all-or-nothing case; a branch the extractor cannot read is dropped
     // here and absent from the expected list below, so both sides agree and the
-    // branch ships ungated. A unit variant is the concrete way in - externally
-    // tagged, serde emits it as a bare string with a `const` and no `required`,
-    // which this extractor returns `None` for.
+    // branch ships ungated.
+    //
+    // A unit variant is the obvious way a branch becomes unreadable - externally
+    // tagged, it emits a bare `const` with no `required` key - and it is NOT the
+    // way this fires, which was measured rather than assumed. Adding one to
+    // `Precondition` does not reach any test: `apply::precondition::evaluate`
+    // matches the enum exhaustively, so the build stops first with E0004
+    // "non-exhaustive patterns". The compiler is the earlier gate for any variant
+    // an evaluator must handle.
+    //
+    // This assertion is therefore defence in depth against the shapes that DO
+    // compile and still read as nothing here - a variant whose schema branch grows
+    // a `$ref`, or a second sibling property beside the tag. None of those is
+    // exercised today, so the assertion is unproven against a real variant and
+    // proven only by mis-keying the extractor.
     assert_eq!(
         found.len(),
         branches.len(),
