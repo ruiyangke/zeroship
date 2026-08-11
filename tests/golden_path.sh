@@ -388,6 +388,34 @@ sched_dml=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_control holds the scheduler store DML (8/8)" \
   || fail "zeroship_control lacks scheduler store privileges: $sched_dml of 8 - the tick would fail even with the tables present (#320)"
 
+# The service roles must NOT be able to do DDL. This is the property #319, #320
+# and #321 all live in, and the one a future privilege error is most likely to be
+# "fixed" by relaxing.
+#
+# It matters because the cheapest repair for "permission denied for database" is
+# a GRANT, and that silently converts the platform back into one where any
+# service can create arbitrary schemas and roles. #320 declined exactly that and
+# moved the tables into migrations instead; this keeps the decision from being
+# quietly reversed.
+#
+# SELF-TESTING, which is the point of including postgres. The first two readings
+# are the property; the third proves the query can return true at all, so a
+# version of this check that is broken (wrong role name, wrong database, a typo
+# that always yields false) fails instead of passing vacuously. MEASURED
+# 2026-08-11 on the live deployment: postgres create=true createrole=true, and
+# zeroship_control / zeroship_gateway / zeroship_auth all false/false.
+#
+# WHAT THIS DOES NOT CATCH: it reads the roles' privileges, not what the services
+# actually do with them. It cannot see a service that connects as postgres
+# anyway, which is what every harness in tests/ does today -- see #322.
+ddl_guard=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select (case when has_database_privilege('zeroship_control',current_database(),'CREATE') then 0 else 1 end)
+        + (case when (select rolcreaterole from pg_roles where rolname='zeroship_control') then 0 else 1 end)
+        + (case when has_database_privilege('postgres',current_database(),'CREATE') then 1 else 0 end)" 2>/dev/null | tr -d '[:space:]')
+[ "$ddl_guard" = "3" ] \
+  && pass "zeroship_control holds no DDL privilege, and the probe discriminates (3/3)" \
+  || fail "DDL privilege guard reads $ddl_guard of 3: control gained CREATE or CREATEROLE, or the probe stopped discriminating (#320/#321)"
+
 # Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
 # --kv-url is empty (crates/worker/src/main.rs), by design -- so an app calling
 # @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
@@ -2629,7 +2657,11 @@ gp_close_step
 # 72 + 2. Both were measured RED on a database carrying every other migration
 # (cols 0 of 10, dml 0 of 8) and GREEN after the new migration alone, so they
 # discriminate rather than merely count.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-74}"
+# RAISED 74 -> 75 on 2026-08-11 for the DDL-privilege guard. Arithmetic is 74 + 1.
+# It is self-testing rather than merely green: MEASURED 3 as written, and 1 when
+# the subject role is swapped for one that CAN do DDL, so it distinguishes the
+# property from a probe that has stopped working.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-75}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
