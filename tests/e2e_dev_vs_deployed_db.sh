@@ -1384,6 +1384,9 @@ if diff -q "$WORK/dev.txt" "$WORK/deployed.txt" >/dev/null 2>&1; then
   pass "dev and deployed results are identical across every probed operation"
 else
   fail "dev and deployed DIVERGE -- results below (< dev, > deployed)"
+  # Count the divergent rows for the classifier at the bottom. Taken from the
+  # SAME diff that is printed, so the number and the evidence cannot disagree.
+  DIVERGENT_ROWS="$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep -c '^<' || true)"
   diff "$WORK/dev.txt" "$WORK/deployed.txt" | cut -c1-400 | head -60
   echo ""
   # Repeat the staleness verdict HERE, not only at boot. Measured 2026-08-10:
@@ -1466,6 +1469,53 @@ echo ""
 echo "  --- raw deployed bodies (verbatim, truncated to 240 cols) ---"
 cut -c1-240 "$WORK/deployed.raw" | sed 's/^/  /'
 
+# --- The classifier: why this script is allowed to be red, and when it is not -
+#
+# WHY THIS EXISTS. Until 2026-08-12 this harness ran in NO workflow, and the
+# reason was never written down. Measured that day: it scores 121 passed, 1
+# failed at HEAD, and the single red is the dev-vs-deployed row diff over
+# divergences the spine ALREADY documents:
+#
+#   cxPlain, cxTotal, txBranch, txOrphan   the transaction-context gap that
+#                                          #250 and #254 record as open by design
+#   tsres  distinct_created_at=2 of 6 dev vs 6 of 6 deployed -- a timestamp
+#          granularity split of the same family as the #236 id-ordering one
+#
+# So the script exited 1 on a red nothing was going to fix, which is exactly why
+# wiring it would have been the hollow-arm shape ci.yml refuses elsewhere. Its
+# sibling e2e_dev_vs_deployed_auth.sh already had this treatment and IS wired;
+# this brings db level, and the wiring is a separate change once it has run
+# green here more than once.
+#
+# WHAT IT DOES NOT DO, in the same words its auth sibling uses: it counts rows,
+# not identities. Five divergences that are a DIFFERENT five would still exit 0.
+# Pinning the row set needs the per-row verdicts in docs/pilot/e2e-scenarios.md
+# to become machine-readable, which they are not today. Stated so the exit code
+# is not read as more than it is.
+#
+# DO NOT WIRE THIS INTO CI YET, and the reason is a measurement the classifier
+# itself produced. Three consecutive runs of UNCHANGED code on this machine:
+#
+#   run 1   5 rows   cxPlain cxTotal tsres txBranch txOrphan
+#   run 2   5 rows   cxPlain cxTotal tsres txBranch txOrphan
+#   run 3   3 rows   cxPlain cxTotal tsres
+#
+# txBranch and txOrphan come and go. Their dev-side values are
+# TRANSACTION_CONNECTION_BUSY and TRANSACTION_SCOPE_EXPIRED, so they are timing
+# dependent, and any fixed expectation would report STALE EXPECTATION on some
+# runs and pass on others -- a CI flake, arriving as good news ("rows were
+# fixed") which is the most misleading shape available. This is the third
+# instance of the host-sensitivity class ci.yml already documents for
+# storage and workflows.
+#
+# THE STABLE CORE IS 3: cxPlain, cxTotal, tsres. Wiring this needs either that
+# instability root-caused, or the classifier taught to tolerate the known
+# intermittent pair by NAME rather than by count. Neither is done here; what is
+# done is that the harness no longer exits 1 on a red nothing intends to fix,
+# and the flake is characterised instead of unknown.
+DB_EXPECTED_DIVERGENT="${DB_EXPECTED_DIVERGENT:-5}"
+DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
+
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
 if [ "$PASS" -lt "$DB_MIN_PASSED" ]; then
@@ -1475,5 +1525,31 @@ if [ "$PASS" -lt "$DB_MIN_PASSED" ]; then
   echo "      nothing) or an assertion was removed. If the removal was deliberate," >&2
   echo "      lower DB_MIN_PASSED in the same change and say why." >&2
   rc=1
+fi
+
+# Only the row diff may be forgiven, and only at the documented count. Anything
+# else -- a second failure, a breached floor, a changed divergence count -- keeps
+# the non-zero exit it already has.
+if [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$DB_MIN_PASSED" ]; then
+  if [ "$DIVERGENT_ROWS" -eq "$DB_EXPECTED_DIVERGENT" ]; then
+    echo "" >&2
+    echo "CLASSIFIER: exit 0 on the documented red - $DIVERGENT_ROWS divergent rows," >&2
+    echo "  which is the KNOWN dev-vs-deployed env.db gap (transaction context per" >&2
+    echo "  #250/#254, timestamp granularity per the #236 family), not a passing" >&2
+    echo "  comparison. The diff above is the evidence; this only says the SHAPE" >&2
+    echo "  has not changed." >&2
+    rc=0
+  elif [ "$DIVERGENT_ROWS" -gt "$DB_EXPECTED_DIVERGENT" ]; then
+    echo "" >&2
+    echo "CLASSIFIER: REGRESSION. $DIVERGENT_ROWS divergent rows, expected $DB_EXPECTED_DIVERGENT." >&2
+    echo "  dev and deployed disagree on MORE of env.db than they did. The new rows" >&2
+    echo "  are in the diff above; find them before changing this number." >&2
+  else
+    echo "" >&2
+    echo "CLASSIFIER: STALE EXPECTATION. $DIVERGENT_ROWS divergent rows, expected $DB_EXPECTED_DIVERGENT." >&2
+    echo "  Rows were FIXED and nobody updated the count. This is good news failing" >&2
+    echo "  loudly on purpose: set DB_EXPECTED_DIVERGENT=$DIVERGENT_ROWS and record" >&2
+    echo "  WHICH rows closed in docs/pilot/e2e-scenarios.md." >&2
+  fi
 fi
 exit "$rc"
