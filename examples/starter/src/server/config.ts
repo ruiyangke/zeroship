@@ -19,5 +19,8 @@ export default defineApp({
   resources: {
     "rpc:getMessages": { auth: "anon", publiclyAccessible: true },
     "rpc:addMessage": { auth: "anon", publiclyAccessible: true },
+    // Deliberately public so the platform error path is reachable without a
+    // session; see the note on `boom` in ../server.ts.
+    "rpc:boom": { auth: "anon", publiclyAccessible: true },
   },
 });

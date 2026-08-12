@@ -47,6 +47,22 @@ export const getMessages = query(
   },
 );
 
+// A procedure that always throws. It exists so the platform's error path can be
+// exercised on a REAL deployed app: golden_path step 13 drives it and then asks
+// `GET /api/apps/<id>/logs` whether a creator can see anything about a request
+// their own code failed. The throw is inside the handler on purpose -- an input
+// rejection is refused before the handler runs, so it cannot tell "the error
+// rail does not deliver" from "no JS ever executed".
+export const boom = query(
+  async () => {
+    throw new Error("[starter] boom: deliberate handler failure");
+  },
+  {
+    id: "boom",
+    output: z.object({ never: z.string() }),
+  },
+);
+
 export const addMessage = mutation(
   async (input: { text: string }) => {
     const message: Message = {

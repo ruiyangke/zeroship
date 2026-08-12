@@ -331,10 +331,10 @@ zship_rpc_ids() {
 GP_IDS="$(zship_rpc_ids "$ZSHIP")"; GP_IDS_RC=$?
 if [ "$GP_IDS_RC" -ne 0 ]; then
   fail "manifest not readable from the .zship (rc=$GP_IDS_RC: 3=no manifest.json, 4=unparseable, 5=no rpc resources)"
-elif [ "$GP_IDS" = "rpc:addMessage,rpc:getMessages" ]; then
+elif [ "$GP_IDS" = "rpc:addMessage,rpc:boom,rpc:getMessages" ]; then
   pass "artifact inspectable via tar; manifest declares $GP_IDS"
 else
-  fail "manifest rpc ids changed: expected rpc:addMessage,rpc:getMessages got '$GP_IDS'"
+  fail "manifest rpc ids changed: expected rpc:addMessage,rpc:boom,rpc:getMessages got '$GP_IDS'"
 fi
 
 # --- 2. Bring up the stack (control + migrated + worker + gateway) ---
@@ -2894,7 +2894,7 @@ SQL
       error-line count here says nothing about whether the error rail reaches
       the creator -- it is a FAILED SETUP, not a finding. A genuine uncaught
       throw needs its own anon procedure (#333); note golden_path.sh:334 asserts
-      the manifest ids are exactly rpc:addMessage,rpc:getMessages, so that
+      the manifest ids are exactly rpc:addMessage,rpc:boom,rpc:getMessages, so that
       assertion moves with it."
   elif [ "${LOG_ERR:-0}" -ge 1 ] 2>/dev/null; then
     pass "deployed: an RPC error also reaches the creator's log surface (input-rejection class)"
@@ -2906,6 +2906,41 @@ SQL
       take the error path at all, or the error rail does not run in the deployed
       isolate. A creator would see everything they chose to print and nothing
       about the failures they hit. See #333."
+  fi
+
+  # --- THE ERROR CLASS THAT IS THE CREATOR'S OWN BUG ------------------------
+  #
+  # The 400 arm above cannot separate "the error rail does not deliver" from
+  # "no JS ever ran", because an input rejection is refused BEFORE the handler.
+  # `boom` throws INSIDE the handler, so the isolate demonstrably executed and
+  # fetch-handler.ts:381's console.error is unambiguously on the path.
+  #
+  # PREDICTION ON RECORD, written before the first run of this arm: the throw's
+  # error line DOES reach the creator, and the 400 result above is therefore
+  # pre-isolate rejection rather than a broken rail. If this arm is ALSO empty,
+  # the rail genuinely does not deliver and the finding is the serious version.
+  LOG_BOOM_CODE=$(curl -s -o /tmp/gp-boom-resp.json -w '%{http_code}' --max-time 15 \
+    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
+    -H "X-Api-Key: $API_KEY" 2>/dev/null)
+  command sleep 2
+  curl -s -o /tmp/gp-logs-boom.json --max-time 20 "$LOG_URL" \
+    -H "Authorization: Bearer $SC_PAT" 2>/dev/null || true
+  LOG_BOOM=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
+  LOG_BOOM_OWN=$(grep -oF -- "[starter] boom" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
+  echo "  deployed throw probe: http=$LOG_BOOM_CODE, rpc error marker x$LOG_BOOM, app message x$LOG_BOOM_OWN"
+  if [ "${LOG_BOOM_CODE:-200}" -lt 400 ] 2>/dev/null; then
+    fail "the throw probe did NOT fail: boom returned http=$LOG_BOOM_CODE. A
+      procedure whose body is \`throw\` answering 2xx is its own finding, and it
+      means this arm measured nothing about error visibility. FAILED SETUP.
+      Body: $(head -c 200 /tmp/gp-boom-resp.json)"
+  elif [ "${LOG_BOOM:-0}" -ge 1 ] 2>/dev/null || [ "${LOG_BOOM_OWN:-0}" -ge 1 ] 2>/dev/null; then
+    pass "deployed: a handler THROW reaches the creator's log surface (rpc marker x$LOG_BOOM, app text x$LOG_BOOM_OWN)"
+  else
+    fail "deployed: a procedure that THREW left NOTHING the creator can read.
+      The isolate definitely ran -- boom's body is the throw -- and the same step
+      proved seconds earlier that a console.log from the same app reaches this
+      surface. So the error rail does not deliver, and a creator debugging their
+      own failing procedure has no log to look at. See #333."
   fi
 
   # --- THE COMPARISON, which is the reason this step exists -----------------
@@ -3417,7 +3452,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|the RPC error path logged NOTHING the creator can see"}
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|the RPC error path logged NOTHING the creator can see|a procedure that THREW left NOTHING the creator can read"}
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
