@@ -253,10 +253,21 @@ services:
       # so control crash-looped with `secret reference env var
       # 'ZEROSHIP_WORKER_KEY' is not set`. MUST match the worker's value.
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
-      # The webhook handler always verifies Stripe-Signature. Local senders must
-      # sign with this generated value; a real Stripe CLI listener should
-      # override it with the whsec value printed by `stripe listen`.
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?run zeroship dev init}
+      # OPTIONAL, and empty means "this deployment does not accept Stripe
+      # webhooks". Stripe is the only party that can issue a value that
+      # verifies: the secret is `whsec_...` from the dashboard endpoint, or
+      # from `stripe listen --print-secret`. A locally generated random value
+      # cannot match a real Stripe-Signature, so requiring one bought nothing -
+      # it forced every Stripe-less deployment to carry an inert placeholder,
+      # and left a Stripe-USING deployment that forgot the real value looking
+      # identically configured. Empty is now visibly unconfigured.
+      #
+      # This does NOT relax the server. Signature verification is unconditional
+      # and an empty secret fails closed: crates/control/src/stripe_handlers.rs
+      # rejects with 500 before any JSON parse or database work, and control
+      # warns at boot that every delivery will be rejected. Pinned by
+      # `webhook_empty_secret_*` in crates/control/tests/stripe_webhook_test.rs.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST be
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.

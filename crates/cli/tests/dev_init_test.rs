@@ -19,14 +19,16 @@ const SECRET_FILES: [&str; 7] = [
     "refresh-idem-key",
 ];
 
-const ENV_KEYS: [&str; 10] = [
+// STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
+// verifies, so `dev init` no longer manufactures one. See
+// `dev_init_never_generates_a_stripe_webhook_secret`.
+const ENV_KEYS: [&str; 9] = [
     "AUTH_STASH_SIGNING_KEY",
     "AUTH_TOTP_ENC_KEY",
     "GATEWAY_OIDC_SECRET",
     "MIGRATED_POLICY_SEAL_KEY",
     "PAIRWISE_SALT",
     "STASH_SIGNING_KEY",
-    "STRIPE_WEBHOOK_SECRET",
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
@@ -334,9 +336,19 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         "all five native services must consume one generated control key"
     );
 
-    assert!(control.contains(
-        "STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?run zeroship dev init}"
-    ));
+    // Stripe is OPTIONAL: only Stripe can issue a webhook secret that verifies,
+    // so compose must render without one rather than force a Stripe-less
+    // deployment to carry a locally generated placeholder. Empty is not a
+    // relaxation - control rejects every delivery with 500 when the secret is
+    // empty (crates/control/tests/stripe_webhook_test.rs).
+    assert!(
+        control.contains("STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}"),
+        "STRIPE_WEBHOOK_SECRET must be optional with an empty default"
+    );
+    assert!(
+        !compose.contains("${STRIPE_WEBHOOK_SECRET:?"),
+        "no service may REQUIRE a Stripe webhook secret to render compose"
+    );
     assert!(migrated.contains(
         "MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
     ));
@@ -373,6 +385,37 @@ fn generated_default_secret_paths_are_gitignored() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+/// `dev init` must NOT manufacture a Stripe webhook secret. Only Stripe issues a
+/// value that verifies (`whsec_...`), so a generated one is inert: it makes an
+/// unconfigured deployment indistinguishable from a configured one while every
+/// real delivery still fails signature verification. The compose default is
+/// empty and control fails those deliveries closed with 500.
+///
+/// This asserts ABSENCE only. It does not check that anything downstream still
+/// works without the value; that is the compose render plus the control webhook
+/// tests.
+#[test]
+fn dev_init_never_generates_a_stripe_webhook_secret() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+
+    let output = run_dev_init(&secrets_dir, &env_file);
+    assert_success(&output, "zeroship dev init");
+
+    let overlay = parse_generated_env(&env_file);
+    assert!(
+        !overlay.contains_key("STRIPE_WEBHOOK_SECRET"),
+        "dev init generated a Stripe webhook secret it cannot possibly issue: {:?}",
+        overlay.keys().collect::<Vec<_>>()
+    );
+    let raw = std::fs::read_to_string(&env_file).expect("read generated env file");
+    assert!(
+        !raw.contains("STRIPE_WEBHOOK_SECRET"),
+        "the generated env file still mentions STRIPE_WEBHOOK_SECRET"
+    );
 }
 
 fn run_dev_init(secrets_dir: &Path, env_file: &Path) -> Output {
