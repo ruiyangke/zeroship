@@ -434,6 +434,16 @@ echo "notifications and watching"
 # The notifications table had three READ procedures and no writer, so the inbox
 # was permanently empty and the nav's unread badge could never appear.
 # Bob is CC'd on the bug, so a comment by Alice must reach him.
+# Re-captured HERE, not reused from the top of the file. `users.me` does not
+# provision: it returns id null for a user who has never written, and Bob only
+# gets a row when he first writes -- which happens further down. Reusing the
+# early capture CC'd nobody, so no notification was ever sent. An accumulated
+# dev database hid this, because Bob already existed from an earlier run.
+BOB_ID="$(bob users.me | jget 'json.id')"
+case "$BOB_ID" in
+  user_*) pass "Bob is provisioned before being CC'd" ;;
+  *) fail "Bob has no app user row yet ($BOB_ID); the CC below would target nobody" ;;
+esac
 call cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
 BOB_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
 call comments.add "{\"bugId\":\"$BUG\",\"body\":\"ping $STAMP\"}" >/dev/null
