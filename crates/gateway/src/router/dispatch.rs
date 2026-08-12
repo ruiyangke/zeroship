@@ -1601,8 +1601,20 @@ async fn execute_resource_tree(
             // Subscription procedures need a WebSocket-aware proxy
             // path. Idempotency is bypassed (already enforced above).
             // Affinity routing uses `(app_id, principal)` so reconnects
-            // from the same caller pin the same worker. The transparent
-            // WS proxy itself is wired in `proxy::forward_subscription`.
+            // from the same caller pin the same worker.
+            //
+            // THE TRANSPARENT WS PROXY DOES NOT EXIST. Until 2026-08-12
+            // this comment named a helper in the `proxy` module as the
+            // place it was wired. The module is real; that function was
+            // in no file in this repo, and the claim contradicted
+            // `handle_subscription_dispatch` below, which says so plainly
+            // and returns 501. Deployed subscriptions are a stub; only
+            // single-tenant `zeroship serve` speaks WebSocket.
+            // `tests/ws_subscription_stub_gate.sh` now fails if a name
+            // like that comes back without a definition behind it.
+            // Bounded: `docs/reference/rpc.md` states subscriptions are
+            // not part of the public client surface, so no creator can
+            // reach this today. Latent, not live.
             if matches!(policy.kind, Some(ProcedureKind::Subscription)) {
                 // The 501 stub is the gateway's own answer, not the app's.
                 (
