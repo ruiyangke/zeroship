@@ -15,6 +15,8 @@
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use futures::FutureExt;
+
 use crate::backend::postgres::PostgresBackend;
 use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
 use crate::error::DbError;
@@ -143,23 +145,17 @@ impl PgChangeStream {
 impl ChangeStream for PgChangeStream {
     type ConsumerHandle = WalConsumerHandle;
 
-    /// Idempotently tear down CDC state for `app_id` — the §17.7 PG
-    /// drop-namespace teardown for THIS worker's slot + publication.
+    /// Idempotently tear down all CDC state for an app deletion.
     ///
     /// Routes through
-    /// [`crate::replication::drop_publication_and_slot`], which runs the
-    /// §17.7 PG order: force the slot inactive
-    /// (`pg_terminate_backend` against the listed backend after the
-    /// caller's grace), `pg_drop_replication_slot`, then
-    /// `DROP PUBLICATION`. Idempotent — a missing slot/publication is a
-    /// no-op, so a retry after partial failure is safe (§17.7 "retry
-    /// from step 3").
+    /// [`crate::replication::drop_publication_and_slots`], which makes
+    /// every worker slot inactive, drops those slots, and then drops
+    /// the shared publication. Missing objects are no-ops, so retries
+    /// after partial failure are safe.
     ///
-    /// The consumer-cancellation courtesy of §17.7 step 2 (cancel the
-    /// in-process WAL consumer + await its exit) happens in the
-    /// drop-namespace orchestrator BEFORE this is called; by the time we
-    /// reach the slot teardown the consumer has been asked to stop and
-    /// the grace has elapsed.
+    /// The local lifecycle manager signals its consumer first. Active
+    /// slots owned by other worker containers are terminated through
+    /// Postgres before they are dropped.
     ///
     /// Runs under the platform-role pool (§17.5) — the only role that
     /// may terminate a replication backend and drop a slot.
@@ -202,12 +198,22 @@ impl ChangeStream for PgChangeStream {
         let app_for_task = app_id.to_string();
         let worker_for_task = worker_id.to_string();
         compio::runtime::spawn(async move {
-            let consumer_result = crate::wal_consumer::run_supervised_controlled(
-                consumer,
-                startup_tx,
-                shutdown_rx,
+            let consumer_result = std::panic::AssertUnwindSafe(
+                crate::wal_consumer::run_supervised_controlled(
+                    consumer,
+                    startup_tx,
+                    shutdown_rx,
+                ),
             )
-            .await;
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(DbError::Internal {
+                    message: format!(
+                        "wal consumer task panicked for app {app_for_task}"
+                    ),
+                })
+            });
             let cleanup_result = crate::replication::drop_worker_slot(
                 &pool,
                 &app_for_task,
@@ -280,11 +286,30 @@ impl ChangeStream for PgChangeStream {
 
 #[cfg(test)]
 mod tests {
-    use super::WalConsumerHandle;
+    use std::sync::Arc;
+
+    use super::{SharedExit, WalConsumerHandle};
 
     #[test]
     fn consumer_handle_is_send_static_and_clone() {
         fn assert_shape<T: Send + Clone + 'static>() {}
         assert_shape::<WalConsumerHandle>();
+    }
+
+    #[test]
+    fn exit_result_is_broadcast_to_all_handle_clones() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        runtime.block_on(async {
+            let exit = Arc::new(SharedExit::default());
+            let first = exit.wait();
+            let second = exit.wait();
+            let complete = {
+                let exit = exit.clone();
+                async move { exit.complete(Ok(())) }
+            };
+            let (first, second, ()) = futures::join!(first, second, complete);
+            assert!(first.is_ok());
+            assert!(second.is_ok());
+        });
     }
 }
