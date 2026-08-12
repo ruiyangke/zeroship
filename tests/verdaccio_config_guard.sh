@@ -150,3 +150,25 @@ echo "verdaccio config guard: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
+
+# MINIMUM-PASSED FLOOR. This is DEFENCE IN DEPTH, not a repair -- all eight
+# assertions were mutation-proven able to fail on 2026-08-12 (granting publish to
+# $authenticated flips exactly one; deleting a packages block trips block-not-
+# found; removing config.yaml aborts the run). The gap it closes is narrower and
+# structural: assertions here are EMITTED PER BLOCK, so a block that disappears
+# takes its sub-assertions with it rather than failing them. Deleting the
+# `@zeroship/*` block measured 5 passed / 1 failed -- the count fell 8 -> 6 and
+# only the block-not-found check registered the loss. Today that check catches
+# it; the floor is what notices if a future refactor ever removes assertions by
+# some route that does not.
+#
+# The number is MEASURED from a full run, not chosen. Raise it when you add
+# checks; if you remove one deliberately, lower it deliberately and say so.
+VERDACCIO_GUARD_MIN_PASSED="${VERDACCIO_GUARD_MIN_PASSED:-8}"
+if [ "$PASS" -lt "$VERDACCIO_GUARD_MIN_PASSED" ]; then
+    echo "" >&2
+    echo "FLOOR: only $PASS assertions passed, expected at least $VERDACCIO_GUARD_MIN_PASSED." >&2
+    echo "  Nothing FAILED, so this is not a broken assertion - it is MISSING ones." >&2
+    echo "  A packages block was probably renamed or removed, taking its checks with it." >&2
+    exit 1
+fi
