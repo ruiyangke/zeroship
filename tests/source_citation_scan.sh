@@ -136,6 +136,7 @@ crates/runtime/tests/call_fetch_handler.rs:tests/http.rs
 crates/migrated/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
 crates/plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
+tests/golden_path.sh:tests/m0_gate.sh
 "
 
 # A corpus check the count cannot do: a renamed root silently stops being
