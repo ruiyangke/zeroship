@@ -4361,18 +4361,36 @@ pub fn validate_op_authorized(
                 op_index,
                 ts_location,
             )?;
-            let scope = TargetScope::structural_only(table);
+            let scope = TargetScope::structural_only(table).refusing_foreign_qualifiers();
             for value in set.values() {
                 if let crate::model::ir::BackfillSetValue::Value(
                     crate::model::ir::IrValue::Expr(expr),
                 ) = value
                 {
                     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                    // A backfill assignment is a scalar context like every other DML
+                    // value slot, and a backfill has one target table like every other
+                    // DML statement. Both rules were added to update/delete/insert
+                    // first and this arm was missed; the shape is identical.
+                    validate_no_aggregate_expr_context(
+                        expr,
+                        "backfill assignment",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             if let Some(pred) = filter {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
                 validate_immutable_expr_context(
+                    pred,
+                    "backfill filter",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
+                validate_no_aggregate_expr_context(
                     pred,
                     "backfill filter",
                     target_dialect,
@@ -6923,14 +6941,28 @@ pub fn validate_op_resolved(
             ..
         } => {
             if let Some(cols) = resolved_scope(table) {
-                let scope = TargetScope::new(table, &cols);
+                let scope = TargetScope::new(table, &cols).refusing_foreign_qualifiers();
                 for value in set.values() {
                     if let crate::model::ir::IrValue::Expr(expr) = value {
                         validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                        validate_no_aggregate_expr_context(
+                            expr,
+                            "update assignment",
+                            target_dialect,
+                            op_index,
+                            ts,
+                        )?;
                     }
                 }
                 if let Some(pred) = r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                    validate_no_aggregate_expr_context(
+                        pred,
+                        "update where predicate",
+                        target_dialect,
+                        op_index,
+                        ts,
+                    )?;
                 }
             } else {
                 validate_op(op, target_dialect, op_index, ts)?;
@@ -6938,8 +6970,15 @@ pub fn validate_op_resolved(
         }
         Op::Delete { table, r#where, .. } => {
             if let Some(cols) = resolved_scope(table) {
-                let scope = TargetScope::new(table, &cols);
+                let scope = TargetScope::new(table, &cols).refusing_foreign_qualifiers();
                 validate_expr(r#where, target_dialect, &scope, op_index, ts)?;
+                validate_no_aggregate_expr_context(
+                    r#where,
+                    "delete where predicate",
+                    target_dialect,
+                    op_index,
+                    ts,
+                )?;
             } else {
                 validate_op(op, target_dialect, op_index, ts)?;
             }
@@ -6961,17 +7000,31 @@ pub fn validate_op_resolved(
                 ts,
             )?;
             if let Some(cols) = resolved_scope(table) {
-                let scope = TargetScope::new(table, &cols);
+                let scope = TargetScope::new(table, &cols).refusing_foreign_qualifiers();
                 for value in set.values() {
                     if let crate::model::ir::BackfillSetValue::Value(
                         crate::model::ir::IrValue::Expr(expr),
                     ) = value
                     {
                         validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                        validate_no_aggregate_expr_context(
+                            expr,
+                            "backfill assignment",
+                            target_dialect,
+                            op_index,
+                            ts,
+                        )?;
                     }
                 }
                 if let Some(pred) = filter {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                    validate_no_aggregate_expr_context(
+                        pred,
+                        "backfill filter",
+                        target_dialect,
+                        op_index,
+                        ts,
+                    )?;
                 }
             } else {
                 validate_op(op, target_dialect, op_index, ts)?;
@@ -7011,11 +7064,18 @@ pub fn validate_op_resolved(
             ..
         } => {
             if let Some(cols) = resolved_scope(table) {
-                let scope = TargetScope::new(table, &cols);
+                let scope = TargetScope::new(table, &cols).refusing_foreign_qualifiers();
                 for row in rows {
                     for cell in row {
                         if let crate::model::ir::IrValue::Expr(e) = cell {
                             validate_expr(e, target_dialect, &scope, op_index, ts)?;
+                            validate_no_aggregate_expr_context(
+                                e,
+                                "insert value",
+                                target_dialect,
+                                op_index,
+                                ts,
+                            )?;
                         }
                     }
                 }
@@ -7023,6 +7083,13 @@ pub fn validate_op_resolved(
                     for v in do_update.values() {
                         if let crate::model::ir::IrValue::Expr(e) = v {
                             validate_expr(e, target_dialect, &scope, op_index, ts)?;
+                            validate_no_aggregate_expr_context(
+                                e,
+                                "upsert assignment",
+                                target_dialect,
+                                op_index,
+                                ts,
+                            )?;
                         }
                     }
                 }
