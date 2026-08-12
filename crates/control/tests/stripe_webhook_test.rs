@@ -368,9 +368,14 @@ async fn invoice_paid_webhook_records_app_audit_row() {
             }
         }
     });
+    // Sign it. This hand-built request carried no `stripe-signature` and passed
+    // only while `insecure_dev` skipped verification; once verification became
+    // unconditional it began returning 400, so the test was asserting the
+    // handler's behaviour on a request the handler now rejects at the door.
     let req = test::TestRequest::post()
         .uri("/internal/webhooks/stripe")
         .header("content-type", "application/json")
+        .header("stripe-signature", signed_webhook_header(&body.to_string()).as_str())
         .set_payload(body.to_string())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -485,9 +490,11 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
             "metadata": { "creator_id": creator_id.to_string(), "invoice_kind": "infra" }
         }}
     });
+    // Signed: unsigned, this now fails verification with 400.
     let req = test::TestRequest::post()
         .uri("/internal/webhooks/stripe")
         .header("content-type", "application/json")
+        .header("stripe-signature", signed_webhook_header(&body.to_string()).as_str())
         .set_payload(body.to_string())
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -2218,6 +2225,21 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
 /// Compute Stripe's `v1` HMAC-SHA256 over `"{t}.{body}"` with `secret` — the SAME
 /// construction `verify_stripe_signature` checks, so a test can build a header that
 /// the REAL verifier accepts (not a hand-faked hex string).
+/// A currently-timestamped `stripe-signature` for `body`, signed with the
+/// fixture secret.
+///
+/// A plain fn rather than reusing `post_webhook!`, because `macro_rules!` is
+/// visible only BELOW its definition and several call sites sit above it, and
+/// because the concurrent-delivery test must build both requests before it
+/// awaits either -- which an inline-awaiting macro cannot express.
+fn signed_webhook_header(body: &str) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time after Unix epoch")
+        .as_secs() as i64;
+    format!("t={timestamp},v1={}", stripe_v1(TEST_WEBHOOK_SECRET, timestamp, body))
+}
+
 fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -2490,15 +2512,21 @@ async fn concurrent_same_event_dispatches_once() {
     let event_id = format!("evt_concur_{}", Uuid::new_v4().simple());
     let body = setup_intent_body(&event_id, creator_id);
 
-    // Two concurrent deliveries of the SAME event.
+    // Two concurrent deliveries of the SAME event. Built by hand rather than
+    // through `post_webhook!` because that macro awaits the call inline, and
+    // both requests must exist before the join. One signature serves both: the
+    // bodies are identical, which is precisely what "the same event" means.
+    let sig = signed_webhook_header(&body);
     let req_a = test::TestRequest::post()
         .uri("/internal/webhooks/stripe")
         .header("content-type", "application/json")
+        .header("stripe-signature", sig.as_str())
         .set_payload(body.clone())
         .to_request();
     let req_b = test::TestRequest::post()
         .uri("/internal/webhooks/stripe")
         .header("content-type", "application/json")
+        .header("stripe-signature", sig.as_str())
         .set_payload(body.clone())
         .to_request();
     let (ra, rb) =
