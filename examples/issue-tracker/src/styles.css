@@ -398,3 +398,51 @@ tbody tr:hover { background: var(--surface-2); }
   opacity: 0.55;
   transition: opacity 120ms ease-out;
 }
+
+/* ---------------------------------------------------------------------------
+   Shell layers.
+
+   Reviewed against a measured layout: header 1440 / sidebar 256 / main 1184,
+   no document overflow, table contained in its own scroller. The frame was
+   right and every layer inside it was unstyled.
+   --------------------------------------------------------------------------- */
+
+/* The rail. These were bare anchors -- no padding, no hover, and nothing bound
+   to aria-current, so the page you were ON looked exactly like the four you
+   were not. The state was in the DOM and invisible. */
+.rail-link {
+  display: block;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.5rem;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 0.9rem;
+  line-height: 1.3;
+}
+.rail-link:hover {
+  background: color-mix(in oklab, currentColor 8%, transparent);
+  text-decoration: none;
+}
+/* Bound to the ACCESSIBLE state, not a separate `active` class, so the
+   styling and what a screen reader announces cannot drift apart. */
+.rail-link[aria-current="page"] {
+  background: color-mix(in oklab, currentColor 12%, transparent);
+  font-weight: 600;
+}
+
+/* Main had no padding, so the heading and the search field ran flush into
+   both viewport edges -- the search input in particular reached x=1440 with
+   nothing between it and the window. */
+[data-slot="app-shell-main"] {
+  padding: 1.25rem 1.5rem 2rem;
+}
+
+/* Vertical rhythm. The h1, the filter row and the table were stacked with no
+   space between them, so the page read as one undifferentiated block. */
+.page > * + * {
+  margin-block-start: 1rem;
+}
+.page > h1,
+.page [data-slot="page-header"] {
+  margin-block-end: 0.25rem;
+}
