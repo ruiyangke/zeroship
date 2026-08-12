@@ -2312,14 +2312,22 @@ pub fn fold_ops_onto(
                 // unvalidated constraint against a catalog that has just validated it -
                 // the mirror image of the drift the recorded tail exists to remove.
                 //
-                // An absent constraint stays a no-op rather than an error, unlike
-                // `DropConstraint`. This op does not need the constraint in the folded
-                // set to have been a legal migration: validating one an earlier
-                // artifact added is ordinary, and a fold over a partial op list would
-                // otherwise fail on a history the server accepted. Nothing to strip is
-                // equally the case for a CHECK, whose fold never carries the tail.
-                let snap = table_mut(&mut tables, table)?;
-                if let Some(constraint) = snap.constraints.iter_mut().find(|c| &c.name == name) {
+                // BOTH lookups miss quietly, unlike `DropConstraint`, which errors with
+                // `MissingConstraint`. This op does not need its target in the folded
+                // set to have been a legal migration: validating a constraint an
+                // EARLIER artifact added is ordinary, and `fold_ops` is routinely handed
+                // one artifact's ops rather than the whole history, so a fatal lookup
+                // would fail a fold on a history the server accepted. `DropConstraint`
+                // is stricter because it has a delta to apply and cannot apply it;
+                // this one's delta is already absent. Nothing to strip is equally the
+                // case for a CHECK, whose fold never carries the tail.
+                //
+                // Exactly one suffix comes off. A doubled tail is malformed and stays
+                // visible as drift rather than being quietly repaired here.
+                if let Some(constraint) = tables
+                    .get_mut(table)
+                    .and_then(|snap| snap.constraints.iter_mut().find(|c| &c.name == name))
+                {
                     if let Some(validated) = constraint
                         .definition
                         .strip_suffix(crate::render::declarative::NOT_VALID_DEFINITION_SUFFIX)
@@ -6449,6 +6457,109 @@ columns = [
                 columns: cols.iter().map(ToString::to_string).collect(),
             },
         }
+    }
+
+    /// A NOT VALID foreign key, its table, and the op that validates it.
+    fn not_valid_fk(name: &str) -> IrConstraint {
+        IrConstraint {
+            name: Some(name.to_string()),
+            kind: IrConstraintKind::Fk {
+                columns: vec!["parent_id".to_string()],
+                references_table: "parents".to_string(),
+                references_columns: vec!["id".to_string()],
+                on_delete: None,
+                on_update: None,
+                deferrable: None,
+                initially_deferred: None,
+                not_valid: Some(true),
+            },
+        }
+    }
+
+    fn validate_constraint(table: &str, name: &str) -> Op {
+        Op::ValidateConstraint {
+            table: table.to_string(),
+            name: name.to_string(),
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn children_with_not_valid_fk(constraint: &str) -> Vec<Op> {
+        // `id` is injected by the charter, so neither table declares one.
+        vec![
+            create("parents", vec![col("label", ColType::Text, false)]),
+            create("children", vec![col("parent_id", ColType::Text, true)]),
+            Op::AddConstraint {
+                table: "children".to_string(),
+                constraint: not_valid_fk(constraint),
+                schema: None,
+                existence_guard: None,
+            },
+        ]
+    }
+
+    fn folded_definition(snapshot: &SchemaSnapshot, table: &str, constraint: &str) -> String {
+        snapshot.tables[table]
+            .constraints
+            .iter()
+            .find(|c| c.name == constraint)
+            .expect("the folded constraint exists")
+            .definition
+            .clone()
+    }
+
+    #[test]
+    fn not_valid_foreign_key_carries_the_tail_until_it_is_validated() {
+        let added = fold(&children_with_not_valid_fk("children_parent_fkey")).unwrap();
+        assert!(
+            folded_definition(&added, "children", "children_parent_fkey").ends_with(" NOT VALID"),
+            "an unvalidated FK must fold with the tail `pg_get_constraintdef` renders"
+        );
+
+        let mut ops = children_with_not_valid_fk("children_parent_fkey");
+        ops.push(validate_constraint("children", "children_parent_fkey"));
+        let validated = fold(&ops).unwrap();
+        let definition = folded_definition(&validated, "children", "children_parent_fkey");
+        assert!(
+            !definition.contains("NOT VALID"),
+            "VALIDATE must remove the tail, leaving {definition:?}"
+        );
+
+        // Validating twice is the same as validating once: the strip is defined on
+        // the suffix being there, not on a state flag that could be flipped twice.
+        ops.push(validate_constraint("children", "children_parent_fkey"));
+        assert_eq!(
+            folded_definition(&fold(&ops).unwrap(), "children", "children_parent_fkey"),
+            definition,
+            "a second VALIDATE is idempotent"
+        );
+    }
+
+    #[test]
+    fn validate_constraint_is_a_no_op_on_a_table_or_constraint_the_fold_cannot_see() {
+        // A VALIDATE naming a table an EARLIER artifact created is an ordinary
+        // migration, and `fold_ops` is routinely handed one artifact's ops rather
+        // than the whole history. Erroring here would fail a fold on a history the
+        // server accepted, so both lookups miss quietly. `DropConstraint` is
+        // deliberately stricter: it has a delta to apply and cannot apply it.
+        let absent_table = fold(&[
+            create("parents", vec![col("label", ColType::Text, false)]),
+            validate_constraint("children", "children_parent_fkey"),
+        ]);
+        assert!(
+            absent_table.is_ok(),
+            "a VALIDATE on an unseen table must fold clean, got {absent_table:?}"
+        );
+
+        let mut ops = children_with_not_valid_fk("children_parent_fkey");
+        ops.push(validate_constraint("children", "some_other_constraint"));
+        let absent_constraint = fold(&ops).expect("a VALIDATE naming an unseen constraint folds");
+        assert!(
+            folded_definition(&absent_constraint, "children", "children_parent_fkey")
+                .ends_with(" NOT VALID"),
+            "validating a different constraint must not strip this one's tail"
+        );
     }
 
     #[test]

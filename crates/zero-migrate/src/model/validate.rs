@@ -4897,14 +4897,24 @@ fn validate_op_support(
         })
     }
 
+    /// Whether a create-time constraint carries the `not_valid` facet AT ALL.
+    ///
+    /// Matching `Some(_)` rather than `Some(true)` is deliberate and was a fix: lower
+    /// refuses `not_valid.is_some()` outright, so admitting `Some(false)` here let an
+    /// authored `{ notValid: false }` clear validate and then die at lower with
+    /// "validated createTable NOT VALID FOREIGN KEY reached lower" - an engine-shaped
+    /// message that reads like a validator bypass while describing a shape validate
+    /// had deliberately passed. `false` is reachable from the surface: the recorder's
+    /// `requireOptionalBoolean` passes it through unchanged. Both gates now refuse the
+    /// same set, and lower's message is true again.
     fn constraint_kind_not_valid(kind: &IrConstraintKind) -> bool {
         matches!(
             kind,
             IrConstraintKind::Fk {
-                not_valid: Some(true),
+                not_valid: Some(_),
                 ..
             } | IrConstraintKind::Check {
-                not_valid: Some(true),
+                not_valid: Some(_),
                 ..
             }
         )
@@ -5002,12 +5012,14 @@ fn validate_op_support(
                 check(Feature::SequenceDefault)?;
             }
             for constraint in constraints {
-                // `NOT VALID` is meaningless at create-time (there are no existing
-                // rows to defer, and PostgreSQL rejects `NOT VALID` in `CREATE TABLE`).
-                // Refuse it fail-closed on the create-time inline constraint so a
-                // hand-crafted IR cannot smuggle it into a silently-dropped slot; it
-                // is only authorable via addForeignKey/addCheck (ALTER TABLE ADD
-                // CONSTRAINT).
+                // `NOT VALID` is meaningless at create-time: there are no existing rows
+                // to defer. PostgreSQL does not reject it - measured on 18.4, a
+                // `CREATE TABLE ... FOREIGN KEY ... NOT VALID` is ACCEPTED and the
+                // constraint is stored with `convalidated = true`, so the server
+                // silently neutralizes the request rather than honouring or refusing
+                // it. That is precisely why this refuses fail-closed: a slot the server
+                // drops on the floor must not look authorable. It is only authorable
+                // via addForeignKey/addCheck (ALTER TABLE ADD CONSTRAINT).
                 if constraint_kind_not_valid(&constraint.kind) {
                     return Err(AuthoringError {
                         code: CODE_OP_INVALID.to_string(),

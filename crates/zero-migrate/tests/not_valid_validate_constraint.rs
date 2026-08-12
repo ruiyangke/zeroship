@@ -16,7 +16,9 @@ mod support;
 use std::path::PathBuf;
 
 use zero_migrate::model::expr::{BinaryOp, Expr};
-use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op};
+use zero_migrate::model::ir::{
+    ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op,
+};
 use zero_migrate::model::support::Dialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::{
@@ -213,6 +215,77 @@ fn not_valid_on_create_time_constraint_is_refused_everywhere() {
         existence_guard: None,
     };
     assert!(!validates(create(Some(true)), Dialect::Postgres));
+
+    // This CHECK fixture cannot carry the `Some(false)` half or an absent control:
+    // its body references `qty`, which the table never declares, so validate refuses
+    // every spelling with "column \"qty\" does not resolve". A matrix built on it
+    // would report the rule working while measuring an unresolvable column. The
+    // foreign-key case below has the declared column that makes the control real.
+}
+
+#[test]
+fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
+    // The refusal has to land at VALIDATE, because that is the gate `lint`/`preview`
+    // run and the one that produces an authoring error a user can act on. Lower's
+    // matching refusal is defense-in-depth and reports an engine-shaped message
+    // ("validated createTable NOT VALID FOREIGN KEY reached lower"), which is a fine
+    // thing for a validator bypass to say and a terrible thing to show an author.
+    //
+    // `Some(false)` used to clear validate and hit exactly that message. It is
+    // reachable from the surface: the recorder's `requireOptionalBoolean` passes a
+    // literal `false` through unchanged.
+    let create = |not_valid: Option<bool>| Op::CreateTable {
+        name: "line_items".into(),
+        columns: vec![IrColumn {
+            name: "parent_id".into(),
+            ty: ColType::Text,
+            nullable: Some(true),
+            default: None,
+            unique: None,
+            value_format: None,
+            references: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
+        primary_key: None,
+        constraints: vec![IrConstraint {
+            name: Some("line_items_parent_fkey".into()),
+            kind: IrConstraintKind::Fk {
+                columns: vec!["parent_id".into()],
+                references_table: "parents".into(),
+                references_columns: vec!["id".into()],
+                on_delete: None,
+                on_update: None,
+                deferrable: None,
+                initially_deferred: None,
+                not_valid,
+            },
+        }],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+
+    for spelling in [Some(true), Some(false)] {
+        assert!(
+            !validates(create(spelling), Dialect::Postgres),
+            "createTable FOREIGN KEY notValid={spelling:?} must be refused at validate"
+        );
+    }
+
+    // The control that makes the two refusals mean something: the SAME fixture with
+    // the facet absent clears validate. Without it, both lines above would pass on a
+    // fixture that validate rejects for some unrelated reason.
+    assert!(
+        validates(create(None), Dialect::Postgres),
+        "the same createTable without the facet must clear validate"
+    );
 }
 
 // ── 3. RECORDER (the surface builders) ──────────────────────────────────────
