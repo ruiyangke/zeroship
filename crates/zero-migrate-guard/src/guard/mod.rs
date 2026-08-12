@@ -1209,8 +1209,9 @@ impl SqlGuard {
         // SQLite fail-closed backstop. `SqlGuard` is the **Postgres** line-1
         // (libpg_query below); it is the PG arm of the per-engine
         // [`MigrationGuard`] seam ([`PgGuard`] wraps it). The engine never selects
-        // `SqlGuard` for SQLite — it routes through [`SqliteDescriptorGuard`] (via
-        // [`guard_for`]), the trusted descriptor-diff path.
+        // `SqlGuard` for SQLite OR MySQL — both route through
+        // [`SqliteDescriptorGuard`] (via [`guard_for`]), the trusted descriptor-diff
+        // path, and both reject raw text in the arm just below.
         // This arm is the defensive fail-closed for the *wrong caller*: if a raw,
         // untrusted SQLite string is ever handed to the PG guard (a SQLite-keyed
         // `GuardConfig`), `libpg_query` cannot vet it, so we reject rather than
@@ -3060,11 +3061,13 @@ impl MigrationGuard for PgGuard {
 /// (The raw-untrusted-SQL fail-closed — refusing a hand-written `SQLite` string
 /// handed to the *PG* guard — stays on [`SqlGuard::check`] as
 /// [`GuardError::SqliteRawSqlRejected`]; that defensive property is unchanged.)
+/// Serves BOTH descriptor-only engines - `SQLite` and MySQL - despite the name.
+/// [`guard_for`] records why they share it and why the name has not been changed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqliteDescriptorGuard;
 
 impl SqliteDescriptorGuard {
-    /// Construct the `SQLite` descriptor guard (stateless).
+    /// Construct the descriptor guard (stateless). Selected for `SQLite` and MySQL.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -3084,10 +3087,25 @@ impl MigrationGuard for SqliteDescriptorGuard {
 /// Select the per-engine line-1 [`MigrationGuard`] for a [`GuardConfig`]'s
 /// dialect.
 ///
-/// Postgres → [`PgGuard`] (`libpg_query` deny-list); `SQLite` → [`SqliteDescriptorGuard`]
-/// (trusted descriptor path). This replaces the `if dialect == Sqlite` branch in
-/// `plan()` — the core no longer knows `SQLite` by name; it asks for the dialect's
-/// guard and runs it uniformly.
+/// - Postgres → [`PgGuard`] (`libpg_query` deny-list).
+/// - `SQLite` and MySQL → [`SqliteDescriptorGuard`], the trusted descriptor path.
+///
+/// MySQL sharing `SQLite`'s guard is DELIBERATE, not a copy-paste. A string guard
+/// earns its keep only where raw SQL can arrive, and neither dialect has a raw door:
+/// both [`SqlGuard::check`] and [`SqlGuard::check_raw_island_sql_backstop`] refuse a
+/// non-Postgres dialect outright ([`GuardError::SqliteRawSqlRejected`] /
+/// [`GuardError::MysqlRawSqlRejected`]) rather than hand the text to `libpg_query`,
+/// which parses Postgres and would mis-read either. What reaches these two engines is
+/// descriptor-diff output, which the author boundary and the backend authorizer already
+/// vet. Give MySQL a Postgres-parsing guard instead and it would reject valid MySQL DDL
+/// as a syntax error.
+///
+/// The TYPE NAME says `SQLite` and the mapping does not, which is why this arm reads as
+/// a bug at a glance. Renaming it is a public-API change and is queued with the other
+/// versioning calls rather than taken silently.
+///
+/// This replaces the `if dialect == Sqlite` branch in `plan()` — the core no longer
+/// knows `SQLite` by name; it asks for the dialect's guard and runs it uniformly.
 #[must_use]
 pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
     match cfg.dialect() {
