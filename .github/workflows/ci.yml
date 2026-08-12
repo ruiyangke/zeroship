@@ -1268,6 +1268,13 @@ jobs:
       # not the volume and not the checksum. So this is a question about the
       # chunked READ path specifically. A creator draining a 1 MiB object
       # chunked on a busy node gets a 500. Wire it once that is settled.
+      #
+      # Two follow-ups, same day, so nobody re-runs them: it REPRODUCES on
+      # freshly built worker/gateway/cli binaries (48/6 again, so the earlier
+      # measurement was not an artefact of this tree's stale build), and the
+      # scenario-6 spine's own case/control narrows the remaining unknown to
+      # plugin-storage chunk delivery - dispatch decode and JSON encode are
+      # common to the passing and failing arms, so neither can be the delta.
       # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
       # same measured reason as storage and with a messier signature:
       #
