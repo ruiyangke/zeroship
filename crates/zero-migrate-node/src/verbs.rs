@@ -602,6 +602,19 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
 
 /// Name the authored migration behind a refusal the engine can only report as a
 /// derived version, so the operator is told which file to look at.
+///
+/// The engine raises `MissingFromSet` for two situations it cannot tell apart, and
+/// only one of them is the situation that variant is named for. A version really
+/// absent from the supplied set keeps the engine's wording. A version the caller DID
+/// supply, whose plan lowered to more than one journaled step, gets its own message:
+/// it is in `unrepresentable`, which exists precisely because the engine reduced it
+/// to a per-step identity it can no longer match.
+///
+/// The second message REPLACES the engine's rather than appending to it. It used to
+/// append, which produced "migration mig_… is applied but absent from the supplied
+/// set … That version is <name>" - a sentence that denies the migration was supplied
+/// and then names it from the supplied set two clauses later. An operator reading the
+/// first half goes looking for a migration file that is not missing.
 fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSet) -> String {
     let zero_migrate::RollbackError::MissingFromSet { version } = error else {
         return error.to_string();
@@ -610,10 +623,12 @@ fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSe
         || error.to_string(),
         |owner| {
             format!(
-                "{error}. That version is {owner}, and a plan that lowers to more than \
-                 one journaled step cannot be reversed from its authored envelope: its \
-                 data steps carry no reverse SQL. Roll forward with a compensating \
-                 migration instead"
+                "migration {owner} cannot be rolled back: it lowers to more than one \
+                 journaled step, and a plan with several steps has no reverse - its data \
+                 steps carry no reverse SQL, so the engine reduced it to the per-step \
+                 identity {version} that no authored envelope can supply a `down` for. \
+                 Only a migration that lowers to exactly ONE step is reversible. Roll \
+                 forward with a compensating migration instead"
             )
         },
     )
