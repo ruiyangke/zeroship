@@ -6,12 +6,14 @@
 
 use proc_macro::TokenStream;
 
+mod shared;
 mod zeroship_config;
 
 /// Expand a resolved configuration struct into its inert source machinery.
 ///
 /// The macro accepts a named-field struct whose fields are
-/// `Operational<T>` or `Secret<T>` and carry `#[config(name = "...")]`.
+/// `Operational<T>` or `Secret<T>` and carry `#[config(name = "...")]`, or
+/// `#[config(shared = SYMBOL)]` for an identity several binaries declare.
 /// It preserves that resolved struct, and emits a separate clap source carrier,
 /// a consumer marker, configuration specs, linked read-site registrations, and
 /// a resolver implementation.
