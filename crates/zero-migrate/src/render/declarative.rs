@@ -8144,9 +8144,8 @@ impl DeclarativeAuthor {
                 // routing these through it would reorder the CREATE TABLE and its
                 // indexes, which have to stay one ordered unit list.
                 //
-                // Does NOT cover MySQL, where nothing needs covering: index names are
-                // per-table there, the emitter writes no `IF NOT EXISTS`, and the
-                // MySQL backend evaluates no probe.
+                // Does NOT cover MySQL, where index names are per-table and the
+                // emitter writes no `IF NOT EXISTS`.
                 //
                 // Does NOT cover a collision this same migration UNIT creates before
                 // the statement runs, and nothing else covers it either: the probe

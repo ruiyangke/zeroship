@@ -4763,9 +4763,8 @@ impl IrAuthor {
                     // verify and no satisfied no-op, so the same-table re-run stays the
                     // `IF NOT EXISTS` no-op crash recovery replays.
                     //
-                    // Does NOT cover MySQL, where nothing needs covering: index names
-                    // are per-table there, the MySQL emitter writes no
-                    // `IF NOT EXISTS`, and the MySQL backend evaluates no probe.
+                    // Does NOT cover MySQL, where index names are per-table and the
+                    // MySQL emitter writes no `IF NOT EXISTS`.
                     //
                     // Does NOT cover a collision the same migration UNIT creates
                     // before this statement runs, and NOTHING ELSE COVERS IT: the

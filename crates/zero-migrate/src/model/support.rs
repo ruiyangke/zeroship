@@ -389,23 +389,24 @@ const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
     "per-column index collations are PostgreSQL-only",
 );
 
-/// Whether an authored `ifNotExists`/`ifExists` is ENFORCED at apply. PostgreSQL
-/// and SQLite run `render::existence_probe::decide` against the live catalog under
-/// the apply lock; the MySQL backend calls it nowhere, so the guard is dropped and
-/// the bare DDL runs unconditionally.
+/// Whether an authored `ifNotExists`/`ifExists` is ENFORCED at apply. PostgreSQL,
+/// SQLite, and MySQL DDL migrations carrying a probe resolve it against the live
+/// catalog at the apply call site under the apply lock. Non-type MySQL verdicts
+/// are delegated to the shared probe decision; present table/column creates are
+/// refused until MySQL can prove modifier-preserving column-type equality.
 ///
 /// Declares the ENFORCEMENT only. It does NOT say whether a given op accepts a
 /// guard at all (`renameColumn` is refused on every dialect - see
 /// `Feature::RenameColumnGuard`), and it does NOT cover `dropView`, whose lowered
-/// DDL is `DROP VIEW IF EXISTS` on every dialect and is therefore honoured by MySQL
-/// itself. Validation never gates on this feature: it is declared so the generated
-/// support matrix states the guard story per dialect.
+/// DDL retains `DROP VIEW IF EXISTS` in addition to the catalog probe. Validation
+/// never gates on this feature: it is declared so the generated support matrix
+/// states the guard story per dialect.
 const EXISTENCE_GUARD_PROBE: DialectSupport = DialectSupport::new(
     supported(RenderMode::LiveResolved),
     supported(RenderMode::LiveResolved),
     unsupported(
         UNSUPPORTED,
-        "the MySQL backend evaluates no existence-guard catalog probe at apply, so a guarded statement runs unconditionally and a re-run errors; the sole exception is dropView, whose DDL carries a native DROP VIEW IF EXISTS",
+        "MySQL catalog probes enforce presence-only and non-column-type decisions, but any decision requiring column-type equality is refused until modifier-preserving equality is implemented",
     ),
 );
 

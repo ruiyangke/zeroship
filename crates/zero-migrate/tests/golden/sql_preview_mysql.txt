@@ -18,7 +18,7 @@ CREATE INDEX `codes_updated_at_idx` ON `public`.`codes` (`updated_at`);
 
 ALTER TABLE `public`.`codes` ADD COLUMN `note` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
 
--- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): NOT honoured on MySQL; the apply evaluates no catalog probe, so the bare DDL below runs unconditionally and a re-run errors instead of no-opping
+-- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): catalog-probed at apply (run / satisfied-noop / fail-drift); present createTable/addColumn is refused until MySQL column-type equality is implemented; the statement below is the bare DDL the apply runs when the probe says run
 
 ALTER TABLE `public`.`codes` ADD COLUMN `flag` TINYINT(1);
 

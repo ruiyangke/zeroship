@@ -137,7 +137,7 @@
 
 ## Notes
 
-[^1]: the MySQL backend evaluates no existence-guard catalog probe at apply, so a guarded statement runs unconditionally and a re-run errors; the sole exception is dropView, whose DDL carries a native DROP VIEW IF EXISTS
+[^1]: MySQL catalog probes enforce presence-only and non-column-type decisions, but any decision requiring column-type equality is refused until modifier-preserving equality is implemented
 [^2]: nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences
 [^3]: table-level CHECK expression rendering is PostgreSQL-only in the current engine
 [^4]: foreign keys need at least one local column

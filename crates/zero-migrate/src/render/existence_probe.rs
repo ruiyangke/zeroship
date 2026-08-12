@@ -4,8 +4,9 @@
 //! every DDL op) is carried in `ir_version 2`. This module is the guard
 //! EXECUTION: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
 //! onto each lowered [`Migration`](crate::model::migration::Migration); at apply time the
-//! executor reads the LIVE catalog under the ALREADY-HELD project advisory lock +
-//! the open per-step transaction, and [`decide`] returns a [`GuardVerdict`]:
+//! executor reads the LIVE catalog under the ALREADY-HELD project apply lock and,
+//! on transactional backends, the open per-step transaction. [`decide`] returns a
+//! [`GuardVerdict`]:
 //!
 //! - [`GuardVerdict::RunBare`] — the guard's precondition is met; run the op's `up`.
 //! - [`GuardVerdict::SatisfiedNoop`] — the object already has the declared shape
@@ -14,14 +15,13 @@
 //!   net-applied and skips it via normal pending computation).
 //! - [`GuardVerdict::FailDrift`] — the object EXISTS with a shape that DIVERGES
 //!   from the declared one (`ifNotExists`) and cannot be proven equal. This is a
-//!   HARD error (`ApplyError::ExistenceGuardDrift`), never a silent skip. The
-//!   transaction is rolled back; nothing is applied or journaled.
+//!   HARD error (`ApplyError::ExistenceGuardDrift`), never a silent skip. Nothing
+//!   is applied or journaled.
 //!
 //! # No-TOCTOU
-//! The probe is a `&Client` read issued INSIDE the same open transaction that will
-//! run the `up`, under the project advisory lock the whole plan already holds. No
-//! lock is acquired or released across probe→decide→act, so there is no window for
-//! the catalog to change between the verdict and the action.
+//! No project apply lock is acquired or released across probe-to-decide-to-act.
+//! PostgreSQL and SQLite also keep the probe in their per-step atomic boundary;
+//! MySQL relies on the held project lock because its DDL auto-commits.
 //!
 //! # Fail-closed shape verification (the point of this module)
 //! A guard whose precondition CANNOT be fully proven from the catalog fails CLOSED
@@ -78,6 +78,10 @@
 //!   column either way, so the blind spot carries no provable physical divergence).
 //!   On PG both sides are the `information_schema` spelling and the raw compare is
 //!   exact.
+//! - **MySQL column equality is not implemented here** - the MySQL executor calls
+//!   this function only when name lookup or non-column structure settles the
+//!   decision. A present `createTable` or `addColumn` is refused before [`decide`]
+//!   rather than comparing the lossy canonical column type.
 //!
 //! - **An over-long constraint / index name on PostgreSQL** — PostgreSQL truncates an
 //!   identifier past 63 bytes with only a NOTICE, so the catalog holds a name the
@@ -134,12 +138,13 @@ pub enum GuardVerdict {
 }
 
 /// Decide the verdict for `probe` against the LIVE catalog `live`. Pure (no DB
-/// access — the caller has already taken the snapshot under the held lock + open
-/// txn). See the module docs for the per-variant fail-closed rules.
+/// access - the caller has already taken the snapshot under its held apply lock).
+/// See the module docs for the per-variant fail-closed rules.
 ///
 /// `dialect` is the backend the LIVE snapshot was introspected from. It is the
-/// caller-known fact (the PG executor passes [`SqlDialect::Postgres`]; the SQLite
-/// backend passes [`SqlDialect::Sqlite`]), NOT carried on the wire-serialized probe.
+/// caller-known fact (the PG executor passes [`SqlDialect::Postgres`], the SQLite
+/// backend passes [`SqlDialect::Sqlite`], and the MySQL backend passes
+/// [`SqlDialect::Mysql`]), NOT carried on the wire-serialized probe.
 ///
 /// **F1** — the declared probe `data_type` is ALWAYS the PG `information_schema`
 /// spelling (the snapshot builder maps via the PG dialect, dialect-agnostically),
@@ -678,9 +683,8 @@ fn decide_index(
     // below keeps the shape verify). Does NOT cover truncation collisions: authoring
     // validation refuses an over-long create-side identifier on every dialect before
     // lowering, and the `truncated_identifier_backstop` just below owns them for the
-    // guarded path. Does NOT cover MySQL, where nothing needs covering - index names
-    // are per table there, so a same name on another table is not a collision, and
-    // the MySQL backend calls `decide` nowhere in any case.
+    // guarded path. Does NOT cover MySQL, where index names are per table and a same
+    // name on another table is not a collision.
     if ownership_only {
         return match other_owner(name) {
             Some(owner) => drift(
@@ -705,10 +709,8 @@ fn decide_index(
             // dropIndex: presence-only on the index name. The table hint may be
             // absent/empty on this path (the probe carries `String::new()` when the
             // op omitted it), so a schema-wide name still resolves through the wider
-            // scan. Does NOT cover MySQL, where the drop names its table and an
-            // index found under another table is a different object - and where
-            // nothing needs to cover it, because the MySQL backend evaluates no
-            // probe at all, so this arm is unreachable on that dialect.
+            // scan. On MySQL the drop names its table, and an index found under
+            // another table is a different object.
             //
             // This branch has NO test on any dialect: no test in this workspace
             // authors a guarded `dropIndex`, and every `GuardProbe::Index` unit test
@@ -1438,12 +1440,9 @@ mod tests {
         // MySQL scopes index names per table, so the same name elsewhere is an
         // unrelated object and must not block the create.
         //
-        // Pins the DECIDER's contract, NOT an apply path: the MySQL backend reads no
-        // `existence_guard` at all (`decide` is called only from the PostgreSQL and
-        // SQLite sessions), so no end-to-end arm can reach this branch and no
-        // end-to-end arm goes red if `Capability::SchemaWideIndexNames` is flipped on
-        // for MySQL. Does NOT cover that gap; it only keeps the function honest for
-        // the day a MySQL probe path exists.
+        // Pins the DECIDER's per-table ownership contract. The MySQL apply tests
+        // cover a free and same-table index name, but no end-to-end arm goes red if
+        // `Capability::SchemaWideIndexNames` is flipped for MySQL.
         let mut live = snapshot_with("users", table_owning("idx_shared"));
         live.tables.insert("orders".to_string(), empty_table());
         assert_eq!(

@@ -4519,9 +4519,9 @@ async fn journal_applied(
 /// journaled-but-absent sibling is the bug; an absent sibling with the unit still
 /// pending would merely be an incomplete deploy.
 ///
-/// Does NOT cover MySQL, and nothing else covers it: that backend evaluates no probe
-/// at all, so the guard is dropped and the bare DDL runs. A separate defect, noted
-/// rather than silently narrowed.
+/// Does NOT cover MySQL. Its apply path probes the live column and refuses a present
+/// addColumn until MySQL column-type equality can be proven, so it cannot silently
+/// adopt the main column as the sibling.
 ///
 /// Asserts the sibling COLUMN only, not the `zero-migrate:mask` sentinel `COMMENT`
 /// riding the same `up`. The sentinel's EMISSION is owned by

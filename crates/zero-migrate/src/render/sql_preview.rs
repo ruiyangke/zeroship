@@ -28,17 +28,16 @@
 //!   12-step rebuild (it does not even lower offline — fails closed with
 //!   [`IrLowerError::SqliteRenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
 //! - **`backfill`** — a runtime windowed loop.
-//! - **any existence-guard-carrying op** (`ifNotExists`/`ifExists`): on PostgreSQL
-//!   and SQLite the apply is a runtime catalog probe + run / satisfied-noop /
-//!   fail-drift decision
+//! - **any DDL migration carrying an existence-guard probe**
+//!   (`ifNotExists`/`ifExists`): apply is a
+//!   runtime catalog probe + run / satisfied-noop / fail-drift decision
 //!   ([`guard_probe`](crate::render::existence_probe), explicitly NOT offline-renderable). The
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
-//!   the engine never emits. The MySQL backend evaluates NO probe, so a MySQL
-//!   preview says so instead (`guard_label`): the bare DDL runs unconditionally,
-//!   except for `dropView`, whose lowered MySQL DDL carries a native
-//!   `DROP VIEW IF EXISTS`. This is a preview-text distinction only: it changes no
-//!   lowered statement and no apply behaviour on any dialect.
+//!   the engine never emits. MySQL additionally refuses a present createTable or
+//!   addColumn until its probe can prove modifier-preserving column-type equality.
+//!   This is a preview-text distinction only: it changes no lowered statement and
+//!   no apply behaviour on any dialect.
 //! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** — require
 //!   live structure; named FK add/drop changes lower to the live 12-step rebuild
 //!   and are not flattened into ordinary offline SQL
@@ -574,18 +573,11 @@ fn render_step_no_op(step: &PlanStep, dialect: SqlDialect, out: &mut Vec<Rendere
                         "{RUNTIME_RESOLVED} guarded DDL ({kind}): catalog-probed at apply \
                          (run / satisfied-noop / fail-drift); the statement below is the bare DDL"
                     ),
-                    // A `view` probe is stamped only by `dropView`, whose MySQL DDL
-                    // carries a native `DROP VIEW IF EXISTS`; every other probe kind
-                    // reaching MySQL is dropped on the floor at apply.
-                    SqlDialect::Mysql if kind == "view" => format!(
-                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): honoured natively on MySQL by \
-                         the IF EXISTS clause below; the apply evaluates no catalog probe, so \
-                         there is no drift check"
-                    ),
                     SqlDialect::Mysql => format!(
-                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): NOT honoured on MySQL; the \
-                         apply evaluates no catalog probe, so the bare DDL below runs \
-                         unconditionally and a re-run errors instead of no-opping"
+                        "{RUNTIME_RESOLVED} guarded DDL ({kind}): catalog-probed at apply \
+                         (run / satisfied-noop / fail-drift); present createTable/addColumn is \
+                         refused until MySQL column-type equality is implemented; the statement \
+                         below is the bare DDL"
                     ),
                 }));
             }
@@ -752,11 +744,9 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
 /// The runtime-resolved label for a guard-carrying op (op context available).
 ///
 /// The apply story is DIALECT-SPECIFIC and the label states the one that is true
-/// for `dialect`. PostgreSQL and SQLite evaluate
-/// [`existence_probe::decide`](crate::render::existence_probe::decide) under the
-/// apply lock; MySQL evaluates no probe at all, so on MySQL the guard is either
-/// carried by a native clause in the statement below
-/// ([`mysql_guard_is_native`]) or silently dropped.
+/// for `dialect`. Every backend resolves a DDL migration carrying a guard probe
+/// against a live catalog snapshot under the apply lock. MySQL also names its
+/// fail-closed column-type boundary.
 ///
 /// Does NOT change the statement rendered beneath the label on any dialect, and
 /// does NOT change apply behaviour - this is preview text only.
@@ -774,15 +764,11 @@ fn guard_label(op: &Op, g: ExistenceGuard, dialect: SqlDialect) -> String {
              (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply \
              runs when the probe says run{newly_live}"
         ),
-        SqlDialect::Mysql if mysql_guard_is_native(op) => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): honoured natively on MySQL by the \
-             IF EXISTS clause below; the apply evaluates no catalog probe, so there is no \
-             drift check"
-        ),
         SqlDialect::Mysql => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): NOT honoured on MySQL; the apply \
-             evaluates no catalog probe, so the bare DDL below runs unconditionally and a \
-             re-run errors instead of no-opping"
+            "{RUNTIME_RESOLVED} {kind} {subject} ({dir}): catalog-probed at apply \
+             (run / satisfied-noop / fail-drift); present createTable/addColumn is refused until \
+             MySQL column-type equality is implemented; the statement below is the bare DDL the \
+             apply runs when the probe says run{newly_live}"
         ),
     }
 }
@@ -821,22 +807,6 @@ fn newly_live_drop_note(op: &Op, g: ExistenceGuard) -> &'static str {
         }
         _ => "",
     }
-}
-
-/// Whether MySQL lowering carries this op's existence guard as a NATIVE SQL clause
-/// rather than dropping it. `dropView` is the only such op among the 22 that
-/// [`Op::legal_existence_guard`](crate::model::ir::Op::legal_existence_guard)
-/// admits: its lowering emits `DROP VIEW IF EXISTS` on every dialect.
-///
-/// `dropSequence` also emits a native `IF EXISTS`, but sequences are unsupported on
-/// MySQL and its lowering fails closed before any label is rendered, so it is
-/// deliberately absent here. Does NOT cover the vendor ops (`dropTrigger` and
-/// friends carry their own `ifExists` field, not an `ExistenceGuard`), and does NOT
-/// speak for PostgreSQL or SQLite, which probe in addition to any native clause.
-/// Defaults to `false` so a newly guardable op is over-warned rather than
-/// mis-promised.
-const fn mysql_guard_is_native(op: &Op) -> bool {
-    matches!(op, Op::DropView { .. })
 }
 
 /// A `Dml` comment line (op context): the op kind + native bind count.

@@ -1010,9 +1010,8 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
 /// was never created.
 ///
 /// Does NOT cover MySQL, which scopes index names per table (there the same shape
-/// is a plain absent-index `RunBare`) - and which needs no arm here in any case,
-/// because the MySQL backend evaluates no existence-guard probe at all. The
-/// decider's MySQL contract is pinned by the unit test
+/// is a plain absent-index `RunBare`). The decider's MySQL contract is pinned by
+/// the unit test
 /// `index_ownership_only_ignores_a_foreign_owner_where_names_are_per_table` in
 /// `render::existence_probe`.
 ///
@@ -1115,8 +1114,8 @@ async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
 /// name, which must still reach the CREATE.
 ///
 /// Does NOT cover MySQL (per-table index names), where there is nothing to cover:
-/// the MySQL emitter writes no `IF NOT EXISTS` and the MySQL backend evaluates no
-/// probe, so the silent-skip shape this arm pins cannot occur there.
+/// the MySQL emitter writes no `IF NOT EXISTS`, and lowering stamps no ownership
+/// probe where a same-name index on another table is legal.
 ///
 /// Does NOT cover a shape divergence - by design, not by omission: the unguarded
 /// decision is ownership and nothing else, and the GUARDED path
