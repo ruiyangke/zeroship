@@ -84,7 +84,7 @@ export PG_PORT=${PG_PORT:-5471}
 export PG_CONTAINER=${PG_CONTAINER:-zs-e2e-bslash-pg}
 # Debug logging on the gateway so the matched path is recoverable from gate.log
 # when a status alone is ambiguous.
-export RUST_LOG=${RUST_LOG:-info,zeroship_gateway=debug}
+export ZEROSHIP_OBSERVABILITY_LOG_FILTER=${ZEROSHIP_OBSERVABILITY_LOG_FILTER:-info,zeroship_gateway=debug}
 
 # shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"
