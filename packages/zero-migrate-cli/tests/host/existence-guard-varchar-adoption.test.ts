@@ -24,8 +24,20 @@
 // real `pg` driver seam against a live database, with the pre-state created OUT OF BAND
 // so the adoption is genuine rather than a re-run of the engine's own DDL.
 //
-// Does NOT cover MySQL (`mysql_canonical_type` folds `varchar(N)` to `text`, so the
-// MySQL guard never compared the length in the first place).
+// MySQL is covered at the bottom, and the reason it needed covering is that this
+// comment used to say the wrong thing. It read: "does NOT cover MySQL
+// (`mysql_canonical_type` folds `varchar(N)` to `text`, so the MySQL guard never
+// compared the length in the first place)" - which describes a guard that would
+// ADOPT a divergent column silently, the worst outcome available, and would have
+// sent the next reader hunting a bug that does not exist.
+//
+// Measured, it is the opposite. MySQL refuses the guarded adoption outright, with
+// `<unknown: MySQL column-type equality ...>` on the live side, and it refuses
+// EVEN WHEN THE DECLARED TYPE MATCHES. That is what `support-matrix.md` footnote 1
+// means by "any decision requiring column-type equality is refused until
+// modifier-preserving equality is implemented": presence-only guards work on MySQL
+// (an `ifExists` drop does), but a `createTable ifNotExists` over an existing table
+// always needs column-type equality, so guarded ADOPTION is unavailable there.
 //
 // Does NOT cover SQLite, and the reason is the same class as MySQL's, not a missing
 // seam: the SQLite leg of `existence_probe::decide` canonicalises BOTH sides through
@@ -235,6 +247,141 @@ test("PostgreSQL: a guarded createTable still fails closed on a genuinely diverg
       await pgColumnType(client, schema, "body"),
       { data_type: "character varying", character_maximum_length: 255 },
       "the refusal changed nothing: the live column keeps its own width",
+    );
+  });
+});
+
+// ── MySQL: guarded adoption is refused, matching type or not ─────────────────
+//
+// The three arms above are PostgreSQL's, where the guard compares declared against
+// live and the interesting question is whether the width survives the snapshot. On
+// MySQL there is no comparison to get right: the live side canonicalises to
+// `<unknown: MySQL column-type equality ...>`, so every column-type decision is
+// refused before it can be wrong.
+//
+// Both arms matter, and the MATCHING one matters more. "A divergent type is
+// refused" is what you would expect of a working comparison, so on its own it
+// cannot tell a fail-closed engine from a comparing one. The matching arm is what
+// shows there is no comparison at all - a declared type IDENTICAL to the live one
+// is refused just the same - which is the operational fact an operator needs:
+// guarded adoption of an existing table does not work on MySQL, and no choice of
+// declared type makes it work.
+//
+// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+
+function mysqlIdent(value: string): string {
+  return `\`${value.replaceAll("`", "``")}\``;
+}
+
+function mysqlCharter(database: string): string {
+  const scope = `{ include = [${JSON.stringify(database)}] }`;
+  return `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = ${scope}
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = ${scope}
+`;
+}
+
+/** Seed `notes` OUT OF BAND with `body` of the given MySQL type, then run `body`. */
+async function withSeededMysqlTable(
+  prefix: string,
+  bodySqlType: string,
+  body: (
+    admin: Awaited<ReturnType<typeof import("mysql2/promise").createConnection>>,
+    database: string,
+    driver: DriverConfig,
+  ) => Promise<void>,
+): Promise<void> {
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
+  const database = uniqueNamespace(prefix);
+  try {
+    await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
+    await admin.query(
+      `CREATE TABLE ${mysqlIdent(database)}.${mysqlIdent(TABLE)} (
+         id int PRIMARY KEY NOT NULL,
+         body ${bodySqlType}
+       ) ENGINE=InnoDB`,
+    );
+    await body(admin, database, { kind: "mysql", url: MYSQL_URL! });
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS ${mysqlIdent(database)};
+         DROP DATABASE IF EXISTS ${mysqlIdent(`${database}_migrations`)}`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+}
+
+/** The `(DATA_TYPE, CHARACTER_MAXIMUM_LENGTH)` the live MySQL catalog holds. */
+async function mysqlColumnType(
+  admin: Awaited<ReturnType<typeof import("mysql2/promise").createConnection>>,
+  database: string,
+): Promise<{ DATA_TYPE: string; CHARACTER_MAXIMUM_LENGTH: number | null } | undefined> {
+  const [rows] = await admin.query(
+    `SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = 'body'`,
+    [database, TABLE],
+  );
+  return (rows as Array<{ DATA_TYPE: string; CHARACTER_MAXIMUM_LENGTH: number | null }>)[0];
+}
+
+test("MySQL: a guarded createTable refuses a divergent varchar width fail-closed", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded adoption skipped");
+    return;
+  }
+  await withSeededMysqlTable("guard_my_drift", "varchar(255)", async (admin, database, driver) => {
+    await assert.rejects(
+      applyGuarded(
+        guardedCreate("guard_my_drift", () => t.string({ length: 100 })),
+        database,
+        driver,
+      ),
+      /existence-guard drift[\s\S]*unknown: MySQL column-type equality/,
+      "MySQL must refuse rather than compare, and say so",
+    );
+    assert.deepEqual(
+      await mysqlColumnType(admin, database),
+      { DATA_TYPE: "varchar", CHARACTER_MAXIMUM_LENGTH: 255 },
+      "the refusal changed nothing about the live column",
+    );
+  });
+});
+
+test("MySQL: the SAME guard refuses even when the declared type matches exactly", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded adoption skipped");
+    return;
+  }
+  // The arm that carries the finding. A refusal here cannot be a comparison
+  // deciding the types differ, because they do not - it is the absence of any
+  // comparison, failing closed. Nothing else in this suite says that.
+  await withSeededMysqlTable("guard_my_match", "varchar(100)", async (admin, database, driver) => {
+    await assert.rejects(
+      applyGuarded(
+        guardedCreate("guard_my_match", () => t.string({ length: 100 })),
+        database,
+        driver,
+      ),
+      /existence-guard drift[\s\S]*unknown: MySQL column-type equality/,
+      "an exactly-matching declared type must be refused too: MySQL never compares",
+    );
+    assert.deepEqual(
+      await mysqlColumnType(admin, database),
+      { DATA_TYPE: "varchar", CHARACTER_MAXIMUM_LENGTH: 100 },
+      "the refusal changed nothing about the live column",
     );
   });
 });
