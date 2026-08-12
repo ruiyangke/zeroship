@@ -632,6 +632,22 @@ pub enum ColType {
         schema: Option<String>,
     },
     /// Application-level encrypted column wrapping an inner type.
+    ///
+    /// CARRIES THE INNER TYPE ONLY. There is deliberately no `mode` and no
+    /// `keyId` here, so `t.encrypted({ of })` is the only form a migration can
+    /// express, and the render stamps the kernel defaults (`randomised`,
+    /// `default`) when it builds the column's encrypted facet. That keeps the
+    /// variant fail-closed: a migration cannot assert an encryption posture it
+    /// has no way to name.
+    ///
+    /// The cost is a ONE-WAY DOOR at the authoring surface, and it is silent. A
+    /// declarative schema may declare `mode` and `keyId`; re-authoring that
+    /// column as a migration drops both, and nothing diagnoses it - the
+    /// migration records, the descriptor generates, and the first symptom is a
+    /// runtime failure naming a key nobody chose. By the time a migration
+    /// reaches the engine the intent is already gone, so no layer downstream of
+    /// here can warn. Migration-first authoring supports default-mode
+    /// encryption only.
     Encrypted {
         /// The inner (plaintext) type.
         of: Box<Self>,

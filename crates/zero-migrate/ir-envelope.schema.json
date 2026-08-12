@@ -3224,7 +3224,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Application-level encrypted column wrapping an inner type.",
+          "description": "Application-level encrypted column wrapping an inner type.\n\nCARRIES THE INNER TYPE ONLY. There is deliberately no `mode` and no\n`keyId` here, so `t.encrypted({ of })` is the only form a migration can\nexpress, and the render stamps the kernel defaults (`randomised`,\n`default`) when it builds the column's encrypted facet. That keeps the\nvariant fail-closed: a migration cannot assert an encryption posture it\nhas no way to name.\n\nThe cost is a ONE-WAY DOOR at the authoring surface, and it is silent. A\ndeclarative schema may declare `mode` and `keyId`; re-authoring that\ncolumn as a migration drops both, and nothing diagnoses it - the\nmigration records, the descriptor generates, and the first symptom is a\nruntime failure naming a key nobody chose. By the time a migration\nreaches the engine the intent is already gone, so no layer downstream of\nhere can warn. Migration-first authoring supports default-mode\nencryption only.",
           "type": "object",
           "properties": {
             "encrypted": {
