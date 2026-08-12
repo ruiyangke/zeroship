@@ -20,6 +20,23 @@
 //!   * rollback (`down` runs, `rolled_back` event appends, re-apply works);
 //!   * baseline / adopt (record `completed` WITHOUT running `up`).
 //!
+//! The interrupted same-deploy online-rename coverage has TWO ARMS, and the pair is
+//! the point:
+//!
+//!   * what SHIPS: the journal keeps the obligation derivable, typed interlocks
+//!     refuse unsafe same-table DDL and rollback before mutation, and an operator can
+//!     resolve it explicitly. Safety, not capability - the table remains guarded, but
+//!     the operator still has to act.
+//!   * what is AIMED AT: retrying that same deploy automatically recovers the rename
+//!     and applies its later envelope. Ignored, because no recovery driver exists.
+//!
+//! `apply/journal.rs:608-622` says this crate ships the durable recovery primitives
+//! AND NO DRIVER: `DeployRecoveryScope` is never constructed, no `deploy_id` is
+//! generated, and the only entry point passes `None`, so no
+//! `schema_deploy_recovery` marker is written or recovered. Keeping both arms means
+//! the shipped behaviour is pinned AND the gap it leaves is legible, rather than the
+//! refusals reading as the finished answer.
+//!
 //! GATED behind `ZERO_MIGRATE_TEST_PG_URL`: every test skips cleanly when unset, so a
 //! contributor without a database still gets a green run. The skip announces itself and
 //! `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns it into a failure, which is what CI sets. The
@@ -1981,6 +1998,359 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
     drop_schemas(&session, &cfg).await;
 }
 
+struct InterruptedOnlineRename {
+    policy: zero_migrate::EffectivePolicy,
+    registry: BTreeMap<String, String>,
+    rename_plan: zero_migrate::ExpandContractPlan,
+    envelopes: Vec<MigrationIr>,
+}
+
+async fn interrupt_online_rename_deploy(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+) -> InterruptedOnlineRename {
+    use zero_migrate::driver::SqlSession;
+
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".same_deploy_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".same_deploy_users VALUES (1, 'before@example.test')",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("create same-deploy rename target");
+
+    let policy = support::no_inject(&cfg.project_schema);
+    let registry = BTreeMap::from([("same_deploy_users".to_string(), "app_test".to_string())]);
+    let rename_ir: MigrationIr = serde_json::from_value(serde_json::json!({
+        "ir_version": 1,
+        "name": "same_deploy_rename",
+        "ops": [{
+            "op": "renameColumn",
+            "table": "same_deploy_users",
+            "from": "email",
+            "to": "email_address",
+            "type": "text"
+        }]
+    }))
+    .expect("build rename envelope");
+    let later_ir: MigrationIr = serde_json::from_value(serde_json::json!({
+        "ir_version": 1,
+        "name": "same_deploy_later_table",
+        "ops": [{
+            "op": "createTable",
+            "name": "same_deploy_later",
+            "columns": [{"name": "id", "type": "bigInt", "nullable": false}],
+            "primaryKey": ["id"]
+        }]
+    }))
+    .expect("build later envelope");
+
+    let backend = PostgresBackend::new_generic(session);
+    let initial_snapshot = backend
+        .snapshot_schema(cfg)
+        .await
+        .expect("snapshot rename target before deploy");
+    let initial_live = LiveSchema::from_catalog_snapshot(initial_snapshot, "app_test");
+    let resolved_rename = resolve_create_table_policy(&rename_ir, &policy, &cfg.project_schema)
+        .expect("resolve rename policy");
+    let resolved_rename_json =
+        serde_json::to_string(&resolved_rename).expect("serialize resolved rename");
+    let authored = IrAuthor::new(
+        &cfg.project_schema,
+        "app_test",
+        SqlDialect::Postgres,
+        &policy,
+    )
+    .load_and_lower_guarded(
+        &resolved_rename_json,
+        "app_test",
+        &registry,
+        &initial_live,
+        &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres),
+    )
+    .expect("lower rename before interruption");
+    let rename_plan = authored
+        .plan
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) => Some(plan.clone()),
+            _ => None,
+        })
+        .expect("rename envelope lowers to a PostgreSQL online rename");
+    let expand_versions: Vec<String> = rename_plan
+        .expand
+        .iter()
+        .map(|migration| migration.version.as_str().to_string())
+        .collect();
+    let envelopes = vec![rename_ir, later_ir];
+
+    zero_migrate::fault::arm(
+        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        2,
+    );
+    let interrupted = MigrationEngine::new()
+        .deploy_envelopes(
+            &envelopes,
+            &backend,
+            &policy,
+            SqlDialect::Postgres,
+            &cfg.project_schema,
+            "app_test",
+            &registry,
+            Approval::Approved,
+            cfg,
+        )
+        .await;
+    zero_migrate::fault::disarm_all();
+
+    let interrupted_text = interrupted
+        .expect_err("the injected fault must interrupt the later envelope")
+        .to_string();
+    assert!(
+        interrupted_text.contains("apply.after_up.before_completed"),
+        "the existing apply fault must be the interruption: {interrupted_text}"
+    );
+
+    let completed_after_interrupt = zero_migrate::applied(session, cfg)
+        .await
+        .expect("read journal after interruption");
+    assert!(
+        expand_versions.iter().all(|version| {
+            completed_after_interrupt.iter().any(|entry| {
+                entry.version == *version && entry.phase == zero_migrate::Phase::Completed
+            })
+        }),
+        "the fault must land after every expand migration completes: {completed_after_interrupt:?}"
+    );
+    assert!(
+        !table_exists(session, &cfg.project_schema, "same_deploy_later").await,
+        "the later transactional envelope must roll back"
+    );
+
+    InterruptedOnlineRename {
+        policy,
+        registry,
+        rename_plan,
+        envelopes,
+    }
+}
+
+/// What ships: the interrupted rename stays derivable from the journal and typed
+/// interlocks refuse unsafe same-table work before it mutates the database. The
+/// operator can still finish the rename through the explicit applied resolution.
+///
+/// This is the safety half of the pair. It pins a reachable, non-destructive response
+/// to the documented absence of an automatic driver without presenting that absence
+/// as the finished answer.
+#[compio::test]
+async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    let interrupted = interrupt_online_rename_deploy(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+
+    let expected_pending_version = interrupted.rename_plan.trigger_version.as_str().to_string();
+    let expected_plan_version = interrupted
+        .rename_plan
+        .plan_version
+        .as_ref()
+        .expect("guarded IR rename carries a plan version")
+        .as_str()
+        .to_string();
+    let outstanding_after_interrupt = backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("derive outstanding contract after interruption");
+    assert_eq!(
+        outstanding_after_interrupt.len(),
+        1,
+        "the journal must derive exactly the interrupted rename obligation"
+    );
+    let obligation = outstanding_after_interrupt
+        .into_iter()
+        .next()
+        .expect("one outstanding obligation was asserted");
+    assert_eq!(obligation.table, "same_deploy_users");
+    assert_eq!(obligation.pending_version, expected_pending_version);
+    assert_eq!(obligation.plan_version, expected_plan_version);
+
+    let blocked_column = "must_not_land";
+    let touching = mig(
+        MigrationId::derive("same_deploy_touch", tok.as_bytes()),
+        "touch_table_with_pending_rename",
+        &format!(
+            "ALTER TABLE \"{}\".same_deploy_users ADD COLUMN {blocked_column} text",
+            cfg.project_schema
+        ),
+    );
+    let touching_version = touching.version.as_str().to_string();
+    let touch_error = MigrationEngine::new()
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::Ddl(touching)],
+            &["same_deploy_users".to_string()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("the outstanding obligation must refuse same-table DDL");
+    match &touch_error {
+        DeclarativeApplyError::Plain(EngineError::PendingContract(refusal)) => {
+            assert_eq!(refusal.table, obligation.table);
+            assert_eq!(refusal.pending_version, obligation.pending_version);
+        }
+        other => panic!("expected the typed pending-contract refusal, got {other:?}"),
+    }
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "same_deploy_users",
+            blocked_column,
+        )
+        .await,
+        "the pending-contract refusal must run before the touching DDL"
+    );
+    let journal_after_refusal = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("read journal after refused same-table DDL");
+    assert!(
+        !journal_after_refusal
+            .iter()
+            .any(|entry| entry.version == touching_version),
+        "the refused same-table DDL must not be journaled"
+    );
+
+    let contract_head = interrupted
+        .rename_plan
+        .contract
+        .first()
+        .expect("online rename carries a contract migration")
+        .clone();
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&contract_head),
+        Approval::Approved,
+        "operator",
+    )
+    .await
+    .expect("apply a contract version for the rollback interlock proof");
+    let rollback_guard = zero_migrate::guard_for(&cfg.guard_config());
+    let rollback_error = zero_migrate::rollback(
+        &backend,
+        &cfg,
+        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::Steps(1)),
+        std::slice::from_ref(&contract_head),
+        Approval::Approved,
+        "operator",
+        &*rollback_guard,
+    )
+    .await
+    .expect_err("rollback must refuse a version held by the outstanding rename");
+    match &rollback_error {
+        zero_migrate::RollbackError::PendingContractOutstanding {
+            version,
+            table,
+            plan_version,
+        } => {
+            assert_eq!(version, contract_head.version.as_str());
+            assert_eq!(table, &obligation.table);
+            assert_eq!(plan_version, &obligation.plan_version);
+        }
+        other => panic!("expected the typed pending-contract rollback refusal, got {other:?}"),
+    }
+
+    MigrationEngine::new()
+        .resolve_pending_contract(
+            &obligation.pending_version,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("explicit applied resolution must finish the interrupted rename");
+    assert!(backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read obligations after explicit resolution")
+        .is_empty());
+    assert!(
+        !column_exists(&session, &cfg.project_schema, "same_deploy_users", "email").await,
+        "applied resolution must drop the source column"
+    );
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "same_deploy_users",
+            "email_address",
+        )
+        .await,
+        "applied resolution must retain the destination column"
+    );
+}
+
+/// What is aimed at: retrying the interrupted deploy automatically resolves its
+/// unfinished rename and continues through the later envelope.
+///
+/// Kept ignored rather than deleted because it states the contract a deploy-recovery
+/// driver has to meet. `apply/journal.rs:608-622` documents the durable primitives and
+/// the absence of that driver today.
+#[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so a retry cannot progress (#222)"]
+#[compio::test]
+async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_retry() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    let interrupted = interrupt_online_rename_deploy(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+
+    let _retried = MigrationEngine::new()
+        .deploy_envelopes(
+            &interrupted.envelopes,
+            &backend,
+            &interrupted.policy,
+            SqlDialect::Postgres,
+            &cfg.project_schema,
+            "app_test",
+            &interrupted.registry,
+            Approval::Approved,
+            &cfg,
+        )
+        .await
+        .expect("same-deploy retry must automatically recover and continue");
+    assert!(backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("derive outstanding contracts after automatic recovery")
+        .is_empty());
+    assert!(
+        table_exists(&session, &cfg.project_schema, "same_deploy_later").await,
+        "the retry must apply the later envelope after automatic recovery"
+    );
+}
 // ---------------------------------------------------------------------------
 // Scenario 1 — two-phase apply + pg_advisory_lock (transactional path)
 // ---------------------------------------------------------------------------
