@@ -57,7 +57,7 @@ impl Fixture {
 
         let registry = Registry::new(db_url).await.expect("registry");
 
-        let env_store = EnvStore::new(registry.clone(), "test-master-key", false)
+        let env_store = EnvStore::new(registry.clone(), "test-master-key")
             .expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
@@ -117,7 +117,6 @@ impl Fixture {
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
-            insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg,
@@ -126,7 +125,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: common::platform_auth_provider(jwks.jwks_url()),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),

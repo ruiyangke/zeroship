@@ -45,7 +45,7 @@ pub struct VerifyRedeemForm {
 /// `/verify?token=<token>` — render a one-shot interstitial that immediately
 /// POSTs the token to `/verify/redeem`.
 #[allow(clippy::unused_async, clippy::future_not_send)]
-pub async fn get(query: Query<VerifyQuery>, cfg: State<Arc<AuthConfig>>) -> HttpResponse {
+pub async fn get(query: Query<VerifyQuery>, _cfg: State<Arc<AuthConfig>>) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = TokenRedeemInterstitial {
         title: "Verify email",
@@ -57,7 +57,7 @@ pub async fn get(query: Query<VerifyQuery>, cfg: State<Arc<AuthConfig>>) -> Http
         script_nonce: "",
         extra_fields: Vec::new(),
     };
-    let csrf_set_cookie = csrf::set_cookie(&csrf_token, cfg.insecure_dev);
+    let csrf_set_cookie = csrf::set_cookie(&csrf_token);
     render_token_interstitial(&page, &csrf_set_cookie)
 }
 
@@ -129,13 +129,13 @@ pub async fn post_redeem(
     resp.body(body)
 }
 
-fn valid_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig) -> bool {
+fn valid_csrf(req: &HttpRequest, form_csrf: Option<&str>, _cfg: &AuthConfig) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     cookie_token
         .as_deref()
         .zip(form_csrf)

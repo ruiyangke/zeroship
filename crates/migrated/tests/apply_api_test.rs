@@ -1554,7 +1554,7 @@ async fn approve_endpoint_real_authenticator_denies_creator_and_allows_operator_
     seed_app(&conn, app_id, owner_id).await;
     seed_platform_admin(&conn, operator_id).await;
 
-    let issuer = Arc::new(PatIssuer::dev_insecure());
+    let issuer = Arc::new(PatIssuer::generate_ephemeral());
     let (creator_token, _creator_token_id) = issue_pat_for_policy(
         &conn,
         &issuer,
@@ -1980,7 +1980,7 @@ async fn real_delegating_authenticator_accepts_apps_migrate_owner_pat() {
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::dev_insecure());
+    let issuer = Arc::new(PatIssuer::generate_ephemeral());
     let (token, token_id) = issue_pat_for_policy(
         &conn,
         &issuer,
@@ -2010,7 +2010,7 @@ async fn real_delegating_authenticator_rejects_pat_without_apps_migrate_scope() 
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::dev_insecure());
+    let issuer = Arc::new(PatIssuer::generate_ephemeral());
     let (token, _token_id) = issue_pat_for_policy(
         &conn,
         &issuer,
@@ -2042,7 +2042,7 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
     seed_app(&conn, app_id, owner_id).await;
     seed_app(&conn, other_app_id, other_owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::dev_insecure());
+    let issuer = Arc::new(PatIssuer::generate_ephemeral());
     let (token, _token_id) = issue_pat_for_policy(
         &conn,
         &issuer,
@@ -2069,7 +2069,7 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
 #[ntex::test]
 async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let auth_conn = admin_conn().await;
-    let issuer = Arc::new(PatIssuer::dev_insecure());
+    let issuer = Arc::new(PatIssuer::generate_ephemeral());
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
         .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")

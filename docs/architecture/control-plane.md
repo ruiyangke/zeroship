@@ -19,7 +19,7 @@ Current internal endpoints are:
 - `POST /internal/usage`
 - `POST /internal/webhooks/stripe`
 
-Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is gated by the control-key bearer unless `--dev-insecure` is enabled.
+Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is always gated by the control-key bearer.
 The master-key is the human or automation credential for creator/admin control-plane mutations, while the control-key is the machine-to-machine bearer gateway and worker use for `/internal/*` feeds and usage reporting.
 
 ## Module map

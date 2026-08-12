@@ -243,9 +243,8 @@ async fn request_device_authorization_with_scope(
 }
 
 /// GET `/device` and pull the freshly-minted CSRF token out of the
-/// `Set-Cookie: zsidp_csrf=…` header. The fixture runs `--dev-insecure`, so the
-/// cookie name has no `__Host-` prefix (`csrf::COOKIE_NAME_DEV`). The same token
-/// is what the rendered form embeds in its hidden `csrf` field, so a faithful
+/// `Set-Cookie: __Host-zsidp_csrf=...` header. The same token is what the
+/// rendered form embeds in its hidden `csrf` field, so a faithful
 /// double-submit POST presents this value in BOTH the cookie header and the
 /// form body.
 #[allow(clippy::future_not_send)]
@@ -267,13 +266,13 @@ async fn fetch_device_page(http: &cyper::Client, auth_base: &str, path: &str) ->
         .and_then(|h| h.to_str().ok())
         .unwrap_or("")
         .to_string();
-    // `zsidp_csrf=<token>; Path=/; SameSite=Strict; Max-Age=3600`
+    // `__Host-zsidp_csrf=<token>; Path=/; SameSite=Strict; Max-Age=3600`
     let csrf = raw
         .split(';')
         .next()
-        .and_then(|kv| kv.trim().strip_prefix("zsidp_csrf="))
+        .and_then(|kv| kv.trim().strip_prefix("__Host-zsidp_csrf="))
         .map(str::to_string)
-        .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"));
+        .unwrap_or_else(|| panic!("GET /device must set a __Host-zsidp_csrf cookie; got: {raw:?}"));
     let body = resp.text().await.expect("GET /device body");
     (csrf, body)
 }
@@ -342,7 +341,7 @@ async fn device_route_renders_and_rejects_bad_input() {
 
     // With a valid csrf token, the input-validation checks are reachable.
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
-    let csrf_cookie = format!("zsidp_csrf={csrf_token}");
+    let csrf_cookie = format!("__Host-zsidp_csrf={csrf_token}");
 
     let empty_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", "")
@@ -486,8 +485,8 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
             .header(
                 "cookie",
                 format!(
-                    "{}; zsidp_csrf={csrf}",
-                    session_cookie::set_cookie(&session.id, true)
+                    "{}; __Host-zsidp_csrf={csrf}",
+                    session_cookie::set_cookie(&session.id)
                 ),
             )
             .expect("cookie")
@@ -524,8 +523,8 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")
@@ -655,7 +654,7 @@ async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
 
     let wrong_code = unique_unknown_user_code(&pg, None).await;
     let csrf = fetch_csrf_token(&http, &auth_base).await;
-    let csrf_cookie = format!("zsidp_csrf={csrf}");
+    let csrf_cookie = format!("__Host-zsidp_csrf={csrf}");
     let mut last_status = 0_u16;
     for attempt in 1..=DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS + 1 {
         let body = url::form_urlencoded::Serializer::new(String::new())
@@ -813,8 +812,8 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf_token}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")
@@ -852,8 +851,8 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf_token}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")
@@ -972,8 +971,8 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf_token}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")
@@ -1106,7 +1105,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .expect("build POST /device")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_csrf={anon_csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={anon_csrf}"))
         .expect("cookie")
         .body(post_body)
         .send()
@@ -1147,17 +1146,13 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .expect("build signed-in POST /device")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        // The boot() config runs with `--dev-insecure`, so the handler's
-        // `parse_cookie` looks for the dev cookie name (`zsidp_session`).
-        // The cookie we present must use the SAME mode (insecure_dev=true),
-        // otherwise it is named `__Host-zsidp_session` and the handler can't
-        // find it — `current_session` returns None and we (wrongly) redirect
-        // to /login. Pass `true` to match the dev config.
+        // Tests carry the secure, host-prefixed cookies explicitly because the
+        // in-process transport itself is plain HTTP.
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf_token}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")
@@ -1257,7 +1252,7 @@ async fn device_post_requires_csrf_token() {
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
         // Session cookie present (the victim is signed in) but no csrf cookie.
-        .header("cookie", session_cookie::set_cookie(&session.id, true))
+        .header("cookie", session_cookie::set_cookie(&session.id))
         .expect("cookie")
         .body(no_csrf_body)
         .send()
@@ -1302,8 +1297,8 @@ async fn device_post_requires_csrf_token() {
         .header(
             "cookie",
             format!(
-                "{}; zsidp_csrf={csrf_token}",
-                session_cookie::set_cookie(&session.id, true)
+                "{}; __Host-zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id)
             ),
         )
         .expect("cookie")

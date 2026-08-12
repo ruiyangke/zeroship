@@ -29,7 +29,7 @@ pub enum EnvError {
     BadKey(String),
     /// Value exceeded the per-secret/var length cap.
     TooLarge(usize),
-    /// Master key is empty and `insecure_dev` was not set.
+    /// Master key is empty.
     MasterKeyRequired,
     /// `merged_env` was called for an app that doesn't exist in the
     /// `apps` table — differentiates "empty env" from "app deleted."
@@ -65,7 +65,7 @@ impl std::fmt::Display for EnvError {
                 )
             }
             Self::TooLarge(n) => write!(f, "value too large ({n} bytes; max {MAX_VALUE_BYTES})"),
-            Self::MasterKeyRequired => write!(f, "master key is empty — refusing to start without --dev-insecure"),
+            Self::MasterKeyRequired => write!(f, "master key is empty; refusing to start"),
             Self::AppNotFound => write!(f, "app not found"),
         }
     }
@@ -139,12 +139,12 @@ impl Drop for EnvStore {
 
 impl EnvStore {
     /// Build a store with a primary master key. `master_key` must be
-    /// non-empty unless `insecure_dev`. An empty master key would
+    /// non-empty. An empty master key would
     /// SHA-256 the known prefix and produce a publicly-reproducible
     /// encryption key — every secret in the DB would be decryptable
     /// by anyone with read access.
-    pub fn new(registry: Registry, master_key: &str, insecure_dev: bool) -> Result<Self, EnvError> {
-        Self::new_with_previous(registry, master_key, &[], insecure_dev)
+    pub fn new(registry: Registry, master_key: &str) -> Result<Self, EnvError> {
+        Self::new_with_previous(registry, master_key, &[])
     }
 
     /// Build a store with rotation support. `previous_master_keys` is
@@ -154,9 +154,8 @@ impl EnvStore {
         registry: Registry,
         master_key: &str,
         previous_master_keys: &[&str],
-        insecure_dev: bool,
     ) -> Result<Self, EnvError> {
-        if master_key.is_empty() && !insecure_dev {
+        if master_key.is_empty() {
             return Err(EnvError::MasterKeyRequired);
         }
         let previous_keys = previous_master_keys

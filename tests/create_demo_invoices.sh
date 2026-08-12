@@ -51,6 +51,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -144,11 +146,14 @@ DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
@@ -299,7 +304,7 @@ info "prorated seg0 (Starter): req=300k cpu=90Mus egr=800MB ≈1.19M CU; seg1 (P
 echo ""
 echo "=== Stage 4: REAL reconcile — create + finalize ALL invoices on REAL Stripe ==="
 # ===========================================================================
-RECON="$(curl -s -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 info "reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget billed)"
 if [ "$BILLED" = "4" ]; then

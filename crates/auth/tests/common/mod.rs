@@ -37,9 +37,9 @@ use zeroship_auth::server;
 // path the CLI uses lets unset fields take their declared defaults
 // automatically — new fields land with their defaults, no fixture churn.
 //
-// `test_auth_config` baked in the overrides every fixture needs:
-// random bind port, dev-mode cookies, in-repo clients TOML, test-only
-// stash key. Federation-specific tests build on the returned config by
+// `test_auth_config` bakes in the overrides every fixture needs:
+// random bind port and explicit test-only secret inputs. Federation-specific
+// tests build on the returned config by
 // mutating the OAuth fields directly (cheaper than parsing again with
 // 8 more CLI args).
 /// The console origin the test fixture admits via `frame-ancestors` on the
@@ -57,9 +57,10 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
         "127.0.0.1:0",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
+        "--totp-enc-key",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         // Admit the console origin so the framed login routes (/login, /signup,
         // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
         // model test pins this NEW contract.
@@ -72,8 +73,7 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
         "--public-url",
         "http://localhost:0",
     ]);
-    // Populate the resolved `insecure_dev` field handlers read, the same step
-    // `main` runs after parse.
+    // Apply the same overlay-resolution step as `main`.
     cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }

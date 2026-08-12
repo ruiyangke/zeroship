@@ -69,17 +69,8 @@ use zeroship_mailer::{Address, Mailer};
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
 
-/// Production cookie name (`__Host-` → Secure required) for the
-/// per-device magic-link CSRF nonce.
-pub const MAGIC_CSRF_COOKIE_PROD: &str = "__Host-zsidp_magic_csrf";
-/// Dev cookie name (no `__Host-` prefix). RFC 6265bis §4.1.3.2 — the
-/// `__Host-` prefix mandates Secure; dev runs over plain HTTP.
-pub const MAGIC_CSRF_COOKIE_DEV: &str = "zsidp_magic_csrf";
-
-/// Resolve the magic-link CSRF cookie name for the current environment.
-pub(crate) fn magic_csrf_cookie_name(insecure_dev: bool) -> &'static str {
-    if insecure_dev { MAGIC_CSRF_COOKIE_DEV } else { MAGIC_CSRF_COOKIE_PROD }
-}
+/// Cookie name for the per-device magic-link CSRF nonce.
+pub const MAGIC_CSRF_COOKIE: &str = "__Host-zsidp_magic_csrf";
 
 /// Build the `Set-Cookie` header value for the magic-link CSRF cookie.
 ///
@@ -89,21 +80,17 @@ pub(crate) fn magic_csrf_cookie_name(insecure_dev: bool) -> &'static str {
 /// JS needs to read it — only the server consults it on
 /// `/magic/verify`. `Path=/` because the cookie must be present on the
 /// `/magic/verify` and `/magic/complete` paths alike.
-pub(crate) fn magic_csrf_set_cookie(nonce: &str, insecure_dev: bool) -> String {
-    let name = magic_csrf_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
+pub(crate) fn magic_csrf_set_cookie(nonce: &str) -> String {
     format!(
-        "{name}={nonce}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=900"
+        "{MAGIC_CSRF_COOKIE}={nonce}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=900"
     )
 }
 
 /// Build the `Set-Cookie` header value for clearing the magic-link
 /// CSRF cookie. Used after a successful redeem so the nonce can't be
 /// reused.
-fn magic_csrf_clear_cookie(insecure_dev: bool) -> String {
-    let name = magic_csrf_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+fn magic_csrf_clear_cookie() -> String {
+    format!("{MAGIC_CSRF_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0")
 }
 
 /// Parse the magic-link CSRF nonce from a request's `Cookie` header
@@ -111,9 +98,8 @@ fn magic_csrf_clear_cookie(insecure_dev: bool) -> String {
 ///
 /// Used by `/magic/verify` to decide same-device vs cross-device on
 /// redeem.
-pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
-    let name = magic_csrf_cookie_name(insecure_dev);
-    let prefix = format!("{name}=");
+pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str) -> Option<String> {
+    let prefix = format!("{MAGIC_CSRF_COOKIE}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
@@ -219,7 +205,7 @@ pub async fn start(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -385,12 +371,12 @@ pub async fn start(
 
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf));
     // The requesting-device cookie: only set if we actually issued.
     if let Some(ref i) = issued {
         resp.header(
             SET_COOKIE,
-            magic_csrf_set_cookie(&i.csrf_nonce, cfg.insecure_dev),
+            magic_csrf_set_cookie(&i.csrf_nonce),
         );
     }
     resp.body(body)
@@ -414,7 +400,7 @@ pub struct MagicAwaitQuery {
 #[allow(clippy::future_not_send, clippy::unused_async)]
 pub async fn await_code(
     query: ntex::web::types::Query<MagicAwaitQuery>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
     let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
@@ -433,7 +419,7 @@ pub async fn await_code(
         .unwrap_or_else(|_| "<h1>Enter your code</h1>".to_string());
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf));
     resp.body(body)
 }
 
@@ -458,7 +444,7 @@ pub struct MagicRedeemForm {
 pub async fn verify(
     req: HttpRequest,
     query: ntex::web::types::Query<MagicVerifyQuery>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
     let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
@@ -469,7 +455,7 @@ pub async fn verify(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let csrf_token = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev)
+    let csrf_token = parse_magic_csrf_cookie(cookie_header)
         .filter(|value| safe_csrf_value(value))
         .unwrap_or_else(csrf::generate_token);
     let page = TokenRedeemInterstitial {
@@ -482,7 +468,7 @@ pub async fn verify(
         script_nonce: "",
         extra_fields: vec![(target.query_key(), target.value())],
     };
-    let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token, cfg.insecure_dev);
+    let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token);
     render_token_interstitial(&page, &csrf_set_cookie)
 }
 
@@ -590,7 +576,7 @@ pub async fn verify_redeem(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_nonce = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_nonce = parse_magic_csrf_cookie(cookie_header);
     let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
 
     // 3. Find-or-create the user.
@@ -663,13 +649,13 @@ pub async fn verify_redeem(
     }
 }
 
-fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig) -> bool {
+fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, _cfg: &AuthConfig) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = parse_magic_csrf_cookie(cookie_header);
     cookie_token
         .as_deref()
         .zip(form_csrf)
@@ -788,12 +774,12 @@ async fn same_device_finish(
     let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
     // Clear the requesting-device cookie so a future stray click can't
     // be replayed in a same-device check.
-    resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
+    resp.header(SET_COOKIE, magic_csrf_clear_cookie());
     resp.finish()
 }
 
@@ -828,7 +814,7 @@ async fn magic_challenge(
     );
     // Clear the requesting-device nonce here too: the magic row backing it is
     // already consumed, so keeping it would only preserve a stale replay input.
-    if let Ok(value) = HeaderValue::from_str(&magic_csrf_clear_cookie(cfg.insecure_dev)) {
+    if let Ok(value) = HeaderValue::from_str(&magic_csrf_clear_cookie()) {
         resp.headers_mut().append(SET_COOKIE, value);
     }
     resp
@@ -842,7 +828,7 @@ async fn magic_challenge(
 /// a TOTP or backup code. They must not read as a password login.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn finish_after_second_factor(
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
     user: &users::UserRow,
     return_to: &str,
@@ -895,10 +881,10 @@ pub(crate) async fn finish_after_second_factor(
     let mut resp = return_to::see_other(&native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
-    resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
+    resp.header(SET_COOKIE, totp_challenge::clear_cookie());
     resp.finish()
 }
 
@@ -993,7 +979,7 @@ pub async fn complete(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -1300,10 +1286,10 @@ pub async fn complete(
     let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
-    resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
+    resp.header(SET_COOKIE, magic_csrf_clear_cookie());
     resp.finish()
 }
 
@@ -1597,6 +1583,27 @@ mod tests {
     use super::*;
 
     const NATIVE_RETURN_TO: &str = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
+
+    #[test]
+    fn magic_csrf_cookie_is_always_secure_and_host_prefixed() {
+        let set = magic_csrf_set_cookie("nonce");
+        assert!(set.starts_with("__Host-zsidp_magic_csrf=nonce"));
+        assert!(set.contains("; Secure"));
+
+        let clear = magic_csrf_clear_cookie();
+        assert!(clear.starts_with("__Host-zsidp_magic_csrf="));
+        assert!(clear.contains("; Secure"));
+        assert!(clear.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn magic_csrf_parser_rejects_bare_cookie_name() {
+        assert_eq!(
+            parse_magic_csrf_cookie("__Host-zsidp_magic_csrf=nonce"),
+            Some("nonce".to_string())
+        );
+        assert_eq!(parse_magic_csrf_cookie("zsidp_magic_csrf=nonce"), None);
+    }
 
     #[test]
     fn magic_target_decode_store_uses_front_anchored_discriminator() {

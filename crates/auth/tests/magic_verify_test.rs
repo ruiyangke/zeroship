@@ -15,7 +15,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "zeroship-auth",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);

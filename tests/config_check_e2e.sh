@@ -197,28 +197,56 @@ CONTROL="$BIN/zeroship-control"
 GATEWAY="$BIN/zeroship-gate"
 AUTH="$BIN/zeroship-auth"
 
+# --check-config exercises the same mandatory guards as real startup. Supply
+# real, strong inputs so these cases vary only the setting each one names.
+STRONG_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+CONTROL_COMMON=(
+    --control-key "$STRONG_HEX"
+    --worker-key "$STRONG_HEX"
+    --signing-key-file "$TMPDIR/control-signing.pem"
+    --pairwise-salt "$STRONG_HEX"
+)
+CONTROL_MASTER=(--master-key "$STRONG_HEX")
+GATEWAY_COMMON=(
+    --control-key "$STRONG_HEX"
+    --worker-key "$STRONG_HEX"
+    --stash-signing-key "$STRONG_HEX"
+    --pairwise-salt "$STRONG_HEX"
+    --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE"
+)
+AUTH_COMMON=(
+    --db-url postgres://check-config
+    --stash-signing-key "$STRONG_HEX"
+    --totp-enc-key "$STRONG_HEX"
+)
+
 echo "=== Case 1: overlay-applied ==="
-run_cmd control-overlay "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure
+run_cmd control-overlay "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}"
 show_last_output
 expect_status 0 "control exits 0"
 expect_stdout_contains "auth_platform_issuer = http://platform-from-file.test/oauth2" "control uses file platform issuer"
 expect_stdout_contains "trusted_oauth_clients_count = 2" "control reports trusted client count 2"
 echo ""
 
-run_cmd gateway-overlay "$GATEWAY" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE"
+run_cmd gateway-overlay "$GATEWAY" --check-config --config "$TMPDIR/shared.toml" \
+    "${GATEWAY_COMMON[@]}"
 show_last_output
 expect_status 0 "gateway exits 0"
 expect_stdout_contains "log_format = json" "gateway uses file observability log format"
 echo ""
 
-run_cmd auth-overlay "$AUTH" --check-config --config "$TMPDIR/shared.toml" --db-url postgres://check-config --dev-insecure
+run_cmd auth-overlay "$AUTH" --check-config --config "$TMPDIR/shared.toml" \
+    "${AUTH_COMMON[@]}"
 show_last_output
 expect_status 0 "auth exits 0"
 expect_stdout_contains "control_url = http://control-from-file:9090" "auth uses file control URL"
 echo ""
 
 echo "=== Case 2: CLI-overrides-file ==="
-run_cmd control-cli-override "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --auth-platform-issuer http://platform-cli-override.test/oauth2
+run_cmd control-cli-override "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform-cli-override.test/oauth2
 show_last_output
 expect_status 0 "control CLI override exits 0"
 expect_stdout_contains "auth_platform_issuer = http://platform-cli-override.test/oauth2" "control CLI platform issuer overrides file"
@@ -226,7 +254,9 @@ expect_stdout_not_contains "auth_platform_issuer = http://platform-from-file.tes
 echo ""
 
 echo "=== Case 3: bad-filter-tolerant + STRUCTURED warning (O3) ==="
-run_cmd control-bad-filter "$CONTROL" --check-config --config "$TMPDIR/bad-filter.toml" --dev-insecure
+run_cmd control-bad-filter "$CONTROL" --check-config --config "$TMPDIR/bad-filter.toml" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
 show_last_output
 expect_status 0 "control tolerates invalid observability filter"
 # O3: the invalid-filter fallback is now a STRUCTURED tracing event on stdout (the
@@ -244,14 +274,16 @@ echo ""
 echo "=== Case 4: config-source ==="
 # $TMPDIR is an absolute path (mktemp -d), so shared.toml is an absolute path.
 SHARED_ABS="$TMPDIR/shared.toml"
-run_cmd control-source "$CONTROL" --check-config --config "$SHARED_ABS" --dev-insecure
+run_cmd control-source "$CONTROL" --check-config --config "$SHARED_ABS" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}"
 show_last_output
 expect_status 0 "control config-source exits 0"
 expect_stdout_contains "config_source = $SHARED_ABS" "control reports explicit config_source path"
 expect_stdout_not_contains "(auto-discovered)" "control explicit source is not marked auto-discovered"
 echo ""
 
-run_cmd gateway-source "$GATEWAY" --check-config --config "$SHARED_ABS" --dev-insecure --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE"
+run_cmd gateway-source "$GATEWAY" --check-config --config "$SHARED_ABS" \
+    "${GATEWAY_COMMON[@]}"
 show_last_output
 expect_status 0 "gateway config-source exits 0"
 expect_stdout_contains "config_source = $SHARED_ABS" "gateway reports explicit config_source path"
@@ -260,7 +292,9 @@ echo ""
 
 echo "=== Case 5: discovery-absent (guarded; never writes to /etc) ==="
 if [ ! -e /etc/zeroship/zeroship.toml ]; then
-    run_cmd control-no-config "$CONTROL" --check-config --dev-insecure
+    run_cmd control-no-config "$CONTROL" --check-config \
+        "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+        --auth-platform-issuer http://platform.test/oauth2
     show_last_output
     expect_status 0 "control with no --config exits 0"
     expect_stdout_contains "config_source = (none)" "control reports no overlay when well-known path absent"
@@ -291,7 +325,9 @@ fi
 echo ""
 
 echo "=== Case 7: invalid --check-config-format rejected (NEW-2) ==="
-run_cmd control-bad-format "$CONTROL" --check-config --check-config-format xml --dev-insecure
+run_cmd control-bad-format "$CONTROL" --check-config --check-config-format xml \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
 show_last_output
 expect_rejected "invalid value 'xml' for '--check-config-format" \
     "control rejects an unknown --check-config-format value (no silent text fallback)"
@@ -313,7 +349,8 @@ LAST_STDERR="$TMPDIR/control-secret-ref.stderr"
 set +e
 env -i PATH="$PATH" HOME="${HOME:-}" \
     MASTER_KEY="urn:zeroship:file:$MISSING_KEYFILE" \
-    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
+    "${CONTROL_COMMON[@]}" \
     >"$LAST_STDOUT" 2>"$LAST_STDERR"
 LAST_STATUS=$?
 set -e
@@ -327,7 +364,8 @@ LAST_STDERR="$TMPDIR/control-bad-ref.stderr"
 set +e
 env -i PATH="$PATH" HOME="${HOME:-}" \
     MASTER_KEY="urn:zeroship:bogus:x" \
-    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
+    "${CONTROL_COMMON[@]}" \
     >"$LAST_STDOUT" 2>"$LAST_STDERR"
 LAST_STATUS=$?
 set -e
@@ -340,7 +378,8 @@ echo "=== Case 10: [secrets] file tier with a REFERENCE validates (no fetch) ===
 # master_key comes from the [secrets] overlay as urn:zeroship:env:E2E_MASTER.
 # The env var is intentionally absent (env -i wipes the environment), so exit 0
 # can only be reached if --check-config validates the FORMAT and never reads it.
-run_cmd control-secrets-file-ref "$CONTROL" --check-config --config "$TMPDIR/secrets-ref.toml" --dev-insecure
+run_cmd control-secrets-file-ref "$CONTROL" --check-config --config "$TMPDIR/secrets-ref.toml" \
+    "${CONTROL_COMMON[@]}" --auth-platform-issuer http://platform.test/oauth2
 show_last_output
 expect_status 0 "control accepts a [secrets] master_key env reference under --check-config without resolving it"
 echo ""
@@ -348,7 +387,8 @@ echo ""
 echo "=== Case 11: [secrets] file tier with a LITERAL rejected (file must be a reference) ==="
 # A plaintext literal in [secrets] is a configuration error: the file must never
 # carry a secret value, only a urn:/arn: reference. obtain_secret rejects it.
-run_cmd control-secrets-file-literal "$CONTROL" --check-config --config "$TMPDIR/secrets-literal.toml" --dev-insecure
+run_cmd control-secrets-file-literal "$CONTROL" --check-config --config "$TMPDIR/secrets-literal.toml" \
+    "${CONTROL_COMMON[@]}" --auth-platform-issuer http://platform.test/oauth2
 show_last_output
 expect_rejected "must be a urn:/arn: reference, not a literal value" \
     "control rejects a literal master_key in the [secrets] file (must be a urn:/arn: reference)"
@@ -363,7 +403,8 @@ LAST_STDERR="$TMPDIR/control-legacy.stderr"
 set +e
 env -i PATH="$PATH" HOME="${HOME:-}" \
     LEGACY_MASTER_KEYS="urn:zeroship:env:LEGACY_A,urn:zeroship:bogus:x" \
-    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
     >"$LAST_STDOUT" 2>"$LAST_STDERR"
 LAST_STATUS=$?
 set -e

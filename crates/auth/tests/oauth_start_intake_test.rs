@@ -15,7 +15,6 @@ fn test_config() -> Arc<AuthConfig> {
         "127.0.0.1:0",
         "--db-url",
         "postgres://postgres:zeroship@localhost:5440/zeroship_p5d_test",
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
         "--google-client-id",
@@ -63,8 +62,8 @@ async fn federation_start_rejects_open_redirect_return_to_without_stash_cookie()
     let http = cyper::Client::new();
 
     for (path, stash_cookie) in [
-        ("/oauth/google/start", "zsidp_google_stash"),
-        ("/oauth/github/start", "zsidp_github_stash"),
+        ("/oauth/google/start", "__Host-zsidp_google_stash"),
+        ("/oauth/github/start", "__Host-zsidp_github_stash"),
     ] {
         for bad_return_to in ["//evil.com", "https://evil.com"] {
             let query = url::form_urlencoded::Serializer::new(String::new())

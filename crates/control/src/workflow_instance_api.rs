@@ -337,9 +337,6 @@ fn check_app_scoped_auth(
     state: &AppState,
     app_id: &Uuid,
 ) -> Result<(), web::HttpResponse> {
-    if state.insecure_dev {
-        return Ok(());
-    }
     let header = req
         .headers()
         .get("authorization")
@@ -369,9 +366,6 @@ fn check_control_auth(
     req: &web::HttpRequest,
     state: &AppState,
 ) -> Result<(), web::HttpResponse> {
-    if state.insecure_dev {
-        return Ok(());
-    }
     let header = req
         .headers()
         .get("authorization")

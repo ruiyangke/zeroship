@@ -88,7 +88,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         )
         .await
         .expect("enable workflow built-in plans for test");
-    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -116,7 +116,6 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
-            insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::clone(&control_pg),
@@ -125,7 +124,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: zeroship_control::platform_auth_provider(
                 "https://auth.zeroship.test/oauth2",
                 Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string()),
@@ -277,6 +276,57 @@ fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
 
 fn run_id(value: &Value) -> String {
     value["id"].as_str().expect("response id").to_string()
+}
+
+#[compio::test]
+async fn workflow_routes_reject_missing_auth() {
+    let Some(db_url) = db_url() else {
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        return;
+    };
+    let fx = build_fixture(&db_url, "auth-required").await;
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+
+    let status = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/internal/workflows/runs")
+            .header(
+                workflow_instance_api::APP_ID_HEADER,
+                Uuid::new_v4().to_string(),
+            )
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "app-scoped workflow routes require a derived control token"
+    );
+
+    let status = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/internal/workflows/signals/fanout/tick")
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "workflow ingress routes require the control key"
+    );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
 }
 
 #[compio::test]

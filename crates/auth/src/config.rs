@@ -3,9 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use zeroship_core::config::{
-    parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY, DEV_TOTP_ENC_KEY,
-};
+use zeroship_core::config::{resolve_overlay_string, AuthSection};
 
 use zeroship_core::observability::ObservabilityFlags;
 use zeroship_mailer::SmtpTls;
@@ -101,30 +99,12 @@ pub struct AuthConfig {
     )]
     pub control_key: String,
 
-    /// Dev mode: drop the Secure flag on cookies + relax secret guards.
-    /// ONLY for localhost. `--dev-insecure` (no value) enables it;
-    /// `--dev-insecure=false` disables a stray `ZEROSHIP_DEV_INSECURE=1`.
-    #[arg(
-        long = "dev-insecure",
-        env = "ZEROSHIP_DEV_INSECURE",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    pub dev_insecure: Option<bool>,
-
-    /// Resolved dev-insecure flag (CLI presence > env > default false).
-    /// Not a CLI/env arg of its own; populated by [`AuthConfig::resolve`].
-    #[arg(skip)]
-    pub insecure_dev: bool,
-
     /// HMAC key (≥32 bytes recommended) used to sign the short-lived
     /// federation stash cookie (`__Host-zsidp_google_stash` etc.). A weak
     /// or default value lets an attacker forge stash cookies and bypass
     /// the OAuth state/PKCE check, so production deployments MUST set
-    /// this explicitly. Empty default keeps the dev sentinel out of
-    /// `--help`; the dev fallback (`DEV_STASH_SIGNING_KEY`) is applied in
-    /// code under `--dev-insecure`.
+    /// this explicitly. The empty default keeps secret material out of
+    /// `--help` and is rejected by the startup strength guard.
     #[arg(
         long,
         env = "AUTH_STASH_SIGNING_KEY",
@@ -139,9 +119,9 @@ pub struct AuthConfig {
     /// at boot by `validate_master_key_material`, identical to the bundle/master
     /// key posture. A weak or absent key means an attacker with DB read access
     /// recovers every user's TOTP seed and can mint valid codes, so production
-    /// MUST set it. Empty default keeps the dev sentinel out of `--help`; the
-    /// dev fallback (`DEV_TOTP_ENC_KEY`) is applied in code under
-    /// `--dev-insecure`. The encryption AAD binds the row's `user_id`, so a
+    /// MUST set it. The empty default keeps secret material out of `--help`
+    /// and is rejected by the startup strength guard. The encryption AAD binds
+    /// the row's `user_id`, so a
     /// ciphertext lifted onto another user's row fails to decrypt.
     ///
     /// OPERATOR NOTE (flagged for review): this is a DEDICATED key, NOT derived
@@ -657,26 +637,7 @@ impl AuthConfig {
     /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
     /// file overlay.
     ///
-    /// The dev-insecure flag resolves CLI presence > env > default-false:
-    /// a CLI `--dev-insecure=false` overrides a stray
-    /// `ZEROSHIP_DEV_INSECURE=1`.
-    ///
-    /// Under `--dev-insecure` an empty stash key falls back to the shared
-    /// [`DEV_STASH_SIGNING_KEY`] in code (the clap default is empty so no
-    /// secret leaks into `--help`); outside dev the empty key is rejected by
-    /// `validate_stash_key` before this fallback would matter.
     pub fn try_resolve(&mut self, auth: AuthSection) -> Result<(), String> {
-        self.insecure_dev = self.dev_insecure.unwrap_or(false);
-        if self.insecure_dev && self.stash_signing_key.is_empty() {
-            self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
-        }
-        // TOTP at-rest key dev fallback (ISS-11), same posture as the stash key:
-        // the clap default is empty (no secret in --help); under --dev-insecure
-        // an empty value falls back to the shared dev sentinel. Outside dev the
-        // empty key is rejected at boot by `validate_master_key_material`.
-        if self.insecure_dev && self.totp_enc_key.is_empty() {
-            self.totp_enc_key = DEV_TOTP_ENC_KEY.to_string();
-        }
         self.refresh_pool_size = self.refresh_pool_size.max(1);
         // Console framing allowlist (immersive iframe login, §4.3/§10.1).
         // Precedence mirrors the deployment-injection pattern: a non-empty
@@ -807,8 +768,6 @@ impl std::fmt::Debug for AuthConfig {
             .field("gotrue_email_hook_secret", &"<redacted>")
             .field("control_url", &self.control_url)
             .field("control_key", &"<redacted>")
-            .field("dev_insecure", &self.dev_insecure)
-            .field("insecure_dev", &self.insecure_dev)
             .field("stash_signing_key", &"<redacted>")
             .field("totp_enc_key", &"<redacted>")
             .field("frame_ancestor_origins", &self.frame_ancestor_origins)
@@ -973,105 +932,68 @@ control_url = "https://control-file.zeroship.test"
         assert_eq!(cfg.control_url(), "https://control-file.zeroship.test");
     }
 
-    // The stash validator now lives in `zeroship_core::config`; these tests
-    // assert auth's resolved key + flag interact with it correctly (S4).
-    // `DEV_STASH_SIGNING_KEY` is already in scope via `use super::*`.
+    // The stash validator lives in `zeroship_core::config`; auth uses the same
+    // unconditional policy as every other binary.
     use zeroship_core::config::validate_stash_key;
 
     #[test]
-    fn stash_key_empty_default_rejected_in_production() {
+    fn stash_key_empty_default_is_rejected() {
         let cfg = test_config();
-        // Empty default (no secret printed in --help) is rejected outside dev.
-        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_err());
+        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
     }
 
     #[test]
-    fn stash_key_empty_default_accepted_in_dev() {
-        let mut cfg = test_config();
-        cfg.insecure_dev = true;
-
-        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_ok());
-    }
-
-    #[test]
-    fn stash_key_short_rejected_in_production() {
+    fn stash_key_short_is_rejected() {
         let mut cfg = test_config();
         cfg.stash_signing_key = "a".repeat(20);
 
-        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_err());
+        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
     }
 
     #[test]
-    fn stash_key_strong_accepted_in_production() {
+    fn stash_key_strong_is_accepted() {
         let mut cfg = test_config();
         cfg.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
 
-        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_ok());
+        assert!(validate_stash_key(&cfg.stash_signing_key).is_ok());
     }
 
-    // (d) The dev stash default is no longer a clap `default_value`, so it
-    // cannot leak in `--help`. The empty default must still be rejected by the
-    // shared validator outside dev.
+    // The key has no clap `default_value`, so no shared sentinel can leak in
+    // `--help`; operators and local tooling must supply real generated input.
     #[test]
-    fn stash_key_default_is_empty_not_dev_sentinel() {
+    fn stash_key_default_is_empty() {
         let cfg = test_config();
         assert_eq!(cfg.stash_signing_key, "");
-        assert_ne!(cfg.stash_signing_key, DEV_STASH_SIGNING_KEY);
-        // The empty default is rejected outside dev (no clap default secret).
-        assert!(validate_stash_key(&cfg.stash_signing_key, false).is_err());
-    }
-
-    // (a) `--dev-insecure` (bare) and `ZEROSHIP_DEV_INSECURE` both enable the
-    // resolved flag, and a CLI `--dev-insecure=false` overrides a stray env=1.
-    #[test]
-    fn dev_insecure_cli_bare_enables() {
-        let mut cfg =
-            AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test", "--dev-insecure"]);
-        cfg.resolve(AuthSection::default());
-        assert!(cfg.insecure_dev);
+        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
     }
 
     #[test]
-    fn dev_insecure_cli_explicit_true_enables() {
-        let mut cfg = AuthConfig::parse_from([
+    fn dev_insecure_flag_is_rejected() {
+        let err = AuthConfig::try_parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
-            "--dev-insecure=true",
-        ]);
-        cfg.resolve(AuthSection::default());
-        assert!(cfg.insecure_dev);
+            "--dev-insecure",
+        ])
+        .expect_err("--dev-insecure must not be accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn dev_insecure_env_enables_and_cli_false_overrides() {
+    fn dev_insecure_env_is_ignored() {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().expect("env lock");
         let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
 
-        // env=1 alone enables.
         let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
         cfg.resolve(AuthSection::default());
-        assert!(cfg.insecure_dev, "ZEROSHIP_DEV_INSECURE=1 should enable");
-
-        // CLI presence overrides env: --dev-insecure=false disables it.
-        let mut cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--dev-insecure=false",
-        ]);
-        cfg.resolve(AuthSection::default());
-        assert!(
-            !cfg.insecure_dev,
-            "--dev-insecure=false must override ZEROSHIP_DEV_INSECURE=1"
-        );
+        assert_eq!(cfg.stash_signing_key, "");
+        assert_eq!(cfg.totp_enc_key, "");
 
         restore_env("ZEROSHIP_DEV_INSECURE", old);
     }
 
-    // (b) The old `--insecure-dev` / `AUTH_INSECURE_DEV` flag is gone.
     #[test]
     fn old_insecure_dev_flag_is_rejected() {
         let err = AuthConfig::try_parse_from([

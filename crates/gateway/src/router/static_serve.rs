@@ -1083,7 +1083,6 @@ mod tests {
                 auth_ui_url: String::new(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
-                insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
             },
@@ -1710,7 +1709,7 @@ mod tests {
             stale_on_error: true,
         };
         let v = cache_control_header(&c);
-        assert!(!v.contains("stale-if-error"), "no swr → no stale-if-error: {v}");
+        assert!(!v.contains("stale-if-error"), "no swr means no stale-if-error: {v}");
     }
 
     #[test]

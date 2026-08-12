@@ -52,22 +52,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
-    // Loopback is the default; a non-loopback bind under --dev-insecure is
-    // intentional (compose dev on a private network) but must shout (S1).
-    if cfg.insecure_dev && !is_loopback_addr(&cfg.addr) {
-        tracing::warn!(
-            addr = %cfg.addr,
-            "auth: binding a non-loopback address with --dev-insecure; admin/cookie guards are relaxed — NEVER in production"
-        );
-    }
-
     // Strength guard runs on the RESOLVED value at real boot (cfg.stash_signing_key
     // is already the literal there). During --check-config a secret REFERENCE is
     // still the raw `urn:`/`arn:` string — running a strength check on it would
     // wrongly fail, so skip it for a reference in that mode only (format was
     // already validated by resolve_auth_secrets).
     if !cfg.check_config || !is_secret_ref(&cfg.stash_signing_key) {
-        if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
+        if let Err(message) = validate_stash_key(&cfg.stash_signing_key) {
             tracing::error!("{message}");
             std::process::exit(1);
         }
@@ -81,7 +72,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(message) = validate_master_key_material(
             "AUTH_TOTP_ENC_KEY / --totp-enc-key",
             &cfg.totp_enc_key,
-            cfg.insecure_dev,
         ) {
             tracing::error!("{message}");
             std::process::exit(1);
@@ -133,7 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_or_else(|| "auto".to_string(), |f| f.to_string()),
             ),
         );
-        report.field("insecure_dev", CheckValue::Flag(cfg.insecure_dev));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
         report.field("op_issuer_url", CheckValue::Plain(cfg.op_issuer_url()));
         report.field(
@@ -516,38 +505,12 @@ fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, Au
     }
 }
 
-/// Return true when the bind address (`host:port`) is a literal loopback host
-/// (`localhost` or a loopback IP). Mirrors the literal-only policy in
-/// `zeroship_core::config::is_loopback_url`; no DNS resolution. Used only to
-/// decide whether to shout about a non-loopback `--dev-insecure` bind.
-fn is_loopback_addr(addr: &str) -> bool {
-    let host = match addr.rsplit_once(':') {
-        // Strip the IPv6 brackets from `[::1]:9092` style addresses.
-        Some((host, _)) => host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host),
-        None => addr,
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{is_loopback_addr, resolve_optional};
+    use super::resolve_optional;
     use zeroship_core::config::{
         is_secret_ref, obtain_secret, resolve_secret, validate_secret_ref, validate_stash_key,
     };
-
-    #[test]
-    fn loopback_addr_recognises_literal_loopback_only() {
-        assert!(is_loopback_addr("127.0.0.1:9092"));
-        assert!(is_loopback_addr("localhost:9092"));
-        assert!(is_loopback_addr("[::1]:9092"));
-        // non-loopback binds (the ones the dev-insecure warn fires on)
-        assert!(!is_loopback_addr("0.0.0.0:9092"));
-        assert!(!is_loopback_addr("10.0.0.5:9092"));
-    }
 
     // (a) A literal secret passes through the resolver byte-identically — the
     // wiring (resolve_required/resolve_optional → resolve_secret_or_exit) must
@@ -589,7 +552,7 @@ mod tests {
             "the ref FORMAT itself is valid (only the strength guard would reject it)"
         );
         assert!(
-            validate_stash_key(reference, false).is_err(),
+            validate_stash_key(reference).is_err(),
             "raw ref string must fail the strength guard if (wrongly) checked"
         );
 

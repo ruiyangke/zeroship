@@ -79,7 +79,6 @@ impl MagicFixture {
             "127.0.0.1:0",
             "--db-url",
             &db_url,
-            "--dev-insecure",
             "--stash-signing-key",
             "test-stash-key-not-for-prod-32bytes!",
             "--mail-from-email",
@@ -176,7 +175,7 @@ fn link_param(link: &str, key: &str) -> String {
 
 fn csrf_cookie() -> String {
     let csrf = csrf::generate_token();
-    format!("zsidp_csrf={csrf}")
+    format!("__Host-zsidp_csrf={csrf}")
 }
 
 fn cookie_value(cookie_header: &str) -> &str {
@@ -292,7 +291,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
 
     let (start_resp, _) = start_magic(&fx, &email, "return_to", &return_to).await;
     assert_eq!(start_resp.status().as_u16(), 200);
-    let magic_cookie = read_set_cookie(&start_resp, "zsidp_magic_csrf")
+    let magic_cookie = read_set_cookie(&start_resp, "__Host-zsidp_magic_csrf")
         .expect("magic csrf cookie on start");
     let link = fx.mailer.last_magic_link();
     assert_eq!(link_param(&link, "return_to"), return_to);
@@ -301,7 +300,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
         .http
         .request(http::Method::GET, fx.magic_url(&link))
         .expect("build /magic/verify")
-        .header("cookie", format!("zsidp_magic_csrf={magic_cookie}"))
+        .header("cookie", format!("__Host-zsidp_magic_csrf={magic_cookie}"))
         .expect("cookie")
         .send()
         .await
@@ -323,7 +322,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
         .expect("build /magic/verify/redeem")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_magic_csrf={magic_cookie}"))
+        .header("cookie", format!("__Host-zsidp_magic_csrf={magic_cookie}"))
         .expect("cookie")
         .body(redeem_body)
         .send()
@@ -332,7 +331,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
 
     assert_eq!(redeem_resp.status().as_u16(), 303);
     assert_eq!(location(&redeem_resp), return_to);
-    assert!(read_set_cookie(&redeem_resp, "zsidp_session").is_some());
+    assert!(read_set_cookie(&redeem_resp, "__Host-zsidp_session").is_some());
 
     cleanup_email(&fx.pg, &email).await;
     drop(fx.srv);
@@ -350,9 +349,9 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
 
     let (start_resp, _) = start_magic(&fx, &email, "return_to", &return_to).await;
     assert_eq!(start_resp.status().as_u16(), 200);
-    let requester_magic_cookie = read_set_cookie(&start_resp, "zsidp_magic_csrf")
+    let requester_magic_cookie = read_set_cookie(&start_resp, "__Host-zsidp_magic_csrf")
         .expect("requester magic csrf cookie");
-    let requester_csrf = read_set_cookie(&start_resp, "zsidp_csrf").expect("requester csrf");
+    let requester_csrf = read_set_cookie(&start_resp, "__Host-zsidp_csrf").expect("requester csrf");
     let link = fx.mailer.last_magic_link();
 
     let verify_resp = fx
@@ -363,7 +362,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .await
         .expect("send cross-device /magic/verify");
     assert_eq!(verify_resp.status().as_u16(), 200);
-    let redeem_magic_cookie = read_set_cookie(&verify_resp, "zsidp_magic_csrf")
+    let redeem_magic_cookie = read_set_cookie(&verify_resp, "__Host-zsidp_magic_csrf")
         .expect("redeeming device magic csrf cookie");
     assert_ne!(redeem_magic_cookie, requester_magic_cookie);
 
@@ -382,7 +381,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .expect("build cross-device redeem")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_magic_csrf={redeem_magic_cookie}"))
+        .header("cookie", format!("__Host-zsidp_magic_csrf={redeem_magic_cookie}"))
         .expect("cookie")
         .body(redeem_body)
         .send()
@@ -412,7 +411,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .expect("build /magic/complete")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_csrf={requester_csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={requester_csrf}"))
         .expect("cookie")
         .body(complete_body)
         .send()
@@ -421,7 +420,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
 
     assert_eq!(complete_resp.status().as_u16(), 303);
     assert_eq!(location(&complete_resp), return_to);
-    assert!(read_set_cookie(&complete_resp, "zsidp_session").is_some());
+    assert!(read_set_cookie(&complete_resp, "__Host-zsidp_session").is_some());
 
     cleanup_email(&fx.pg, &email).await;
     drop(fx.srv);

@@ -20,10 +20,10 @@
 #   tiers leak". That is why this went unmeasured, and it is why this harness
 #   asserts the absolute property separately, against the RAW deployed bytes.
 #
-#   Symmetrically, a crate-local suite cannot see it either:
-#   `crates/plugin-db/tests/capability.rs:41` sets `AUTH_INSECURE_DEV=true` on
-#   purpose so it can read the verbose envelope -- it opts OUT of the very rail
-#   under examination.
+#   Symmetrically, a crate-local suite reads the envelope from ONE side only:
+#   `crates/plugin-db/tests/capability.rs` can read a verbose `code`/`details`
+#   body because `CAPABILITY_VIOLATION` is on `is_public_error_code`'s
+#   allow-list, so it never exercises the blanking arm this harness measures.
 #
 # THE FIXTURE (examples/error-probe) HOLDS EVERYTHING CONSTANT BUT ONE THING.
 #   All four throwing procedures share one throw site and one message, so rows
@@ -49,9 +49,18 @@
 #   1. A dev-vs-dev self-diff that must be EMPTY (the auth harness's guard: a
 #      comparison that is red no matter what proves as little as one that is
 #      green no matter what).
-#   2. MUTATE=dev-insecure, which sets AUTH_INSECURE_DEV=true for the DEV SIDE
-#      ONLY -- one variable, one side -- and must drive the diff RED on exactly
-#      the 5xx rows. That is the red-before-green for the relative half.
+#   2. THE RELATIVE HALF HAS NO ONE-SIDED LEVER ANY MORE, and that is a real
+#      gap, not an omission. It used to be MUTATE=dev-insecure, which set
+#      AUTH_INSECURE_DEV=true on the dev child only and drove the diff RED on
+#      the 5xx rows. That env var was the runtime's escape hatch out of the 5xx
+#      sanitization rail; it was DELETED so the rail runs unconditionally, and
+#      with it went the only way to make one tier verbose without editing the
+#      platform. Nothing here re-introduces one: a lever that relaxes a security
+#      rail for a test is the shape this change removed. So the relative diff is
+#      currently guarded by (1) alone, and the ABSOLUTE assertions below -- which
+#      read the raw deployed bytes and do not depend on the diff at all -- are
+#      what actually carry the leak verdict. Read a green relative diff as
+#      "no divergence observed", not as "the diff would have caught one".
 #   3. MUTATE=drop-status, which removes `status: 403` from the shared source so
 #      err.status4xx lands at 500 on BOTH sides. The relative diff stays green,
 #      and the row is RE-JUDGED UNDER THE NEW STATUS CLASS. That is the
@@ -275,19 +284,26 @@ echo "=== error envelopes: dev vs deployed (error-probe) ==="
 echo "  mutation: $MUTATE"
 
 # --- 0b. THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON --------------------
-# `AUTH_INSECURE_DEV` is the documented escape hatch that restores the verbose
-# 5xx body (crates/runtime/src/core/dispatch.rs::expose_internal_dispatch_errors,
-# sdks/bootstrap/src/fetch-handler.ts::insecureDevErrorsEnabled). If it leaks
-# into this shell it reaches BOTH tiers through the environment and every 5xx
-# row below measures the escape hatch instead of the production rail -- silently,
-# and in the direction that manufactures a finding. Refuse to run rather than
-# report on it. (MUTATE=dev-insecure sets it for the dev child ONLY, explicitly,
-# after this gate.)
-if [ -n "${AUTH_INSECURE_DEV:-}" ]; then
-  fail "AUTH_INSECURE_DEV is set in this shell ('${AUTH_INSECURE_DEV}') -- that is the escape hatch under examination; unset it and re-run"
+# The 5xx sanitization rail must have NO env escape hatch. It used to have one:
+# `AUTH_INSECURE_DEV`, read by
+# `crates/runtime/src/core/dispatch.rs::expose_internal_dispatch_errors` and
+# `sdks/bootstrap/src/fetch-handler.ts::insecureDevErrorsEnabled`. Both readers
+# are deleted. While they existed, a stray value in the environment reached BOTH
+# tiers and every 5xx row below measured the hatch instead of the rail --
+# silently, and in the direction that manufactures a finding.
+#
+# The old check here read the harness's own environment. That is now unfalsifiable
+# (an unset variable nothing reads), so it checks the SOURCE instead: if a reader
+# is ever re-introduced, this fires whether or not the variable happens to be set
+# in the shell that runs the harness.
+_ZS_HATCH_HITS="$(grep -rlE 'AUTH_INSECURE_DEV|insecureDevErrorsEnabled|expose_internal_dispatch_errors' \
+  "$ROOT/crates/runtime/src" "$ROOT/crates/worker/src" "$ROOT/crates/gateway/src" \
+  "$ROOT/sdks/bootstrap/src" "$ROOT/sdks/rpc/src" 2>/dev/null || true)"
+if [ -n "$_ZS_HATCH_HITS" ]; then
+  fail "an escape hatch out of the 5xx sanitization rail is back in the source: $(tr '\n' ' ' <<<"$_ZS_HATCH_HITS")"
   exit 2
 fi
-pass "AUTH_INSECURE_DEV unset in the harness environment (production rail is live)"
+pass "no source reader of a 5xx-sanitization escape hatch (the rail is unconditional)"
 
 # ---------------------------------------------------------------------------
 # The probe. ONE function, both sides. `$1` is the base URL.
@@ -447,20 +463,10 @@ grep -q '"rpc:err.needsInput"' "$d/manifest.json" \
 for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
-DEV_ENV=()
-if [ "$MUTATE" = "dev-insecure" ]; then
-  # RED-BEFORE-GREEN for the RELATIVE half. One variable, ONE SIDE: the dev
-  # child gets the escape hatch, deployed does not. The 5xx rows MUST diverge.
-  DEV_ENV=(AUTH_INSECURE_DEV=true)
-  echo "  MUTATED: dev child gets AUTH_INSECURE_DEV=true (deployed does NOT)"
-fi
-# `env "${DEV_ENV[@]:-}"` would expand to `env ''` when the array is empty and
-# fail with "env: '': No such file or directory". Branch instead.
-if [ "${#DEV_ENV[@]}" -gt 0 ]; then
-  ( cd "$APP" && env "${DEV_ENV[@]}" ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
-else
-  ( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
-fi
+# No per-side environment is applied. The dev child used to be able to take a
+# 5xx-verbosity escape hatch the deployed side did not (MUTATE=dev-insecure);
+# that hatch is deleted, so both tiers now run the same rail with the same env.
+( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 25 x 2s count
 # sized on an idle machine (#273). This harness already sources e2e_stack.sh
 # above, after its own port block, so the helper is in scope here.
@@ -528,42 +534,13 @@ mint_admin_pat || exit 1
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy error-probe"; exit 1; }
 pass "deployed error-probe ($APP_ID)"
 
-# The DEPLOYED worker must NOT have the escape hatch in its environment, or the
-# "production" half of this comparison is measuring dev behaviour. `--dev-insecure`
-# (which stack_up does pass) is a CLI flag on a different subsystem and does not
-# set this var -- assert that rather than assume it, by reading the live process.
-worker_pid="$(sed -n '2p' "$PIDFILE")"
-if [ -n "$worker_pid" ] && [ -r "/proc/$worker_pid/environ" ]; then
-  # NOT `tr ... | grep -q`, for a LATENT size-dependence rather than an observed
-  # failure. See the long note at the same site in e2e_dev_vs_deployed_env.sh for
-  # the measurements; the short form:
-  #
-  # `grep -q` exits on the FIRST match. If `tr` is still writing then, it takes
-  # SIGPIPE (141) and `set -o pipefail` promotes 141 to the pipeline's status --
-  # so the `if` takes the else arm EXACTLY WHEN THE VALUE IS PRESENT. But `tr` is
-  # only still writing when the data exceeds what the pipe buffer absorbs, so the
-  # inversion is CONDITIONAL ON INPUT SIZE. Measured 2026-08-10: it appears
-  # between 71 KB and 134 KB, while real `/proc/PID/environ` on the processes
-  # this site reads is ~50 KB (50605 / 50917 / 49455 bytes measured). So it does
-  # not fire here today; the margin is about 1.5x, and more app vars or a fatter
-  # CI image eat it with nothing failing loudly on the way. Removing the pipeline
-  # removes the size-dependence at no cost, which is the whole reason to do it.
-  #
-  # NOT ESTABLISHED, and asserted here before: that this check was ever OBSERVED
-  # reporting a worker clean while AUTH_INSECURE_DEV was set. That claim cited a
-  # positive control I could not reproduce, and the sizes above do not explain
-  # it. If it was real it had another cause, still unexplained -- which matters,
-  # because this assertion is the one standing between a dev-only escape hatch
-  # and the deployed tier.
-  tr '\0' '\n' < "/proc/$worker_pid/environ" > "$WORK/worker.environ" 2>/dev/null || true
-  if grep -q '^AUTH_INSECURE_DEV=' "$WORK/worker.environ"; then
-    fail "the DEPLOYED worker (pid $worker_pid) has AUTH_INSECURE_DEV set -- it is not running the production rail"
-  else
-    pass "deployed worker (pid $worker_pid) has NO AUTH_INSECURE_DEV (production rail confirmed on the live process)"
-  fi
-else
-  fail "could not read /proc/$worker_pid/environ -- cannot confirm the deployed worker runs the production rail"
-fi
+# THE DEPLOYED-WORKER ENVIRONMENT CHECK USED TO LIVE HERE and is deliberately
+# gone, not misplaced. It read `/proc/<worker>/environ` and failed if
+# `AUTH_INSECURE_DEV` was set, because that variable could switch the deployed
+# tier onto the verbose 5xx body. Nothing reads that variable now, so the check
+# could only ever pass -- a green that proves the harness ran, not that the
+# worker is on the production rail. Section 0b asserts the property that still
+# has content: no source file reads such a hatch at all.
 
 # Wait for the gateway to pull the route before probing (an unrouted call is a
 # 404/503 and would read as a divergence when it is a race).
@@ -793,7 +770,12 @@ cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 #     errors dev vs deployed: 24 passed, 0 failed, 0 leaks        (exit 0)
 #
 # CROSS-CHECKED against a second, independent instrument: CALL SITES in the
-# source, with loops multiplied out. 12 unconditional top-level `pass` sites
+# source, with loops multiplied out. (HISTORICAL: of the sites named below, "the
+# live-process rail check" was DELETED and "AUTH_INSECURE_DEV unset here" was
+# REPLACED by a source-level check -- see the 2026-08-12 note further down. Kept
+# verbatim because the later accounting is stated as a delta against it.)
+# 12 unconditional
+# top-level `pass` sites
 # (AUTH_INSECURE_DEV unset here, .zship built, leak marker matches the fixture,
 # all 5 procedures anon, dev reachable, dev probe, dev-vs-dev self-diff empty,
 # deployed, the live-process rail check, gateway routes, deployed probe, the
@@ -829,9 +811,16 @@ cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 #   section-7 diff
 # = 37. Dynamic and static agree, and they fail differently.
 #
+# LOWERED TO 36 ON 2026-08-12, BY CALL SITE ONLY -- the run was NOT re-taken.
+# One top-level site was deleted: the `/proc/<worker>/environ` check for
+# `AUTH_INSECURE_DEV`. That variable's readers are gone, so the check could only
+# ever pass. 12 top-level sites became 11; every other term is untouched, so
+# 37 - 1 = 36. If a real run reports anything other than 36 ran, trust the run
+# and fix this note, not the other way round.
+#
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
-# easier one keeps the total at 37. Nothing here can see that; review can.
-ERRORS_MIN_RAN="${ERRORS_MIN_RAN:-37}"
+# easier one keeps the total at 36. Nothing here can see that; review can.
+ERRORS_MIN_RAN="${ERRORS_MIN_RAN:-36}"
 RAN=$((PASS+FAIL))
 
 echo ""

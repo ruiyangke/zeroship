@@ -50,7 +50,7 @@ pub struct GateConfig {
     /// Shared secret between gateway and workers. Used to bearer-auth the
     /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
     /// workers can verify forwarded identity was not forged by an attacker
-    /// with direct network access. Empty disables both checks (dev only).
+    /// with direct network access. Startup rejects an empty value.
     pub worker_key: String,
     /// Upstream URL for `crates/auth` — the self-contained OP
     /// (`/oauth2/*`, `/oauth2/.well-known/*`),
@@ -63,11 +63,6 @@ pub struct GateConfig {
     /// Each app's own `{origin_scheme}://{request-host}` remains implicitly
     /// trusted so arbitrary creator-app subdomains do not need enumeration.
     pub trusted_origins: Vec<TrustedOrigin>,
-    /// Dev-only flag. When true the gateway emits cookies without the
-    /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
-    /// / docker-compose. Production MUST set this to false — the
-    /// `__Host-` cookie prefix RFC 6265bis §4.1.3 requires `Secure`.
-    pub insecure_dev: bool,
     /// Opt-in proxy header trust for client IP derivation. When false
     /// (default), per-IP rate limits and subscription affinity ignore
     /// `Forwarded` / `X-Forwarded-For` / similar headers and use only

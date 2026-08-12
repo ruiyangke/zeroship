@@ -84,10 +84,10 @@ pub async fn enroll(
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
+    if !csrf_ok(&req, &form.csrf) {
         return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
     }
-    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
 
@@ -207,10 +207,10 @@ pub async fn confirm(
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
+    if !csrf_ok(&req, &form.csrf) {
         return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
     }
-    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
     // Bound brute-force of the 6-digit code against the pending secret.
@@ -307,10 +307,10 @@ pub async fn disable(
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
+    if !csrf_ok(&req, &form.csrf) {
         return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
     }
-    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
     if rate_limited(db.as_ref(), user.id).await {
@@ -431,13 +431,13 @@ async fn rate_limited(db: &compio_postgres::Client, user_id: uuid::Uuid) -> bool
     }
 }
 
-fn csrf_ok(req: &HttpRequest, form_token: &str, insecure_dev: bool) -> bool {
+fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    csrf::parse_cookie(cookie_header, insecure_dev)
+    csrf::parse_cookie(cookie_header)
         .as_deref()
         .is_some_and(|c| csrf::matches(form_token, c))
 }
@@ -448,14 +448,13 @@ fn csrf_ok(req: &HttpRequest, form_token: &str, insecure_dev: bool) -> bool {
 async fn resolve_user(
     req: &HttpRequest,
     db: &compio_postgres::Client,
-    insecure_dev: bool,
 ) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let session_id = session_cookie::parse_cookie(cookie_header, insecure_dev)?;
+    let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
     users::find_by_id(db, &session.user_id.to_string())
         .await

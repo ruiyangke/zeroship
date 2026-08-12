@@ -54,20 +54,19 @@ pub async fn get(
     }
     let user_code = query.user_code.as_deref().unwrap_or("").trim();
     if user_code.is_empty() {
-        return render_form("", None, StatusCode::OK, cfg.insecure_dev, None);
+        return render_form("", None, StatusCode::OK, None);
     }
     if !device_token::valid_user_code(user_code) {
         return render_form(
             user_code,
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
-            cfg.insecure_dev,
             None,
         );
     }
     match device_token::native_user_code_details(db.as_ref(), user_code).await {
         Ok(Some(details)) => {
-            render_form(user_code, None, StatusCode::OK, cfg.insecure_dev, Some(&details))
+            render_form(user_code, None, StatusCode::OK, Some(&details))
         }
         Ok(None) => {
             if let Some(resp) =
@@ -79,7 +78,6 @@ pub async fn get(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                cfg.insecure_dev,
                 None,
             )
         }
@@ -94,7 +92,6 @@ pub async fn get(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                cfg.insecure_dev,
                 None,
             )
         }
@@ -107,7 +104,7 @@ async fn rate_limit_failed_get_user_code_attempt(
     cfg: &AuthConfig,
 ) -> Option<HttpResponse> {
     let session = current_session(req, cfg, db).await;
-    rate_limit_failed_user_code_attempt(db, req, session.as_ref(), cfg.insecure_dev).await
+    rate_limit_failed_user_code_attempt(db, req, session.as_ref()).await
 }
 
 /// `/device` POST — approve a native OP device grant. Anonymous browsers are
@@ -120,8 +117,6 @@ pub async fn post(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let insecure_dev = cfg.insecure_dev;
-
     if cfg.auth_provider() == AuthProviderKind::Supabase {
         return render_supabase_form(
             cfg.as_ref(),
@@ -133,12 +128,11 @@ pub async fn post(
 
     // CSRF double-submit — enforced FIRST, before any state change, exactly
     // like the login/signup/consent/reset siblings.
-    if !csrf_valid(&req, &form, insecure_dev) {
+    if !csrf_valid(&req, &form) {
         return render_form(
             "",
             Some("invalid request"),
             StatusCode::FORBIDDEN,
-            insecure_dev,
             None,
         );
     }
@@ -149,7 +143,6 @@ pub async fn post(
             "",
             Some("enter the code shown on your device"),
             StatusCode::BAD_REQUEST,
-            insecure_dev,
             None,
         );
     }
@@ -158,7 +151,6 @@ pub async fn post(
             "",
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
-            insecure_dev,
             None,
         );
     }
@@ -173,14 +165,13 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                insecure_dev,
                 None,
             );
         }
     };
     let Some(pending) = pending else {
         if let Some(resp) =
-            rate_limit_failed_user_code_attempt(db.as_ref(), &req, session.as_ref(), insecure_dev)
+            rate_limit_failed_user_code_attempt(db.as_ref(), &req, session.as_ref())
                 .await
         {
             return resp;
@@ -189,7 +180,6 @@ pub async fn post(
             user_code,
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
-            insecure_dev,
             None,
         );
     };
@@ -205,7 +195,6 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                insecure_dev,
                 Some(&pending),
             );
         }
@@ -213,7 +202,6 @@ pub async fn post(
             user_code,
             Some("account temporarily locked"),
             StatusCode::FORBIDDEN,
-            insecure_dev,
             Some(&pending),
         );
     }
@@ -223,7 +211,6 @@ pub async fn post(
             user_code,
             None,
             StatusCode::OK,
-            insecure_dev,
             Some(&pending),
         );
     }
@@ -243,7 +230,7 @@ pub async fn post(
         }
         Ok(DeviceApproval::NotFound) => {
             if let Some(resp) =
-                rate_limit_failed_user_code_attempt(db.as_ref(), &req, Some(&session), insecure_dev)
+                rate_limit_failed_user_code_attempt(db.as_ref(), &req, Some(&session))
                     .await
             {
                 return resp;
@@ -252,7 +239,6 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                insecure_dev,
                 None,
             )
         }
@@ -262,7 +248,6 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
-                insecure_dev,
                 None,
             )
         }
@@ -294,32 +279,24 @@ async fn rate_limit_failed_user_code_attempt(
     db: &compio_postgres::Client,
     req: &HttpRequest,
     session: Option<&sessions::Session>,
-    insecure_dev: bool,
 ) -> Option<HttpResponse> {
     let ip = headers::client_ip(req);
     if let Some(session) = session {
         let key = format!("device:user_ip:{}:{ip}", session.user_id);
-        if let Some(resp) = consume_failed_attempt_bucket(
-            db,
-            &key,
-            Bucket::LOGIN_EIP,
-            insecure_dev,
-        )
-        .await
+        if let Some(resp) = consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_EIP).await
         {
             return Some(resp);
         }
     }
 
     let key = format!("device:ip:{ip}");
-    consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_IP, insecure_dev).await
+    consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_IP).await
 }
 
 async fn consume_failed_attempt_bucket(
     db: &compio_postgres::Client,
     key: &str,
     bucket: Bucket,
-    insecure_dev: bool,
 ) -> Option<HttpResponse> {
     match ratelimit::consume(db, key, bucket).await {
         Ok(RateLimitDecision::Allowed) => None,
@@ -327,7 +304,6 @@ async fn consume_failed_attempt_bucket(
             "",
             Some("too many attempts, try again later"),
             StatusCode::TOO_MANY_REQUESTS,
-            insecure_dev,
             None,
         )),
         Err(e) => {
@@ -336,7 +312,6 @@ async fn consume_failed_attempt_bucket(
                 "",
                 Some("try again later"),
                 StatusCode::SERVICE_UNAVAILABLE,
-                insecure_dev,
                 None,
             ))
         }
@@ -346,13 +321,13 @@ async fn consume_failed_attempt_bucket(
 /// Double-submit CSRF check for the device-confirmation POST. Mirrors the
 /// `consent.rs` / `reset.rs` helpers: the form-field token must be present and
 /// byte-equal (constant-time) to the `__Host-zsidp_csrf` cookie token.
-fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool {
+fn csrf_valid(req: &HttpRequest, form: &DeviceForm) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     let Some(form_token) = form.csrf.as_deref() else {
         return false;
     };
@@ -363,7 +338,7 @@ fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool 
 
 async fn current_session(
     req: &HttpRequest,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
 ) -> Option<sessions::Session> {
     let cookie_header = req
@@ -371,7 +346,7 @@ async fn current_session(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let session_id = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev)?;
+    let session_id = session_cookie::parse_cookie(cookie_header)?;
     sessions::validate(db, session_id).await.ok().flatten()
 }
 
@@ -388,7 +363,6 @@ fn render_form(
     user_code: &str,
     error: Option<&str>,
     status: StatusCode,
-    insecure_dev: bool,
     details: Option<&device_token::NativeDeviceGrantDetails>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
@@ -411,7 +385,7 @@ fn render_form(
         .unwrap_or_else(|_| "<h1>device authorization</h1>".to_string());
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 

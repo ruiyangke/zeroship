@@ -78,12 +78,13 @@ CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
 MASTER_KEY="$ZEROSHIP_MASTER_KEY" \
 WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 PAIRWISE_SALT="$PAIRWISE_SALT" \
+STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET" \
+AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ./target/release/zeroship-control \
   --port 9090 \
   --db postgres://localhost:5432/zeroship \
   --blob-store ./bundles \
-  --signing-key-file deploy/compose/secrets/control-signing.pem \
-  --dev-insecure
+  --signing-key-file deploy/compose/secrets/control-signing.pem
 ```
 
 Terminal 2:
@@ -114,8 +115,7 @@ PAIRWISE_SALT="$PAIRWISE_SALT" \
   --auth-ui-url http://localhost:9092 \
   --gateway-public-url http://localhost:8000 \
   --signing-key-file deploy/compose/secrets/gateway-signing.pem \
-  --gateway-broker-secret-file deploy/compose/secrets/broker-secret \
-  --dev-insecure
+  --gateway-broker-secret-file deploy/compose/secrets/broker-secret
 ```
 
 Terminal 4:
@@ -134,16 +134,15 @@ AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
   --refresh-hash-key-file deploy/compose/secrets/refresh-hash-key \
   --refresh-idem-key-file deploy/compose/secrets/refresh-idem-key \
   --mailer stdout \
-  --relay-forward-mailer stdout \
-  --dev-insecure
+  --relay-forward-mailer stdout
 ```
 
 Notes:
 
-- The generated inputs are strong and stable across restarts. `--dev-insecure`
-  remains in these commands because its other behaviors are removed in later
-  work; this provisioning step does not delete or rename the flag. Never pass it
-  outside local dev. There is no `--auth-secret` flag.
+- The generated inputs are strong and stable across restarts. Local services
+  execute the same authentication, signature, cookie, and secret-strength
+  checks as every other deployment. There is no `--auth-secret` flag or local
+  security-relaxation switch.
 - Gateway and auth intentionally read the same physical `broker-secret` file.
   Auth reads `pairwise-salt` from a file while control and gateway read the
   byte-identical `PAIRWISE_SALT` value from the overlay. The file has no trailing

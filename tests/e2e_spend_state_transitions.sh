@@ -26,6 +26,8 @@
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 PASS=0; FAIL=0
 pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
@@ -58,7 +60,7 @@ WORK="$(mktemp -d -t zs-e2e-spend-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-c
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 spend_state(){ psql_exec -tA -c "SELECT state::text FROM zeroship.app_spend_state WHERE app_id='$1'" 2>/dev/null | tr -d '[:space:]'; }
-set_limit(){ curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$1/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$2}"; curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"; }
+set_limit(){ curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$1/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$2}"; curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"; }
 # GET one probe request; echo "<status> <warnheader:0|1>"
 probe_req(){ local out; out="$(curl -s -D - -o /dev/null -H 'Host: spend-probe.localhost' "http://localhost:$GATE_PORT/probe/$1" 2>/dev/null)"; local code warn; code="$(printf '%s' "$out" | awk 'NR==1{print $2}')"; warn=0; printf '%s' "$out" | grep -qiE '^x-zs-spend-warn:' && warn=1; echo "${code:-000} $warn"; }
 
@@ -125,24 +127,28 @@ openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-brok
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 
+SIGNING_KEY_FILE="$WORK/sk.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --stripe-base-url "http://127.0.0.1:1" --stripe-secret-key "sk_test_unused" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
-  --spend-recompute-interval 2 --dev-insecure > "$WORK/control.log" 2>&1 &
+  --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (lite provider, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
   --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
-  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
@@ -189,7 +195,7 @@ assert_band(){ # $1=label $2=target_pct $3=expect_state $4=expect_gw_code $5=exp
   curC="$(read_charge)"; [ -n "$curC" ] && [ "$curC" -ge 1 ] 2>/dev/null || { fail "$label: projected charge unreadable ($curC)"; return; }
   lim=$(( curC*100/pct )); [ "$lim" -lt 1 ] && lim=1
   set_limit "$APP" "$lim"
-  st=""; for _ in $(seq 1 15); do st="$(spend_state "$APP")"; [ "$st" = "$want_state" ] && break; curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"; sleep 1; done
+  st=""; for _ in $(seq 1 15); do st="$(spend_state "$APP")"; [ "$st" = "$want_state" ] && break; curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"; sleep 1; done
   [ "$st" = "$want_state" ] && pass "$label: charge=${curC}c limit=${lim}c (~${pct}%) → control state='$st'" || { fail "$label: state='$st' (want '$want_state'; charge=$curC limit=$lim)"; return; }
   # The gateway PULLS the spend_state on its ~2s poll, so probe results lag the
   # control state. Poll the probe until it reflects the expected code + header

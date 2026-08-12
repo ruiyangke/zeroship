@@ -60,6 +60,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # Load the gitignored repo-root .env (Stripe TEST keys) when the vars aren't
@@ -169,13 +171,16 @@ chmod 600 "$WORK/signing-key.pem"
 
 # control — booted against REAL https://api.stripe.com with the operator's TEST
 # secret key (from env; NEVER on the command line where it'd hit /proc/cmdline).
-# --dev-insecure gates the /internal/* endpoints. The webhook secret is a known
+# The generated CONTROL_KEY gates the /internal/* endpoints. The webhook secret is a known
 # throwaway so the harness can produce VALID signatures (the REAL verify path).
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
@@ -242,7 +247,7 @@ ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
 SQL
 pass "seeded creator+app+usage (750 priced requests=750c) in closed period $PERIOD_START, Customer=$CUS"
 
-RECON="$(curl -s -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 echo "    reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget billed)"
 [ "$BILLED" = "1" ] && pass "REAL reconcile billed 1 creator (created invoice item + invoice + finalized on REAL Stripe)" \

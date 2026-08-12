@@ -19,12 +19,14 @@ const SECRET_FILES: [&str; 7] = [
     "refresh-idem-key",
 ];
 
-const ENV_KEYS: [&str; 8] = [
+const ENV_KEYS: [&str; 10] = [
     "AUTH_STASH_SIGNING_KEY",
     "AUTH_TOTP_ENC_KEY",
     "GATEWAY_OIDC_SECRET",
+    "MIGRATED_POLICY_SEAL_KEY",
     "PAIRWISE_SALT",
     "STASH_SIGNING_KEY",
+    "STRIPE_WEBHOOK_SECRET",
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
@@ -110,17 +112,17 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         );
     }
 
-    validate_master_key_material("MASTER_KEY", &overlay["ZEROSHIP_MASTER_KEY"], false)
+    validate_master_key_material("MASTER_KEY", &overlay["ZEROSHIP_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
-    validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"], false)
+    validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"])
         .expect("generated worker key must pass the production boot guard");
-    validate_stash_key(&overlay["STASH_SIGNING_KEY"], false)
+    validate_stash_key(&overlay["STASH_SIGNING_KEY"])
         .expect("generated gateway stash key must pass the production boot guard");
-    validate_stash_key(&overlay["AUTH_STASH_SIGNING_KEY"], false)
+    validate_stash_key(&overlay["AUTH_STASH_SIGNING_KEY"])
         .expect("generated auth stash key must pass the production boot guard");
-    validate_pairwise_salt(&overlay["PAIRWISE_SALT"], false)
+    validate_pairwise_salt(&overlay["PAIRWISE_SALT"])
         .expect("generated pairwise salt must pass the production boot guard");
-    validate_master_key_material("AUTH_TOTP_ENC_KEY", &overlay["AUTH_TOTP_ENC_KEY"], false)
+    validate_master_key_material("AUTH_TOTP_ENC_KEY", &overlay["AUTH_TOTP_ENC_KEY"])
         .expect("generated TOTP key must pass the production boot guard");
 
     let broker = std::fs::read(secrets_dir.join("broker-secret"))
@@ -277,6 +279,18 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     let worker = service_block(&compose, "worker");
     let auth = service_block(&compose, "auth");
 
+    for (name, block) in [
+        ("control", control),
+        ("migrated", migrated),
+        ("gateway", gateway),
+        ("auth", auth),
+    ] {
+        assert!(
+            !block.contains("--dev-insecure"),
+            "{name} still enables the deleted security-relaxation flag"
+        );
+    }
+
     assert!(gateway.contains("GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
     assert!(auth.contains("AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
     assert_eq!(
@@ -319,6 +333,16 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         5,
         "all five native services must consume one generated control key"
     );
+
+    assert!(control.contains(
+        "STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?run zeroship dev init}"
+    ));
+    assert!(migrated.contains(
+        "MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
+    ));
+    assert!(migrated.contains(
+        "AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2"
+    ));
 
     let active_compose = compose
         .lines()
@@ -450,6 +474,65 @@ fn assert_private_mode(_path: &Path, _expected: u32) {}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// No server binary may declare the deleted security-relaxation flag again.
+///
+/// Each of the five binaries already has its own `try_parse_from(["...",
+/// "--dev-insecure"])` rejection test. Those are per-crate and prove only that
+/// TODAY'S parser rejects it; this one is cross-crate and keys on the
+/// DECLARATION, so a re-added arg fails here even in a crate whose own suite
+/// was not run.
+///
+/// WHAT THIS DOES NOT CATCH, and it is the realistic remaining hole: a
+/// hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")` read that never goes
+/// through clap. Only the clap spellings are matched, because the existing
+/// rejection tests legitimately contain the bare strings inside `mod tests` and
+/// a bare-string scan would flag them.
+#[test]
+fn no_server_binary_redeclares_the_relaxation_flag() {
+    let root = workspace_root();
+    let mut sources = Vec::new();
+    for crate_name in ["control", "gateway", "worker", "auth", "migrated", "cli"] {
+        collect_rs_files(&root.join("crates").join(crate_name).join("src"), &mut sources);
+    }
+    assert!(
+        sources.len() > 50,
+        "expected to scan the five server crates plus the CLI, found only {} files -- \
+         the walk is broken and this test would pass over nothing",
+        sources.len()
+    );
+
+    let mut offenders = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        if text.contains(r#"env = "ZEROSHIP_DEV_INSECURE""#)
+            || text.contains(r#"long = "dev-insecure""#)
+            || text.contains(r#"long = "insecure-dev""#)
+        {
+            offenders.push(path.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the deleted security-relaxation flag is declared again in: {}",
+        offenders.join(", ")
+    );
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
 }
 
 fn service_block<'a>(compose: &'a str, service: &str) -> &'a str {

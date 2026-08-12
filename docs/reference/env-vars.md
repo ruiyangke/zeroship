@@ -233,7 +233,7 @@ Supabase (alternate auth provider): `SUPABASE_JWKS_URL` `SUPABASE_JWT_ISSUER`
 
 ### runtime (`crates/runtime`)
 
-`ZEROSHIP_DEV` `ZEROSHIP_LOG` `AUTH_INSECURE_DEV`
+`ZEROSHIP_DEV` `ZEROSHIP_LOG`
 `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS`
 `ZEROSHIP_STREAM_GLOBAL_CAP`
 
@@ -265,7 +265,6 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | `SIGNING_KEY_FILE` | control, migrated |
 | `AUTH_PLATFORM_ISSUER`, `AUTH_PLATFORM_JWKS_URL` | control, migrated |
 | `ZEROSHIP_ORIGIN_SCHEME` | control, gateway |
-| `ZEROSHIP_DEV_INSECURE` | auth, control, gateway, migrated, worker |
 | `ZEROSHIP_CONFIG` | auth, control, gateway, worker |
 | `ZEROSHIP_TRUST_PROXY` | control, gateway |
 | `ZEROSHIP_AUTH_PROVIDER`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` | auth, control |

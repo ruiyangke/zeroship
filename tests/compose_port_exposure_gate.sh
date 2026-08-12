@@ -26,11 +26,9 @@
 # from the host, so every local harness and every `curl localhost:8000` keeps
 # working. Only REMOTE reach is removed.
 #
-# Control no longer publishes a host port. A control.<domain> Caddy block is
-# staged in deploy/ops/Caddyfile, but remains fully commented while control
-# still runs with --dev-insecure and the hardcoded platform-key. The server
-# runbook documents a loopback-only override for SSH-tunnel access until those
-# two prerequisites land and the edge route can safely be enabled.
+# Control no longer publishes a host port. Its control.<domain> Caddy block is
+# active only when the compose service has no known security-relaxation input.
+# The route reaches control over the private compose network.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
 #   - it does not run docker and does not probe any host
@@ -122,16 +120,22 @@ grep -q -- '--dev-insecure' <<<"$CONTROL_BLOCK" && CONTROL_POSTURE_RELAXED=1
 grep -Eq '^[[:space:]]*ZEROSHIP_CONTROL_KEY:[[:space:]]*platform-key([[:space:]]|$)' \
   <<<"$CONTROL_BLOCK" && CONTROL_POSTURE_RELAXED=1
 
-if [ "$CONTROL_ROUTE_STAGED" -eq 1 ]; then
-  pass "commented control route targets control:9090 by service name"
+if [ "$CONTROL_POSTURE_RELAXED" -eq 1 ]; then
+  if [ "$CONTROL_ROUTE_STAGED" -eq 1 ] && [ "$CONTROL_ROUTE_ACTIVE" -eq 0 ]; then
+    pass "control route is staged while compose has an insecure input"
+  else
+    fail "control route must remain staged and inactive while compose has an insecure input"
+  fi
+elif [ "$CONTROL_ROUTE_ACTIVE" -eq 1 ]; then
+  pass "control route is active after insecure compose inputs were removed"
 else
-  fail "commented control route to control:9090 is missing"
+  fail "control route stayed inactive after insecure compose inputs were removed"
 fi
 
 if [ "$CONTROL_ROUTE_ACTIVE" -eq 1 ] && [ "$CONTROL_POSTURE_RELAXED" -eq 1 ]; then
   fail "control route is active while control still has an insecure compose input"
 else
-  pass "control route remains inactive while compose has an insecure input"
+  pass "control route state does not expose a relaxed control service"
 fi
 
 echo ""

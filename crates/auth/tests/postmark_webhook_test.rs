@@ -36,7 +36,6 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         // basic-auth comparison, so any value parses.
         "--db-url".to_string(),
         String::new(),
-        "--dev-insecure".to_string(),
     ];
     if let Some(u) = user {
         args.push("--postmark-webhook-user".to_string());

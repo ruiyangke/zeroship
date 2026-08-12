@@ -8,8 +8,7 @@
 # MINTS that session the same way the admin PAT is minted (sign a real token with
 # the harness-controlled gateway Ed25519 key + seed the backing rows), so the
 # gateway's REAL session-cookie validation + `ZeroShip-User` derivation runs
-# end-to-end — no `--dev-insecure` auth-bypass added to the prod binaries
-# (the pilot-rejected approach), just an offline-signed credential.
+# end-to-end with an offline-signed credential and the normal auth checks.
 #
 # It closes the gap the other harnesses leave: `e2e_app_primitives_auth.sh`
 # proves the WORKER side (signed `ZeroShip-User` → AuthPlugin → requireUser) over
@@ -154,9 +153,9 @@ SESSION="$(mint_app_session)"
 rpc() {
   local proc="$2" cookie="$3"
   local args=(-s -o /tmp/authrpc.body -w '%{http_code}' -H "Host: $HOST")
-  # Dev cookie name has no `__Host-` prefix (that requires Secure; the gateway
-  # runs --dev-insecure over http). See oidc_rp::APP_SESSION_COOKIE_DEV.
-  [ -n "$cookie" ] && args+=(-H "Cookie: zeroship_app_session=$cookie" -H "Origin: http://$HOST")
+  # curl can send the production Secure cookie explicitly over this loopback
+  # transport, while the gateway still parses the unconditional `__Host-` name.
+  [ -n "$cookie" ] && args+=(-H "Cookie: __Host-zeroship_app_session=$cookie" -H "Origin: http://$HOST")
   local code; code="$(curl "${args[@]}" "http://localhost:$GATE_PORT/__zeroship/v1/$proc")"
   echo "$code"
 }

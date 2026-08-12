@@ -138,15 +138,12 @@ pub struct ErrorExtras<'a> {
 ///
 /// Two independent rails, both client-visible boundaries:
 ///
-/// 1. **5xx body sanitization.** Production clients get a fixed response
+/// 1. **5xx body sanitization.** Clients get a fixed response
 ///    body while raw diagnostics go to the server logs with the request
 ///    id. `is_public_error_code` codes are exempt from the blanking.
 /// 2. **`stack` is never emitted, at ANY status.** Not at 4xx (which
 ///    skips rail 1 entirely) and not via rail 1's code exemption. See the
 ///    inline note at the strip for what was measured leaking.
-///
-/// `AUTH_INSECURE_DEV=true` (or `1`) disables BOTH rails for local
-/// debugging — it is the only way to get a stack back on the wire.
 #[inline]
 pub fn build_error_body(
     status: u16,
@@ -171,7 +168,7 @@ pub fn build_error_body(
         // developer-facing errors (e.g. `capability_violation`). They
         // are safe to surface verbatim even at a 5xx boundary — the
         // platform owns the message string. Still logged above.
-        // Everything else is blanked unless the dev escape hatch is set.
+        // Everything else is blanked.
         //
         // "and there is no stack" USED TO BE ASSERTED HERE. It was not
         // true: this arm skips the blanking, so whatever stack was on the
@@ -179,7 +176,7 @@ pub fn build_error_body(
         // anonymous caller. The stack strip below is what makes the claim
         // true now; it is not a property of the codes. Do not restore the
         // assertion in place of the enforcement.
-        if !extras.code.is_some_and(is_public_error_code) && !expose_internal_dispatch_errors() {
+        if !extras.code.is_some_and(is_public_error_code) {
             // The code may still ride out alone: see `is_code_only_public_error`
             // for why a constraint violation needs its classification kept and
             // its backend-written wording dropped.
@@ -223,11 +220,7 @@ pub fn build_error_body(
     // Only `stack` is removed. `message`, `code`, `details` and `retryable`
     // still ride at 4xx on purpose — creators throw intentional 401/403
     // messages and the SDKs branch on `code`.
-    let extras = if expose_internal_dispatch_errors() {
-        extras
-    } else {
-        ErrorExtras { stack: None, ..extras }
-    };
+    let extras = ErrorExtras { stack: None, ..extras };
 
     build_verbose_error_body(message, name, extras)
 }
@@ -308,13 +301,6 @@ fn is_public_error_code(code: &str) -> bool {
             | "RESERVED_SYSTEM_FIELD_NAME"
             | "IMMUTABLE_SYSTEM_FIELD"
             | "FILTER_NESTING_TOO_DEEP"
-    )
-}
-
-fn expose_internal_dispatch_errors() -> bool {
-    matches!(
-        std::env::var("AUTH_INSECURE_DEV").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") | Ok("on") | Ok("ON")
     )
 }
 
@@ -712,13 +698,13 @@ mod tests {
     /// testing for a spelling that had already been rewritten one layer down.
     ///
     /// MEASURED against a live `pnpm dev` (`examples/db-todos`, port 3061,
-    /// 2026-08-10) — the same orphan insert, twice, with only
-    /// `AUTH_INSECURE_DEV` differing:
+    /// 2026-08-10): the same orphan insert reached the sanitizer as the
+    /// following two representations before and after verbose serialization:
     ///
     /// ```text
-    /// unset:      {"message":"internal error","name":"Error","request_id":"24"}
-    /// =true:      {"message":"{\"code\":\"fk_violation\",…}",…,
-    ///              "code":"FOREIGN_KEY_VIOLATION"}
+    /// sanitized: {"message":"internal error","name":"Error","request_id":"24"}
+    /// verbose:   {"message":"{\"code\":\"fk_violation\",...}",...,
+    ///             "code":"FOREIGN_KEY_VIOLATION"}
     /// ```
     ///
     /// The second body is this file's own verbose serializer, so
