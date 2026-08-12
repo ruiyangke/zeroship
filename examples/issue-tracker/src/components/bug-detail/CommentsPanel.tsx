@@ -1,0 +1,155 @@
+import { useState } from "react";
+import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
+import { AsyncSection } from "../StateViews";
+import { errorMessage, useAsync } from "../rpc";
+import type { Comment } from "../types";
+
+function formatDate(ms: number): string {
+  return new Date(ms).toLocaleString();
+}
+
+function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(comment.body);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await editComment({ id: comment.id, body: draft });
+      setEditing(false);
+      onChanged();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const togglePrivate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setCommentPrivate({ id: comment.id, isPrivate: !comment.isPrivate });
+      onChanged();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <li className={`comment ${comment.isPrivate ? "private" : ""}`} id={`comment-${comment.commentNumber}`}>
+      <div className="comment-head">
+        <span className="comment-number">#{comment.commentNumber}</span>
+        <span className="comment-author">{comment.authorId}</span>
+        <span className="comment-when">{formatDate(comment.created_at)}</span>
+        {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
+        {comment.workTimeMinutes > 0 ? (
+          <span className="comment-worktime">{comment.workTimeMinutes}m logged</span>
+        ) : null}
+        <button type="button" className="btn ghost small" disabled={busy} onClick={() => setEditing((v) => !v)}>
+          Edit
+        </button>
+        <button type="button" className="btn ghost small" disabled={busy} onClick={() => void togglePrivate()}>
+          {comment.isPrivate ? "Make public" : "Make private"}
+        </button>
+      </div>
+      {editing ? (
+        <div className="comment-edit">
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} />
+          <button type="button" className="btn primary small" disabled={busy} onClick={() => void save()}>
+            Save
+          </button>
+        </div>
+      ) : (
+        <p className="comment-body">{comment.body}</p>
+      )}
+      {error ? <p className="field-error">{error}</p> : null}
+    </li>
+  );
+}
+
+function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void }) {
+  const [body, setBody] = useState("");
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [workTimeMinutes, setWorkTimeMinutes] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!body.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await addComment({ bugId, body: body.trim(), isPrivate, workTimeMinutes });
+      setBody("");
+      setIsPrivate(false);
+      setWorkTimeMinutes(0);
+      onAdded();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="new-comment">
+      <textarea
+        placeholder="Add a comment..."
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        rows={4}
+      />
+      <div className="new-comment-row">
+        <label>
+          <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} />
+          Private
+        </label>
+        <label>
+          Work time (min)
+          <input
+            type="number"
+            min={0}
+            value={workTimeMinutes}
+            onChange={(e) => setWorkTimeMinutes(Number(e.target.value) || 0)}
+          />
+        </label>
+        <button type="button" className="btn primary small" disabled={busy || !body.trim()} onClick={() => void submit()}>
+          Comment
+        </button>
+      </div>
+      {error ? <p className="field-error">{error}</p> : null}
+    </div>
+  );
+}
+
+export function CommentsPanel({ bugId }: { bugId: string }) {
+  const { state, reload } = useAsync(() => listComments({ bugId }), [bugId]);
+
+  return (
+    <section className="comments-panel">
+      <h3>Comments</h3>
+      <AsyncSection
+        state={state}
+        onRetry={reload}
+        loadingLabel="Loading comments..."
+        isEmpty={(data) => data.length === 0}
+        emptyTitle="No comments yet."
+      >
+        {(comments) => (
+          <ul className="comment-list">
+            {comments.map((comment) => (
+              <CommentRow key={comment.id} comment={comment} onChanged={reload} />
+            ))}
+          </ul>
+        )}
+      </AsyncSection>
+      <NewCommentForm bugId={bugId} onAdded={reload} />
+    </section>
+  );
+}
