@@ -63,12 +63,13 @@ cd "$ROOT"
 SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 
 # MEASURED on a fresh database provisioned per the requirements above:
-# 103 passed / 0 failed / 8 ignored / 0 filtered. The floor is the measured
-# number, not a round one below it, because this suite has a fixed test count
-# and any shortfall means a target stopped running rather than a test getting
-# faster. Raise it deliberately when tests are added; do not lower it to match
-# a red run.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-103}"
+#   integration         103 passed / 0 failed / 8 ignored / 0 skips
+#   native_transaction    8 passed / 0 failed / 0 ignored / 0 skips
+# The floor is the SUM, 111, and it is the measured number rather than a round
+# one below it: these binaries have a fixed test count, so any shortfall means a
+# target stopped running rather than a test getting faster. Raise it
+# deliberately when tests are added; do not lower it to match a red run.
+PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-111}"
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
@@ -80,12 +81,22 @@ PLUGIN_DB_SKIP_ALLOWLIST="${PLUGIN_DB_SKIP_ALLOWLIST:-postgis}"
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
+# BOTH live-Postgres targets. `integration` and `native_transaction` are the two
+# siblings ci.yml names together as belonging "with the other live-database
+# gates"; running only the first would leave the second in exactly the limbo
+# this script exists to end.
+#
 # `--test-threads=1` is required, not tidiness: these tests share one database
 # and create identically-named schemas, which is the same hazard #78 fixed for
 # compio-postgres.
-cargo test -p zeroship-plugin-db --features test-helpers --test integration \
-  -- --test-threads=1 2>&1 | tee "$SUITE_LOG"
-suite_rc=${PIPESTATUS[0]}
+suite_rc=0
+: > "$SUITE_LOG"
+for target in integration native_transaction; do
+  echo "--- cargo test --test ${target} ---" | tee -a "$SUITE_LOG"
+  cargo test -p zeroship-plugin-db --features test-helpers --test "$target" \
+    -- --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
+  [ "${PIPESTATUS[0]}" -ne 0 ] && suite_rc=1
+done
 
 # Sum EVERY `test result:` line rather than reading the last one. One binary
 # emits one line today, but a tail would silently start lying the moment a
