@@ -1491,22 +1491,65 @@ export const moveBug = mutation(
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
     await assertBugAccessible(current, actor);
-    const structure = await validateProductChildren(productId, componentId);
+
+    // The version and milestone are REMAPPED to same-named entries in the
+    // target product, which is what Bugzilla does. They cannot simply be
+    // carried over -- both are product-scoped, so keeping the old ids would
+    // leave the bug pointing at another product's rows -- and they cannot be
+    // cleared either, because env.db has no SQL NULL update.
+    //
+    // This procedure previously refused any bug with a version or milestone.
+    // Since `bugs.versionId` is NOT NULL, that was every bug that can exist:
+    // an exported, policy-listed procedure whose success path no input could
+    // reach. It then got worse -- `validateProductChildren` gained a required
+    // versionId check, and this call site passes none, so the refusal became
+    // "versionId is required" about a field the caller never sends.
+    // `bugs.versionId` is NOT NULL in the schema, but BugRow types it optional
+    // (it was nullable before the rework). Checked rather than asserted: if a
+    // row ever does lack one, a clear conflict beats a cast that produces
+    // `getRequired(undefined)` and a confusing "Version id" error.
+    if (!current.versionId) conflict("this bug has no version and cannot be moved");
+    const currentVersion = await getRequired(db.versions, current.versionId, "Version");
+    const targetVersions = await readAll(db.versions, { productId });
+    const mappedVersion = targetVersions.find((row) => row.name === currentVersion.name);
+    if (!mappedVersion) {
+      conflict(
+        `the target product has no version named "${currentVersion.name}"; ` +
+          `create it there before moving this bug`,
+      );
+    }
+
+    let mappedMilestoneId: string | undefined;
+    if (current.milestoneId) {
+      const currentMilestone = await getRequired(db.milestones, current.milestoneId, "Milestone");
+      const targetMilestones = await readAll(db.milestones, { productId });
+      const mapped = targetMilestones.find((row) => row.name === currentMilestone.name);
+      if (!mapped) {
+        conflict(
+          `the target product has no milestone named "${currentMilestone.name}"; ` +
+            `create it there before moving this bug`,
+        );
+      }
+      mappedMilestoneId = mapped.id;
+    }
+
+    const structure = await validateProductChildren(
+      productId,
+      componentId,
+      mappedVersion.id,
+      mappedMilestoneId,
+    );
     await assertCanViewProduct(structure.product.id, actor);
+
     return updateBugWithHistory(
       id,
       actor.id,
-      (before) => {
-        if (before.versionId || before.milestoneId) {
-          conflict(
-            "moving a versioned or milestone-assigned bug is unavailable until env.db supports SQL NULL updates",
-          );
-        }
-        return {
-          productId: structure.product.id,
-          componentId: structure.component.id,
-        };
-      },
+      () => ({
+        productId: structure.product.id,
+        componentId: structure.component.id,
+        versionId: mappedVersion.id,
+        ...(mappedMilestoneId ? { milestoneId: mappedMilestoneId } : {}),
+      }),
       ["productId", "componentId", "versionId", "milestoneId"],
     );
   },

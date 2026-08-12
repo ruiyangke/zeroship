@@ -555,6 +555,38 @@ bob cc.listMine | grep -q "$SECRET_BUG" \
 [ "$(bobc bugs.unrestrict "{\"bugId\":\"$SECRET_BUG\",\"groupId\":\"$GROUP\"}")" = "403" ] \
   && pass "bugs.unrestrict refuses a non-member" \
   || fail "bugs.unrestrict let a non-member strip a restriction"
+
+echo "moving a bug between products"
+# This procedure could never succeed: it refused any bug with a version, and
+# bugs.versionId is NOT NULL, so that was every bug. It is exported and
+# policy-listed, and no test had ever driven it.
+MV_SRC="$(call products.create "{\"name\":\"MoveA $STAMP\",\"description\":\"a\"}" | jget 'json.id')"
+MV_SC="$(call components.create "{\"productId\":\"$MV_SRC\",\"name\":\"Core\",\"description\":\"c\"}" | jget 'json.id')"
+MV_SV="$(call versions.create "{\"productId\":\"$MV_SRC\",\"name\":\"1.0\"}" | jget 'json.id')"
+MV_BUG="$(call bugs.create "{\"productId\":\"$MV_SRC\",\"componentId\":\"$MV_SC\",\"versionId\":\"$MV_SV\",\"summary\":\"Movable $STAMP\",\"description\":\"d\"}" | jget 'json.id')"
+
+MV_DST="$(call products.create "{\"name\":\"MoveB $STAMP\",\"description\":\"b\"}" | jget 'json.id')"
+MV_DC="$(call components.create "{\"productId\":\"$MV_DST\",\"name\":\"Core\",\"description\":\"c\"}" | jget 'json.id')"
+
+# The target has no "1.0" yet, so the move must be refused with a message that
+# says what to do -- not silently carry a version belonging to another product.
+[ "$(code bugs.move "{\"id\":\"$MV_BUG\",\"productId\":\"$MV_DST\",\"componentId\":\"$MV_DC\"}")" = "409" ] \
+  && pass "moving to a product without a matching version is refused" \
+  || fail "a bug moved into a product that has no matching version"
+
+call versions.create "{\"productId\":\"$MV_DST\",\"name\":\"1.0\"}" >/dev/null
+MV_RESULT="$(call bugs.move "{\"id\":\"$MV_BUG\",\"productId\":\"$MV_DST\",\"componentId\":\"$MV_DC\"}")"
+[ "$(echo "$MV_RESULT" | jget 'json.productId')" = "$MV_DST" ] \
+  && pass "the bug moves once the target has the same version name" \
+  || fail "bugs.move did not move the bug" "$(echo "$MV_RESULT" | head -c 120)"
+
+# The version must be REMAPPED to the target product's row, not carried over:
+# versions are product-scoped, so keeping the old id would leave the bug
+# pointing into the product it left.
+MV_NEWV="$(echo "$MV_RESULT" | jget 'json.versionId')"
+[ -n "$MV_NEWV" ] && [ "$MV_NEWV" != "$MV_SV" ] \
+  && pass "the version is remapped to the target product's own row" \
+  || fail "the bug kept the source product's version id" "was=$MV_SV now=$MV_NEWV"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.
