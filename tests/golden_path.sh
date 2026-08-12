@@ -1812,6 +1812,39 @@ exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" 2>/dev/null && {
   exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
 }
 WS_FRAME_HEX=$(tail -c 11 "$WS_FRAME_RAW" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+# --- THE FIRST FRAME, PIPELINED INTO THE HANDSHAKE SEGMENT -----------------
+# The frame arm above writes the request head and the frame as two printfs, so
+# whether they share a TCP segment is up to the kernel - it reproduced the loss
+# about a quarter of the time, which is useless as an assertion.
+#
+# ONE `cat` of a prebuilt file is one write() and, at 150 bytes, one segment, so
+# the server's read MUST contain both. That is deterministic: measured
+# 2026-08-12, 0 of 16 round-tripped before the fix and 16 of 16 after, with the
+# server itself reporting `leftover=10` on every failing probe and `leftover=0`
+# on every passing one.
+#
+# WHY IT MATTERS: sending the first frame straight after the handshake is legal
+# and ordinary - browsers do it. Before the fix those bytes were dropped in
+# silence, with no error on either side.
+WS_PIPE_PAYLOAD="$WS_TMP/pipelined.bin"
+printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n\x81\x84\x00\x00\x00\x00ping' "$WS_PORT" > "$WS_PIPE_PAYLOAD"
+WS_PIPE_RAW="$WS_TMP/pipelined-reply.bin"
+: > "$WS_PIPE_RAW"
+exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" 2>/dev/null && {
+  cat "$WS_PIPE_PAYLOAD" >&3
+  timeout 2 cat <&3 > "$WS_PIPE_RAW"
+  exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+}
+WS_PIPE_HEX=$(tail -c 11 "$WS_PIPE_RAW" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+if [ "$WS_PIPE_HEX" = "81096563686f3a70696e67" ]; then
+  pass "dev: a frame pipelined into the handshake segment still round-trips"
+else
+  fail "dev: the first frame was LOST when it shared a segment with the upgrade request.
+      want 81096563686f3a70696e67, got '${WS_PIPE_HEX:-<nothing>}'. The HTTP read
+      buffer holds bytes past the request head, and after an upgrade the socket
+      never produces them again, so they have to be handed to the frame reader."
+fi
+
 # --- WHAT THE SERVER DOES AFTER THE CLIENT WALKS AWAY ---------------------
 # Every arm above ends by closing the socket without a WebSocket Close frame -
 # which is what a browser tab being closed, a reload, or a crashed client looks
@@ -4294,7 +4327,7 @@ gp_close_step
 # Second consecutive raise where the delta and the run agree to the assertion.
 # Mutation-proven before the run by deleting the app's message listener: 3/1,
 # only the frame arm red.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-118}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-119}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4353,7 +4386,7 @@ echo "            and its 'only step 11 collation reds are left' reading was tru
 echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
 echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
 echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
-echo "            is 118/15, so the mutated arm should read 124/9 -- DERIVED by"
+echo "            is 119/15, so the mutated arm should read 125/9 -- DERIVED by"
 echo "            subtraction, NOT measured; nobody has run the mutated arm since"
 echo "            the suite grew. If you run it, replace this with the real pair."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
