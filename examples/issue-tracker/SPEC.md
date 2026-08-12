@@ -28,9 +28,11 @@ Every table gets the seven injected platform system columns (`id`,
 ### Products and structure
 
 - `products` — name (unique), description, isActive, defaultMilestone,
-  allowsUnconfirmed, classification
-- `components` — productId -> products, name, description, defaultAssignee,
-  defaultQaContact, isActive
+  allowsUnconfirmed, classification, votesPerUser, maxVotesPerBug,
+  votesToConfirm (all three default 0, which means voting is off)
+- `components` — productId -> products, name, description, defaultAssigneeId
+  (NOT NULL: a component always has an initial owner), defaultQaContactId,
+  initialCc, isActive
 - `versions` — productId -> products, name, sortKey, isActive
 - `milestones` — productId -> products, name, sortKey, isActive
 - `keywords` — name (unique), description
@@ -44,7 +46,9 @@ Every table gets the seven injected platform system columns (`id`,
   resolution (nullable; FIXED/INVALID/WONTFIX/DUPLICATE/WORKSFORME/INCOMPLETE),
   severity (blocker/critical/major/normal/minor/trivial/enhancement),
   priority (P1..P5), assigneeId, reporterId, qaContactId, duplicateOfId,
-  whiteboard, opSys, platform, url, isConfirmed, votes, deadline
+  alias (unique when set), whiteboard, opSys, platform, url, isConfirmed,
+  voteCount, commentCount, estimatedTimeMinutes, remainingTimeMinutes,
+  deadline, resolvedAt (stamped on resolve so reports need not mine history)
 - `comments` — bugId, authorId, body, isPrivate, workTimeMinutes,
   commentNumber (0 = the original description)
 - `attachments` — bugId, uploaderId, filename, contentType, sizeBytes,
@@ -52,6 +56,8 @@ Every table gets the seven injected platform system columns (`id`,
 - `bugKeywords` — bugId, keywordId (join)
 - `bugDependencies` — bugId, dependsOnId (a bug blocked by another bug)
 - `bugCc` — bugId, userId (join)
+- `bugGroups` — bugId, groupId (join). Bugzilla's bug_group_map: the table
+  behind a confidential bug inside an otherwise readable product.
 - `bugSeeAlso` — bugId, url
 - `flags` — bugId (nullable), attachmentId (nullable), flagTypeId, setterId,
   requesteeId, status (+/-/?)
@@ -61,8 +67,9 @@ Every table gets the seven injected platform system columns (`id`,
 
 ### People and preferences
 
-- `users` — email (unique), name, handle (unique), isAdmin, isDisabled,
-  realName, timezone
+- `users` — email (unique), handle (unique), name, isAdmin, isDisabled,
+  timezone, prefs (json). Bugzilla has login + realname and no third name
+  field, so there is no separate `realName`
 - `groups` — name (unique), description, isBugGroup
 - `groupMembers` — groupId, userId
 - `productGroups` — productId, groupId (per-product visibility)
@@ -94,7 +101,30 @@ explicitly with `publiclyAccessible: true`.
 ### Keywords, flags, CC
 `keywords.list` `keywords.create` `keywords.attach` `keywords.detach`
 `flags.set` `flags.clear` `flags.listRequests` (my requests / requests of me)
-`cc.add` `cc.remove` `cc.list`
+`flags.list` (the live flags on a bug and its attachments)
+`cc.add` `cc.remove` `cc.list` `cc.listMine` (the bugs I am CC'd on)
+
+### Access control
+`groups.create` `groups.list` `groups.addMember` `groups.removeMember`
+`products.restrict` `products.unrestrict` (product-level visibility)
+`bugs.restrict` `bugs.unrestrict` (Bugzilla's bug_group_map: a confidential
+bug inside an otherwise readable product)
+
+The first account to exist becomes an admin, the way Bugzilla's installer
+creates one. Without a bootstrap nothing could ever set `isAdmin`, and the
+whole admin surface would be unreachable.
+
+### Voting
+`votes.cast` `votes.listMine`
+
+A vote carries a QUANTITY, so a bug's `voteCount` is the sum of vote rows rather
+than a count of them. Voting is disabled until a product sets `votesPerUser`;
+reaching `votesToConfirm` confirms an UNCONFIRMED bug.
+
+### Watching and see-also
+`watchers.add` `watchers.remove` `watchers.list` (Bugzilla's user watching:
+you also hear about bugs the watched user is involved in)
+`seeAlso.add` `seeAlso.remove` `seeAlso.list` (cross-tracker links)
 
 ### Products and admin
 `products.list` `products.get` `products.create` `products.update`
@@ -132,3 +162,18 @@ Charts beyond the summary set, custom fields, whining (scheduled query email),
 XML-RPC/BzAPI compatibility, and the classic Bugzilla templating skin. Custom
 fields in particular are deliberately out: they need runtime DDL, which is the
 migration engine's job and not an app-level concern.
+
+Email delivery is also out: notifications are in-app rows, and nothing sends
+mail. Full-text search is out -- `search.quick` matches structured tokens and
+an indexed prefix of the summary, not comment bodies.
+
+## Divergences from Bugzilla, taken deliberately
+
+- **Comments are editable.** Bugzilla comments are immutable by design; here
+  `comments.edit` exists and writes an activity row. Kept because an example
+  that cannot correct a typo teaches the wrong lesson about the data model.
+- **Attachments can be deleted, not only obsoleted.** Bugzilla obsoletes them.
+  `attachments.delete` checks bug access but NOT uploader identity, so any user
+  who can edit the bug can delete another user's attachment.
+- **`versions.sortKey` is a float**, where Bugzilla uses an int, so a version
+  can be inserted between two others without renumbering.
