@@ -1236,6 +1236,204 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// A resumed backfill stops at the cohort boundary its FIRST run captured.
+///
+/// `docs/security-model.md`: "Before the first batch, a backfill captures a fixed
+/// terminal cursor. Each committed batch advances saved progress, and retries stop at
+/// that original boundary rather than chasing later rows."
+///
+/// That sentence is what makes a backfill terminate. If a resume re-derived its
+/// terminal cursor from the live table instead of reading the one `initialize_progress`
+/// persisted, a table taking ordinary writes would extend its own cohort every time a
+/// deploy retried, and the backfill would mutate rows the operator never approved —
+/// silently, since every one of them matches the filter and the run still reports
+/// success.
+///
+/// The crash-and-resume coverage above never measured it: it seeds a fixed set of rows
+/// and the only row it inserts mid-flight is deliberately NON-matching, so a resume
+/// that ignored the stored boundary entirely would still have passed. Here the inserted
+/// rows MATCH the filter and sit beyond the boundary, which is the only shape that can
+/// tell the two implementations apart.
+///
+/// `ExternalInvariant` stability on purpose: `GuardUpdates` installs a trigger that
+/// would police the insert, so under it the boundary is never the thing under test.
+/// With no guard, the persisted `end_cursor` is the ONLY thing holding the line.
+#[compio::test]
+async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".cohort_items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".cohort_items (id, value) VALUES \
+                 (1, 'pending'), (2, 'pending'), (3, 'pending'), (4, 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create the bounded-cohort target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("bounded cohort boundary");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "cohort_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+            name: "cohort_items_id_immutable".into(),
+        },
+        cursor_contract: None,
+        batch_size: 2,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: Some("\"value\" = 'pending'".into()),
+        name: "bounded cohort boundary".into(),
+    };
+
+    let run = || {
+        backend.run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+    };
+
+    // Every row's value, keyed by id, as the DATABASE holds it.
+    let values = || async {
+        let rows = session
+            .query(
+                &format!(
+                    "SELECT id, value FROM \"{}\".cohort_items ORDER BY id",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("read cohort values");
+        rows.iter()
+            .map(|row| {
+                (
+                    row.try_get::<_, i64>("id").expect("id"),
+                    row.try_get::<_, String>("value").expect("value"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let stored_end_cursor = || async {
+        let row = session
+            .query_one(
+                &format!(
+                    "SELECT end_cursor::text AS end_cursor, complete \
+                       FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                    cfg.pg.meta_schema
+                ),
+                &[version.as_str().into()],
+            )
+            .await
+            .expect("read progress");
+        let end: String = row.try_get("end_cursor").expect("end cursor JSON");
+        (
+            serde_json::from_str::<serde_json::Value>(&end).expect("tagged JSON"),
+            row.try_get::<_, bool>("complete").expect("complete"),
+        )
+    };
+
+    // Phase 1 — crash after the first committed batch, with the boundary already
+    // durable at id 4.
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let error = run()
+        .await
+        .expect_err("the fault must abort the run after its first committed batch");
+    assert!(
+        error.to_string().contains("fault-injection"),
+        "unexpected pre-fault failure: {error}"
+    );
+    assert_eq!(
+        stored_end_cursor().await,
+        (serde_json::json!([{"int64": "4"}]), false),
+        "the interrupted run must leave a durable boundary at the last row it saw"
+    );
+    assert_eq!(
+        values().await,
+        vec![
+            (1, "done".to_string()),
+            (2, "done".to_string()),
+            (3, "pending".to_string()),
+            (4, "pending".to_string()),
+        ],
+        "exactly one batch committed before the crash"
+    );
+
+    // Rows that arrive between the crash and the retry, MATCHING the filter and
+    // sitting past the boundary. Nothing guards this table, so the insert succeeds
+    // and only the stored boundary can keep the resume off them.
+    session
+        .batch(&format!(
+            "INSERT INTO \"{}\".cohort_items (id, value) VALUES (5, 'pending'), (6, 'pending')",
+            cfg.project_schema
+        ))
+        .await
+        .expect("ordinary application writes land during the outage");
+
+    // Phase 2 — the retry.
+    run()
+        .await
+        .expect("the retry completes the original cohort");
+
+    assert_eq!(
+        values().await,
+        vec![
+            (1, "done".to_string()),
+            (2, "done".to_string()),
+            // The control. Without these two turning over, "rows 5 and 6 untouched"
+            // would also hold for a resume that did nothing at all, and this test
+            // would be measuring an absence rather than a boundary.
+            (3, "done".to_string()),
+            (4, "done".to_string()),
+            // The claim: past the boundary, so the retry must not chase them.
+            (5, "pending".to_string()),
+            (6, "pending".to_string()),
+        ],
+        "the retry must finish the original cohort and leave later rows alone"
+    );
+    assert_eq!(
+        stored_end_cursor().await,
+        (serde_json::json!([{"int64": "4"}]), true),
+        "the boundary must still be the one the first run captured, not a re-derived 6"
+    );
+
+    // And the cohort stays closed: running the same step again cannot reopen it.
+    run()
+        .await
+        .expect("a completed backfill re-runs as a no-op");
+    assert_eq!(
+        values()
+            .await
+            .into_iter()
+            .filter(|(_, v)| v == "pending")
+            .count(),
+        2,
+        "re-running a completed backfill must not swallow the rows that arrived after it"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
 #[compio::test]
 async fn guard_detects_representation_changes_under_case_insensitive_cursor_semantics() {
     use zero_migrate::driver::SqlSession;
