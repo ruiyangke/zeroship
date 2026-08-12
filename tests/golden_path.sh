@@ -3853,7 +3853,28 @@ gp_close_step
 # LEDGER GAP, recorded so the chain above is not read as complete: three earlier
 # raises (71 -> 72, 75 -> 85, 87 -> 89) have no entry. The arithmetic in the
 # entries that DO exist is still checkable, but it does not compose end to end.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-101}"
+#
+# 101 -> 105, 2026-08-12. FOUR privilege assertions were added beside the
+# existing token_revocations one while fixing a class of six least-privilege
+# defects (#356, #357, #358, #359):
+#   gw_revoke      zeroship_gateway   token_revocations   SELECT+INSERT+UPDATE
+#   ctl_oauth      zeroship_control   app_oauth_clients   SELECT+INSERT+UPDATE
+#   ctl_upsert     zeroship_control   app_vars + token_revocations   UPDATE
+#   auth_suppress  zeroship_auth      email_suppressions  INSERT+UPDATE
+# A fifth, auth_del, was WIDENED from DELETE to SELECT+DELETE - same single
+# assertion, so it adds no count.
+#
+# THIS RAISE IS A DELTA, NOT A FRESH FULL-RUN MEASUREMENT, and is labelled so
+# deliberately (the lesson of the 49/0-vs-73/2 correction recorded above). What
+# was measured: all four sit at top level in the post-migrate block, which is
+# preceded by hard `exit 1` guards, so they cannot be conditionally skipped; and
+# all four return their expected values on a database built ONLY by
+# `zeroship-platform-migrate` from db/migrations-ts, with no hand-granting
+# (verified 2026-08-12 on a scratch DB, since dropped). So a run that reaches
+# this block gains exactly four passes. What was NOT measured: the absolute
+# total on a full green run. If a future full run disagrees, trust the run and
+# restate this as a measurement rather than adjusting the run to fit.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-105}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
