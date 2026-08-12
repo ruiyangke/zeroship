@@ -2,7 +2,7 @@
 // empty, and error -- with a 401 (fail-closed "user" procedures hit while
 // signed out) rendered as an explicit sign-in prompt, never as an empty list.
 import type { ReactNode } from "react";
-import { errorCode, errorMessage, isUnauthenticated } from "./rpc";
+import { errorCode, errorMessage, isUnauthenticated, type AsyncState } from "./rpc";
 
 export function Loading({ label = "Loading..." }: { label?: string }) {
   return (
@@ -65,18 +65,24 @@ export function AsyncSection<T>({
   emptyHint,
   children,
 }: {
-  state: { status: "loading" } | { status: "error"; error: unknown } | { status: "ready"; data: T };
+  // The shared AsyncState, not a re-spelling of it. This was an inline copy
+  // of the same union, so adding `refreshing` to the real one left this
+  // signature quietly behind.
+  state: AsyncState<T>;
   onRetry?: () => void;
   loadingLabel?: string;
   isEmpty?: (data: T) => boolean;
   emptyTitle?: string;
   emptyHint?: ReactNode;
-  children: (data: T) => ReactNode;
+  children: (data: T, refreshing: boolean) => ReactNode;
 }) {
   if (state.status === "loading") return <Loading label={loadingLabel} />;
   if (state.status === "error") return <ErrorState error={state.error} onRetry={onRetry} />;
   if (isEmpty?.(state.data)) {
     return <EmptyState title={emptyTitle ?? "Nothing here yet"} hint={emptyHint} />;
   }
-  return <>{children(state.data)}</>;
+  // The refreshing flag reaches the child rather than being swallowed here.
+  // A section that knows it is reloading can mark itself busy in place; the
+  // alternative is unmounting it, which is what this component used to do.
+  return <>{children(state.data, state.refreshing === true)}</>;
 }

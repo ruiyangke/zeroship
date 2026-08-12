@@ -264,11 +264,12 @@ export function BugListPage() {
             : "Either nothing has been filed yet, or there is no signed-in identity with visibility into any product."
         }
       >
-        {(bugs: Bug[]) => (
+        {(bugs: Bug[], refreshing: boolean) => (
           <>
             <BugResultsTable
               bugs={bugs}
               columns={columns}
+              loading={refreshing}
               sort={{ key: SORT_COLUMN[sortBy] ?? "updated", direction: sortDirection === 1 ? "asc" : "desc" }}
               onSortChange={(next) => {
                 setSortBy(COLUMN_SORT[next.key] ?? "updated_at");

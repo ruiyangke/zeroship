@@ -1237,7 +1237,17 @@ export const getBug = query(
       ).map((user) => [user.id, publicUserView(user)]),
     );
     return {
-      bug,
+      // The same denormalised key searchBugs carries, so a bug from EITHER
+      // endpoint can name itself without a second lookup. The dashboard builds
+      // its rows from bugs.get and would otherwise be the one surface that
+      // could not.
+      // OPTIONAL, so a plain BugRow -- what every mutation returns -- is still
+      // assignable. The label falls back when it is absent, so the only cost of
+      // a mutation not carrying it is one render without the key, and the
+      // alternative is threading it through twenty return statements.
+      bug: { ...bug, productKey: must(product)?.key ?? null } as BugRow & {
+        productKey?: string | null;
+      },
       people,
       product: must(product),
       component: must(component),
@@ -1293,7 +1303,10 @@ async function searchBugsInternal(
   input: BugSearchInput,
   identity: PlatformUser | null,
   extraFilter?: DbFilter,
-): Promise<BugRow[]> {
+  // The annotation carries productKey: without it the declared type erases the
+  // field the client needs to render PARSER-12, and the flash comes back with
+  // nothing failing to typecheck.
+): Promise<(BugRow & { productKey?: string | null })[]> {
   const visible = await visibleProductIds(identity);
   if (visible.size === 0) return [];
   if (input.productId && !visible.has(input.productId)) return [];
@@ -1366,13 +1379,32 @@ async function searchBugsInternal(
   // duplicate of a restricted one still NAMES it in duplicateOfId, and
   // bugs.search is anonymous.
   const hiddenSet = new Set(hidden);
-  return must(
+  const rows = must(
     await db.bugs
       .find(filter)
       .sort({ [sortBy]: direction })
       .skip(clampOffset(input.offset))
       .limit(clampLimit(input.limit)),
   ).map((row) => maskHiddenBugLinks(normalizeBugRow(row), hiddenSet));
+
+  // The product KEY travels with the row.
+  //
+  // A bug is displayed as PARSER-12, and the key half used to be fetched
+  // separately by the client, so every time the rows changed the id column
+  // rendered a full UUID until that second request landed and then snapped to
+  // the short form -- a visible flash on every sort, filter and page turn.
+  //
+  // The server already knows the key, and one lookup here covers the whole
+  // page: at most one product per row, in practice a handful. Denormalised
+  // onto the row rather than returned alongside it because every consumer of
+  // a bug wants to be able to name it.
+  const keysByProduct = new Map(
+    (await readByIds(db.products, rows.map((row) => row.productId))).map((product) => [
+      product.id,
+      product.key,
+    ]),
+  );
+  return rows.map((row) => ({ ...row, productKey: keysByProduct.get(row.productId) ?? null }));
 }
 
 export const searchBugs = query(

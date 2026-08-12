@@ -390,3 +390,11 @@ tbody tr:hover { background: var(--surface-2); }
   inline-size: 11rem;
   flex: 0 0 auto;
 }
+
+/* A table being refetched keeps its rows and dims. Opacity only -- no size,
+   position or font change, so nothing moves under the pointer while the new
+   rows are on their way. */
+.is-refetching {
+  opacity: 0.55;
+  transition: opacity 120ms ease-out;
+}

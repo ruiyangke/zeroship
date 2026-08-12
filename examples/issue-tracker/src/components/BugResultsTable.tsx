@@ -39,8 +39,16 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
  * than rendering a bare number: "12" on its own belongs to no product.
  */
 function bugLabel(bug: Bug, productKeysById: Record<string, string>): string {
-  const key = productKeysById[bug.productId];
-  return key ? `${key}-${bug.number}` : bug.id;
+  // The row's OWN key first. searchBugs carries productKey, so the label is
+  // known the moment the row is, and the lookup map is only a fallback for
+  // callers whose rows predate that field.
+  //
+  // The fallback used to be the full UUID, which meant every data change
+  // rendered a column of long ids until a second request resolved the keys and
+  // then snapped to the short form. A dash is a placeholder that holds its
+  // place; a UUID is a different, much wider string pretending to be an answer.
+  const key = bug.productKey ?? productKeysById[bug.productId];
+  return key ? `${key}-${bug.number}` : "--";
 }
 
 function formatDate(ms: number): string {
@@ -81,12 +89,16 @@ export function BugResultsTable({
   bugs,
   columns,
   caption,
+  loading = false,
   sort,
   onSortChange,
 }: {
   bugs: readonly Bug[];
   columns: readonly BugColumnKey[];
   caption?: string;
+  /** Marks the table busy IN PLACE during a refetch, rather than the caller
+   *  unmounting it and leaving a hole where the rows were. */
+  loading?: boolean;
   sort?: DataTableSort | null;
   onSortChange?: (sort: DataTableSort) => void;
 }) {
@@ -149,7 +161,23 @@ export function BugResultsTable({
     updated: { key: "updated", header: "Updated", cell: (bug) => formatDate(bug.updated_at) },
   };
 
+  // Two different states, deliberately not conflated.
+  //
+  // DataTable resolves state as error > loading > empty > data, so its
+  // `loading` REPLACES the rows with skeletons. That is right when there is
+  // nothing yet and wrong for a refetch, which is the common case here: every
+  // filter change, sort and page turn reloads, and swapping 25 rows for 5
+  // skeletons is the same hole the unmounting used to leave, just shorter.
+  //
+  // So skeletons only when there is nothing to keep. With rows on screen the
+  // table stays exactly as it is and the wrapper is marked aria-busy, which
+  // announces the update to a screen reader and dims it without moving
+  // anything.
+  const firstLoad = loading && bugs.length === 0;
+  const refetching = loading && bugs.length > 0;
+
   return (
+    <div aria-busy={refetching || undefined} className={refetching ? "is-refetching" : undefined}>
     <DataTable
       columns={columns.map((key) => ({
         ...byKey[key],
@@ -167,11 +195,13 @@ export function BugResultsTable({
       manualSorting
       manualFiltering
       manualPagination
+      loading={firstLoad}
       sort={sort ?? null}
       onSortChange={onSortChange}
       // A caption or an aria-label is REQUIRED -- the component dev-warns and
       // the table is left unnamed for a screen reader without one.
       aria-label={caption ?? "Bugs"}
     />
+    </div>
   );
 }

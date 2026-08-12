@@ -13,7 +13,17 @@ import { isRpcError } from "@zeroship/rpc/client";
 export type AsyncState<T> =
   | { status: "loading" }
   | { status: "error"; error: unknown }
-  | { status: "ready"; data: T };
+  /**
+   * `refreshing` marks a RELOAD of data that is already on screen.
+   *
+   * A refetch used to drop straight back to `status: "loading"`, which
+   * discarded the rows and unmounted whatever was rendering them: changing a
+   * filter, sorting, paging, or any mutation that reloads blanked the section
+   * and jumped the layout, then filled it back in. The previous data is still
+   * true until the new data arrives, so it stays and the consumer marks it
+   * busy instead.
+   */
+  | { status: "ready"; data: T; refreshing?: boolean };
 
 export function errorCode(error: unknown): string | undefined {
   return isRpcError(error) ? error.code : undefined;
@@ -63,10 +73,16 @@ export function useAsync<T>(
 
   const reload = useCallback(() => {
     const id = ++seq.current;
-    setState({ status: "loading" });
+    // Only a FIRST load is "loading". With data already on screen the state
+    // stays ready and gains `refreshing`, so the section keeps rendering
+    // what it has. There is nothing better to show in its place -- an empty
+    // box is strictly less information than stale rows.
+    setState((previous) =>
+      previous.status === "ready" ? { ...previous, refreshing: true } : { status: "loading" },
+    );
     Promise.resolve(fnRef.current())
       .then((data) => {
-        if (seq.current === id) setState({ status: "ready", data });
+        if (seq.current === id) setState({ status: "ready", data, refreshing: false });
       })
       .catch((error: unknown) => {
         if (seq.current === id) setState({ status: "error", error });
