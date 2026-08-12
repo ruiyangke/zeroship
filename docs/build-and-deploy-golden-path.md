@@ -148,5 +148,10 @@ For the **real agent flow** against a deployed platform, the path is
 - ☐ Host a real SDK registry (npmjs / hosted Verdaccio) for production gap #1.
 - ☐ Smooth one-step deploy UX (provision-app-if-needed; a `zeroship deploy` that
   creates the app on first push instead of requiring a pre-created `--app`).
+  The TRANSPORT half of this is done: `deploy/scripts/deploy-app.sh` forwards
+  the control plane over ssh, which is what a remote deploy was actually
+  blocked on -- control binds loopback with no Caddy route, so
+  `--control=https://control.<domain>` 404s and the direct port is refused.
+  What remains is the app-provisioning UX, not the connection.
 - ☐ Agent integration: a control-plane MCP server / Claude Code skill so the
   agent deploys + manages apps directly as tools.
