@@ -1149,6 +1149,30 @@ jobs:
           tests/e2e_gateway_path_backslash.sh 2>&1 | tee "$RUNNER_TEMP/dvd-backslash.log"
         env:
           ZS_FRESHNESS_STRICT: 1
+      # The probe that CONFIRMED #199 by execution, and until now it ran in NO
+      # workflow: `grep -rn e2e_gateway_workflow_advance_authz .github/`
+      # returned nothing while the same search for golden_path.sh returned
+      # ci.yml. So the single finding in this review with executed evidence of a
+      # live authorization gap was ungated - whoever FIXES it would have been
+      # told by nothing, and a widening would have been told by nothing either.
+      #
+      # IT IS RED AT HEAD, AND THAT IS WHY IT CARRIES A CLASSIFIER RATHER THAN
+      # `continue-on-error`. #199's gap is real and unfixed, so a raw wiring
+      # would paint this job permanently red and hide the next real regression
+      # inside a failure everyone learns to skip. The script's own two-sided
+      # block (414b8476c) exits 0 only when the documented, bounded gap is the
+      # ONLY failure; it exits 1 on anything new AND on the gap disappearing
+      # while AUTHZ_EXPECTED_FAILURES still names it.
+      #
+      # BOUNDED, and the probe measures the bounds itself rather than asserting
+      # them: phase 2 shows the shipped worker refusing the unsigned advance
+      # (HTTP 403, run stays queued) and phase 3 shows the dotless Host that
+      # bypasses the gate is not routable through Caddy. Reaching the gap needs
+      # BOTH the worker flag ON and direct gateway access.
+      - name: Gateway workflow-advance authorization (#199 - red at HEAD, classified)
+        run: |
+          set -o pipefail
+          tests/e2e_gateway_workflow_advance_authz.sh 2>&1 | tee "$RUNNER_TEMP/dvd-wfadvz.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
