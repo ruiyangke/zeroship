@@ -112,7 +112,7 @@ pub struct Divergence {
     /// `index users_email_idx`, `constraint users_age_chk`.
     pub object: String,
     /// The attribute that diverged: `data_type`, `nullable`, `unique`, `columns`,
-    /// `expression`, `kind`, or `definition`.
+    /// `expression`, `kind`, `definition`, or `presence`.
     pub field: String,
     /// The DECLARED (expected) value for `field`.
     pub expected: String,
@@ -795,9 +795,26 @@ fn decide_constraint(
     dialect: SqlDialect,
 ) -> GuardVerdict {
     let find = |candidate: &str| {
-        live.tables
-            .get(table)
-            .and_then(|t| t.constraints.iter().find(|c| c.name == candidate))
+        let table = live.tables.get(table)?;
+        if let Some(constraint) = table
+            .constraints
+            .iter()
+            .find(|constraint| constraint.name == candidate)
+        {
+            return Some((constraint.kind.as_str(), constraint.definition.as_str()));
+        }
+        // MySQL's catalog collapses a named table UNIQUE and its backing index
+        // into one key object. Resolve constraints first because PRIMARY KEY is
+        // filed in both buckets.
+        if matches!(dialect, SqlDialect::Mysql)
+            && table
+                .indexes
+                .iter()
+                .any(|index| index.name == candidate && index.unique)
+        {
+            return Some(("UNIQUE", ""));
+        }
+        None
     };
     if let Some(verdict) =
         truncated_identifier_backstop("constraint", name, direction, dialect, |candidate| {
@@ -812,18 +829,28 @@ fn decide_constraint(
             // dropConstraint: presence-only on the constraint name.
             if live_con.is_some() {
                 GuardVerdict::RunBare
+            } else if matches!(dialect, SqlDialect::Mysql) {
+                // MySQL's snapshot retains no CHECK constraint identity. A miss
+                // cannot prove absence, and a no-op could skip a real DROP while
+                // journaling the migration as completed.
+                drift(
+                    &format!("constraint {name}"),
+                    "presence",
+                    "<absent>",
+                    "<unknown: MySQL's snapshot retains no CHECK constraint identity at all, so not found does not prove absent>",
+                )
             } else {
                 GuardVerdict::SatisfiedNoop
             }
         }
         GuardDir::IfNotExists => {
-            let Some(live_con) = live_con else {
+            let Some((live_kind, live_definition)) = live_con else {
                 return GuardVerdict::RunBare; // absent → add it.
             };
             // Present. A kind clash is the clearest divergence.
             if let Some(kind) = expect_kind {
-                if kind != live_con.kind {
-                    return drift(&format!("constraint {name}"), "kind", kind, &live_con.kind);
+                if kind != live_kind {
+                    return drift(&format!("constraint {name}"), "kind", kind, live_kind);
                 }
             }
             // **F2 — structural compare when a byte-comparable definition is
@@ -843,19 +870,17 @@ fn decide_constraint(
             // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
             // DEFERRABLE) survives the normalization and is still caught.
             if let Some(decl_def) = expect_definition {
-                if normalize_fk_definition(decl_def)
-                    == normalize_fk_definition(&live_con.definition)
-                {
+                if normalize_fk_definition(decl_def) == normalize_fk_definition(live_definition) {
                     return GuardVerdict::SatisfiedNoop;
                 }
                 return drift(
                     &format!("constraint {name}"),
                     "definition",
                     decl_def,
-                    if live_con.definition.is_empty() {
+                    if live_definition.is_empty() {
                         "<present>"
                     } else {
-                        &live_con.definition
+                        live_definition
                     },
                 );
             }
@@ -871,10 +896,10 @@ fn decide_constraint(
                 &format!("constraint {name}"),
                 "definition",
                 "<declared constraint — cannot prove equal to live pg_get_constraintdef>",
-                if live_con.definition.is_empty() {
+                if live_definition.is_empty() {
                     "<present>"
                 } else {
-                    &live_con.definition
+                    live_definition
                 },
             )
         }
@@ -1040,6 +1065,11 @@ mod tests {
     /// `decide` on the SQLite leg (affinity-fold compare — F1).
     fn decide_sqlite(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
         decide(probe, live, SqlDialect::Sqlite)
+    }
+
+    /// `decide` on the MySQL leg (constraint-first catalog resolution).
+    fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
+        decide(probe, live, SqlDialect::Mysql)
     }
 
     fn col(name: &str, dtype: &str, nullable: bool) -> ColumnSnapshot {
@@ -1449,6 +1479,126 @@ mod tests {
             comment: None,
             cascade_columns: None,
         }
+    }
+
+    fn constraint_probe(name: &str, direction: GuardDir, expect_kind: Option<&str>) -> GuardProbe {
+        GuardProbe::Constraint {
+            schema: "app".into(),
+            table: "users".into(),
+            name: name.into(),
+            direction,
+            expect_kind: expect_kind.map(str::to_owned),
+            expect_definition: None,
+        }
+    }
+
+    fn mysql_primary_table() -> TableSnapshot {
+        let mut table = empty_table();
+        table
+            .constraints
+            .push(constraint("users_pkey", "PRIMARY KEY", "PRIMARY KEY (id)"));
+        table.indexes.push(IndexSnapshot::btree(
+            "users_pkey".to_string(),
+            true,
+            vec!["id".to_string()],
+        ));
+        table
+    }
+
+    #[test]
+    fn constraint_mysql_ifexists_unique_index_runs_bare() {
+        let probe = constraint_probe("users_email_key", GuardDir::IfExists, None);
+        let mut table = empty_table();
+        table.indexes.push(IndexSnapshot::btree(
+            "users_email_key".to_string(),
+            true,
+            vec!["email".to_string()],
+        ));
+        assert_eq!(
+            decide_mysql(&probe, &snapshot_with("users", table)),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn constraint_mysql_ifexists_unresolved_refuses() {
+        let probe = constraint_probe("users_age_check", GuardDir::IfExists, None);
+        match decide_mysql(&probe, &snapshot_with("users", empty_table())) {
+            GuardVerdict::FailDrift(divergence) => {
+                assert_eq!(divergence.object, "constraint users_age_check");
+                assert_eq!(divergence.field, "presence");
+                assert_eq!(divergence.expected, "<absent>");
+                assert_eq!(
+                    divergence.actual,
+                    "<unknown: MySQL's snapshot retains no CHECK constraint identity at all, so not found does not prove absent>"
+                );
+            }
+            verdict => panic!("expected FailDrift(presence), got {verdict:?}"),
+        }
+    }
+
+    #[test]
+    fn constraint_mysql_ifexists_primary_constraint_runs_bare() {
+        let probe = constraint_probe("users_pkey", GuardDir::IfExists, None);
+        assert_eq!(
+            decide_mysql(&probe, &snapshot_with("users", mysql_primary_table())),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn constraint_mysql_ifexists_foreign_key_runs_bare() {
+        let probe = constraint_probe("users_account_fkey", GuardDir::IfExists, None);
+        let mut table = empty_table();
+        table.constraints.push(constraint(
+            "users_account_fkey",
+            "FOREIGN KEY",
+            "FOREIGN KEY (account_id) REFERENCES accounts(id)",
+        ));
+        assert_eq!(
+            decide_mysql(&probe, &snapshot_with("users", table)),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn constraint_mysql_ifnotexists_unresolved_runs_bare() {
+        let probe = constraint_probe("users_email_key", GuardDir::IfNotExists, Some("UNIQUE"));
+        assert_eq!(
+            decide_mysql(&probe, &snapshot_with("users", empty_table())),
+            GuardVerdict::RunBare
+        );
+    }
+
+    #[test]
+    fn constraint_mysql_ifnotexists_primary_constraint_beats_unique_index_fallback() {
+        let probe = constraint_probe("users_pkey", GuardDir::IfNotExists, Some("UNIQUE"));
+        match decide_mysql(&probe, &snapshot_with("users", mysql_primary_table())) {
+            GuardVerdict::FailDrift(divergence) => {
+                assert_eq!(divergence.field, "kind");
+                assert_eq!(divergence.expected, "UNIQUE");
+                assert_eq!(divergence.actual, "PRIMARY KEY");
+            }
+            verdict => panic!("expected FailDrift(kind), got {verdict:?}"),
+        }
+    }
+
+    #[test]
+    fn constraint_postgres_ifexists_unresolved_noops() {
+        let probe = constraint_probe("users_age_check", GuardDir::IfExists, None);
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("users", empty_table())),
+            GuardVerdict::SatisfiedNoop
+        );
+    }
+
+    #[test]
+    fn constraint_sqlite_ifexists_unresolved_noops() {
+        let probe = constraint_probe("users_age_check", GuardDir::IfExists, None);
+        assert_eq!(
+            decide_sqlite(&probe, &snapshot_with("users", empty_table())),
+            GuardVerdict::SatisfiedNoop
+        );
     }
 
     #[test]

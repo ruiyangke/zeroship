@@ -606,6 +606,40 @@ fn empty_live() -> SchemaSnapshot {
     live_schema(Vec::new(), Vec::new())
 }
 
+fn assert_ifexists_miss(
+    label: &str,
+    probe: &GuardProbe,
+    live: &SchemaSnapshot,
+    dialect: SqlDialect,
+    noop_reason: &str,
+) {
+    let mysql_constraint =
+        matches!(dialect, SqlDialect::Mysql) && matches!(probe, GuardProbe::Constraint { .. });
+    let verdict = decide(probe, live, dialect);
+    if mysql_constraint {
+        match verdict {
+            GuardVerdict::FailDrift(divergence) => {
+                assert_eq!(divergence.field, "presence");
+                assert!(
+                    divergence
+                        .actual
+                        .contains("retains no CHECK constraint identity"),
+                    "{label} ifExists on MySQL names the snapshot ambiguity"
+                );
+            }
+            verdict => panic!(
+                "{label} ifExists on MySQL must refuse an unresolved constraint, got {verdict:?}"
+            ),
+        }
+    } else {
+        assert_eq!(
+            verdict,
+            GuardVerdict::SatisfiedNoop,
+            "{label} ifExists on {dialect:?}: {noop_reason}"
+        );
+    }
+}
+
 /// The defect at its last seam. An over-long `ifExists` name whose TRUNCATED spelling
 /// is what the catalog holds must never read as "already gone": that verdict skips the
 /// statement and journals it completed while the object survives.
@@ -696,11 +730,10 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
     }
 }
 
-/// A name WITHIN the bound keeps every verdict it has today, on every dialect and in
-/// both directions. This is the common correct case and the backstop must be invisible
-/// to it.
+/// A name within the bound never triggers the PostgreSQL truncation backstop. MySQL's
+/// separate unresolved-constraint refusal remains visible on its one ambiguous arm.
 #[test]
-fn a_within_bound_name_keeps_its_verdict_on_every_dialect() {
+fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
     let name = ascii_name(MAX);
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
         for (label, probe, live) in probe_cases() {
@@ -709,10 +742,12 @@ fn a_within_bound_name_keeps_its_verdict_on_every_dialect() {
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: a live object still runs the drop"
             );
-            assert_eq!(
-                decide(&probe(&name, GuardDir::IfExists), &empty_live(), dialect),
-                GuardVerdict::SatisfiedNoop,
-                "{label} ifExists on {dialect:?}: an absent object still no-ops"
+            assert_ifexists_miss(
+                label,
+                &probe(&name, GuardDir::IfExists),
+                &empty_live(),
+                dialect,
+                "an absent object still no-ops",
             );
             assert_eq!(
                 decide(&probe(&name, GuardDir::IfNotExists), &empty_live(), dialect),
@@ -727,7 +762,7 @@ fn a_within_bound_name_keeps_its_verdict_on_every_dialect() {
 /// them at all, so an over-long name can name a real object in either catalog. The byte
 /// rule must never reach them.
 #[test]
-fn an_over_long_name_keeps_its_verdict_on_mysql_and_sqlite() {
+fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
     let authored = ascii_name(MAX + 1);
     let truncated = pg_truncation(&authored);
     for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
@@ -741,14 +776,12 @@ fn an_over_long_name_keeps_its_verdict_on_mysql_and_sqlite() {
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: the catalog can hold the full name"
             );
-            assert_eq!(
-                decide(
-                    &probe(&authored, GuardDir::IfExists),
-                    &live(&truncated),
-                    dialect
-                ),
-                GuardVerdict::SatisfiedNoop,
-                "{label} ifExists on {dialect:?}: no truncated spelling is derived"
+            assert_ifexists_miss(
+                label,
+                &probe(&authored, GuardDir::IfExists),
+                &live(&truncated),
+                dialect,
+                "no truncated spelling is derived",
             );
             assert_eq!(
                 decide(
