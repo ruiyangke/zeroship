@@ -63,6 +63,28 @@ use crate::PolicyDoc;
 /// run at [`finalize_charter`](crate::compose::finalize_charter) (MED), and admit's
 /// per-key `draft ⊑ charter` grant check transitively bounds the draft's creatable
 /// region below the charter's.
+///
+/// # Precondition: `registry` must be the definition the charter was loaded under
+///
+/// UNCHECKED, and it is the caller's to keep. A knob's kind and DEFAULT come from
+/// the registry, and the default is what "raises above default" is measured against,
+/// so the same charter document means different things under two definitions. Admit a
+/// charter loaded under a strict registry against a looser one and a draft that raises
+/// a grant can stop raising anything - there is nothing left for the grant check to
+/// check, and the result reads as authorised.
+///
+/// The requirement is DIGEST equality, not one object: two `builtin_registry()` calls
+/// produce different instances that are deterministic and digest-equal, which is what
+/// this needs. `PolicyRegistry::digest()` is how to compare them.
+///
+/// Two further consequences worth knowing before relying on anything downstream:
+///
+/// - The returned [`EffectivePolicy`] carries the registry passed HERE, so every later
+///   read of it - defaults included - resolves under the caller's vocabulary, whichever
+///   registry built the layers.
+/// - Sealing does not rescue a mismatch. The seal digests an already-composed policy,
+///   so it would faithfully seal the wrong interpretation. It enforces registry
+///   identity across a storage or process boundary, not within one process.
 pub fn admit(
     charter: &impl AdmitCharter,
     draft: &PolicyDoc,

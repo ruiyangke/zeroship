@@ -986,6 +986,22 @@ mod sealed {
 /// [`restrict`] — deliberately does **not** implement this trait: it must pass
 /// [`finalize_charter`] first, so "un-finalized charter reaches admit" is a TYPE
 /// ERROR, not a runtime hazard (MED).
+///
+/// # The `registry` argument is a precondition, not a choice
+///
+/// It must be digest-equal to the definition the charter was loaded under, and
+/// nothing checks that - see [`admit`](crate::boundary::admit) for what a mismatch
+/// buys an attacker. The three implementations do not treat the argument alike, which
+/// is worth knowing before assuming a correct layer stack is enough:
+///
+/// - [`RootCharter`] RE-READS its stored document under whatever is passed, so the
+///   layers themselves come out in the caller's vocabulary.
+/// - [`Charter`] and [`EffectivePolicy`] IGNORE it and return layers already built at
+///   their own load, so those layers stay correct.
+///
+/// The second case is not safe by omission: `admit` stores the registry it was given
+/// on the policy it returns, so a mismatch still decides every later read even when
+/// the layers were right.
 pub trait AdmitCharter: sealed::Sealed {
     /// The charter's layer stack (top/innermost first), for `admit` to build
     /// `[draft] over [these layers]` (H-4).
