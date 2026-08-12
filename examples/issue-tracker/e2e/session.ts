@@ -21,10 +21,38 @@ import type { BrowserContext } from "@playwright/test";
  * these specs.
  */
 
-const DEV_USER = {
+export type DevUser = {
+  id: string;
+  email: string;
+  name: string;
+  avatar: null;
+  email_verified: boolean;
+  scopes: string[];
+};
+
+const DEV_USER: DevUser = {
   id: "pws_devalice0000000000",
   email: "alice@localhost",
   name: "Alice Dev",
+  avatar: null,
+  email_verified: true,
+  scopes: ["openid", "profile", "email"],
+};
+
+/**
+ * A second identity, so a spec can show that someone is DENIED rather than only
+ * that the actor succeeds.
+ *
+ * Which of the two is the administrator is decided by the app, not here: the
+ * first account to reach `ensureUser` becomes the admin (`src/index.ts`, "the
+ * first account to exist is the admin"). An admin bypasses group restrictions
+ * outright, so a spec that wants Bob denied must let Alice write first. Signing
+ * Bob in does not provision him -- only a request that reaches a handler does.
+ */
+const DEV_OTHER: DevUser = {
+  id: "pws_devbob00000000000",
+  email: "bob@localhost",
+  name: "Bob Dev",
   avatar: null,
   email_verified: true,
   scopes: ["openid", "profile", "email"],
@@ -80,21 +108,25 @@ function devAuthSecret(runtimePort: number): string {
   );
 }
 
-export function signDevSession(runtimePort: number): string {
-  const payload = Buffer.from(JSON.stringify(DEV_USER)).toString("base64url");
+export function signDevSession(runtimePort: number, user: DevUser = DEV_USER): string {
+  const payload = Buffer.from(JSON.stringify(user)).toString("base64url");
   const mac = createHmac("sha256", devAuthSecret(runtimePort)).update(payload).digest("hex");
   return `${payload}.${mac}`;
 }
 
 export async function signIn(
   context: BrowserContext,
-  { runtimePort, baseURL }: { runtimePort: number; baseURL: string },
+  {
+    runtimePort,
+    baseURL,
+    user = DEV_USER,
+  }: { runtimePort: number; baseURL: string; user?: DevUser },
 ): Promise<void> {
   const url = new URL(baseURL);
   await context.addCookies([
     {
       name: "__zeroship_dev_session",
-      value: signDevSession(runtimePort),
+      value: signDevSession(runtimePort, user),
       domain: url.hostname,
       path: "/",
       httpOnly: true,
@@ -104,3 +136,4 @@ export async function signIn(
 }
 
 export const devUser = DEV_USER;
+export const otherUser = DEV_OTHER;

@@ -172,6 +172,14 @@ an indexed prefix of the summary, not comment bodies.
 
 ## Divergences from Bugzilla, taken deliberately
 
+- **A group-restricted bug answers 403, not 404, and so its existence leaks.**
+  Bugzilla behaves the same way ("You are not authorized to access bug #N"), and
+  a tracker that pretends a restricted bug was never filed still cannot explain
+  the gap its id leaves in every list. Hiding existence is the stronger property
+  and this app does NOT have it: a non-member learns that the id is real and
+  that it is held in some group, just not what it says. The refusal names the
+  group restriction rather than the product, because the product stays fully
+  accessible -- the same user can still list and file its other bugs.
 - **Comments are editable.** Bugzilla comments are immutable by design; here
   `comments.edit` exists and writes an activity row. Kept because an example
   that cannot correct a typo teaches the wrong lesson about the data model.

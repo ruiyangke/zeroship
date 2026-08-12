@@ -378,6 +378,27 @@ function forbidden(message = "You do not have access to this product"): never {
   throw httpError(403, "FORBIDDEN", message);
 }
 
+/**
+ * Refusing a bug the caller may not see.
+ *
+ * Separate from `forbidden()` because the reasons are different and the default
+ * message is not interchangeable. Every bug-level denial used to report "You do
+ * not have access to this product", which is false in the case that matters:
+ * the product IS accessible -- a user can list the product's other bugs and
+ * file new ones -- and only this bug is held in a group they are not in. A
+ * reader told the product is off-limits looks for the wrong fix.
+ *
+ * 403 and not 404. This is deliberate and it does leak the bug's existence:
+ * Bugzilla answers "You are not authorized to access bug #N", so the id space
+ * is enumerable there too, and a tracker that pretends a restricted bug was
+ * never filed cannot explain why its id is skipped in every list. Hiding
+ * existence would be the stronger property and it is NOT what this app does.
+ * See "Divergences from Bugzilla" in SPEC.md.
+ */
+function forbiddenBug(): never {
+  forbidden("You do not have access to this bug. It is restricted to a group you are not in.");
+}
+
 function must<T>(result: DbResult<T>): T {
   if (result.error) throw result.error;
   return result.data;
@@ -648,7 +669,7 @@ async function canViewBug(bug: BugRow, user: UserRow | null): Promise<boolean> {
 }
 
 async function assertBugVisible(bug: BugRow, identity: PlatformUser | null): Promise<void> {
-  if (!(await canViewBug(bug, await appUserForIdentity(identity)))) forbidden();
+  if (!(await canViewBug(bug, await appUserForIdentity(identity)))) forbiddenBug();
 }
 
 /**
@@ -666,7 +687,7 @@ async function assertBugVisible(bug: BugRow, identity: PlatformUser | null): Pro
  * If you can't read it, you can't write it.
  */
 async function assertBugAccessible(bug: BugRow, actor: UserRow | null): Promise<void> {
-  if (!(await canViewBug(bug, actor))) forbidden();
+  if (!(await canViewBug(bug, actor))) forbiddenBug();
 }
 
 /**
@@ -3839,7 +3860,7 @@ export const restrictBug = mutation(
   async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    if (!(await canViewBug(bug, actor))) forbidden();
+    if (!(await canViewBug(bug, actor))) forbiddenBug();
     await getRequired(db.groups, groupId, "Group");
 
     // Bugzilla requires you to be IN a group to put a bug into it, and the
@@ -3874,7 +3895,7 @@ export const unrestrictBug = mutation(
   async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    if (!(await canViewBug(bug, actor))) forbidden();
+    if (!(await canViewBug(bug, actor))) forbiddenBug();
 
     // Membership is required to REMOVE a restriction, exactly as it is to add
     // one. Without this, a bug restricted to two groups could have group B's
