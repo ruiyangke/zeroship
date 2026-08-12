@@ -75,7 +75,17 @@ export default defineApp({
     "rpc:bugs.restrict": { auth: "user" },
     "rpc:bugs.unrestrict": { auth: "user" },
 
-    // Products and administration
+    // Product structure.
+    //
+    // NOT gated on admin, deliberately and contrary to Bugzilla, where these
+    // need `editcomponents`. Any authenticated user can create or rename a
+    // product here. The reason is that the first account bootstraps as the
+    // only admin, so gating these would mean a second user could not set up
+    // anything to file bugs against -- which makes the example unusable as a
+    // demo. `assertCanViewProduct` is NOT a substitute: it returns true for
+    // any product with no group restriction, so it gates almost nothing here.
+    //
+    // If you copy this app for real use, gate these with `requireAdmin`.
     "rpc:products.list": { auth: "anon", publiclyAccessible: true },
     "rpc:products.get": { auth: "user" },
     "rpc:products.create": { auth: "user" },

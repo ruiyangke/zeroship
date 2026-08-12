@@ -177,3 +177,10 @@ an indexed prefix of the summary, not comment bodies.
   who can edit the bug can delete another user's attachment.
 - **`versions.sortKey` is a float**, where Bugzilla uses an int, so a version
   can be inserted between two others without renumbering.
+- **Product structure is not admin-gated.** Bugzilla requires
+  `editcomponents` to create or rename a product, component or version. Here
+  any authenticated user can. The first account bootstraps as the only admin,
+  so gating these would leave a second user unable to set up anything to file
+  bugs against. `assertCanViewProduct` does not fill the gap: it returns true
+  for any product carrying no group restriction. Gate them with
+  `requireAdmin` if you copy this app for real use.
