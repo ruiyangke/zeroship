@@ -84,6 +84,15 @@ The bootstrap's fallback subscription transport currently uses `WebSocketPair` a
 
 See [`crates/runtime/src/core/init.rs`](../../crates/runtime/src/core/init.rs) for the exact wire behavior.
 
+## Where sockets are served
+
+Single-tenant `zeroship serve` speaks WebSocket directly.
+
+Behind the multi-node gateway, **subscription routes return `501 Not
+Implemented`** - the gateway does not proxy an upgraded connection today. This
+is why [`rpc.md`](rpc.md) lists `subscription` as not part of the public client
+surface and points you at `stream(...)` for live feeds that ship.
+
 ## Authentication
 
 A WebSocket upgrade goes through the same gateway auth gate as any other
