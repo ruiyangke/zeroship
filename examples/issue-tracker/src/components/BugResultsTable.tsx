@@ -1,7 +1,7 @@
 // Shared results table used by the bug list, advanced/quick search results,
 // and the "my dashboard" sections. Presentation only -- callers own data
 // fetching, filtering, and (for the bug list) which columns are visible.
-import { DataTable, type DataTableColumn } from "@zeroship/ui";
+import { DataTable, type DataTableColumn, type DataTableSort } from "@zeroship/ui";
 
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
 import type { Bug } from "./types";
@@ -63,14 +63,32 @@ function formatDate(ms: number): string {
  * which is also the only place that can ask for the resolution a close
  * requires.
  */
+/**
+ * Which columns the SERVER can order by. A header is only clickable when the
+ * server has a matching sort key -- offering to sort by a column it cannot
+ * order would either silently do nothing or quietly sort one page in
+ * isolation, which is worse than not offering it.
+ */
+const SERVER_SORTABLE: Partial<Record<BugColumnKey, string>> = {
+  id: "created_at",
+  status: "status",
+  severity: "severity",
+  priority: "priority",
+  updated: "updated_at",
+};
+
 export function BugResultsTable({
   bugs,
   columns,
   caption,
+  sort,
+  onSortChange,
 }: {
   bugs: readonly Bug[];
   columns: readonly BugColumnKey[];
   caption?: string;
+  sort?: DataTableSort | null;
+  onSortChange?: (sort: DataTableSort) => void;
 }) {
   // Resolved HERE rather than passed in. These were props, and three of the
   // four call sites left them out, so those tables printed raw ids with
@@ -133,7 +151,10 @@ export function BugResultsTable({
 
   return (
     <DataTable
-      columns={columns.map((key) => byKey[key])}
+      columns={columns.map((key) => ({
+        ...byKey[key],
+        sortable: onSortChange ? Boolean(SERVER_SORTABLE[key]) : false,
+      }))}
       data={[...bugs]}
       rowKey={(bug) => bug.id}
       // The SERVER filters, sorts and pages -- searchBugs takes text, sortBy
@@ -146,6 +167,8 @@ export function BugResultsTable({
       manualSorting
       manualFiltering
       manualPagination
+      sort={sort ?? null}
+      onSortChange={onSortChange}
       // A caption or an aria-label is REQUIRED -- the component dev-warns and
       // the table is left unnamed for a screen reader without one.
       aria-label={caption ?? "Bugs"}

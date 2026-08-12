@@ -381,3 +381,12 @@ tbody tr:hover { background: var(--surface-2); }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* The filter selects are sized rather than left to grow. FilterBar lays its
+   children out in a wrapping row, and a Select with no width fills that row on
+   its own -- the four of them stacked vertically down the page, one per line,
+   which read as a broken layout rather than a missing width. */
+.filter-select {
+  inline-size: 11rem;
+  flex: 0 0 auto;
+}

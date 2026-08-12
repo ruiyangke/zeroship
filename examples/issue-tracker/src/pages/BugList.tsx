@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { PageHeader } from "@zeroship/ui";
+import { Button, Card, Checkbox, Cluster, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import { listProducts, searchBugs } from "../api";
 import {
   ALL_BUG_COLUMNS,
@@ -43,6 +43,24 @@ function loadColumns(): BugColumnKey[] {
 }
 
 type SortBy = "created_at" | "updated_at" | "priority" | "severity" | "status";
+
+// The table speaks in COLUMN keys and the server in sort fields; these map
+// between them. Kept as a pair rather than reusing one vocabulary because the
+// id column sorts by creation time, which no single name describes.
+const COLUMN_SORT: Record<string, SortBy> = {
+  id: "created_at",
+  status: "status",
+  severity: "severity",
+  priority: "priority",
+  updated: "updated_at",
+};
+const SORT_COLUMN: Record<SortBy, string> = {
+  created_at: "id",
+  status: "status",
+  severity: "severity",
+  priority: "priority",
+  updated_at: "updated",
+};
 
 export function BugListPage() {
   const [text, setText] = useState("");
@@ -93,6 +111,43 @@ export function BugListPage() {
     setOffset(0);
   };
 
+  // Applying resets to the first page. Staying on page 4 of the old result set
+  // while the filter changes shows an empty table for a query that matched
+  // plenty, which reads as "no results" rather than "you are past the end".
+  const applyFilters = () => {
+    setOffset(0);
+    reload();
+  };
+
+  /**
+   * The applied filters, as removable chips.
+   *
+   * Four permanently visible dropdowns told you which filters EXIST, never
+   * which are ON: a list narrowed to one product looked exactly like a list
+   * with nothing set, and the only way to tell was to read every control. A
+   * chip appears when a filter is applied and removing it clears that one.
+   */
+  const activeFilters = [
+    status ? { id: "status", label: `Status: ${status}`, onRemove: () => setStatus("") } : null,
+    severity
+      ? { id: "severity", label: `Severity: ${severity}`, onRemove: () => setSeverity("") }
+      : null,
+    priority
+      ? { id: "priority", label: `Priority: ${priority}`, onRemove: () => setPriority("") }
+      : null,
+    productId
+      ? {
+          id: "product",
+          label: `Product: ${
+            productsQ.state.status === "ready"
+              ? productsQ.state.data.find((p) => p.id === productId)?.name ?? productId
+              : productId
+          }`,
+          onRemove: () => setProductId(""),
+        }
+      : null,
+  ].filter((chip): chip is NonNullable<typeof chip> => chip !== null);
+
   return (
     <div className="page bug-list-page">
       {/* No page-level "New bug": the shell header carries it on every
@@ -105,107 +160,93 @@ export function BugListPage() {
         <PageHeader.Title>Bugs</PageHeader.Title>
       </PageHeader>
 
-      <form
-        className="filter-bar"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setOffset(0);
-          reload();
-        }}
+      {/* FilterBar owns the row: a real search Input, the applied filters as
+          removable chips, and the pickers in the controls slot. The chips are
+          the point -- four always-visible dropdowns showed which filters
+          EXIST, never which are ON, so a narrowed list looked identical to an
+          empty one. */}
+      <FilterBar
+        search={text}
+        onSearchChange={setText}
+        searchPlaceholder="Search summary, whiteboard, URL..."
+        activeFilters={activeFilters}
+        onClearFilters={activeFilters.length > 0 ? resetFilters : undefined}
+        actions={
+          <Cluster gap={2} align="center">
+            <Button variant="gray" size="small" onClick={applyFilters}>
+              Apply
+            </Button>
+            <Button
+              variant="plain"
+              size="small"
+              onClick={() => setPickerOpen((open) => !open)}
+              aria-expanded={pickerOpen}
+            >
+              Columns
+            </Button>
+          </Cluster>
+        }
       >
-        <input
-          placeholder="Search summary, whiteboard, URL..."
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-        />
-        <select value={status} onChange={(e) => setStatus(e.target.value as BugStatus | "")}>
-          <option value="">Any status</option>
+        <Select value={status} onValueChange={(v) => setStatus((v as BugStatus) ?? "")} placeholder="Any status" className="filter-select">
           {BUG_STATUSES.map((s) => (
-            <option key={s} value={s}>
+            <Select.Item key={s} value={s}>
               {s}
-            </option>
+            </Select.Item>
           ))}
-        </select>
-        <select
+        </Select>
+        <Select
           value={severity}
-          onChange={(e) => setSeverity(e.target.value as (typeof BUG_SEVERITIES)[number] | "")}
+          onValueChange={(v) => setSeverity((v as (typeof BUG_SEVERITIES)[number]) ?? "")}
+          placeholder="Any severity"
+          className="filter-select"
         >
-          <option value="">Any severity</option>
           {BUG_SEVERITIES.map((s) => (
-            <option key={s} value={s}>
+            <Select.Item key={s} value={s}>
               {s}
-            </option>
+            </Select.Item>
           ))}
-        </select>
-        <select
+        </Select>
+        <Select
           value={priority}
-          onChange={(e) => setPriority(e.target.value as (typeof BUG_PRIORITIES)[number] | "")}
+          onValueChange={(v) => setPriority((v as (typeof BUG_PRIORITIES)[number]) ?? "")}
+          placeholder="Any priority"
+          className="filter-select"
         >
-          <option value="">Any priority</option>
           {BUG_PRIORITIES.map((p) => (
-            <option key={p} value={p}>
+            <Select.Item key={p} value={p}>
               {p}
-            </option>
+            </Select.Item>
           ))}
-        </select>
-        <select value={productId} onChange={(e) => setProductId(e.target.value)}>
-          <option value="">Any product</option>
+        </Select>
+        <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="Any product" className="filter-select">
           {productsQ.state.status === "ready" &&
             productsQ.state.data.map((p) => (
-              <option key={p.id} value={p.id}>
+              <Select.Item key={p.id} value={p.id}>
                 {p.name}
-              </option>
+              </Select.Item>
             ))}
-        </select>
-        <button type="submit" className="btn ghost small">
-          Apply
-        </button>
-        <button type="button" className="btn ghost small" onClick={resetFilters}>
-          Reset
-        </button>
-        <div className="column-picker">
-          <button
-            type="button"
-            className="btn ghost small"
-            onClick={() => setPickerOpen((v) => !v)}
-          >
-            Columns
-          </button>
-          {pickerOpen ? (
-            <div className="column-picker-menu">
-              {ALL_BUG_COLUMNS.map((col) => (
-                <label key={col.key}>
-                  <input
-                    type="checkbox"
-                    checked={columns.includes(col.key)}
-                    disabled={col.key === "summary"}
-                    onChange={() => toggleColumn(col.key)}
-                  />
-                  {col.label}
-                </label>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </form>
+        </Select>
+      </FilterBar>
+      {pickerOpen ? (
+        <Card className="column-picker-menu">
+          <Cluster gap={3}>
+            {ALL_BUG_COLUMNS.map((col) => (
+              <Checkbox
+                key={col.key}
+                checked={columns.includes(col.key)}
+                disabled={col.key === "summary"}
+                onCheckedChange={() => toggleColumn(col.key)}
+                label={col.label}
+              />
+            ))}
+          </Cluster>
+        </Card>
+      ) : null}
 
-      <div className="sort-bar">
-        <span>Sort:</span>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortBy)}>
-          <option value="updated_at">Updated</option>
-          <option value="created_at">Created</option>
-          <option value="priority">Priority</option>
-          <option value="severity">Severity</option>
-          <option value="status">Status</option>
-        </select>
-        <button
-          type="button"
-          className="btn ghost small"
-          onClick={() => setSortDirection((d) => (d === 1 ? -1 : 1))}
-        >
-          {sortDirection === 1 ? "Ascending" : "Descending"}
-        </button>
-      </div>
+      {/* No sort bar. Sorting lives on the table headers, where the thing
+          being sorted is the thing you click -- a separate control naming a
+          column you then have to find is an extra hop and can drift out of
+          step with which columns are even visible. */}
 
       <AsyncSection
         state={state}
@@ -228,6 +269,12 @@ export function BugListPage() {
             <BugResultsTable
               bugs={bugs}
               columns={columns}
+              sort={{ key: SORT_COLUMN[sortBy] ?? "updated", direction: sortDirection === 1 ? "asc" : "desc" }}
+              onSortChange={(next) => {
+                setSortBy(COLUMN_SORT[next.key] ?? "updated_at");
+                setSortDirection(next.direction === "asc" ? 1 : -1);
+                setOffset(0);
+              }}
             />
             <div className="pager">
               <button
