@@ -1246,6 +1246,14 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_app_primitives_render.sh 2>&1 | tee "$RUNNER_TEMP/dvd-render.log"
+      # Scenario 17's harness (#311) - Active / PastDue / Suspended enforced at
+      # the gateway. Same story as the render step above: WALKED and
+      # product-mutation-proven in this review, then ungated. Run by me at HEAD
+      # before wiring: 16 passed, 0 failed, rc=0 - the same 16/0 #311 recorded.
+      - name: Account status enforcement (scenario 17, 16/0 at HEAD)
+        run: |
+          set -o pipefail
+          tests/e2e_account_status_enforcement.sh 2>&1 | tee "$RUNNER_TEMP/dvd-acctstatus.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
