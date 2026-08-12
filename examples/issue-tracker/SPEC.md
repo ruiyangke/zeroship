@@ -148,12 +148,15 @@ you also hear about bugs the watched user is involved in)
 ## Frontend pages
 
 1. **Bug list** — the query result table, column picker, inline status edit
-2. **Bug detail** — the Bugzilla show_bug page: fields panel, comment stream,
-   attachments, dependencies, flags, activity history
+2. **Bug detail** -- the Bugzilla show_bug page: fields panel, comment stream,
+   attachments, dependencies, duplicates, flags, votes, CC, security groups,
+   see-also links, and the activity history tab
 3. **New bug** — guided product -> component -> details
 4. **Advanced search** — boolean field builder + QuickSearch box
-5. **My dashboard** — assigned to me, reported by me, my flag requests, CC'd
-6. **Products admin** — products, components, versions, milestones
+5. **My dashboard** -- the notification inbox, assigned to me, reported by me,
+   my flag requests, and bugs I am CC-d on
+6. **Products admin** -- products, components, versions, target releases, plus
+   group administration and product-level visibility
 7. **Reports** — the summary charts
 
 ## Non-goals for this example

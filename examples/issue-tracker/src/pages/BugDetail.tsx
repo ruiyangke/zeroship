@@ -7,6 +7,7 @@ import { CommentsPanel } from "../components/bug-detail/CommentsPanel";
 import { FieldsPanel } from "../components/bug-detail/FieldsPanel";
 import { FlagsPanel } from "../components/bug-detail/FlagsPanel";
 import { SecurityPanel } from "../components/bug-detail/SecurityPanel";
+import { SeeAlsoPanel } from "../components/bug-detail/SeeAlsoPanel";
 import { VotesPanel } from "../components/bug-detail/VotesPanel";
 import { HistoryPanel } from "../components/bug-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/bug-detail/RelationsPanel";
@@ -116,6 +117,7 @@ export function BugDetailPage({ id }: { id: string }) {
               onChanged={reload}
             />
             <SecurityPanel bugId={id} onChanged={reload} />
+            <SeeAlsoPanel bugId={id} />
             <DependenciesPanel bugId={id} />
             <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
             <CcPanel bugId={id} />

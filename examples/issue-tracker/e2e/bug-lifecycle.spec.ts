@@ -327,3 +327,45 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   // a bug changes who can see it and that is the point of the action.
   await expect(security.getByText(/only members of that group/i)).toBeVisible();
 });
+
+test("see also links are added, listed and removed from the bug page", async ({ page, baseURL }) => {
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const product = await rpc("products.create", { name: `SeeAlso ${RUN}`, description: "sa spec" });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary: `Linked ${RUN}`,
+    description: "has links",
+  });
+
+  await page.goto(`/#/bugs/${bug.id}`);
+  const panel = page.locator("section.see-also-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByText("No linked reports.")).toBeVisible();
+
+  const url = `https://bugzilla.example.org/show_bug.cgi?id=${RUN}`;
+  await panel.getByLabel("Link").fill(url);
+  await panel.getByRole("button", { name: "Add", exact: true }).click();
+
+  // Rendered as a real anchor, since the server guarantees the scheme is
+  // http(s) -- a javascript: url is refused there, which is why the client can
+  // safely put this in an href.
+  const link = panel.getByRole("link", { name: url });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("rel", /noreferrer/);
+
+  await panel.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(panel.getByText("No linked reports.")).toBeVisible();
+});

@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { addGroupMember, createGroup, listGroups, listUsers } from "../api";
+import {
+  addGroupMember,
+  createGroup,
+  listGroups,
+  listProducts,
+  listUsers,
+  restrictProduct,
+  unrestrictProduct,
+} from "../api";
 import { errorMessage } from "./rpc";
 
 /**
@@ -167,7 +175,105 @@ export function GroupsAdmin() {
         </ul>
       ) : null}
 
+      {groups && groups.length > 0 ? <ProductRestrictions groups={groups} /> : null}
+
       {error ? <p className="field-error">{error}</p> : null}
     </section>
+  );
+}
+
+/**
+ * Product-level restriction: hide an entire product behind a group.
+ *
+ * Distinct from restricting one bug. This is the coarser of the two controls
+ * and the one that silently changes what a whole team can see, so the
+ * confirmation names the consequence rather than saying "saved".
+ */
+function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof listGroups>> }) {
+  const [products, setProducts] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
+  const [productId, setProductId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Awaited rather than chained: the generated client types this as
+    // `Row[] | Promise<Row[]>`, so `.then` does not exist on the union.
+    void (async () => {
+      try {
+        setProducts(await listProducts({}));
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    })();
+  }, []);
+
+  const apply = async (action: "restrict" | "unrestrict") => {
+    if (!productId || !groupId) return;
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      if (action === "restrict") await restrictProduct({ productId, groupId });
+      else await unrestrictProduct({ productId, groupId });
+      setNote(
+        action === "restrict"
+          ? "Restricted. Only members of that group can now see this product and its bugs."
+          : "Restriction removed.",
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="product-restrictions">
+      <h3>Product visibility</h3>
+      <div className="field-row">
+        <label>
+          Product
+          <select value={productId} onChange={(e) => setProductId(e.target.value)}>
+            <option value="">Select a product</option>
+            {products.map((product) => (
+              <option key={product.id} value={product.id}>
+                {product.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Group
+          <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+            <option value="">Select a group</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="btn ghost small"
+          disabled={busy || !productId || !groupId}
+          onClick={() => void apply("restrict")}
+        >
+          Restrict
+        </button>
+        <button
+          type="button"
+          className="btn ghost small"
+          disabled={busy || !productId || !groupId}
+          onClick={() => void apply("unrestrict")}
+        >
+          Remove
+        </button>
+      </div>
+      {note ? <p className="state-hint small">{note}</p> : null}
+      {error ? <p className="field-error">{error}</p> : null}
+    </div>
   );
 }
