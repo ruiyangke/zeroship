@@ -4303,19 +4303,47 @@ pub fn validate_op_authorized(
         }
         Op::Update { table, set, r#where, .. } => {
             let scope = TargetScope::structural_only(table);
-            for value in set.values() {
+            for (column, value) in set {
                 if let crate::model::ir::IrValue::Expr(expr) = value {
                     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                    // An assignment is a SCALAR context. Measured on PostgreSQL 18.4,
+                    // `UPDATE t SET n = count(n)` is refused with "aggregate functions
+                    // are not allowed in UPDATE"; every other DML slot below is refused
+                    // the same way. Without this the refusal came from the SERVER, mid
+                    // deploy, on a plan that had already cleared validate and preview.
+                    validate_no_aggregate_expr_context(
+                        expr,
+                        &format!("update assignment to {column:?}"),
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                // "aggregate functions are not allowed in WHERE" - an aggregate belongs
+                // in a HAVING, which a DML predicate has no room for.
+                validate_no_aggregate_expr_context(
+                    pred,
+                    "update where predicate",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
         Op::Delete { table, r#where, .. } => {
             let scope = TargetScope::structural_only(table);
-            validate_expr(r#where, target_dialect, &scope, op_index, ts_location)
+            validate_expr(r#where, target_dialect, &scope, op_index, ts_location)?;
+            validate_no_aggregate_expr_context(
+                r#where,
+                "delete where predicate",
+                target_dialect,
+                op_index,
+                ts_location,
+            )
         }
         Op::Backfill {
             table,
@@ -4360,6 +4388,15 @@ pub fn validate_op_authorized(
                 for value in row {
                     if let crate::model::ir::IrValue::Expr(expr) = value {
                         validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                        // `INSERT … VALUES (1, count(1))` is refused by PostgreSQL the
+                        // same way an assignment is; a VALUES item is a scalar context.
+                        validate_no_aggregate_expr_context(
+                            expr,
+                            "insert value",
+                            target_dialect,
+                            op_index,
+                            ts_location,
+                        )?;
                     }
                 }
             }
@@ -4368,6 +4405,13 @@ pub fn validate_op_authorized(
                     for value in do_update.values() {
                         if let crate::model::ir::IrValue::Expr(expr) = value {
                             validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                            validate_no_aggregate_expr_context(
+                                expr,
+                                "upsert assignment",
+                                target_dialect,
+                                op_index,
+                                ts_location,
+                            )?;
                         }
                     }
                 }
