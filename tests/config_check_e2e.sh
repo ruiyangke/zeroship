@@ -503,11 +503,12 @@ fi
 # MINIMUM-PASSED FLOOR. Without this the verdict is only "nothing failed", so a
 # run that asserted NOTHING would print "0 passed, 0 failed" and exit 0 -- the
 # shape already fixed in #279, #285, #294 and #316. The number is MEASURED, not
-# chosen: a full run on 2026-08-12 reported exactly 29.
+# chosen: a full run on 2026-08-12 reported exactly 29, and 55 after cases
+# 13-15 extended coverage to worker and migrated on the same day.
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-29}"
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-55}"
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2
