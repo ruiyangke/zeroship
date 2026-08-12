@@ -1,7 +1,7 @@
-//! Preserve the consumed position when rolling back a dropped PostgreSQL sequence.
+//! Refuse rollback after dropping a consumed PostgreSQL sequence.
 //!
-//! Read the restored generator through `nextval`, because `SequenceSnapshot` only
-//! carries declared settings and cannot observe runtime position.
+//! The setup issues values before the drop because a sequence definition does not
+//! include its runtime position, and recreating it could issue those values again.
 
 mod support;
 
@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
+use zero_migrate::apply::executor::{
+    rollback, LockMode, RollbackError, RollbackRequest, RollbackTarget,
+};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
@@ -141,15 +143,8 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     ))
 }
 
-// Ignored because it FAILS, and it is meant to: it reproduces a live defect rather than guarding a
-// fixed one. The synthesised inverse recreates the sequence with `START WITH <declared start>`, so
-// rolling back a drop returns a sequence positioned to reissue values it has already handed out.
-// Run it with `cargo test -p zero-migrate --test drop_sequence_position_pg -- --ignored`, with
-// ZERO_MIGRATE_TEST_PG_URL exported. Whoever repairs the inverse deletes this attribute; the fix is
-// not finished while the test still has to be skipped to keep the suite green.
-#[ignore = "reproduces an unfixed defect: rollback resets a used sequence to its declared start"]
 #[compio::test]
-async fn rolling_back_a_dropped_sequence_preserves_its_position() {
+async fn rolling_back_a_consumed_dropped_sequence_is_refused() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
@@ -169,7 +164,7 @@ async fn rolling_back_a_dropped_sequence_preserves_its_position() {
         .await
         .expect("create isolated test schema");
 
-    let work: Result<i64, String> = async {
+    let work: Result<RollbackError, String> = async {
         let backend = PostgresBackend::new_generic(&session);
         backend
             .ensure_journal(&cfg)
@@ -204,7 +199,7 @@ async fn rolling_back_a_dropped_sequence_preserves_its_position() {
         }
 
         let request = RollbackRequest::new(RollbackTarget::Steps(1));
-        rollback(
+        let error = rollback(
             &backend,
             &cfg,
             &request,
@@ -214,9 +209,13 @@ async fn rolling_back_a_dropped_sequence_preserves_its_position() {
             pg_guard(&cfg).as_ref(),
         )
         .await
-        .map_err(|error| format!("rolling back the dropped sequence must succeed: {error}"))?;
+        .err()
+        .ok_or_else(|| "rolling back the consumed sequence must be refused".to_string())?;
 
-        next_sequence_value(&session, &cfg.project_schema).await
+        if sequence_exists(&session, &cfg.project_schema).await? {
+            return Err("the refused rollback must not re-create the sequence".into());
+        }
+        Ok(error)
     }
     .await;
 
@@ -226,15 +225,21 @@ async fn rolling_back_a_dropped_sequence_preserves_its_position() {
              DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
         ))
         .await;
-    let actual = match (work, cleanup) {
-        (Ok(actual), Ok(())) => actual,
+    let error = match (work, cleanup) {
+        (Ok(error), Ok(())) => error,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
     };
 
-    assert_eq!(
-        actual, 6,
-        "rolling back a dropped sequence must preserve its next value"
+    assert!(
+        matches!(&error, RollbackError::Irreversible { .. }),
+        "expected the consumed sequence drop to be irreversible, got {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("is irreversible (down: None); rollback refuses by default"),
+        "expected the explicit irreversible rollback refusal, got {error}"
     );
 }

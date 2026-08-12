@@ -1,10 +1,8 @@
-//! Rolling back a dropped sequence restores it, proven against live `PostgreSQL`.
+//! Refuse rollback after dropping an unconsumed PostgreSQL sequence.
 //!
-//! `Op::DropSequence` lowers with no `down`, so a rollback leaves the sequence
-//! gone. Unlike a view, nothing new has to be recorded to fix it: the fold already
-//! keeps the whole `SequenceSnapshot` - increment, start, bounds, cache, cycle,
-//! ownership - so the `CREATE SEQUENCE` that undoes the drop can be rendered from
-//! facts the history is already carrying.
+//! Refusing this case is the deliberate cost of refusing unsafe recreation after
+//! consumption. Narrowing the refusal later requires durable rollback metadata
+//! that can distinguish an unconsumed sequence from a consumed one.
 //!
 //! Sequences are PostgreSQL-only here (`Capability::Sequence`), so there is no
 //! SQLite sibling for this one.
@@ -155,7 +153,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
 }
 
 #[compio::test]
-async fn rolling_back_a_dropped_sequence_restores_it() {
+async fn rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
@@ -176,7 +174,7 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
         .await
         .expect("create isolated test schema");
 
-    let work: Result<(), String> = async {
+    let work: Result<RollbackError, String> = async {
         let backend = PostgresBackend::new_generic(&session);
         backend
             .ensure_journal(&cfg)
@@ -194,9 +192,12 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
         )
         .await?;
 
-        let before = live_sequence(&session, &cfg.project_schema)
+        if live_sequence(&session, &cfg.project_schema)
             .await?
-            .ok_or_else(|| "the sequence must exist before it is dropped".to_string())?;
+            .is_none()
+        {
+            return Err("the unconsumed sequence must exist before it is dropped".into());
+        }
 
         migrations.extend(
             apply_doc(
@@ -209,12 +210,15 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
             )
             .await?,
         );
-        if live_sequence(&session, &cfg.project_schema).await?.is_some() {
+        if live_sequence(&session, &cfg.project_schema)
+            .await?
+            .is_some()
+        {
             return Err("the drop must actually remove the sequence".into());
         }
 
         let request = RollbackRequest::new(RollbackTarget::Steps(1));
-        rollback(
+        let error = rollback(
             &backend,
             &cfg,
             &request,
@@ -224,17 +228,16 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
             pg_guard(&cfg).as_ref(),
         )
         .await
-        .map_err(|error| format!("rolling back the dropped sequence must succeed: {error}"))?;
+        .err()
+        .ok_or_else(|| "rolling back the unconsumed sequence must be refused".to_string())?;
 
-        let after = live_sequence(&session, &cfg.project_schema)
+        if live_sequence(&session, &cfg.project_schema)
             .await?
-            .ok_or_else(|| "rolling back the drop must put the sequence back".to_string())?;
-        if after != before {
-            return Err(format!(
-                "the restored sequence must carry the settings it had before the drop\n  before: {before:?}\n   after: {after:?}"
-            ));
+            .is_some()
+        {
+            return Err("the refused rollback must not re-create the sequence".into());
         }
-        Ok(())
+        Ok(error)
     }
     .await;
 
@@ -244,12 +247,23 @@ async fn rolling_back_a_dropped_sequence_restores_it() {
              DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
         ))
         .await;
-    match (work, cleanup) {
-        (Ok(()), Ok(())) => {}
+    let error = match (work, cleanup) {
+        (Ok(error), Ok(())) => error,
         (Err(work), Ok(())) => panic!("{work}"),
-        (Ok(()), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
+        (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
-    }
+    };
+
+    assert!(
+        matches!(&error, RollbackError::Irreversible { .. }),
+        "expected the unconsumed sequence drop to be irreversible, got {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("is irreversible (down: None); rollback refuses by default"),
+        "expected the explicit irreversible rollback refusal, got {error}"
+    );
 }
 
 /// A guarded drop keeps no inverse, for the same reason it does not on views: an

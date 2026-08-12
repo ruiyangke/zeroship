@@ -304,12 +304,9 @@ pub struct LiveSchema {
     /// Populated when the schema comes from folding a history. A catalog-introspected
     /// schema leaves the bodies `None`, and a drop with no body stays irreversible.
     pub views: std::collections::BTreeMap<String, crate::model::snapshot::ViewSnapshot>,
-    /// Sequences already present in the folded live schema, with the settings each
-    /// was created or last altered with. A `dropSequence` renders its own inverse
-    /// from this, the same way `dropView` does from `views`.
-    ///
-    /// Unlike a view body, nothing had to be added to record this: the fold already
-    /// keeps every sequence facet it needs to re-create one.
+    /// Track sequence definitions for schema projection and declarative comparison.
+    /// These snapshots do not include runtime position and therefore are not
+    /// complete rollback state for a dropped sequence.
     pub sequences: std::collections::BTreeMap<String, crate::model::snapshot::SequenceSnapshot>,
     /// Extensions already present in the folded live schema, with the placement each
     /// was created with. A `dropExtension` renders its own inverse from this.
@@ -4488,7 +4485,7 @@ impl IrAuthor {
                 }
             }
             Op::CreateSequence { .. } | Op::AlterSequence { .. } => {
-                let stmt = render_sequence_op(op, &eff_schema, self.dialect, live_schema)?;
+                let stmt = render_sequence_op(op, &eff_schema, self.dialect)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::DropSequence { name, .. } => {
@@ -4499,7 +4496,7 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
-                let stmt = render_sequence_op(op, &eff_schema, self.dialect, live_schema)?;
+                let stmt = render_sequence_op(op, &eff_schema, self.dialect)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::Comment { .. } => {
@@ -7998,66 +7995,6 @@ struct CommentStatement {
     up: String,
 }
 
-/// Render the `CREATE SEQUENCE` that re-creates `snapshot` exactly.
-///
-/// Every facet is written explicitly rather than left to the server's defaults, so
-/// a restored sequence carries the increment, bounds, cache and cycle it had rather
-/// than PostgreSQL's defaults for the ones that happen to match.
-fn render_sequence_create_from_snapshot(
-    name: &str,
-    snapshot: &crate::model::snapshot::SequenceSnapshot,
-    eff_schema: &str,
-) -> Result<String, IrLowerError> {
-    use crate::model::snapshot::SequenceDataTypeSnapshot;
-
-    let qname = pg_sequence_qname(eff_schema, name)?;
-    let as_type = match snapshot.as_type {
-        SequenceDataTypeSnapshot::SmallInt => "smallint",
-        SequenceDataTypeSnapshot::Int => "integer",
-        SequenceDataTypeSnapshot::BigInt => "bigint",
-        // A catalog type the portable IR cannot author is not something to guess an
-        // inverse for.
-        SequenceDataTypeSnapshot::Unsupported => {
-            return Err(IrLowerError::SequenceUnsupported {
-                kind: "sequence data type",
-                dialect: SqlDialect::Postgres,
-            })
-        }
-    };
-    let mut sql = format!("CREATE SEQUENCE {qname} AS {as_type}");
-    sql.push_str(" INCREMENT BY ");
-    sql.push_str(&snapshot.increment.to_string());
-    sql.push_str(" START WITH ");
-    sql.push_str(&snapshot.start.to_string());
-    match &snapshot.min_value {
-        Some(n) => {
-            sql.push_str(" MINVALUE ");
-            sql.push_str(&n.to_string());
-        }
-        None => sql.push_str(" NO MINVALUE"),
-    }
-    match &snapshot.max_value {
-        Some(n) => {
-            sql.push_str(" MAXVALUE ");
-            sql.push_str(&n.to_string());
-        }
-        None => sql.push_str(" NO MAXVALUE"),
-    }
-    sql.push_str(" CACHE ");
-    sql.push_str(&snapshot.cache.to_string());
-    sql.push_str(if snapshot.cycle {
-        " CYCLE"
-    } else {
-        " NO CYCLE"
-    });
-    sql.push_str(" OWNED BY ");
-    sql.push_str(&render_sequence_owned_by(
-        snapshot.owned_by.as_ref(),
-        eff_schema,
-    )?);
-    Ok(sql)
-}
-
 /// The `down` a trigger drop can recover from migration history, or `None` when
 /// the drop is not reversible.
 ///
@@ -8238,7 +8175,6 @@ fn render_sequence_op(
     op: &Op,
     eff_schema: &str,
     dialect: SqlDialect,
-    live_schema: &LiveSchema,
 ) -> Result<SequenceStatement, IrLowerError> {
     if !dialect.supports(Capability::Sequence) {
         return Err(IrLowerError::SequenceUnsupported {
@@ -8347,26 +8283,13 @@ fn render_sequence_op(
             }
             up.push_str(&qname);
 
-            // Undo the drop by re-creating the sequence from the settings the
-            // history recorded, under the same two refusals a dropped view gets. A
-            // guarded drop can journal `completed` without running, so reversing it
-            // would conjure a sequence that never existed here; and a sequence the
-            // history never created has no recorded settings to restore.
-            let down = if existence_guard.is_some() {
-                None
-            } else {
-                live_schema
-                    .sequences
-                    .get(name)
-                    .map(|snapshot| {
-                        render_sequence_create_from_snapshot(name, snapshot, eff_schema)
-                    })
-                    .transpose()?
-            };
+            // Refuse to synthesize an inverse: the definition is half the object
+            // and its runtime position is the other half. No IR history knows the
+            // position, so recreation could reissue values.
             Ok(SequenceStatement {
                 name: format!("drop_sequence_{name}"),
                 up,
-                down,
+                down: None,
             })
         }
         _ => Err(IrLowerError::UnsupportedOp(

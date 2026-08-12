@@ -174,10 +174,9 @@ test("PostgreSQL: the CLI rolls an applied migration back and leaves it pending"
   }
 });
 
-/** Two migrations, where the second drops what the first created. Rolling back only the
- *  drop has to re-create the sequence from the definition the EARLIER migration authored,
- *  which is the only place that definition exists once the drop has run - the catalog no
- *  longer has it, and the dropped migration's own text says nothing about how to rebuild it. */
+/** Two migrations, where the second drops the unconsumed sequence the first created.
+ *  Refusing this rollback is the deliberate cost of protecting consumed sequences from
+ *  unsafe recreation. Narrowing the refusal requires durable rollback metadata. */
 function scaffoldSequenceDrop(schema: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-seq-"));
   writeFileSync(
@@ -202,7 +201,7 @@ export function up() {
   return dir;
 }
 
-test("PostgreSQL: rolling back a dropSequence rebuilds it from the migration that created it", async (t) => {
+test("PostgreSQL: rolling back an unconsumed dropSequence is deliberately refused", async (t) => {
   const client = await connectLivePg(t);
   if (!client) return;
 
@@ -229,17 +228,18 @@ test("PostgreSQL: rolling back a dropSequence rebuilds it from the migration tha
       "both migrations ran, so the sequence is created and then dropped",
     );
 
-    // Unwind ONLY the drop. The create stays applied, which is what makes the earlier
-    // envelope part of the history the inverse is reconstructed from rather than
-    // something the rollback is also undoing.
+    // Unwind only the drop while the create remains applied. Authored history still
+    // cannot supply the sequence's runtime position, even when none was consumed.
     const rolledBack = spawnCli(
       [...baseArgs(schema, pgUrl()), "rollback", "--steps", "1", "--approve"],
       dir,
     );
-    assert.equal(rolledBack.status, 0, `rollback failed: ${rolledBack.stderr}`);
-    assert.ok(
+    assert.notEqual(rolledBack.status, 0, "an unconsumed sequence drop is still irreversible");
+    assert.match(rolledBack.stderr, /is irreversible \(down: None\); rollback refuses by default/);
+    assert.equal(
       await sequenceExists(),
-      "the reversed dropSequence rebuilds the sequence the earlier migration authored",
+      false,
+      "the refused rollback leaves the dropped sequence absent",
     );
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
