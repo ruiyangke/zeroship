@@ -170,6 +170,28 @@ Email delivery is also out: notifications are in-app rows, and nothing sends
 mail. Full-text search is out -- `search.quick` matches structured tokens and
 an indexed prefix of the summary, not comment bodies.
 
+## Known limits
+
+**Reference-data lists are not paginated, and adding a limit alone would break
+name resolution.** Bug listing is capped -- `bugs.search` returns 100 rows by
+default and takes `limit`/`offset`. The reference lists do not: measured
+against the dev database, `products.list` returned 131 rows and
+`reports.byComponent` 103, both reachable anonymously and both growing with the
+data.
+
+The obvious repair is wrong. Every bug table resolves its product and assignee
+columns through `useBugLookups()`, which builds id-to-name maps out of the
+WHOLE of `products.list`; the table falls back to printing the raw id for
+anything the map misses. Capping the list at N would therefore make every
+product past the cap render as `prod_034607nk...` again -- reintroducing the
+defect those maps exist to prevent, silently, and only for installations large
+enough to notice.
+
+Doing this properly means paginating the list AND giving name resolution its
+own path (resolve per page, or a lookup endpoint keyed by the ids actually on
+screen). That is a design change, not a parameter, so it is recorded here
+rather than half-applied.
+
 ## Divergences from Bugzilla, taken deliberately
 
 - **A group-restricted bug answers 403, not 404, and so its existence leaks.**
