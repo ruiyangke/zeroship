@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { currentUser, getAttachment, getBug, listFlagRequests, listMyCc, searchBugs } from "../api";
 import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable";
+import { NotificationsPanel } from "../components/NotificationsPanel";
 import { AsyncSection } from "../components/StateViews";
 import { toPromise, useAsync } from "../components/rpc";
 import type { Bug, BugDetail, FlagRequestEntry } from "../components/types";
@@ -108,6 +109,8 @@ export function DashboardPage() {
   return (
     <div className="page dashboard-page">
       <h1>My dashboard</h1>
+
+      <NotificationsPanel />
 
       {userState.status === "ready" && !userState.data.isProvisioned ? (
         <p className="state-hint">

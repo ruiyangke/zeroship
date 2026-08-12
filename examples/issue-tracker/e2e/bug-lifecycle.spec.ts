@@ -208,3 +208,52 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
   // voteCount is the SUM of quantities, so two votes read as 2, not 1.
   await expect(votes.getByText("2 votes")).toBeVisible();
 });
+
+test("the notification inbox renders, and omits my own changes", async ({ page, baseURL }) => {
+  // The nav has carried an unread badge since the UI was written, linking to a
+  // dashboard with nowhere to read the notifications it counted. This drives
+  // the whole chain: fanout writes a row, the inbox renders it, marking it
+  // read removes the action.
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const me = await rpc("users.me", {});
+  const product = await rpc("products.create", { name: `Notif ${RUN}`, description: "notif spec" });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
+  const summary = `Notify me ${RUN}`;
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary,
+    description: "watch this",
+  });
+
+  // SCOPE, stated because the name of this test used to overclaim it: the
+  // actor is never notified about her own change, and this spec runs ONE
+  // identity, so it cannot show a notification arriving. That direction is
+  // covered by scripts/smoke.sh, which runs two identities and asserts the
+  // unread count rises for the CC'd user. What this spec pins is the inbox
+  // rendering at all, and the negative that a self-authored comment does not
+  // appear in it.
+  await page.goto("/#/dashboard");
+  const inbox = page.locator("section.notifications-panel");
+  await expect(inbox).toBeVisible();
+  await expect(inbox.getByRole("heading", { name: "Notifications" })).toBeVisible();
+
+  // A self-authored comment must NOT appear: the actor is not notified about
+  // her own change, and an inbox that showed it would be wrong in a way the
+  // count alone would hide.
+  await rpc("cc.add", { bugId: bug.id, userId: me.id });
+  await rpc("comments.add", { bugId: bug.id, body: `self comment ${RUN}` });
+  await page.reload();
+  await expect(inbox.getByText(summary)).toHaveCount(0);
+});
