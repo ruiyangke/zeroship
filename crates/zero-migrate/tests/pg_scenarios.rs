@@ -2615,6 +2615,145 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// Re-classifying an APPLIED once-only migration as repeatable is refused.
+///
+/// `docs/security-model.md` lists it among the journal-integrity guarantees:
+/// "a versioned/repeatable kind mismatch fails". `drift.rs` names the attack it
+/// stops - the flip-flag bypass: a once-only migration aborts when its checksum
+/// changes, so an attacker flips `repeatable = true` instead, and a naive engine
+/// reads a changed checksum on a "repeatable" as the ordinary re-run signal and
+/// executes the mutated `up`.
+///
+/// The comment there is careful about why the SUPPLIED flag cannot be trusted:
+/// the only trustworthy evidence that a version is a repeatable is what the
+/// journal recorded when it last applied. So the exemption requires the journaled
+/// kind AND the supplied flag to AGREE, and either disagreement is tamper -
+/// aborting even when the checksums match, because the re-classification itself
+/// is the attack.
+///
+/// None of that was measured. `repeatable` appeared across the whole test tree
+/// only as a `false` in two struct literals, so neither direction of the mismatch,
+/// nor a repeatable applying at all, had ever run against a database.
+///
+/// The mutation here is REAL: `up` creates a second table. If the bypass worked,
+/// the assertion that names the table catches it, rather than only the reply.
+#[compio::test]
+async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let version = MigrationId::generate();
+    let honest_up = format!(
+        "CREATE TABLE \"{}\".ledger (id bigint PRIMARY KEY)",
+        cfg.project_schema
+    );
+    let honest = mig(version.clone(), "create_ledger", &honest_up);
+
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&honest),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the honest once-only migration applies");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "ledger").await,
+        "the once-only migration really ran"
+    );
+
+    // The journal must have recorded it as a once-only kind. That recording is
+    // what the guard trusts over the supplied flag, so an arm that never checked
+    // it could be measuring a journal that said "repeatable" all along.
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
+    assert_eq!(applied.len(), 1);
+    assert!(
+        !applied[0]
+            .kind
+            .is_some_and(zero_migrate::apply::journal::JournaledKind::is_repeatable),
+        "the first apply must be journaled as a once-only kind, got {:?}",
+        applied[0].kind
+    );
+
+    // The attack. SAME version and name, a MUTATED `up` that creates a second
+    // table, and `repeatable = true` so a naive engine reads the changed checksum
+    // as a re-run signal instead of as tamper. The checksum is recomputed
+    // honestly over the new body and flags, which is what an attacker holding the
+    // migration source would produce - the bypass does not need a forged one.
+    let mutated_up = format!(
+        "CREATE TABLE \"{}\".ledger_shadow (id bigint PRIMARY KEY)",
+        cfg.project_schema
+    );
+    let mut flipped = mig(version.clone(), "create_ledger", &mutated_up);
+    flipped.flags.repeatable = true;
+    flipped.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+        up: &mutated_up,
+        down: None,
+        flags: &flipped.flags,
+        owner_app: "app_test",
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+
+    let error = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&flipped),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect_err("re-classifying an applied once-only migration must abort");
+    let rendered = error.to_string();
+    assert!(
+        rendered.to_lowercase().contains("checksum"),
+        "the abort must be the checksum-drift gate, got {rendered:?}"
+    );
+
+    // The proof that matters is in the DATABASE, not in the reply: the mutated
+    // body must not have run.
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "ledger_shadow").await,
+        "the flip-flag bypass must not have executed the mutated up"
+    );
+
+    // The journal is still the original single completed event - the refused
+    // apply appended nothing and rewrote nothing.
+    let after = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal re-read");
+    assert_eq!(after.len(), 1, "the refused apply appended no journal row");
+    assert_eq!(
+        after[0].checksum,
+        honest.checksum.as_str(),
+        "the journaled checksum must still be the honest one"
+    );
+
+    // THE CONTROL. Re-supplying the migration exactly as it was applied still
+    // works, so the refusal above is about the RE-CLASSIFICATION and not about
+    // this test's journal being wedged into refusing everything.
+    let noop = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&honest),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the unmodified once-only migration still re-runs as a no-op");
+    assert!(noop.is_noop(), "an unchanged re-apply is still a no-op");
+
+    drop_schemas(&session, &cfg).await;
+}
+
 /// The advisory lock is a real `pg_advisory_lock(hashtext(project_id))`: after an
 /// apply the session holds NO advisory lock (acquire+release balanced), and while
 /// held it appears in `pg_locks`.
