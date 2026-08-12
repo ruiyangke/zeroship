@@ -464,3 +464,10 @@ tbody tr:hover { background: var(--surface-2); }
 .bug-detail-side > section > h3:first-child {
   margin-block-start: 0;
 }
+
+/* Resolution reads as a value beside its label, not as a form control. */
+.status-resolution {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}

@@ -70,11 +70,21 @@ test("headers sort the server query, and only where the server can", async ({
     );
   await expect(page.locator("table tbody tr")).toHaveCount(3);
 
+  // Waits for the reload to settle between clicks. The table stays mounted
+  // and clickable while it refetches now -- which is the point -- so a second
+  // click can land before the first sort has come back and the assertion then
+  // reads a half-applied state. A person waits for the rows to stop being
+  // dimmed; so does this.
+  const settle = async () => {
+    await expect(page.locator("[aria-busy='true']")).toHaveCount(0, { timeout: 10_000 });
+  };
   await page.getByRole("button", { name: /^Priority/ }).click();
+  await settle();
   const ascending = await priorities();
   expect(ascending, "clicking Priority orders by it").toEqual([...ascending].sort());
 
   await page.getByRole("button", { name: /^Priority/ }).click();
+  await settle();
   const descending = await priorities();
   expect(descending, "clicking again reverses it").toEqual([...ascending].reverse());
 

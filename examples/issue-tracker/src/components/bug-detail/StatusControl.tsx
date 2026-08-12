@@ -13,6 +13,7 @@ import {
   type BugResolution,
   type BugStatus,
 } from "../../lib/workflow";
+import { ResolutionBadge } from "../Badges";
 import { errorMessage } from "../rpc";
 import type { BugDetail } from "../types";
 
@@ -75,10 +76,19 @@ export function StatusControl({
             ))}
           </select>
         </label>
-        <label>
-          Resolution
-          <input value={bug.resolution ?? "--"} disabled readOnly />
-        </label>
+        {/* A VALUE, not a disabled input. Resolution is never typed here --
+            it is chosen in the Resolve flow below, which also enforces the
+            pairing with status. A greyed-out text box holding "--" says "you
+            could edit this, but not right now", which is the opposite of
+            true. */}
+        <div className="status-resolution">
+          <span className="field-label">Resolution</span>
+          {bug.resolution ? (
+            <ResolutionBadge resolution={bug.resolution} />
+          ) : (
+            <span className="dim">Unresolved</span>
+          )}
+        </div>
       </div>
 
       <div className="status-actions">

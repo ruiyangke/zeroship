@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Card, DescriptionList } from "@zeroship/ui";
+import { Card, DescriptionList, Select } from "@zeroship/ui";
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
 
@@ -322,43 +322,45 @@ export function FieldsPanel({
         <div className="field-row">
           <label>
             Version
-            <select
+            {/* The design system Select, so the detail page stops mixing two
+                kinds of dropdown with the filter bar. */}
+            <Select
               value={bug.versionId ?? ""}
-              onChange={(e) => {
-                if (!e.target.value) return;
+              onValueChange={(next) => {
+                if (!next) return;
                 setVersionMilestoneError(null);
-                toPromise(updateBug({ id: bug.id, changes: { versionId: e.target.value } }))
+                toPromise(updateBug({ id: bug.id, changes: { versionId: next } }))
                   .then(onUpdated)
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
+              placeholder="unspecified"
             >
-              <option value="">unspecified</option>
               {productDetail.versions.map((v) => (
-                <option key={v.id} value={v.id}>
+                <Select.Item key={v.id} value={v.id}>
                   {v.name}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
           <label>
             Milestone
-            <select
+            <Select
               value={bug.milestoneId ?? ""}
-              onChange={(e) => {
-                if (!e.target.value) return;
+              onValueChange={(next) => {
+                if (!next) return;
                 setVersionMilestoneError(null);
-                toPromise(updateBug({ id: bug.id, changes: { milestoneId: e.target.value } }))
+                toPromise(updateBug({ id: bug.id, changes: { milestoneId: next } }))
                   .then(onUpdated)
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
+              placeholder="unspecified"
             >
-              <option value="">unspecified</option>
               {productDetail.milestones.map((m) => (
-                <option key={m.id} value={m.id}>
+                <Select.Item key={m.id} value={m.id}>
                   {m.name}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
         </div>
       ) : (
