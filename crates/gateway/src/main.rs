@@ -10,12 +10,10 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_nonempty, resolve_origin_scheme,
-    resolve_trusted_origins, validate_stash_key, CheckConfigReport, CheckValue,
-    OriginScheme, TrustedOrigin,
+    bootstrap_or_exit, require_nonempty, validate_stash_key, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
-use zeroship_gateway::config::{GateControls, GateControlsSources};
+use zeroship_gateway::config::{GateSettings, GateSettingsSources};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
     router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
@@ -25,67 +23,23 @@ use zeroship_gateway::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// zeroship gateway startup configuration.
+///
+/// Only the credential-bearing fields remain here; every operational value is
+/// generated in `zeroship_gateway::config`.
 #[derive(Parser)]
 #[command(name = "zeroship-gate")]
 struct GateCli {
-    /// HTTP listen port.
-    #[arg(long, env = "GATE_PORT", default_value_t = 80)]
-    port: u16,
-
-    /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
-    #[arg(long, env = "GATE_BIND", default_value = "127.0.0.1")]
-    bind: String,
-
-    /// Control-plane API base URL.
-    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
-    control: String,
-
     /// Admin/control API shared secret.
     #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
     control_key: String,
-
-    /// Comma-separated worker base URLs.
-    #[arg(long = "workers", env = "WORKER_URLS", default_value = "http://localhost:8080")]
-    workers: String,
-
-    /// Route-table polling interval in seconds.
-    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
-    poll_interval: u64,
 
     /// Shared secret for worker admin endpoints.
     #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
     worker_key: String,
 
-    /// Root directory for content-addressed deploy blobs.
-    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
-    blob_store: String,
-
-    /// In-memory blob cache budget in MiB.
-    #[arg(long = "blob-cache-mem-mb", env = "BLOB_CACHE_MEM_MB", default_value = "256")]
-    blob_cache_mem_mb: usize,
-
-    /// On-disk blob cache budget in GiB.
-    #[arg(long = "blob-cache-disk-gb", env = "BLOB_CACHE_DISK_GB", default_value = "20")]
-    blob_cache_disk_gb: u64,
-
-    /// Root directory for the on-disk blob cache.
-    #[arg(
-        long = "blob-cache-disk-root",
-        env = "BLOB_CACHE_DISK_ROOT",
-        default_value = "./blob-cache"
-    )]
-    blob_cache_disk_root: String,
-
     /// `PostgreSQL` DSN for gateway session validation.
     #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
-
-    /// Maximum number of pooled PostgreSQL connections the gateway
-    /// keeps open for session/anchor/revocation work. Bounds concurrent
-    /// DB fan-out so a OP brownout (or any stalled query) cannot pile
-    /// up unbounded checkouts. Ignored when `--db` is empty.
-    #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
-    db_pool_size: usize,
 
     /// PEM/PKCS#8 signing key file for the gateway-signed session cookie.
     #[arg(
@@ -96,40 +50,16 @@ struct GateCli {
     gateway_signing_key_file: String,
 
     /// PEM/PKCS#8 PREVIOUS signing key file for the session-cookie rotation
-    /// overlap (auth-sdk §8.5). Set ONLY during a key roll: the Verifier
+    /// overlap (auth-sdk 8.5). Set ONLY during a key roll: the Verifier
     /// then accepts session cookies signed by EITHER the current or this
     /// previous key. The Issuer always signs with the current key only.
-    /// Empty (default) ⇒ single-key Verifier.
+    /// Empty (default) means a single-key Verifier.
     #[arg(
         long = "prev-signing-key-file",
         env = "GATEWAY_PREV_SIGNING_KEY_FILE",
         default_value = ""
     )]
     gateway_prev_signing_key_file: String,
-
-    /// Public URL advertised as the gateway session-cookie issuer.
-    #[arg(
-        long = "gateway-public-url",
-        env = "GATEWAY_PUBLIC_URL",
-        default_value = "https://api.zeroship.ai"
-    )]
-    gateway_public_url: String,
-
-    /// Scheme used in public app URLs and same-origin checks.
-    #[arg(long, env = "ZEROSHIP_ORIGIN_SCHEME", value_enum)]
-    origin_scheme: Option<OriginScheme>,
-
-    /// Additional exact origins accepted by same-origin guards.
-    #[arg(
-        long,
-        env = "ZEROSHIP_TRUSTED_ORIGINS",
-        value_delimiter = ','
-    )]
-    trusted_origins: Option<Vec<TrustedOrigin>>,
-
-    /// Upstream URL for the auth service UI and OAuth surfaces.
-    #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
-    auth_ui_url: String,
 
     /// File containing the shared platform broker master secret.
     ///
@@ -154,7 +84,7 @@ struct GateCli {
     stash_signing_key: String,
 
     /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
-    /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
+    /// app's `pws_` per-app identity anchor (auth-sdk 6.2) - independent of
     /// the rotatable stash key. MUST be identical on gateway + control and
     /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
     /// `--pairwise-salt-file` in production so the value never appears in a
@@ -172,21 +102,10 @@ struct GateCli {
     #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
     pairwise_salt_file: String,
 
-    /// Trust `X-Forwarded-For` from an upstream proxy. CLI presence
-    /// overrides the env var.
-    #[arg(
-        long = "trust-proxy",
-        env = "ZEROSHIP_TRUST_PROXY",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    trust_proxy: Option<bool>,
-
-    /// Bootstrap, command and observability controls, generated from one
-    /// declaration in `zeroship_gateway::config`.
+    /// Every operational value, generated from one declaration in
+    /// `zeroship_gateway::config`.
     #[command(flatten)]
-    controls: GateControlsSources,
+    settings: GateSettingsSources,
 }
 
 /// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
@@ -262,12 +181,12 @@ fn load_gateway_broker_secret_file(path: &str) -> oidc_rp::BrokerSecret {
 
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
-    let (controls, boot) = bootstrap_or_exit::<GateControls>(
-        cli.controls,
+    let (settings, boot) = bootstrap_or_exit::<GateSettings>(
+        cli.settings,
         zeroship_gateway::config::DEFAULT_LOG_FILTER,
         "gateway",
     );
-    let check_config = *controls.check_config.get();
+    let check_config = *settings.check_config.get();
     let file = &boot.overlay.config;
     // `[secrets]` file-tier overlay — bound ONCE before any secret resolution.
     // The gateway never partially moves `boot.overlay.config`, so a reference
@@ -275,20 +194,18 @@ fn main() -> std::io::Result<()> {
     // reference-only file tier > default, applied by `obtain_secret`.
     let file_secrets = &file.secrets;
 
-    let origin_scheme = resolve_origin_scheme(cli.origin_scheme, file.origin_scheme);
-    let trusted_origins =
-        resolve_trusted_origins(cli.trusted_origins, file.trusted_origins.clone());
-
-    let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let port = cli.port;
-    let bind_host = cli.bind;
-    let control_url = cli.control;
+    let origin_scheme = *settings.origin_scheme.get();
+    let trusted_origins = settings.trusted_origins.get().clone();
+    let trust_proxy = *settings.trust_proxy.get();
+    let port = *settings.port.get();
+    let bind_host = settings.bind.get().clone();
+    let control_url = settings.control_url.get().clone();
     // Refuse a scheme this transport cannot honour, the same way `--blob-store`
     // below refuses a store URL it cannot parse. Without this an `https://`
     // control URL is silently downgraded to plaintext on port 80 and the
     // control key goes out in the clear.
     if let Err(e) = zeroship_gateway::sync::validate_control_url(&control_url) {
-        eprintln!("gateway: invalid --control: {e}");
+        eprintln!("gateway: invalid --control-url: {e}");
         std::process::exit(2);
     }
     // Secret-bearing inputs are resolved through the secret-reference
@@ -306,15 +223,15 @@ fn main() -> std::io::Result<()> {
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
     // runtime hash ring, so the two can never disagree.
-    let worker_urls = parse_worker_urls(&cli.workers);
-    let poll_interval = cli.poll_interval;
+    let worker_urls = parse_worker_urls(settings.worker_urls.get());
+    let poll_interval = *settings.poll_interval.get();
     let worker_key = zeroship_core::config::obtain_secret(
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
         file_secrets.worker_key.as_deref(),
         check_config,
     );
-    let blob_store_root = cli.blob_store;
+    let blob_store_root = settings.blob_store.get().clone();
     // Classify the `--blob-store` value: `s3://…` → remote S3, bare path →
     // local disk (dev default). An `s3://` URL is validated now so a
     // misconfiguration fails fast at startup / check-config.
@@ -326,11 +243,11 @@ fn main() -> std::io::Result<()> {
         }
     };
     let blob_store_is_remote = store_url.is_remote();
-    let blob_cache_mem_mb = cli.blob_cache_mem_mb;
-    let blob_cache_disk_gb = cli.blob_cache_disk_gb;
-    let blob_cache_disk_root = cli.blob_cache_disk_root;
-    let auth_ui_url = cli.auth_ui_url;
-    let db_pool_size = cli.db_pool_size.max(1);
+    let blob_cache_mem_mb = *settings.blob_cache_mem_mb.get();
+    let blob_cache_disk_gb = *settings.blob_cache_disk_gb.get();
+    let blob_cache_disk_root = settings.blob_cache_disk_root.get().clone();
+    let auth_ui_url = settings.auth_ui_url.get().clone();
+    let db_pool_size = (*settings.db_pool_size.get()).max(1);
     // DSN carries the database password, so it is resolved like any other
     // secret (literals — including colon-laden DSNs — pass through unchanged).
     let pg_dsn = zeroship_core::config::obtain_secret(
@@ -359,7 +276,7 @@ fn main() -> std::io::Result<()> {
     let signing_key_path = cli.gateway_signing_key_file;
     let prev_signing_key_path = cli.gateway_prev_signing_key_file;
     let broker_secret_path = cli.gateway_broker_secret_file;
-    let public_url = cli.gateway_public_url;
+    let public_url = settings.public_url.get().clone();
 
     if let Err(message) = require_nonempty("CONTROL_KEY / --control-key", &control_key) {
         tracing::error!(error = %message, "gateway: refusing to start without control key");
@@ -528,7 +445,7 @@ fn main() -> std::io::Result<()> {
             "pairwise_salt_configured",
             CheckValue::Secret(!pairwise_salt.is_empty()),
         );
-        report.emit(*controls.check_config_format.get());
+        report.emit(*settings.check_config_format.get());
         return Ok(());
     }
 
@@ -846,6 +763,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::config::{GeneratedConfig, OriginScheme, TrustedOrigin};
 
     static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -867,19 +785,26 @@ mod tests {
             "https://env.example,http://localhost:3000",
         );
 
+        // The environment reaches the same carrier the flag does, and the
+        // generated resolver then prefers the carrier over the overlay. The
+        // hand-written resolve_origin_scheme/resolve_trusted_origins helpers
+        // this test used to call are deleted; the precedence they encoded is
+        // now the resolver's, asserted here against a REAL overlay.
+        let overlay: toml::Value = toml::from_str(
+            "origin_scheme = \"https\"\ntrusted_origins = [\"https://file.example\"]\n",
+        )
+        .expect("fixture overlay");
         let env = GateCli::try_parse_from(["zeroship-gate"]).expect("parse env topology");
+        let resolved = GateSettings::resolve_config(env.settings, Some(&overlay))
+            .expect("settings resolve");
+        assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
         assert_eq!(
-            resolve_origin_scheme(env.origin_scheme, Some(OriginScheme::Https)),
-            OriginScheme::Http
-        );
-        assert_eq!(
-            resolve_trusted_origins(
-                env.trusted_origins,
-                Some(vec!["https://file.example".parse().expect("file origin")]),
-            )
-            .iter()
-            .map(TrustedOrigin::as_str)
-            .collect::<Vec<_>>(),
+            resolved
+                .trusted_origins
+                .get()
+                .iter()
+                .map(TrustedOrigin::as_str)
+                .collect::<Vec<_>>(),
             vec!["https://env.example", "http://localhost:3000"]
         );
 
@@ -891,12 +816,11 @@ mod tests {
             "https://cli.example",
         ])
         .expect("parse CLI topology");
-        assert_eq!(cli.origin_scheme, Some(OriginScheme::Https));
+        let flagged = GateSettings::resolve_config(cli.settings, Some(&overlay))
+            .expect("settings resolve");
+        assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
         assert_eq!(
-            cli.trusted_origins
-                .as_deref()
-                .expect("CLI trusted origins")[0]
-                .as_str(),
+            flagged.trusted_origins.get()[0].as_str(),
             "https://cli.example"
         );
 
@@ -925,8 +849,8 @@ mod tests {
         let Ok(cli) = parsed else {
             panic!("an obsolete environment variable must not affect parsing");
         };
-        assert_eq!(cli.origin_scheme, None);
-        assert_eq!(cli.trust_proxy, None);
+        assert_eq!(cli.settings.origin_scheme, None);
+        assert_eq!(cli.settings.trust_proxy, None);
     }
 
     #[test]
