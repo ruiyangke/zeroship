@@ -104,9 +104,11 @@ used by `@zeroship/auth`.
 
 ## Cookies
 
-All auth cookies are `HttpOnly`, `SameSite=Lax`, and `Path=/`. `Secure` is set
-outside explicit insecure dev mode. The `__Host-` prefix is used where RFC
-6265bis allows it.
+All auth cookies are `HttpOnly`, `SameSite=Lax`, and `Path=/`. `Secure` is
+always set, in every environment: there is no mode that drops it. Local runs
+work because browsers treat `localhost` and `*.localhost` as trustworthy
+origins, so a `Secure` cookie is accepted over plain `http` there. The `__Host-`
+prefix is used where RFC 6265bis allows it.
 
 | Cookie | Set by | Host | Max-Age |
 |---|---|---|---|

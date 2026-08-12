@@ -207,8 +207,9 @@ probe() {
   # exactly that in the diff -- present on one side only still diverges.
   #
   # AS OF THE STACK STRIP in crates/runtime/src/core/dispatch.rs, no tier emits
-  # a `stack` in an RPC error body at all (unless AUTH_INSECURE_DEV is set), so
-  # this substitution is now a TRIPWIRE rather than a normaliser.
+  # a `stack` in an RPC error body at all -- the strip is unconditional and the
+  # `AUTH_INSECURE_DEV` escape hatch that used to lift it is deleted -- so this
+  # substitution is now a TRIPWIRE rather than a normaliser.
   #
   # DO NOT READ IT AS EVIDENCE ABOUT LEAKS EITHER WAY. Because the scrub runs on
   # BOTH sides, this diff goes GREEN when both tiers emit a stack just as
