@@ -103,3 +103,25 @@ describe("README.md against the implementation", () => {
     expect(claimed).toBe(actual);
   });
 });
+
+describe("README.md's commands", () => {
+  const readme = readFileSync(resolve(process.cwd(), "README.md"), "utf8");
+  const scripts = Object.keys(
+    JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")).scripts ?? {},
+  );
+
+  it("only tells the reader to run scripts that exist", () => {
+    // A README naming a script that was renamed or never existed sends the
+    // reader to `ERR_PNPM_NO_SCRIPT` on their first command. The digit in
+    // `test:e2e` matters here -- an earlier version of this pattern stopped at
+    // `[a-z:-]+` and silently truncated it to `test:e`, which would have made
+    // this test pass while checking the wrong name.
+    const referenced = [...readme.matchAll(/^pnpm ([a-z][a-z0-9:-]*)/gm)]
+      .map((match) => match[1])
+      .filter((name) => name !== "install");
+    expect(referenced.length, "README no longer shows any pnpm commands").toBeGreaterThan(3);
+    const missing = [...new Set(referenced)].filter((name) => !scripts.includes(name));
+    expect(missing, `README runs scripts that package.json does not define: ${missing.join(", ")}`)
+      .toEqual([]);
+  });
+});
