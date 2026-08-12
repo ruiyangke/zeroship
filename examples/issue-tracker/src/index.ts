@@ -1811,7 +1811,13 @@ export const addDependency = mutation(
       getRequired(db.bugs, targetId, "Dependency"),
     ]);
     await assertBugAccessible(bug, actor);
-    await assertCanViewProduct(dependency.productId, actor);
+    // The DEPENDENCY needs the same bug-level check as the bug being edited.
+    // Checking only its product let a caller point an edge at a restricted bug
+    // they cannot open -- and an edge is itself a disclosure: it confirms the
+    // bug exists and names it in the tree. Missed by the earlier sweep because
+    // this variable is `dependency`, not `bug`/`current`/`source`/`target`,
+    // which is what a mechanical rename catches and a reading pass does not.
+    await assertBugAccessible(dependency, actor);
 
     const result = await db.transaction(
       async (tx) => {
@@ -1877,7 +1883,13 @@ async function visibleGraphRows(identity: PlatformUser): Promise<{
     Promise.all(productBatches.map((ids) => readAll(db.bugs, { productId: { $in: ids } }))),
     readAll(db.bugDependencies),
   ]);
-  const bugRows = bugPages.flat();
+  // Bug-level restrictions apply to the graph too. Filtering on product
+  // visibility alone put a restricted bug into deps.tree and deps.graph as a
+  // named node -- summary included -- for anyone who could see its product.
+  // The edge filter below then keeps only edges whose BOTH ends survive, so a
+  // hidden bug also stops leaking through its neighbours.
+  const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
+  const bugRows = bugPages.flat().filter((bug) => !hidden.has(bug.id));
   const ids = new Set(bugRows.map((bug) => bug.id));
   return {
     bugs: bugRows,

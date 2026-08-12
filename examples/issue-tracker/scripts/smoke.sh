@@ -338,6 +338,32 @@ for probe in "comments.add:{\"bugId\":\"$SECRET_BUG\",\"body\":\"x\"}" \
     && pass "Bob cannot $proc on a bug he cannot read" \
     || fail "Bob can $proc on a restricted bug" "http=$got (200 here is the read/write split regressing)"
 done
+
+# Dependency edges are disclosures. deps.add checked the edited bug at the
+# bug level but the DEPENDENCY at the product level only, so an edge could be
+# pointed at a restricted bug the caller cannot open -- confirming it exists
+# and naming it in the tree. deps.tree/graph filtered on product visibility
+# alone for the same reason.
+[ "$(bobc deps.add "{\"bugId\":\"$BUG\",\"dependsOnId\":\"$SECRET_BUG\"}")" = "403" ] \
+  && pass "Bob cannot point a dependency at a bug he cannot read" \
+  || fail "deps.add accepts an edge to a restricted bug" \
+          "http=$(bobc deps.add "{\"bugId\":\"$BUG\",\"dependsOnId\":\"$SECRET_BUG\"}")"
+
+# Control: Alice CAN create an edge to that same restricted bug -- from a
+# DIFFERENT source bug, so it does not collide with the probe above. An
+# earlier version reused the same pair, and under mutation Bob's edge landed
+# first, making the control fail with "already exists" and report a cascade
+# rather than an independent result.
+# access and not about the edge being rejected for some unrelated reason.
+[ "$(code deps.add "{\"bugId\":\"$PRIV_BUG\",\"dependsOnId\":\"$SECRET_BUG\"}")" = "200" ] \
+  && pass "control: Alice can create the same edge" \
+  || fail "control failed: even Alice cannot create the edge, so the refusal proves nothing"
+
+# With that edge in place, the restricted bug must not surface as a node in
+# Bob's graph.
+bob deps.graph | grep -q "$SECRET_BUG" \
+  && fail "the restricted bug appears as a node in Bob's dependency graph" \
+  || pass "the restricted bug is absent from Bob's dependency graph"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
