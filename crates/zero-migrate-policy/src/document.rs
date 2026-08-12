@@ -62,8 +62,15 @@ impl LoadContext {
 pub struct PolicyDoc {
     /// The document's declared version.
     pub policy_version: u32,
-    /// The policy-wide default scope (`None` = `All`, II.2.4). Kept for the
-    /// composer; every non-Global rule's scope has already been met with it.
+    /// The policy-wide default scope (`None` = `All`, II.2.4), as authored.
+    ///
+    /// Nothing downstream reads it, and nothing needs to: every non-Global rule in
+    /// `rules` already carries its own effective scope with this met in, so the
+    /// composer works entirely from the rules. It is retained because a host
+    /// inspecting a loaded document otherwise cannot recover what the author wrote -
+    /// `app_*` met into every rule is not distinguishable from `app_*` repeated on
+    /// every rule. Reporting only; deriving authority from it would double-apply a
+    /// meet the loader already performed.
     pub default_scope: Option<Scope>,
     /// The resolved rules, in document order (grants, requires, injects,
     /// validates — preserving each section's authored order).
@@ -632,12 +639,20 @@ pub trait ProfileCatalog {
     fn get_source(&self, name: &str) -> Option<String>;
 }
 
-/// Doc-level overlay for `extends` (II.7): the `base` is the OUTER layer, `over` the
-/// INNER (override) layer. Rule lists ACCUMULATE (base first, then `over`) so a
-/// query's loosest-covering/fall-through sees `over` first; `over`'s `default_scope`
-/// wins when present, else `base`'s is inherited. This mirrors the `overlay`
-/// combinator's list-accumulation at the document level (the composer's scalar
-/// last-wins is realized at query time by rule order).
+/// Doc-level merge for `extends` (II.7): the two rule lists ACCUMULATE, base first,
+/// and `over`'s `default_scope` wins when present, else `base`'s is inherited.
+///
+/// ACCUMULATE is the whole of it, and the result is ONE document, which is one layer.
+/// Rule order decides nothing: a layer resolves a grant through
+/// [`crate::compose::GrantKeyMap::value_at`], which JOINS every covering rule, so a
+/// later rule cannot pull a value down. `over` can therefore raise a base grant and
+/// never tighten one, and a tightening rule is refused by
+/// [`check_extends_grant_direction`] rather than accepted and ignored.
+///
+/// This is NOT the [`crate::compose::overlay`] combinator despite the shared word.
+/// That one builds TWO layers and gets presence-override from the layered fall-through;
+/// this one flattens and does not. Tightening belongs in the layer stack, where a later
+/// layer is admitted as a narrowing draft.
 fn overlay_docs(base: PolicyDoc, over: PolicyDoc) -> PolicyDoc {
     let mut rules = base.rules;
     rules.extend(over.rules);
