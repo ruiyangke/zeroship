@@ -438,7 +438,6 @@ impl WalConsumer {
             }
         }
 
-        let _guard = SuppressGuard::activate(&self.app_id);
         match self.consume_until_shutdown(stream, shutdown).await {
             Ok(ControlledAttempt::Shutdown) => ControlledAttempt::Shutdown,
             Ok(ControlledAttempt::StreamEnd) => ControlledAttempt::StreamEnd,
@@ -882,6 +881,11 @@ pub async fn run_supervised_controlled(
     shutdown: flume::Receiver<()>,
 ) -> Result<(), DbError> {
     let app_id = consumer.app_id().to_string();
+    // Hold suppression for the supervisor's full lifetime, including
+    // reconnect backoff. The slot retains changes while disconnected;
+    // allowing local emit during the gap would deliver once locally
+    // and again when WAL replay catches up.
+    let _suppression = SuppressGuard::activate(&app_id);
     let mut first_attempt = true;
     let mut backoff = INITIAL_BACKOFF;
 
