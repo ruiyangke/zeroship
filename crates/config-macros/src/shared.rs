@@ -126,20 +126,8 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         inner: "bool",
     },
     SharedIdentity {
-        symbol: "TRUSTED_ORIGINS",
-        canonical: "trusted_origins",
-        wrapper: "Operational",
-        inner: "Vec<TrustedOrigin>",
-    },
-    SharedIdentity {
         symbol: "OAUTH_AUDIENCE",
         canonical: "oauth_audience",
-        wrapper: "Operational",
-        inner: "String",
-    },
-    SharedIdentity {
-        symbol: "APP_BASE_DOMAIN",
-        canonical: "app_base_domain",
         wrapper: "Operational",
         inner: "String",
     },
@@ -167,12 +155,6 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     SharedIdentity {
         symbol: "AUTH_SUPABASE_URL",
         canonical: "auth.supabase_url",
-        wrapper: "Operational",
-        inner: "String",
-    },
-    SharedIdentity {
-        symbol: "AUTH_CONTROL_URL",
-        canonical: "auth.control_url",
         wrapper: "Operational",
         inner: "String",
     },

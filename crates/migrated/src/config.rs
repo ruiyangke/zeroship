@@ -21,7 +21,7 @@ pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_migrated=debug";
 /// The controls every migration-service launch resolves before anything else.
 #[zeroship_config(binary = "zeroship-migrated", scope = "migrated")]
 #[derive(Debug)]
-pub struct MigratedControls {
+pub struct MigratedSettings {
     /// Optional shared config overlay path.
     #[config(shared = CONFIG)]
     pub config: BootstrapControl<Option<PathBuf>>,
@@ -46,9 +46,37 @@ pub struct MigratedControls {
     /// Tracing output format; `auto` picks pretty on a TTY and json otherwise.
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
+
+    /// HTTP listen port.
+    #[config(name = "migrated.port", default = 9091)]
+    pub port: Operational<u16>,
+
+    /// Address to bind.
+    #[config(name = "migrated.bind", default = "127.0.0.1".to_owned())]
+    pub bind: Operational<String>,
+
+    /// Directory for staged request migration files.
+    #[config(name = "migrated.tmp_dir", default = std::env::temp_dir().join("zeroship-migrated"))]
+    pub tmp_dir: Operational<PathBuf>,
+
+    /// Active managed ceiling version stamped into sealed migration profiles.
+    #[config(name = "migrated.policy_ceiling_version", default = 1)]
+    pub policy_ceiling_version: Operational<u64>,
+
+    /// Expected OAuth audience for accepted bearer tokens.
+    #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
+    pub oauth_audience: Operational<String>,
+
+    /// Platform OP issuer for platform-issued migration-service access tokens.
+    #[config(shared = AUTH_PLATFORM_ISSUER, default = String::new())]
+    pub auth_platform_issuer: Operational<String>,
+
+    /// JWKS URL for the platform OP. Defaults to `{issuer}/.well-known/jwks.json`.
+    #[config(shared = AUTH_PLATFORM_JWKS_URL, default = String::new())]
+    pub auth_platform_jwks_url: Operational<String>,
 }
 
-impl OverlaySelector for MigratedControlsSources {
+impl OverlaySelector for MigratedSettingsSources {
     fn overlay_path(&self) -> Option<&Path> {
         self.config.as_deref()
     }
@@ -58,7 +86,7 @@ impl OverlaySelector for MigratedControlsSources {
     }
 }
 
-impl ObservabilityControls for MigratedControls {
+impl ObservabilityControls for MigratedSettings {
     fn log_filter(&self) -> &str {
         self.log_filter.get()
     }
@@ -70,19 +98,11 @@ impl ObservabilityControls for MigratedControls {
 
 /// zeroship-migrated startup configuration.
 ///
-/// No `#[derive(Debug)]`: this struct holds raw secrets (`db`, `provision_db`,
-/// `control_key`, `policy_seal_key`) before they are consumed.
+/// Only the credential-bearing fields remain; every operational value is
+/// generated above. No `#[derive(Debug)]`: what is left IS the raw-secret set.
 #[derive(Parser)]
 #[command(name = "zeroship-migrated")]
 pub struct MigratedCli {
-    /// HTTP listen port.
-    #[arg(long, env = "MIGRATED_PORT", default_value_t = 9091)]
-    pub port: u16,
-
-    /// Address to bind.
-    #[arg(long, env = "MIGRATED_BIND", default_value = "127.0.0.1")]
-    pub bind: String,
-
     /// PostgreSQL DSN for control-plane authz data.
     #[arg(
         long = "db",
@@ -109,34 +129,6 @@ pub struct MigratedCli {
     #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
     pub signing_key_file: String,
 
-    /// Expected OAuth audience for accepted bearer tokens.
-    #[arg(
-        long = "oauth-audience",
-        env = "CONTROL_OAUTH_AUDIENCE",
-        default_value = "control.zeroship.ai"
-    )]
-    pub oauth_audience: String,
-
-    /// Platform OP issuer for platform-issued migration-service access tokens.
-    #[arg(
-        long = "auth-platform-issuer",
-        env = "AUTH_PLATFORM_ISSUER",
-        default_value = ""
-    )]
-    pub auth_platform_issuer: String,
-
-    /// JWKS URL for the platform OP. Defaults to {issuer}/.well-known/jwks.json.
-    #[arg(
-        long = "auth-platform-jwks-url",
-        env = "AUTH_PLATFORM_JWKS_URL",
-        default_value = ""
-    )]
-    pub auth_platform_jwks_url: String,
-
-    /// Directory for staged request migration files.
-    #[arg(long = "tmp-dir", env = "MIGRATED_TMP_DIR")]
-    pub tmp_dir: Option<PathBuf>,
-
     /// HMAC key used to seal server-composed migration policy profiles.
     #[arg(
         long = "policy-seal-key",
@@ -146,25 +138,16 @@ pub struct MigratedCli {
     )]
     pub policy_seal_key: String,
 
-    /// Active managed ceiling version stamped into sealed migration profiles.
-    #[arg(
-        long = "policy-ceiling-version",
-        env = "MIGRATED_POLICY_CEILING_VERSION",
-        default_value_t = 1
-    )]
-    pub policy_ceiling_version: u64,
-
-    /// Bootstrap, command and observability controls, generated from one
-    /// declaration above.
+    /// Every operational value, generated from one declaration above.
     #[command(flatten)]
-    pub controls: MigratedControlsSources,
+    pub settings: MigratedSettingsSources,
 }
 
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{MigratedCli, MigratedControlsSources};
+    use super::{MigratedCli, MigratedSettingsSources};
 
     #[test]
     fn migrated_now_carries_the_same_bootstrap_controls_as_its_siblings() {
@@ -179,8 +162,8 @@ mod tests {
             "json",
         ])
         .expect("controls parse");
-        assert!(cli.controls.check_config);
-        assert!(cli.controls.no_config);
+        assert!(cli.settings.check_config);
+        assert!(cli.settings.no_config);
 
         // Does not cover what main.rs then does with them; that is asserted end
         // to end by tests/config_check_e2e.sh, which runs the real binary.
@@ -188,7 +171,7 @@ mod tests {
 
     #[test]
     fn migrated_cli_rejects_deleted_security_relaxation_flag() {
-        let error = MigratedControlsSources::try_parse_from([
+        let error = MigratedSettingsSources::try_parse_from([
             "zeroship-migrated",
             "--dev-insecure",
         ])
