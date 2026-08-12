@@ -1254,11 +1254,20 @@ jobs:
       # load, not a random flake. A GitHub-hosted runner is 2-4 shared vCPUs, so
       # wiring it would produce a red that is about the runner rather than about
       # the product - and the honest fix is neither a retry (this repo's stance:
-      # a flaky step is a defect to diagnose) nor a lowered floor. Two things are
-      # worth separating for whoever picks this up: the harness may be asking for
-      # more CPU than a 1 MiB read should need, AND a real creator streaming a
-      # 1 MiB object off a busy node gets a 500, which is a platform question in
-      # its own right. Wire it once that is settled.
+      # a flaky step is a defect to diagnose) nor a lowered floor.
+      #
+      # RE-MEASURED 2026-08-12 and the finding is sharper than "a 1 MiB read
+      # costs too much" (task #364). Reproduced at 48/6 under 12 busy loops, and
+      # THREE probes touch the same 1 MiB object in that same run:
+      #   probe.streamPut           1 MiB written in 16 x 64 KiB chunks  PASSES
+      #   probe.streamThenBuffered  1 MiB read buffered + checksummed    PASSES
+      #   probe.streamGet           1 MiB read CHUNKED + checksummed     FAILS
+      # Same bytes, proven by the identical checksum. streamThenBuffered runs
+      # checksumOf() over the whole megabyte, so it does the same JS byte-loop
+      # arithmetic - the differing variable is the `await reader.read()` loop,
+      # not the volume and not the checksum. So this is a question about the
+      # chunked READ path specifically. A creator draining a 1 MiB object
+      # chunked on a busy node gets a 500. Wire it once that is settled.
       # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
       # same measured reason as storage and with a messier signature:
       #
