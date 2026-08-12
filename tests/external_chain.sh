@@ -174,12 +174,55 @@ if (bad.length > 0) {
 }
 NODE
 
-  if rg -n 'workspace:|file:' package-lock.json package.json node_modules/@zeroship/*/package.json >/tmp/zs-external-links.log 2>&1; then
-    cat /tmp/zs-external-links.log >&2
-    echo "external install contains workspace:/file: links" >&2
-    exit 1
-  fi
-  echo "no workspace:/file: links in external install"
+  # rg exit codes are THREE-VALUED: 0 = matched, 1 = no match, >=2 = ERROR.
+  # This used to be spelled `if rg ...; then <fail>; fi; echo "no links"`, which
+  # collapses 1 and 2 into the same branch, so a TOOL ERROR read as a clean bill
+  # of health.
+  #
+  # MEASURED under bash on 2026-08-12, three arms differing in one variable:
+  #   A. no node_modules/@zeroship/* at all, clean lock
+  #        -> glob stays literal, rg exits 2 ("No such file or directory"),
+  #           old code printed "no workspace:/file: links in external install"
+  #   B. no node_modules/@zeroship/*, but package-lock.json DOES carry
+  #      "resolved": "workspace:*"
+  #        -> same rg exit 2, old code AGAIN reported no links. A real link
+  #           missed, which is the failure this whole function exists to catch.
+  #   C. same lock as B, plus node_modules/@zeroship/db/package.json present
+  #        -> glob expands, rg exits 0, correctly reported LINKS PRESENT.
+  # So the guard went blind exactly when the install was incomplete - the state
+  # in which a leaked link is most likely.
+  #
+  # Two changes: the @zeroship package set must be non-empty (an empty scan is
+  # now an error, not a pass), and rg's status is dispatched on all three values.
+  local link_targets=(package-lock.json package.json)
+  local pkg
+  for pkg in node_modules/@zeroship/*/package.json; do
+    if [ ! -e "$pkg" ]; then
+      echo "no installed @zeroship packages to scan for workspace:/file: links" >&2
+      echo "  (node_modules/@zeroship/*/package.json matched nothing - the install" >&2
+      echo "   did not produce the packages this check exists to inspect)" >&2
+      exit 1
+    fi
+    link_targets+=("$pkg")
+  done
+
+  local rg_status=0
+  rg -n 'workspace:|file:' "${link_targets[@]}" >/tmp/zs-external-links.log 2>&1 || rg_status=$?
+  case "$rg_status" in
+    0)
+      cat /tmp/zs-external-links.log >&2
+      echo "external install contains workspace:/file: links" >&2
+      exit 1
+      ;;
+    1)
+      echo "no workspace:/file: links in external install (scanned ${#link_targets[@]} files)"
+      ;;
+    *)
+      cat /tmp/zs-external-links.log >&2
+      echo "link scan FAILED (rg exit $rg_status); refusing to report it as clean" >&2
+      exit 1
+      ;;
+  esac
 }
 
 require_local_registry
