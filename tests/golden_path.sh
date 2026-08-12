@@ -3219,6 +3219,89 @@ gp_close_step
 # drive a fresh call, so it uses the stronger before/after discriminator: steps
 # 4-6 have already populated the ring, so "the marker is present" would pass
 # over a stale buffer. Only an INCREASE proves this call reached it.
+# ---------------------------------------------------------------------------
+# The per-request WALL CLOCK is the one runtime limit the two tiers do not
+# agree on, and until this step nothing executed it:
+#
+#   pnpm dev   unbounded  (crates/runtime/src/core/serve.rs, `wall_timeout: None`;
+#                          the vite dev server spawns `zeroship serve` WITHOUT
+#                          --wall-timeout, sdks/vite-plugin/src/dev-server.ts:958)
+#   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/core/src/types.rs;
+#                          crates/worker/src/handler.rs answers
+#                          `make_error_msg(504, "request timed out")`)
+#
+# So a creator's slow handler WORKS locally and 504s in production with no local
+# signal. docs/pilot/e2e-scenarios.md lists the divergence under "Divergences
+# that remain, pinned rather than fixed"; it was written down and never run.
+#
+# BOTH ARMS ARE ASSERTED, not just the deployed 504. An assertion that only
+# checked production would stay green if dev ever GAINED a wall bound - and dev
+# gaining one would close the trap, which is a change worth noticing. The
+# finding is the DISAGREEMENT.
+#
+# `wallp.fast` is the one-variable control: same app, same tiers, same dispatch
+# and envelope, differing only in duration. If slow diverges and fast agrees,
+# the divergence is the wall clock and not the app, the deploy or the gateway.
+# If BOTH diverge, something more basic is broken and the slow row says nothing
+# about budgets.
+step 12w "Wall clock: a 6s handler is fine in dev and 504s deployed"
+WP="$ROOT/examples/wall-probe"
+WP_APP="wallprobe"
+WP_ZSHIP="$WP/dist/app.zship"
+WP_V="${WP_V:-3147}"      # vite
+WP_RT="${WP_RT:-3098}"    # dev RUNTIME (vite's port is not the runtime's)
+WP_DEV_SLOW=""; WP_DEP_SLOW=""; WP_DEV_FAST=""; WP_DEP_FAST=""
+
+if ! ( cd "$WP" && pnpm build ) >/tmp/gp-wall-build.log 2>&1 || [ ! -f "$WP_ZSHIP" ]; then
+  fail "examples/wall-probe does not build: $(tail -5 /tmp/gp-wall-build.log | tr '\n' ' ')"
+else
+  pass "wall-probe builds through the real vite-plugin ($(du -k "$WP_ZSHIP" | cut -f1)KB)"
+  WP_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$WP_APP" --zship "$WP_ZSHIP" 2>&1)
+  WP_APP_ID=$(echo "$WP_OUT" | awk -F= '$1 == "app_id" { print $2 }')
+  if [ -z "$WP_APP_ID" ]; then
+    fail "could not provision wall-probe: ${WP_OUT:0:200}"
+  else
+    pass "wall-probe deployed ($WP_APP_ID)"
+    sleep 4  # gateway route-sync poll
+    WP_BASE="http://localhost:$GATE_PORT/apps/$WP_APP/__zeroship/v1"
+    # -m 30 is the CLIENT deadline and must stay well clear of both the 5s
+    # deployed budget and the 6s handler, so a timeout here is the SERVER's
+    # answer and never curl giving up first.
+    WP_DEP_FAST=$(curl -s -m 30 -X POST -H 'content-type: application/json' "$WP_BASE/wallp.fast" -d '{"json":{}}' 2>&1)
+    WP_DEP_SLOW=$(curl -s -m 30 -X POST -H 'content-type: application/json' "$WP_BASE/wallp.slow" -d '{"json":{}}' 2>&1)
+  fi
+
+  free_ports "$WP_V" "$WP_RT"
+  ( cd "$WP" && WALL_PROBE_API_PORT="$WP_RT" ./node_modules/.bin/vite --port "$WP_V" --strictPort ) >/tmp/gp-wall-dev.log 2>&1 &
+  WP_PID=$!; PIDS+=($WP_PID)
+  if wait_http_ok "http://localhost:$WP_V/__zeroship/v1/wallp.fast" 50; then
+    WP_DEV_FAST=$(curl -s -m 30 -X POST -H 'content-type: application/json' "http://localhost:$WP_V/__zeroship/v1/wallp.fast" -d '{"json":{}}' 2>&1)
+    WP_DEV_SLOW=$(curl -s -m 30 -X POST -H 'content-type: application/json' "http://localhost:$WP_V/__zeroship/v1/wallp.slow" -d '{"json":{}}' 2>&1)
+  else
+    fail "wall-probe never came up under vite on :$WP_V, so the dev arm did not run: $(tail -3 /tmp/gp-wall-dev.log | tr '\n' ' ')"
+  fi
+
+  # --- the control: fast must AGREE ---------------------------------------
+  case "$WP_DEV_FAST$WP_DEP_FAST" in
+    *'"arm":"fast"'*'"arm":"fast"'*)
+      pass "control: wallp.fast answers on BOTH tiers, so the stack, deploy and gateway are sound" ;;
+    *)
+      fail "control: wallp.fast does NOT answer on both tiers, so the slow verdict below is uninterpretable
+      dev      : ${WP_DEV_FAST:0:150}
+      deployed : ${WP_DEP_FAST:0:150}" ;;
+  esac
+
+  # --- the finding: slow must DIVERGE, in the documented direction ---------
+  case "$WP_DEV_SLOW" in
+    *'"arm":"slow"'*) pass "dev ran the 6s handler to completion (no wall bound)" ;;
+    *) fail "dev did NOT complete the 6s handler -- if dev has gained a wall bound the trap is closed and this step's premise is stale: ${WP_DEV_SLOW:0:200}" ;;
+  esac
+  case "$WP_DEP_SLOW" in
+    *'request timed out'*) pass "deployed refused the same handler at its 5s wall budget" ;;
+    *'"arm":"slow"'*) fail "deployed COMPLETED the 6s handler -- the free-tier wall budget did not apply, which contradicts FREE_TIER_RUNTIME_LIMITS: ${WP_DEP_SLOW:0:200}" ;;
+    *) fail "deployed answered the 6s handler with neither a completion nor a wall timeout: ${WP_DEP_SLOW:0:200}" ;;
+  esac
+fi
 step 13 "Logs: the creator can read what their deployed app printed"
 GP_LOG_MARK="[starter] getMessages"
 if [ -z "${SC_PAT:-}" ] || [ -z "${APP_ID:-}" ]; then
@@ -4168,7 +4251,7 @@ gp_close_step
 # Second consecutive raise where the delta and the run agree to the assertion.
 # Mutation-proven before the run by deleting the app's message listener: 3/1,
 # only the frame arm red.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-112}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-117}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
