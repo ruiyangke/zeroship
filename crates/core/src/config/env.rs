@@ -1,5 +1,16 @@
 //! Environment-variable and CLI boolean truthiness helpers.
 
+/// The sole raw environment read used by the inert typed naming layer.
+///
+/// This remains crate-private: callers must present an `EnvKey<T, Consumer>`.
+pub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {
+    match std::env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(()),
+    }
+}
+
 /// Return true when environment variable `key` is exactly `expected`.
 ///
 /// Web binaries use a `SetTrue` flag plus skipped env field so `--dev-insecure`

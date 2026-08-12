@@ -13,6 +13,7 @@
 pub mod bootstrap;
 pub mod env;
 pub mod file;
+pub mod names;
 pub mod secrets;
 pub mod source;
 pub mod topology;
@@ -22,6 +23,14 @@ pub use bootstrap::{
 };
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{AuthSection, ConfigError, FileConfig, ObsSection, SecretSection};
+pub use names::{
+    BootstrapControl, CanonicalName, CanonicalNameError, CliEnv, CommandControl, CommandEnv,
+    ConfigConsumer, ConfigResolveError, ConfigSpec, Consumer, ConsumerToken, DevEnv, EnvKey,
+    EnvReadError, ExternalEnv, ExternalEnvFamily, GeneratedConfig, Operational,
+    OverlayLookupError, ReadSite, Secret, Sensitivity, SourceKind, TestEnv, CONFIG_READ_SITES,
+    lookup_overlay, read_typed_env, resolve_operational, resolve_secret_sources,
+};
+pub use zeroship_config_macros::zeroship_config;
 pub use secrets::{
     decoded_master_key_len, is_loopback_url, is_secret_ref, obtain_secret, parse_secret_ref,
     require_unless_dev, resolve_secret, resolve_secret_or_exit, validate_master_key_material,
