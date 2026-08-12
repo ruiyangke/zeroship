@@ -98,8 +98,56 @@ function resolveName(mod: MigrationModule, fallback: string): string {
  */
 function recordUp(up: () => void): unknown[] {
   __begin("up");
-  up();
+  const result = up() as unknown;
+  if (result && typeof (result as { then?: unknown }).then === "function") {
+    // Swallow the detached rejection BEFORE throwing. The ops authored after the
+    // creator's first `await` run once the microtask queue drains, by which time
+    // the recorder is gone, so each raises OP_OUTSIDE_RECORDER with nobody
+    // waiting on it. Without this the refusal below would be accompanied by an
+    // unhandled rejection that can take the build process down.
+    void Promise.resolve(result).catch(() => undefined);
+    // `ops.ts` exposes no `__abort`, so drain to release the ambient recorder.
+    // Discarding is correct: the op list is already incomplete by construction.
+    __drain();
+    const error = new Error(
+      "migration up() must be synchronous; promises and async functions are not supported",
+    ) as Error & { code: string; suggested_fix: string };
+    error.code = "ASYNC_UP_UNSUPPORTED";
+    error.suggested_fix =
+      "remove async/await and author every migration operation synchronously inside up()";
+    throw error;
+  }
   return __drain();
+}
+
+/**
+ * Refuse a migration that authors its own `down()`.
+ *
+ * WHY REFUSE RATHER THAN IGNORE: the recorder captures `up()` only, and rollback
+ * runs the engine's SYNTHESISED inverse. An authored `down()` body would sit in
+ * the file looking load-bearing and never execute, which is worse than not being
+ * allowed to write one.
+ *
+ * Both spellings are checked because both are valid authoring shapes: a named
+ * export and a property of the default object.
+ */
+function refuseAuthoredDown(mod: MigrationModule): void {
+  const def = mod && (mod as { default?: unknown }).default;
+  const authored =
+    typeof (mod as { down?: unknown }).down === "function" ||
+    (!!def &&
+      typeof def === "object" &&
+      typeof (def as { down?: unknown }).down === "function");
+  if (!authored) return;
+  const error = new Error(
+    "migration authors a down() function, which the recorder does not capture; " +
+      "rollback runs the engine's synthesised inverse, so the authored body would " +
+      "never execute",
+  ) as Error & { code: string; suggested_fix: string };
+  error.code = "AUTHORED_DOWN_UNSUPPORTED";
+  error.suggested_fix =
+    "remove down() and let rollback synthesise the inverse from the recorded ops";
+  throw error;
 }
 
 /** Options for {@link buildEnvelope}. */
@@ -118,14 +166,23 @@ export interface BuildEnvelopeOptions {
  * `owner_app` or fold a checksum — the addon does both in Rust.
  *
  * @throws the structured recorder errors (`OP_OUTSIDE_RECORDER`,
- *         `SELECTOR_NOT_TERMINATED`) verbatim, and a plain `Error` for a missing
- *         `up()`.
+ *         `SELECTOR_NOT_TERMINATED`, `ASYNC_UP_UNSUPPORTED`,
+ *         `AUTHORED_DOWN_UNSUPPORTED`) verbatim, and a plain `Error` for a
+ *         missing `up()`.
+ *
+ * THE REFUSAL SET IS DELIBERATELY IDENTICAL TO `zero-migrate/internal/recorder`.
+ * That module is unpublished, which is what makes @zeroship/vite-plugin
+ * unpublishable (#344); this one is the published stand-in, and a stand-in that
+ * accepts MORE than the original is not a stand-in. Measured 2026-08-12 before
+ * the last two were added: the symbol surface matched 4 of 4 while the behaviour
+ * diverged on exactly these two arms.
  */
 export function buildEnvelope(
   mod: MigrationModule,
   opts: BuildEnvelopeOptions,
 ): IrEnvelope {
   const up = resolveUp(mod);
+  refuseAuthoredDown(mod);
   const ops = recordUp(up);
   return {
     ir_version: opts.irVersion,
