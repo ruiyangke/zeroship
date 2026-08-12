@@ -500,6 +500,31 @@ ctl_oauth=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_control holds SELECT+INSERT+UPDATE on app_oauth_clients (its provisioning upserts)" \
   || fail "zeroship_control app_oauth_clients privileges read $ctl_oauth of 3: per-app OAuth client provisioning cannot complete (#357)"
 
+# The remaining two production upserts control could not execute, from the same
+# sweep. Grouped because they share one cause and one migration.
+#
+#   zeroship.app_vars          crates/control/src/env_store.rs:236
+#                              the env-var write behind `zeroship var set`; the
+#                              upsert is inside a CTE that then bumps
+#                              apps.env_version, so the whole creator-facing
+#                              operation failed.
+#   zeroship.token_revocations crates/control/src/oauth_grants_handlers.rs:223
+#                              revokes a family when an OAuth grant is deleted.
+#
+# MEASURED 2026-08-12 as zeroship_control, each in its own transaction:
+#   ON CONFLICT (app_id,key_name) DO UPDATE  -> permission denied for app_vars
+#   ON CONFLICT (client_id,sub)  DO UPDATE  -> permission denied for token_revocations
+#
+# NOTE the same table appears twice in this file under DIFFERENT roles:
+# token_revocations is asserted above for zeroship_gateway (#356) and here for
+# zeroship_control. Neither assertion implies the other - that is exactly how
+# #356 hid behind the #319 assertion for a year of reading passes.
+ctl_upsert=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from unnest(array['app_vars','token_revocations']) t where has_table_privilege('zeroship_control','zeroship.'||t,'UPDATE')" 2>/dev/null | tr -d '[:space:]')
+[ "$ctl_upsert" = "2" ] \
+  && pass "zeroship_control holds UPDATE on app_vars + token_revocations (both are upsert targets)" \
+  || fail "zeroship_control UPDATE on its upsert targets reads $ctl_upsert of 2: \`zeroship var set\` and/or grant-delete revocation cannot complete (#358)"
+
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
