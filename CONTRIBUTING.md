@@ -245,8 +245,17 @@ footer. If the impact needs explaining, put it in the body and say what to use i
 ### Body
 
 Usually omitted; a good subject carries most changes. Add a body when the rationale,
-trade-off, or migration impact is not obvious. Separate it with one blank line, and
-write prose paragraphs (one idea each, blank line between), not a bullet dump.
+trade-off, or migration impact is not obvious. Separate it with one blank line, wrap
+it at 80 columns, and write prose paragraphs (one idea each, blank line between),
+not a bullet dump.
+
+**The whole message is capped at 500 characters,** which with a typical subject is
+about six wrapped lines. This is deliberately tighter than what the repo was doing:
+the week before it landed ran p50 623 and p90 829, so it refuses the prevailing
+style rather than ratifying it. Say what changed and why it is not obvious; a
+measurement log, a transcript, or a narrative of how the work was scheduled belongs
+in the PR description or a doc under `docs/`, where it can be edited later. A commit
+message cannot be, and `git log` is read far more often than it is written.
 
 ```
 refactor(core)!: move wrapper_revocation out of core into authz

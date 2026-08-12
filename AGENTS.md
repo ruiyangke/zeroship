@@ -304,7 +304,11 @@ type(scope): imperative summary of what the change does
   meaningless to anyone reading the log later; state the outcome instead.
 - ASCII only. No em-dash, curly quote or arrow.
 - Body only when the why is not obvious: prose, a few sentences, blank line
-  after the subject. A good subject carries most changes.
+  after the subject, wrapped at 80 columns. A good subject carries most changes.
+- **The whole message is capped at 500 characters.** With a ~75-char subject
+  that is about six wrapped lines of body. Say what changed and why it is not
+  obvious; measurements, transcripts and narration belong in the PR or a doc,
+  not in `git log`.
 - Breaking change: `!` before the colon (`refactor(core)!: ...`). No
   `BREAKING CHANGE:` footer.
 - Every bug fix adds a regression test that would fail before the fix.
