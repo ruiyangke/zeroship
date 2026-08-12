@@ -417,14 +417,30 @@ pub struct ApplyPendingContractDto {
 }
 
 /// The typed reply for `status` (the projected `MigrationStatus`).
+///
+/// **The `mig_…` ids below are LOGICAL PLAN ids, and they are a different namespace
+/// from the journal versions [`ApplyReply::applied`] returns.** Both are spelled
+/// `mig_…`, so a consumer that correlates the two gets no matches and no error.
+/// Measured on live PostgreSQL: one `createTable` applied through the host path put
+/// `mig_7n42DGM5RSBfCGYlS39M1y` in the journal and returned it from `apply`, while
+/// `status` reported `applied: ["mig_7n42DGM5SrG4j3FrNuIVBe"]` and the same id as
+/// `current_version` - correctly identifying the migration as applied, under an id
+/// that appears in no journal row.
+///
+/// To correlate a status entry with the journal, match on the plan rather than on
+/// the string: `plans[]` carries the per-plan detail, and `history` reads journal
+/// identities directly.
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct StatusReply {
-    /// The highest net-applied version (`mig_…`), or `None` when nothing is applied.
+    /// The highest net-applied LOGICAL PLAN id (`mig_…`), or `None` when nothing is
+    /// applied. NOT the journal version - see the type doc.
     pub current_version: Option<String>,
-    /// Net-applied versions, in version order.
+    /// Net-applied logical plan ids, in order. NOT journal versions - see the type
+    /// doc.
     pub applied: Vec<String>,
-    /// Supplied versions that are NOT net-applied, in apply order.
+    /// Supplied logical plan ids that are NOT net-applied, in apply order. NOT
+    /// journal versions - see the type doc.
     pub pending: Vec<String>,
     /// Supplied logical plans whose online rename was explicitly aborted.
     pub aborted: Vec<String>,
