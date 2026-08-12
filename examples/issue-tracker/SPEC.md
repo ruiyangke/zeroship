@@ -27,7 +27,8 @@ Every table gets the seven injected platform system columns (`id`,
 
 ### Products and structure
 
-- `products` — name (unique), description, isActive, defaultMilestone,
+- `products` — name (unique), key (unique, the PARSER in PARSER-12),
+  description, isActive, defaultMilestone,
   allowsUnconfirmed, classification, votesPerUser, maxVotesPerBug,
   votesToConfirm (all three default 0, which means voting is off)
 - `components` — productId -> products, name, description, defaultAssigneeId
@@ -46,6 +47,8 @@ Every table gets the seven injected platform system columns (`id`,
   resolution (nullable; FIXED/INVALID/WONTFIX/DUPLICATE/WORKSFORME/INCOMPLETE),
   severity (blocker/critical/major/normal/minor/trivial/enhancement),
   priority (P1..P5), assigneeId, reporterId, qaContactId, duplicateOfId,
+  number (per-product sequence, 1-based; with the product key this is the
+  PARSER-12 a person reads and types),
   alias (unique when set), whiteboard, opSys, platform, url, isConfirmed,
   voteCount, commentCount, estimatedTimeMinutes, remainingTimeMinutes,
   deadline, resolvedAt (stamped on resolve so reports need not mine history)
@@ -130,6 +133,8 @@ you also hear about bugs the watched user is involved in)
 
 ### Products and admin
 `products.list` `products.get` `products.create` `products.update`
+`products.resolve` `users.resolve` (names for the ids a page is showing, so a
+bug table need not fetch every product and user to label its rows)
 `components.list` `components.create` `components.update`
 `versions.list` `versions.create` `milestones.list` `milestones.create`
 

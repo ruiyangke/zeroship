@@ -31,6 +31,7 @@ type Row = { productId?: string | null; assigneeId?: string | null; reporterId?:
 // would have undone the fix it implements.
 export function useBugLookups(rows: readonly Row[]): {
   productsById: Record<string, string>;
+  productKeysById: Record<string, string>;
   usersById: Record<string, string>;
 } {
   // Keyed on the sorted id set, not the rows array. Re-fetching whenever the
@@ -73,6 +74,14 @@ export function useBugLookups(rows: readonly Row[]): {
     return map;
   }, [productsQ.state]);
 
+  const productKeysById = useMemo(() => {
+    const map: Record<string, string> = {};
+    if (productsQ.state.status === "ready") {
+      for (const product of productsQ.state.data) map[product.id] = product.key;
+    }
+    return map;
+  }, [productsQ.state]);
+
   const usersById = useMemo(() => {
     const map: Record<string, string> = {};
     if (usersQ.state.status === "ready") {
@@ -81,5 +90,5 @@ export function useBugLookups(rows: readonly Row[]): {
     return map;
   }, [usersQ.state]);
 
-  return { productsById, usersById };
+  return { productsById, productKeysById, usersById };
 }

@@ -67,6 +67,7 @@ const schema = {
     versionId: t.string().required(),
     milestoneId: t.string(),
     alias: t.string(),
+    number: t.number().required(),
     summary: t.string().required(),
     status: t.string().required().default("UNCONFIRMED"),
     resolution: t.string(),
@@ -87,7 +88,7 @@ const schema = {
     remainingTimeMinutes: t.number().required().default(0),
     deadline: t.timestamp(),
     resolvedAt: t.timestamp(),
-  }).index("bugs_product_idx", ["productId"]).index("bugs_component_idx", ["componentId"]).index("bugs_status_idx", ["status"]).index("bugs_assignee_idx", ["assigneeId"]).index("bugs_reporter_idx", ["reporterId"]).index("bugs_duplicate_of_idx", ["duplicateOfId"]).index("bugs_resolved_at_idx", ["resolvedAt"]).uniqueIndex("bugs_alias_uniq", ["alias"]).index("bugs_deleted_at_idx", ["deleted_at"]).index("bugs_updated_at_idx", ["updated_at"]).index("bugs_created_by_idx", ["created_by"]),
+  }).index("bugs_product_idx", ["productId"]).uniqueIndex("bugs_product_number_uniq", ["productId","number"]).index("bugs_component_idx", ["componentId"]).index("bugs_status_idx", ["status"]).index("bugs_assignee_idx", ["assigneeId"]).index("bugs_reporter_idx", ["reporterId"]).index("bugs_duplicate_of_idx", ["duplicateOfId"]).index("bugs_resolved_at_idx", ["resolvedAt"]).uniqueIndex("bugs_alias_uniq", ["alias"]).index("bugs_deleted_at_idx", ["deleted_at"]).index("bugs_updated_at_idx", ["updated_at"]).index("bugs_created_by_idx", ["created_by"]),
   comments: defineSchema({
     bugId: t.string().required(),
     authorId: t.string().required(),
@@ -154,6 +155,7 @@ const schema = {
   }).uniqueIndex("product_groups_pair_uniq", ["productId","groupId"]).index("product_groups_group_idx", ["groupId"]).index("productGroups_deleted_at_idx", ["deleted_at"]).index("productGroups_updated_at_idx", ["updated_at"]).index("productGroups_created_by_idx", ["created_by"]),
   products: defineSchema({
     name: t.string().required().unique(),
+    key: t.string().required().unique(),
     description: t.string(),
     classification: t.string().required().default("Unclassified"),
     defaultMilestone: t.string(),
@@ -162,7 +164,7 @@ const schema = {
     votesPerUser: t.number().required().default(0),
     maxVotesPerBug: t.number().required().default(0),
     votesToConfirm: t.number().required().default(0),
-  }).uniqueIndex("products_name_key", ["name"]).index("products_deleted_at_idx", ["deleted_at"]).index("products_updated_at_idx", ["updated_at"]).index("products_created_by_idx", ["created_by"]),
+  }).uniqueIndex("products_name_key", ["name"]).uniqueIndex("products_key_key", ["key"]).index("products_deleted_at_idx", ["deleted_at"]).index("products_updated_at_idx", ["updated_at"]).index("products_created_by_idx", ["created_by"]),
   savedSearches: defineSchema({
     ownerId: t.string().required(),
     name: t.string().required(),

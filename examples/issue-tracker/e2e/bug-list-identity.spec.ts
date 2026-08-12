@@ -27,7 +27,14 @@ test("every bug in the list shows a distinct id", async ({ page, baseURL, contex
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `Ident ${RUN}`, description: "identity" });
+  // An explicit key, because a derived one would be the run marker's digits
+  // and collide with another run's product.
+  const productKey = `ID${String(process.pid).slice(-5)}`;
+  const product = await rpc("products.create", {
+    name: `Ident ${RUN}`,
+    key: productKey,
+    description: "identity",
+  });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",
@@ -70,24 +77,27 @@ test("every bug in the list shows a distinct id", async ({ page, baseURL, contex
   );
 
   // Uniqueness alone would also be satisfied by a column rendering row numbers
-  // or the summary. Each cell must be the bug's OWN id: shortened, but a
-  // genuine tail of the id its link points at.
+  // or a UUID tail. A per-product sequence is the claim, so the sequence is
+  // what gets checked: every label is KEY-N for this product, and the eight
+  // numbers are exactly 1..8 with no gap and no repeat.
+  const numbers = shown
+    .map((label) => {
+      expect(label, `"${label}" should be ${productKey}-N`).toMatch(
+        new RegExp(`^${productKey}-\\d+$`),
+      );
+      return Number(label.slice(productKey.length + 1));
+    })
+    .sort((left, right) => left - right);
+  expect(numbers, "the sequence runs 1..8 with no gaps").toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+  // The key is what a person reads; the UUID is still the identity. Each row
+  // must link to one of the bugs filed above, checked per row against that
+  // row's own link rather than a position in `created` -- rows come back
+  // ordered by update time, which for a burst is not creation order.
   for (const cell of await idCells.all()) {
-    const text = (await cell.textContent())?.trim() ?? "";
-    const link = cell.locator("a");
-    const href = (await link.getAttribute("href")) ?? "";
-    const full = href.split("/").pop() ?? "";
-    expect(created, "each row should be one of the bugs filed above").toContain(full);
-    expect(
-      full.endsWith(text.replace(/^.*\.\.\./, "")),
-      `"${text}" is not a tail of ${full}`,
-    ).toBe(true);
-    // The full id must stay reachable, since the visible form is lossy -- and
-    // it is checked per row against that row's own link rather than against a
-    // position in `created`. Rows come back ordered by update time, which for
-    // bugs filed in one burst is not the order they were created in; asserting
-    // on `created[last]` failed here for that reason alone, while the column
-    // was correct.
-    await expect(link, "the row must carry its own full id").toHaveAttribute("title", full);
+    const href = (await cell.locator("a").getAttribute("href")) ?? "";
+    expect(created, "each row links to one of the bugs filed above").toContain(
+      href.split("/").pop(),
+    );
   }
 });

@@ -68,7 +68,8 @@ test("the unread count rises on someone else's change and falls when read", asyn
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `Notify ${RUN}`, description: "n" });
+  const product = await rpc("products.create", { key: `NOTI${String(Date.now()).slice(-5)}`,
+    name: `Notify ${RUN}`, description: "n" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",

@@ -90,6 +90,9 @@ export default {
     table("products").create({
       columns: {
         name: t.text().notNull().unique(),
+        // The short prefix a bug is referred to by: PARSER-12, RUNTIME-3.
+        // Unique, because it is half of every bug identifier a human types.
+        key: t.text().notNull().unique(),
         description: t.text(),
         classification: t.text().notNull().default("Unclassified"),
         defaultMilestone: t.text(),
@@ -188,6 +191,11 @@ export default {
         // PostgreSQL and SQLite, so any number of alias-less bugs coexist
         // without needing a partial predicate.
         alias: t.text(),
+        // Per-product sequence, 1-based. Paired with the product key this
+        // gives PARSER-12: short, ordered, and quotable, which a UUID is not.
+        // Uniqueness is enforced by the (productId, number) index below, not
+        // by the allocator, so two concurrent files cannot both take 12.
+        number: t.int().notNull(),
         summary: t.text().notNull(),
         status: t.text().notNull().default("UNCONFIRMED"),
         resolution: t.text(),
@@ -219,6 +227,10 @@ export default {
       },
       indexes: [
         { name: "bugs_product_idx", on: ["productId"] },
+        // The allocator reads max(number) for a product and writes max+1. This
+        // is what makes that safe: two transactions that both read 11 cannot
+        // both commit 12, the loser is rejected and retries.
+        { name: "bugs_product_number_uniq", on: ["productId", "number"], unique: true },
         { name: "bugs_component_idx", on: ["componentId"] },
         { name: "bugs_status_idx", on: ["status"] },
         { name: "bugs_assignee_idx", on: ["assigneeId"] },

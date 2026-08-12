@@ -137,7 +137,8 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
   // having done a write -- it passed in a full run and failed under --grep or
   // sharding, on a fresh database, with a cc.add 400 that says nothing about
   // provisioning.
-  const product = await rpc("products.create", { name: `CC ${RUN}`, description: "cc spec" });
+  const product = await rpc("products.create", { key: `CC${String(Date.now()).slice(-5)}`,
+    name: `CC ${RUN}`, description: "cc spec" });
   const me = await rpc("users.me", {});
   expect(me.id, "users.me must return a provisioned id after a write").toMatch(/^user_/);
   const component = await rpc("components.create", {
@@ -180,7 +181,8 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `Vote ${RUN}`, description: "vote spec" });
+  const product = await rpc("products.create", { key: `VOTE${String(Date.now()).slice(-5)}`,
+    name: `Vote ${RUN}`, description: "vote spec" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",
@@ -228,7 +230,8 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
   };
 
   // Product first, `me` after: users.me does not provision (see the CC spec).
-  const product = await rpc("products.create", { name: `Notif ${RUN}`, description: "notif spec" });
+  const product = await rpc("products.create", { key: `NOTI${String(Date.now()).slice(-5)}`,
+    name: `Notif ${RUN}`, description: "notif spec" });
   const me = await rpc("users.me", {});
   expect(me.id, "users.me must return a provisioned id after a write").toMatch(/^user_/);
   const component = await rpc("components.create", {
@@ -277,7 +280,8 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `Sec ${RUN}`, description: "sec spec" });
+  const product = await rpc("products.create", { key: `SEC${String(Date.now()).slice(-5)}`,
+    name: `Sec ${RUN}`, description: "sec spec" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",
@@ -335,7 +339,8 @@ test("see also links are added, listed and removed from the bug page", async ({ 
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `SeeAlso ${RUN}`, description: "sa spec" });
+  const product = await rpc("products.create", { key: `SEEA${String(Date.now()).slice(-5)}`,
+    name: `SeeAlso ${RUN}`, description: "sa spec" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",

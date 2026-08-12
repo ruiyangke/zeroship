@@ -72,6 +72,7 @@ type UserRow = SystemRow & {
 
 type ProductRow = SystemRow & {
   name: string;
+  key: string;
   description?: string | null;
   classification: string;
   defaultMilestone?: string | null;
@@ -104,6 +105,7 @@ type MilestoneRow = VersionRow;
 
 type BugRow = SystemRow & {
   productId: string;
+  number: number;
   componentId: string;
   versionId?: string | null;
   milestoneId?: string | null;
@@ -368,6 +370,80 @@ function invalid(message: string): never {
 
 function notFound(noun: string): never {
   throw httpError(404, "NOT_FOUND", `${noun} not found`);
+}
+
+/**
+ * A product key: the human half of PARSER-12.
+ *
+ * Uppercase letters and digits, starting with a letter, 2 to 10 characters.
+ * Short because it is typed and spoken; no hyphen because the hyphen is the
+ * separator, and a key containing one would make `PARSER-X-12` ambiguous to
+ * parse.
+ */
+const PRODUCT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
+
+function requireProductKey(value: string): string {
+  const clean = requireNonEmpty(value, "key").toUpperCase();
+  if (!PRODUCT_KEY_PATTERN.test(clean)) {
+    invalid(
+      "key must be 2 to 10 characters, uppercase letters and digits, starting with a letter " +
+        "(for example PARSER)",
+    );
+  }
+  return clean;
+}
+
+/**
+ * The identifier a person uses: `PARSER-12`.
+ *
+ * Bugs are addressed by this everywhere a human reads or types one. The UUID
+ * remains the primary key and the thing every foreign key points at -- this is
+ * a display and lookup form, not a second identity.
+ */
+/**
+ * Look a bug up by UUID or by its PARSER-12 key.
+ *
+ * The key path is two reads rather than one, and is not indexed as a pair --
+ * the (productId, number) index does the work once the product is known.
+ */
+async function bugByIdOrKey(input: string): Promise<BugRow> {
+  const parsed = parseBugKey(input);
+  if (!parsed) return getRequired(db.bugs, input, "Bug");
+  const product = must(await db.products.get({ key: parsed.key }));
+  if (!product) notFound("Bug");
+  const bug = must(await db.bugs.get({ productId: product.id, number: parsed.number }));
+  if (!bug) notFound("Bug");
+  return bug;
+}
+
+function bugKey(product: { key: string }, bug: { number: number }): string {
+  return `${product.key}-${bug.number}`;
+}
+
+/**
+ * A default key from a product name: "Parser" -> PARSER, "Web UI" -> WEBUI.
+ *
+ * Only a starting point -- the caller can pass one explicitly. Names that
+ * reduce to nothing usable (punctuation only, or a leading digit) fall through
+ * to `requireProductKey` and are refused there with a message that says what a
+ * key looks like, rather than being silently mangled into something the
+ * creator did not choose.
+ */
+function deriveProductKey(name: string): string {
+  const letters = name.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return letters.slice(0, 10);
+}
+
+/**
+ * Split `PARSER-12` back into its parts. Returns null for anything that is not
+ * in that shape, so callers can fall through to treating the input as a UUID.
+ */
+function parseBugKey(input: string): { key: string; number: number } | null {
+  const match = /^([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,9})$/.exec(input.trim());
+  if (!match) return null;
+  const number = Number(match[2]);
+  if (!Number.isSafeInteger(number) || number < 1) return null;
+  return { key: match[1].toUpperCase(), number };
 }
 
 function conflict(message: string): never {
@@ -1068,7 +1144,16 @@ export const createBug = mutation(
     const cleanSummary = requireNonEmpty(summary, "summary").slice(0, 500);
     const cleanDescription = requireNonEmpty(description, "description");
     const result = await db.transaction(async (tx) => {
+      // Allocated inside the transaction, from the rows themselves rather than
+      // a counter that could drift from them. Two concurrent files can read
+      // the same max; the (productId, number) unique index rejects the loser
+      // and the retry below re-reads. Without that index this is a lost
+      // update that silently gives two bugs the same key.
+      const siblings = await readAllTx(tx.bugs, { productId: structure.product.id });
+      const nextNumber =
+        siblings.reduce((highest, row) => Math.max(highest, row.number ?? 0), 0) + 1;
       const bug = await tx.bugs.insert({
+        number: nextNumber,
         productId: structure.product.id,
         componentId: structure.component.id,
         ...(versionId ? { versionId } : {}),
@@ -1118,7 +1203,11 @@ export const createBug = mutation(
 
 export const getBug = query(
   async ({ id }: { id: string }) => {
-    const storedBug = await getRequired(db.bugs, id, "Bug");
+    // Accepts either form. A person arrives with PARSER-12 -- from a commit
+    // message, a chat, the address bar -- while every internal link still
+    // carries the UUID. Refusing the human form here would mean the
+    // identifier the app puts on screen is not one it accepts back.
+    const storedBug = await bugByIdOrKey(id);
     // Resolved once and reused: bugs.get is anonymous, so `optionalIdentity()`
     // is frequently null and `appUserForIdentity(null)` is the anonymous case
     // rather than an error.
@@ -2686,7 +2775,10 @@ export const resolveProducts = query(
       db.products,
       wanted.filter((id) => visible.has(id)),
     );
-    return rows.map((row) => ({ id: row.id, name: row.name }));
+    // Carries the key as well: a bug table renders PARSER-12 from the
+    // product key and the bug number, so resolving the name without the key
+    // would leave the id column unable to name its own rows.
+    return rows.map((row) => ({ id: row.id, name: row.name, key: row.key }));
   },
   { id: "products.resolve" },
 );
@@ -2741,6 +2833,7 @@ export const getProduct = query(
 export const createProduct = mutation(
   async ({
     name,
+    key,
     description,
     classification = "Unclassified",
     defaultMilestone,
@@ -2748,6 +2841,7 @@ export const createProduct = mutation(
     isActive = true,
   }: {
     name: string;
+    key?: string;
     description?: string | null;
     classification?: string;
     defaultMilestone?: string | null;
@@ -2757,9 +2851,43 @@ export const createProduct = mutation(
     await requireActor();
     const cleanName = requireNonEmpty(name, "name");
     if (must(await db.products.get({ name: cleanName }))) conflict("product name already exists");
+    // Derived from the name when the caller does not supply one, so filing
+    // stays a one-field action, but validated either way: the key is half of
+    // every bug identifier and a bad one is not fixable later without
+    // renaming every bug reference in prose.
+    // Named separately so the failure can say WHY. A name of "!!!" derives to
+    // the empty string, and letting that fall through to requireProductKey
+    // reported "key is required" for a call that supplied no key on purpose.
+    const derived = key ?? deriveProductKey(cleanName);
+    if (!derived) {
+      invalid(
+        `"${cleanName}" has no letters or digits to build a key from -- pass an explicit key, ` +
+          "for example PARSER",
+      );
+    }
+    const cleanKey = requireProductKey(derived);
+    if (must(await db.products.get({ key: cleanKey }))) {
+      // Two messages, because the caller's next move differs. Someone who
+      // passed PARSER and was refused knows what to change. Someone who passed
+      // only a name is being refused over a key they never saw -- derivation
+      // truncates at ten characters, so "Payment Gateway v1" and "Payment
+      // Gateway v2" both reduce to PAYMENTGAT, and a bare "key is in use" is
+      // baffling.
+      //
+      // Refused rather than auto-suffixed. A key is half of every bug
+      // reference this product will ever have, printed in commit messages and
+      // read aloud; silently handing out PAYMENTGA2 because PAYMENTGAT was
+      // taken picks something permanent on the creator's behalf.
+      if (key) conflict(`product key ${cleanKey} is already in use`);
+      conflict(
+        `the key derived from "${cleanName}" is ${cleanKey}, which is already in use -- ` +
+          "pass an explicit key",
+      );
+    }
     return must(
       await db.products.insert({
         name: cleanName,
+        key: cleanKey,
         ...(description ? { description } : {}),
         classification: requireNonEmpty(classification, "classification"),
         ...(defaultMilestone ? { defaultMilestone } : {}),

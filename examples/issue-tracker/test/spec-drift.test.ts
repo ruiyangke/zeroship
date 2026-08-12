@@ -97,8 +97,23 @@ describe("README.md against the implementation", () => {
   });
 
   it("states the real anonymous count", () => {
-    const claimed = readme.match(/Nine are anonymous/i) ? 9 : null;
-    expect(claimed, "README.md no longer states the anonymous count as a word").not.toBeNull();
+    // Any number word, not the one that happened to be right when this was
+    // written. The previous form matched the literal "Nine", so adding a
+    // tenth anonymous procedure made this fail with "expected 9 to be 10"
+    // while the README already said "Ten" -- the gate was asserting against
+    // its own stale copy of the answer rather than against the prose.
+    const WORDS = [
+      "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+      "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+      "seventeen", "eighteen", "nineteen", "twenty",
+    ];
+    const word = readme.match(/(\w+) are anonymous/i)?.[1]?.toLowerCase();
+    const claimed = word ? WORDS.indexOf(word) : -1;
+    expect(
+      claimed,
+      `README.md states the anonymous count as "${word}", which is not a number word this ` +
+        "test knows; write it as a word between zero and twenty",
+    ).toBeGreaterThanOrEqual(0);
     const actual = (config.match(/"rpc:[^"]+":\s*\{[^}]*auth:\s*"anon"/g) ?? []).length;
     expect(claimed).toBe(actual);
   });

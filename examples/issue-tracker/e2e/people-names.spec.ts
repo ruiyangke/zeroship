@@ -33,7 +33,8 @@ test("the bug page names people rather than printing their ids", async ({
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { name: `People ${RUN}`, description: "people" });
+  const product = await rpc("products.create", { key: `PEOP${String(Date.now()).slice(-5)}`,
+    name: `People ${RUN}`, description: "people" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",

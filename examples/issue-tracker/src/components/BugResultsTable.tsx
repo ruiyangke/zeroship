@@ -32,36 +32,25 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
 ];
 
 /**
- * A bug id short enough for a table cell and still unique.
+ * The identifier a person reads: PARSER-12.
  *
- * Takes the END of the body, not the start. A typed_id is a UUIDv7 in base62,
- * and UUIDv7 is time-ordered: the leading characters encode the timestamp, so
- * every id minted in the same window shares them. Keeping the first six kept
- * exactly the half that is identical across rows and threw away the random
- * half -- measured against the dev database, 61 bugs rendered as 11 distinct
- * ids, so 50 of them shared a displayed id with another bug. Bugs filed
- * seconds apart, which is what a test run or an import produces, collided
- * every time.
+ * This replaced a truncated UUID. That form took the FIRST six characters of
+ * the id body, and a typed_id is a time-ordered UUIDv7 in base62, so the
+ * leading characters encode the timestamp: measured against the dev database,
+ * 61 bugs rendered as 11 distinct strings. Taking the tail instead made them
+ * unique but not meaningful -- `bug_...4ewAeC` is no more quotable than the
+ * whole thing.
  *
- * That makes the id column worse than absent in the one job it has: you cannot
- * tell two rows apart, quote one to a colleague, or match a row against a
- * screenshot. `title` carries the full id, but hover does not survive reading,
- * copying or printing.
+ * A per-product sequence is both. It is short, ordered, sayable out loud, and
+ * survives being copied into a commit message, which is the actual job of the
+ * column.
  *
- * The leading ellipsis is deliberate. The detail page shows the id in full, so
- * a silently shortened form that looks whole would not match it.
- *
- * Six base62 characters is 62^6, or 35.7 bits. That is not a uniqueness
- * guarantee, and the number worth knowing is the onset rather than the median:
- * by the birthday bound some pair collides with 1% probability at ~34,000 bugs
- * and 50% at ~281,000. Thirty-four thousand is an ordinary size for a tracker,
- * so treat this as "short enough to read, unique enough to scan" and not as an
- * identifier. The anchor carries the full id for that reason.
+ * Falls back to the UUID when the product key has not resolved yet, rather
+ * than rendering a bare number: "12" on its own belongs to no product.
  */
-export function shortId(id: string): string {
-  const parts = id.split("_");
-  if (parts.length < 2 || parts[1].length <= 6) return id;
-  return `${parts[0]}_...${parts[1].slice(-6)}`;
+function bugLabel(bug: Bug, productKeysById: Record<string, string>): string {
+  const key = productKeysById[bug.productId];
+  return key ? `${key}-${bug.number}` : bug.id;
 }
 
 function formatDate(ms: number): string {
@@ -90,7 +79,7 @@ export function BugResultsTable({
   // nothing failing. Making them required only moved the problem: the pages
   // call the hook where the rows are not loaded yet. The table is the one
   // place that always knows which ids are on screen.
-  const { productsById, usersById } = useBugLookups(bugs);
+  const { productsById, productKeysById, usersById } = useBugLookups(bugs);
   return (
     <div className="table-wrap">
       <table className="bug-table">
@@ -108,7 +97,7 @@ export function BugResultsTable({
                 <td key={key} data-col={key}>
                   {key === "id" && (
                     <a href={`#/bugs/${bug.id}`} className="bug-link" title={bug.id}>
-                      {shortId(bug.id)}
+                      {bugLabel(bug, productKeysById)}
                     </a>
                   )}
                   {key === "status" &&

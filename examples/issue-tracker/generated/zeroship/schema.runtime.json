@@ -675,6 +675,10 @@
         "alias": {
           "type": "string"
         },
+        "number": {
+          "type": "int",
+          "required": true
+        },
         "summary": {
           "type": "string",
           "required": true
@@ -777,6 +781,14 @@
           "fields": [
             "productId"
           ]
+        },
+        {
+          "name": "bugs_product_number_uniq",
+          "fields": [
+            "productId",
+            "number"
+          ],
+          "unique": true
         },
         {
           "name": "bugs_component_idx",
@@ -1788,6 +1800,11 @@
           "required": true,
           "unique": true
         },
+        "key": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
         "description": {
           "type": "string"
         },
@@ -1835,6 +1852,13 @@
           "name": "products_name_key",
           "fields": [
             "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "products_key_key",
+          "fields": [
+            "key"
           ],
           "unique": true
         },

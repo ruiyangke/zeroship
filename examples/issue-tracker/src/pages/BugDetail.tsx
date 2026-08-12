@@ -59,7 +59,12 @@ export function BugDetailPage({ id }: { id: string }) {
     <div className="page bug-detail-page">
       <div className="page-head">
         <h1>
-          <span className="bug-id">{detail.bug.id}</span> {detail.bug.summary}
+          {/* The key, not the UUID. This heading is what a person copies into
+              a commit message or reads out in a standup. */}
+          <span className="bug-id">
+            {detail.product ? `${detail.product.key}-${detail.bug.number}` : detail.bug.id}
+          </span>{" "}
+          {detail.bug.summary}
         </h1>
       </div>
 

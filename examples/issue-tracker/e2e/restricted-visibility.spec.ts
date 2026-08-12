@@ -49,7 +49,8 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   // the administrator, and an administrator bypasses group restrictions
   // outright (`canViewBug`). If Bob provisioned first he would see the bug
   // after the restriction and this spec would fail while the app was right.
-  const product = await rpc("products.create", { name: `Vis ${RUN}`, description: "visibility" });
+  const product = await rpc("products.create", { key: `VIS${String(Date.now()).slice(-5)}`,
+    name: `Vis ${RUN}`, description: "visibility" });
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",
