@@ -36,9 +36,12 @@
 # one, which is owned by other work and would make this gate a change detector.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
-#   - NOTHING past the argument and credential handling of either script. No
-#     ssh, no port-forward, no docker build/push/roll, no backup, no rollback,
-#     no probe. Those need a host and are not faked here.
+#   - deploy-app.sh past its argument and credential handling. No ssh, no
+#     port-forward, no upload. Those need a host and are not faked here.
+#   - deploy-remote.sh's DEPLOY path: docker build/push, the config sync, the
+#     secret provisioning, the render, the roll and the probe. Only --rollback
+#     is driven, and only through a stub ssh (see that section for exactly
+#     what a stub proves and what it cannot).
 #   - deploy-app.sh's tunnel teardown, the ControlMaster=no/ControlPath=none
 #     pairing that makes the PID real, and the `kill -0` liveness poll. That
 #     was measured by hand with `ss -tlnp` and has no coverage here.
@@ -332,15 +335,177 @@ else
   fail "sourcing produced rc=$SRC_RC output [$SRC_OUT]; main() ran or something else escaped the guard"
 fi
 
+# ============================================================================
+# --rollback, driven through a STUB ssh
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. --rollback had never been executed, by anyone, in
+# any form. It is the thing you reach for during an outage, and it ends in
+# `docker compose up -d` on a live stack, so a defect in it is not a failed
+# test, it is a failed recovery.
+#
+# HOW IT IS REACHED WITHOUT A HOST. A stub `ssh` earlier on PATH records every
+# command the script sends AND runs the remote body locally with `bash -c`,
+# with the script pointed at a sandbox directory via --remote-dir. `docker`,
+# `scp` and `openssl` are stubbed to record-and-succeed. So two different
+# things are under test at once, and they must not be confused:
+#
+#   - the COMMAND STREAM (what the script decided to send). This is real
+#     evidence about the script's control flow.
+#   - the remote body's own LOGIC (which backup it picks, what it copies),
+#     executed here against seeded files. Real evidence about the snippet,
+#     under THIS machine's bash and GNU coreutils.
+#
+# WHAT NONE OF IT PROVES: that a real host does the right thing with the
+# stream. ssh transport, the remote login shell, remote `docker compose`,
+# whether the stack actually comes back up, and every quoting hazard that only
+# appears when the body crosses ssh's own shell are all untested here and
+# cannot be tested without a host.
+echo ""
+echo "-- --rollback (stub ssh; the remote body is executed locally)"
+
+STUB="$FIX/stub"; mkdir -p "$STUB"
+
+cat >"$STUB/ssh" <<'STUBEOF'
+#!/usr/bin/env bash
+# Record the command, then run it locally. Options come as `-o X=Y` pairs, so
+# drop pairs, then the host, and the single remaining argument is the body.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *)  break ;;
+  esac
+done
+host="$1"; shift
+{ printf '### ssh %s\n' "$host"; printf '%s\n' "$*"; } >>"$ZS_GATE_CAPTURE"
+bash -c "$*"
+STUBEOF
+
+for prog in docker scp; do
+  cat >"$STUB/$prog" <<STUBEOF
+#!/usr/bin/env bash
+printf '### %s %s\n' "$prog" "\$*" >>"\$ZS_GATE_CAPTURE"
+exit 0
+STUBEOF
+done
+# Must print something: the real call is \$(openssl rand -hex 32).
+cat >"$STUB/openssl" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '### openssl %s\n' "$*" >>"$ZS_GATE_CAPTURE"
+echo deadbeef
+STUBEOF
+chmod +x "$STUB"/*
+
+# The three files the rollback contract names, and two backup generations of
+# each. GEN2 has the LATER stamp in its name and the EARLIER mtime; GEN1 the
+# reverse. That inversion is the whole point of the fixture: without it, a
+# selector that reads mtime and a selector that reads the stamp agree, and
+# "restored GEN2" would prove nothing about which one the script used.
+#
+# The inversion is not hypothetical. `cp -a` preserves mtime, so a backup
+# carries the mtime of the file's LAST CONTENT CHANGE, not the moment the
+# backup was taken. Anything that puts an older mtime back on the live file --
+# this script's own rollback, an operator's `cp -p`, `rsync -a` or `tar -xp`
+# from an archive, all normal outage moves -- makes the next backup's mtime
+# older than an earlier backup's.
+ROLL_FILES="compose/.env compose/docker-compose.yml ops/Caddyfile"
+seed_sandbox() { # $1 dir, $2 body of the current (post-deploy) files
+  local d="$1" body="$2" f
+  mkdir -p "$d/compose" "$d/ops"
+  for f in $ROLL_FILES; do
+    printf '%s\n' "$body" >"$d/$f"
+    printf 'GEN1\n' >"$d/$f.bak.20260101000000"
+    printf 'GEN2\n' >"$d/$f.bak.20260812010101"
+    touch -d '2026-08-20 00:00:00' "$d/$f.bak.20260101000000"   # oldest stamp, NEWEST mtime
+    touch -d '2026-01-01 00:00:00' "$d/$f.bak.20260812010101"   # newest stamp, OLDEST mtime
+  done
+}
+
+CAP_N=0
+run_rollback() { # $1 sandbox, rest: extra argv. Sets ROLL_RC and CAP.
+  CAP_N=$((CAP_N+1))
+  CAP="$FIX/capture.$CAP_N"
+  : >"$CAP"
+  local sb="$1"; shift
+  ROLL_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" \
+    "$REMOTE" --host fakehost --remote-dir "$sb" --rollback "$@" 2>&1)"
+  ROLL_RC=$?
+}
+
+# The scanner. `seen` is asserted BOTH ways below so that "not seen" is a
+# statement about the stream and not about a scanner that never matches.
+seen() { grep -qF -- "$2" "$1"; }
+
+SB="$FIX/sb_main"; seed_sandbox "$SB" CURRENT
+run_rollback "$SB"
+
+[ "$ROLL_RC" = 0 ] \
+  && pass "--rollback exits 0" \
+  || fail "--rollback exited $ROLL_RC; output: $ROLL_OUT"
+
+seen "$CAP" 'docker compose up -d --remove-orphans' \
+  && pass "--rollback restarts the whole stack (docker compose up -d --remove-orphans)" \
+  || fail "--rollback never reached 'docker compose up -d --remove-orphans'; it restored files and left the stack on the old ones"
+
+# THE SHORT-CIRCUIT. This is what makes --rollback safe to run in a panic: it
+# must not build, must not push, must not overwrite host config, and must not
+# provision anything.
+for tok in 'docker build' 'docker push' '### scp' '### openssl' 'ZEROSHIP_IMAGE=' 'docker compose config'; do
+  seen "$CAP" "$tok" \
+    && fail "--rollback reached '$tok'; it is not a short-circuit and is not safe to run blind" \
+    || pass "--rollback never reaches '$tok'"
+done
+
+# CONTROL for the six negatives above. Without it, a scanner that matches
+# nothing would report all six as clean.
+printf 'docker build --target runtime\ndocker push x\n### scp a b\n### openssl rand -hex 32\nZEROSHIP_IMAGE=x\ndocker compose config -q\n' >"$FIX/synthetic"
+ctl_missed=""
+for tok in 'docker build' 'docker push' '### scp' '### openssl' 'ZEROSHIP_IMAGE=' 'docker compose config'; do
+  seen "$FIX/synthetic" "$tok" || ctl_missed="$ctl_missed [$tok]"
+done
+[ -z "$ctl_missed" ] \
+  && pass "CONTROL: the scanner finds all six forbidden commands in a capture that contains them" \
+  || fail "CONTROL: the scanner missed$ctl_missed in a capture that contains them; the six negatives above prove nothing"
+
+# --------------------------------------------------------- argument contract
+run_case "--rollback still requires --host" \
+  2 "--host is required" env PATH="$STUB:$PATH" ZS_GATE_CAPTURE=/dev/null "$REMOTE" --rollback
+
+case "$ROLL_OUT" in
+  *"--registry is required"*) fail "--rollback demanded --registry; there is nothing to build" ;;
+  *) pass "--rollback does not require --registry" ;;
+esac
+
+# A --registry that IS supplied must not switch the build back on, and the
+# host .env here carries every variable the shipped compose needs, so nothing
+# EARLIER than the build would stop a fall-through.
+SB_REG="$FIX/sb_registry"; seed_sandbox "$SB_REG" CURRENT
+compose_vars '' "$REAL_COMPOSE" | sed 's/$/=x/' >"$SB_REG/compose/.env"
+cp -a "$SB_REG/compose/.env" "$SB_REG/compose/.env.bak.20260812010101"
+run_rollback "$SB_REG" --registry ghcr.io/example/zeroship-platform
+if [ "$ROLL_RC" = 0 ] \
+   && ! seen "$CAP" 'docker build' && ! seen "$CAP" 'docker push' && ! seen "$CAP" '### scp'; then
+  pass "--rollback with --registry supplied and a fully populated host .env still builds, pushes and syncs nothing"
+else
+  fail "--rollback with --registry exited $ROLL_RC and/or reached the build path"
+fi
+
+# ------------------------------------------------------ preflight still runs
+run_rollback "$FIX/no_such_dir"
+[ "$ROLL_RC" != 0 ] && [[ "$ROLL_OUT" == *"does not exist on"* ]] \
+  && pass "--rollback runs preflight first and refuses a remote dir that is not there" \
+  || fail "--rollback did not preflight the remote dir (rc=$ROLL_RC): $ROLL_OUT"
+
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an
 # outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
 # real-compose block is conditional and deliberately NOT counted in the floor.
-# MEASURED 2026-08-12: 29 unconditional assertions (30 ran with the shipped
+# MEASURED 2026-08-12: 42 unconditional assertions (43 ran with the shipped
 # compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-29}"
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-42}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
