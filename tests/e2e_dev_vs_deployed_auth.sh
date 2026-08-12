@@ -37,9 +37,21 @@
 # 48 total. See `probe()`.
 #
 # EXPECTED RESULT TODAY: RED, 20 of 48 rows divergent (28 identical). MEASURED
-# TWICE on 2026-08-11: both runs `22 passed, 1 failed`, both `20 of 48`, and the
-# 40 diff lines byte-identical between runs after normalising the app UUID -
-# stable, not flake.
+# THREE TIMES on 2026-08-11: every run `22 passed, 1 failed` and `20 of 48`, and
+# the 40 diff lines byte-identical between the first two after normalising the
+# app UUID - stable, not flake.
+#
+# THE 20 IS NOT PROSE. It is the default of `AUTH_EXPECTED_DIVERGENT` in the
+# classifier at the foot of this file, which exits 0 ONLY on exactly that count
+# and exits 1 in BOTH directions - on a new divergence AND on a count that has
+# SHRUNK without this header being updated.
+#
+# BE PRECISE ABOUT WHAT THAT PROTECTS, because it is asymmetric: the classifier
+# guards the CODE's number against the world. It does not guard this header
+# against the code. Change the default below and leave this paragraph alone and
+# nothing fails - the drift that is caught is behaviour-vs-expectation, not
+# comment-vs-constant. The 27 -> 20 rot this file already suffered was of the
+# caught kind; a stale sentence up here is still on the reader.
 #
 # THIS NUMBER WAS 27 UNTIL 2026-08-11 and this header said so. Seven rows became
 # identical. WHICH fixes closed them is NOT established here: I measured the
@@ -561,6 +573,7 @@ if diff -q "$WORK/dev.txt" "$WORK/deployed.txt" >/dev/null 2>&1; then
   pass "dev and deployed agree on every probed auth operation"
 else
   n=$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep -c '^<')
+  DIVERGENT_ROWS="$n"
   fail "dev and deployed DIVERGE on $n of $(wc -l < "$WORK/dev.txt") rows (< dev, > deployed)"
   diff "$WORK/dev.txt" "$WORK/deployed.txt"
   echo ""
@@ -645,4 +658,73 @@ if [ "$PASS" -lt "$AUTH_MIN_PASSED" ]; then
   echo "      shortfall means the comparison ran against less than it claims." >&2
   exit 1
 fi
-[ "$FAIL" -eq 0 ]
+# ---------------------------------------------------------------------------
+# TWO-SIDED CLASSIFIER (#340 item b). Same shape as the #199 probe's block at
+# 414b8476c, and it exists for the same reason: this harness is RED AT HEAD by
+# design, so a raw `[ "$FAIL" -eq 0 ]` makes it unwireable. Wired raw it would
+# paint its job permanently red and hide the next real regression inside a
+# failure everyone learns to skip; wired with `continue-on-error` it would
+# report nothing at all.
+#
+# It exits 0 ONLY on the exact documented state, and exits 1 in BOTH directions:
+#
+#   divergent == AUTH_EXPECTED_DIVERGENT  and FAIL == 1  -> 0, the known red
+#   divergent >  AUTH_EXPECTED_DIVERGENT              -> 1, a NEW divergence
+#   divergent <  AUTH_EXPECTED_DIVERGENT              -> 1, STALE expectation:
+#       rows were FIXED and this number was not updated. That arm matters more
+#       than it looks - the count already drifted 27 -> 20 once (f67834232) with
+#       nobody noticing, because a shrinking divergence looks like good news and
+#       nothing was watching for it.
+#   FAIL > 1                                          -> 1, something OTHER than
+#       the row-diff failed (the self-diff guard, the floor, a setup step), so
+#       the comparison is no longer measuring what the count claims.
+#
+# WHAT IT DOES NOT DO: it counts rows, not identities. Twenty divergences that
+# are a DIFFERENT twenty would still exit 0. Pinning the row set needs the
+# per-row verdict table in docs/pilot/e2e-scenarios.md scenario 6 to become
+# machine-readable, which it is not today. Stated so the exit code is not read
+# as more than it is.
+AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT:-20}"
+if [ "${MUTATE:-none}" != "none" ]; then
+  # The documented control moves the count to 17; see the header. Do not
+  # classify a mutated run against the unmutated expectation.
+  AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT_MUTATED:-17}"
+fi
+DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
+if [ "$FAIL" -eq 0 ] && [ "$DIVERGENT_ROWS" -eq 0 ] && [ "$AUTH_EXPECTED_DIVERGENT" -eq 0 ]; then
+  exit 0
+fi
+if [ "$FAIL" -gt 1 ]; then
+  echo "" >&2
+  echo "CLASSIFIER: $FAIL failures, but only the dev-vs-deployed row diff is expected." >&2
+  echo "  Something else failed too - grep the output above for lines starting" >&2
+  echo "  '  FAIL '. The divergence count is NOT trustworthy when the" >&2
+  echo "  comparison's own guards are red." >&2
+  exit 1
+fi
+if [ "$DIVERGENT_ROWS" -ne "$AUTH_EXPECTED_DIVERGENT" ]; then
+  echo "" >&2
+  if [ "$DIVERGENT_ROWS" -gt "$AUTH_EXPECTED_DIVERGENT" ]; then
+    echo "CLASSIFIER: REGRESSION. $DIVERGENT_ROWS divergent rows, expected $AUTH_EXPECTED_DIVERGENT." >&2
+    echo "  dev and deployed disagree on MORE of the auth contract than they did." >&2
+    echo "  The new rows are in the diff above; find them before changing this number." >&2
+  else
+    echo "CLASSIFIER: STALE EXPECTATION. $DIVERGENT_ROWS divergent rows, expected $AUTH_EXPECTED_DIVERGENT." >&2
+    echo "  Rows were FIXED and nobody updated the count. This is good news failing" >&2
+    echo "  loudly on purpose: set AUTH_EXPECTED_DIVERGENT=$DIVERGENT_ROWS here and in" >&2
+    echo "  the header, and record WHICH rows closed in docs/pilot/e2e-scenarios.md" >&2
+    echo "  scenario 6 - the last drift (27 -> 20) went unattributed and still is." >&2
+  fi
+  exit 1
+fi
+echo "" >&2
+# Total rows read back rather than hardcoded: a literal here would go stale the
+# first time a probe row is added, and would then claim a denominator the diff
+# never used.
+AUTH_TOTAL_ROWS="$(wc -l < "$WORK/dev.txt" 2>/dev/null || echo '?')"
+echo "CLASSIFIER: exit 0 on the documented red - $DIVERGENT_ROWS of $AUTH_TOTAL_ROWS divergent," >&2
+echo "  which is the KNOWN dev-vs-deployed auth contract gap, not a passing" >&2
+echo "  comparison. Scenario 6 in docs/pilot/e2e-scenarios.md has the row-by-row" >&2
+echo "  verdicts, including which divergences are deliberate and which are" >&2
+echo "  defects (two of the defects are on the DEPLOYED side)." >&2
+exit 0
