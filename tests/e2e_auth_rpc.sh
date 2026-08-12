@@ -20,8 +20,27 @@
 # What it asserts (app = auth-notes, all RPCs are SEC-5 `auth: user`):
 #   - anon  GET /__zeroship/v1/auth.whoami    → 401 UNAUTHENTICATED (gateway gate)
 #   - authed (session cookie) auth.whoami      → 200, env.auth.getUser() == our user
+#   - anon  auth.whoamiStrict                  → 401
+#   - authed auth.whoamiStrict                 → 200, env.auth.requireUser() == our user
 #   - anon  auth.notes.list                    → 401
-#   - authed auth.notes.list                   → 200
+#
+# WHAT IT DOES NOT ASSERT, and why this list was wrong until 2026-08-12: the
+# fourth line used to read "authed auth.notes.list → 200". There is no such
+# assertion and there never was - see the comment at the notes.list call below,
+# which states the reason. `tests/lib/e2e_stack.sh` starts NO Redis and passes
+# NO `--kv-url` (grep: zero hits), so an authed kv-backed read would fail for a
+# reason that has nothing to do with the seam under test. The omission is
+# correct; the header was not. This list also omitted the two `whoamiStrict`
+# arms it does run, so it was wrong in both directions.
+#
+# WHAT THAT COSTS, stated so nobody has to re-derive it: `whoami` and
+# `whoamiStrict` are ECHO procedures - they report identity and touch nothing.
+# So this harness proves the gateway delivers identity to a procedure that only
+# REPORTS it, and not to one that USES it to scope data. The scoped-data case is
+# covered a tier down by `e2e_app_primitives_auth.sh` (authed notes.list over
+# /dispatch, with a cross-user isolation check), which runs its own Redis. What
+# no harness covers today is scoped-data-through-the-GATEWAY; closing that needs
+# a kv backend in the shared stack, not a new assertion here.
 #
 # Needs a release build + examples/auth-notes/dist/app.zship.
 #   ./tests/e2e_auth_rpc.sh
