@@ -1177,6 +1177,32 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
+      # env.auth. This harness existed and ran in NO workflow until 2026-08-12.
+      # Unlike storage and workflows below, whose exclusions are measured and
+      # written down, nothing recorded a reason for this one - so it was an
+      # omission, not a decision.
+      #
+      # WIRED ONLY AFTER MEASURING THAT IT CAN BE. Run at HEAD on this tree:
+      # 22 passed, 1 failed, against its own AUTH_MIN_PASSED floor of 22. The
+      # single red is the KNOWN dev-vs-deployed auth contract gap (20 of 48 rows
+      # divergent, matching the number recorded when that gap was measured), and
+      # the script CLASSIFIES it: `exit 0` on that documented shape, `exit 1` on
+      # anything else. So it is green here by design and goes red the moment the
+      # divergence set changes - which is the whole point of wiring it.
+      #
+      # Its sibling tests/e2e_dev_vs_deployed_login.sh is still NOT wired, and
+      # that IS now a decision: it has no classifier and no floor, so at HEAD it
+      # exits 1 on a divergence scenario 6 already documents. Wiring it green
+      # would be the hollow-arm shape this file refuses elsewhere. It needs the
+      # classifier treatment this one already has first.
+      - name: env.auth (dev provider vs deployed gateway identity)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_vs_deployed_auth.sh 2>&1 | tee "$RUNNER_TEMP/dvd-auth.log"
+        env:
+          ZS_FRESHNESS_STRICT: 1
+          PG_CONTAINER: compose-postgres-1
+          PG_USER: postgres
       # tests/e2e_dev_vs_deployed_storage.sh IS NOT WIRED HERE, and the reason is
       # a measurement rather than a suspicion. It carries a floor of 53 and scores
       # 54/0 on an idle machine - but its deployed 1 MiB chunked streamGet dies on
