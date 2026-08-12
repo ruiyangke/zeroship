@@ -40,7 +40,6 @@ fn test_config(public_url: &str) -> AuthConfig {
         "127.0.0.1:0",
         "--db-url",
         "postgres://unused",
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
         "--public-url",

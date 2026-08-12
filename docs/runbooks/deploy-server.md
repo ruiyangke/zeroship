@@ -215,8 +215,9 @@ PAIRWISE_SALT=<openssl rand -hex 32>
 `zeroship dev init` already added these generated values to the same file:
 
 `ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
-`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
-`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+`GATEWAY_OIDC_SECRET` `MIGRATED_POLICY_SEAL_KEY` `STASH_SIGNING_KEY`
+`STRIPE_WEBHOOK_SECRET` `PAIRWISE_SALT` `AUTH_STASH_SIGNING_KEY`
+`AUTH_TOTP_ENC_KEY`
 
 Do not replace them with shared examples or per-service values. In particular,
 one `ZEROSHIP_CONTROL_KEY` now supplies control, gateway, worker, migrated, and
@@ -224,16 +225,11 @@ auth together. `chmod 600 .env`; the generator applies that mode on Unix too.
 
 ### Control plane access
 
-The base compose file does not publish control. `deploy/ops/Caddyfile` contains
-a fully commented `control.<domain>` route, but it must stay disabled while
-control still runs with `--dev-insecure` and the stack still uses the hardcoded
-`platform-key`. Enabling it now would put relaxed control-plane auth and a known
-credential on the public edge.
-
-On an internet-facing host that is not acceptable as-is. The generated control
-key removes the shipped weak literal, but it does not make a directly published
-control plane an appropriate public entry point. Bind it to loopback with a
-**server-only** override, so the upstream gate keeps telling the truth:
+The base compose file does not publish a raw control port.
+`deploy/ops/Caddyfile` exposes `control.<domain>` through the edge so CLI deploys
+can reach it; every protected route still requires the generated control-key or
+creator authentication. If an operator also needs a raw port for an SSH tunnel,
+bind it to loopback with a **server-only** override:
 
 ```yaml
 # /opt/zeroship-deploy/compose/docker-compose.override.yml
@@ -402,15 +398,11 @@ pull, so use a read-only token there, not the `write:packages` one used to push.
 
 ## Security posture
 
-The compose file still carries local-development behavior beyond secret
-provisioning. Before treating any of this as production:
+The service binaries apply the same authentication, signature, cookie, and
+secret-strength checks in compose as in every other deployment. Local setup
+differs only in how `zeroship dev init` provisions strong, stable inputs.
 
-- `--dev-insecure` on control, gateway and auth relaxes admin and internal auth.
-- `zeroship dev init` supplies strong, stable local inputs, but this step does
-  not remove the remaining `--dev-insecure` behavior.
-- Caddy speaks plain HTTP; TLS lives entirely in Cloudflare, so the origin is
-  only as private as its IP. Anything that reaches the host directly on `:80`
-  skips TLS.
-
-Generated secrets solve secret provisioning and restart stability. They do not
-replace network isolation or the later removal of `--dev-insecure`.
+Caddy still speaks plain HTTP in this topology because TLS terminates at
+Cloudflare. The origin is therefore only as private as its IP; anything that
+reaches the host directly on `:80` skips TLS. Generated secrets do not replace
+origin-network isolation.

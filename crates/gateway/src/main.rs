@@ -10,9 +10,9 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_origin_scheme,
+    bootstrap_or_exit, parse_bool_flag, require_nonempty, resolve_origin_scheme,
     resolve_trusted_origins, validate_stash_key, CheckConfigReport, CheckFormat, CheckValue,
-    OriginScheme, TrustedOrigin, DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
+    OriginScheme, TrustedOrigin,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
@@ -171,18 +171,6 @@ struct GateCli {
     #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
     pairwise_salt_file: String,
 
-    /// Allow explicitly insecure local development startup.
-    /// CLI presence overrides the env var, so `--dev-insecure=false`
-    /// disables a stray `ZEROSHIP_DEV_INSECURE=1`.
-    #[arg(
-        long = "dev-insecure",
-        env = "ZEROSHIP_DEV_INSECURE",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    dev_insecure: Option<bool>,
-
     /// Trust `X-Forwarded-For` from an upstream proxy. CLI presence
     /// overrides the env var.
     #[arg(
@@ -235,8 +223,8 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
 ///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ the
 ///      config-overlay reference).
 ///
-/// A configured-but-unreadable file is fatal (a misconfigured prod salt must
-/// fail loudly, not silently fall through to the dev default).
+/// A configured-but-unreadable file is fatal; a misconfigured salt must fail
+/// loudly rather than silently falling through to another input tier.
 fn resolve_pairwise_salt(
     salt_file: &str,
     salt_value: &str,
@@ -307,7 +295,6 @@ fn main() -> std::io::Result<()> {
     let trusted_origins =
         resolve_trusted_origins(cli.trusted_origins, file.trusted_origins.clone());
 
-    let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let port = cli.port;
     let bind_host = cli.bind;
@@ -390,9 +377,7 @@ fn main() -> std::io::Result<()> {
     let broker_secret_path = cli.gateway_broker_secret_file;
     let public_url = cli.gateway_public_url;
 
-    if let Err(message) =
-        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
-    {
+    if let Err(message) = require_nonempty("CONTROL_KEY / --control-key", &control_key) {
         tracing::error!(error = %message, "gateway: refusing to start without control key");
         std::process::exit(1);
     }
@@ -405,61 +390,33 @@ fn main() -> std::io::Result<()> {
     // format-validated it above); a reference's text is not the secret, so
     // running a strength check on it would wrongly fail — skip it then.
     if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
-        if let Err(message) = validate_stash_key(&stash_signing_key, insecure_dev) {
+        if let Err(message) = validate_stash_key(&stash_signing_key) {
             tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
             std::process::exit(1);
         }
     }
-    // Capture this BEFORE the dev default is substituted below: once the
-    // fallback is in place the local is non-empty and the fact that the
-    // operator supplied nothing is no longer recoverable. The bind guard
-    // further down needs it, because a gateway running on `DEV_STASH_SIGNING_KEY`
-    // signs sessions with a constant published in this source tree.
-    let stash_key_is_dev_default = stash_signing_key.is_empty();
-    let stash_signing_key = if stash_signing_key.is_empty() {
-        DEV_STASH_SIGNING_KEY.to_string()
-    } else {
-        stash_signing_key
-    };
 
     // STRENGTH guard for the dedicated pairwise-salt secret. Same posture as
     // the stash key: skip the strength check when `--check-config` still holds a
-    // raw secret reference (its text is not the secret). Outside dev a missing /
-    // weak / dev-default salt aborts boot — the per-app `pws_` anchor must be a
-    // strong, stable, operator-set secret.
+    // raw secret reference (its text is not the secret). A missing or weak salt
+    // aborts boot: the per-app `pws_` anchor must be a strong, stable,
+    // operator-set secret.
     if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
-        if let Err(message) =
-            zeroship_core::config::validate_pairwise_salt(&pairwise_salt, insecure_dev)
-        {
+        if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
             tracing::error!(error = %message, "gateway: refusing to start with unsafe pairwise salt");
             std::process::exit(1);
         }
     }
-    // Keep the operator-supplied `pairwise_salt` String intact (the check-config
-    // report reads it pre-dev-default); derive the effective secret separately.
-    let pairwise_salt_secret = if pairwise_salt.is_empty() {
-        DEV_PAIRWISE_SALT.to_string()
-    } else {
-        pairwise_salt.clone()
-    };
+    let pairwise_salt_secret = pairwise_salt.clone();
 
     // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
     // non-loopback bind without a key; the gateway is the caller of those
     // worker admin endpoints, so it must fail just as hard rather than
     // shipping `Authorization: Bearer ` (empty) into a cluster that
     // believes dispatch is authenticated.
-    if let Err(message) =
-        require_unless_dev("WORKER_KEY / --worker-key", &worker_key, insecure_dev)
-    {
+    if let Err(message) = require_nonempty("WORKER_KEY / --worker-key", &worker_key) {
         tracing::error!(error = %message, "gateway: refusing to start without worker key");
         std::process::exit(1);
-    }
-
-    // Recorded here because both keys are consumed before the bind guard below,
-    // which needs to know whether `--dev-insecure` actually waived anything.
-    let control_key_unset = control_key.is_empty();
-    let worker_key_unset = worker_key.is_empty();
-    {
     }
 
     // Load the gateway's session-cookie signing key. The flag is optional:
@@ -555,7 +512,6 @@ fn main() -> std::io::Result<()> {
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
-        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
         report.field("blob_store", CheckValue::Plain(blob_store_root));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
@@ -585,9 +541,7 @@ fn main() -> std::io::Result<()> {
             "gateway_broker_secret_file_configured",
             CheckValue::Secret(!broker_secret_path.is_empty()),
         );
-        // Report whether the OPERATOR explicitly supplied a salt (pre-dev-
-        // default), matching control — so a dev run with no salt reads "(unset)"
-        // rather than masking the missing config behind the dev default.
+        // Report whether the operator supplied a salt without revealing it.
         report.field(
             "pairwise_salt_configured",
             CheckValue::Secret(!pairwise_salt.is_empty()),
@@ -732,7 +686,6 @@ fn main() -> std::io::Result<()> {
             auth_ui_url,
             origin_scheme,
             trusted_origins,
-            insecure_dev,
             trust_proxy,
             public_url,
         },
@@ -816,54 +769,6 @@ fn main() -> std::io::Result<()> {
                 "gateway usage outbox could not be built (wal={}): {error}",
                 gate_wal.as_str()
             )));
-        }
-    }
-    if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
-        // `--dev-insecure` waives the control key, worker key, stash signing key
-        // and pairwise salt. Whether that is survivable on a network depends on
-        // whether the waiver was actually USED: with real secrets supplied this
-        // is a deliberate private-network deployment (what deploy/compose does),
-        // but with the waiver taken the gateway signs sessions with constants
-        // published in this source tree, so anyone can mint a session for any
-        // user. That is not a warning-level condition, so refuse it - matching
-        // the worker, which already refuses a non-loopback bind without a key.
-        //
-        // WHAT THIS CHECK DOES NOT COVER, stated because it is the only
-        // bind-safety check here and reads as though it vets the bind in
-        // general: it is scoped to WAIVED SECRETS. It cannot fire when
-        // `insecure_dev` is false, so a fully-configured deployment that sets
-        // every key and binds 0.0.0.0 passes it silently - and that deployment
-        // still exposes `/__zeroship/internal/workflow-advance`, which is
-        // registered on this one bound server and gated only by
-        // `extract_app_name(..).is_some()` (router/dispatch.rs), i.e. served to
-        // any caller whose Host does not resolve to an app. There is no
-        // signature on it yet; see the TODO(DW-signed-transport) at that site.
-        // No key check can cover that route, because its exposure is not tied
-        // to a key. Tracked as tasks #186/#199.
-        let waived: Vec<&str> = [
-            ("CONTROL_KEY", control_key_unset),
-            ("WORKER_KEY", worker_key_unset),
-            ("stash signing key", stash_key_is_dev_default),
-            ("pairwise salt", pairwise_salt.is_empty()),
-        ]
-        .into_iter()
-        .filter_map(|(name, missing)| missing.then_some(name))
-        .collect();
-
-        if waived.is_empty() {
-            tracing::warn!(
-                bind = %bind_addr,
-                "gateway: binding a non-loopback address under --dev-insecure on an untrusted \
-                 network is unsafe"
-            );
-        } else {
-            tracing::error!(
-                bind = %bind_addr,
-                unset = %waived.join(", "),
-                "gateway: refusing to bind non-loopback under --dev-insecure with dev-default \
-                 secrets - sessions would be signed with keys published in this source tree"
-            );
-            std::process::exit(1);
         }
     }
     tracing::info!(bind = %bind_addr, "gateway listening");
@@ -965,7 +870,7 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
         match old {
@@ -976,7 +881,7 @@ mod tests {
 
     #[test]
     fn topology_cli_overrides_environment_and_environment_overrides_file() {
-        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let _guard = CLI_ENV_LOCK.lock().expect("env lock");
         let old_scheme = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
         let old_origins = std::env::var_os("ZEROSHIP_TRUSTED_ORIGINS");
         std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
@@ -1022,45 +927,35 @@ mod tests {
         restore_env_var("ZEROSHIP_TRUSTED_ORIGINS", old_origins);
     }
 
-    // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
-    // overridable from the CLI. `--dev-insecure=false` resolves to false.
-    // NB: `GateCli` deliberately has no `Debug` (S2 — it holds raw secret
-    // strings), so we can't `.expect()` the Ok arm; match instead.
     #[test]
-    fn dev_insecure_cli_false_overrides_env_one() {
-        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-        let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure=false"]);
-        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
-
-        let Ok(cli) = parsed else {
-            panic!("parse with explicit false should succeed");
+    fn deleted_security_relaxation_flag_is_rejected() {
+        let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure"]);
+        let err = match parsed {
+            Ok(_) => panic!("deleted --dev-insecure flag must be rejected"),
+            Err(err) => err,
         };
-        let insecure_dev = cli.dev_insecure.unwrap_or(false);
-        assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn dev_insecure_env_one_enables_when_cli_absent() {
-        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+    fn obsolete_security_relaxation_environment_variable_is_ignored() {
+        let _guard = CLI_ENV_LOCK.lock().expect("env lock");
         let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate"]);
         restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
         let Ok(cli) = parsed else {
-            panic!("parse with env only should succeed");
+            panic!("an obsolete environment variable must not affect parsing");
         };
-        assert_eq!(cli.dev_insecure, Some(true));
+        assert_eq!(cli.origin_scheme, None);
+        assert_eq!(cli.trust_proxy, None);
     }
 
-    // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.
     #[test]
-    fn missing_worker_key_is_fatal_outside_dev() {
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", false).is_err());
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
+    fn gateway_worker_key_is_required() {
+        assert!(require_nonempty("WORKER_KEY / --worker-key", "").is_err());
+        assert!(require_nonempty("WORKER_KEY / --worker-key", "key").is_ok());
     }
 
     // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
@@ -1091,26 +986,20 @@ mod tests {
     }
 
     #[test]
-    fn gateway_stash_key_rejects_missing_in_non_dev() {
-        let err = validate_stash_key("", false).unwrap_err();
+    fn gateway_stash_key_rejects_missing() {
+        let err = validate_stash_key("").unwrap_err();
         assert!(err.contains("required"), "{err}");
     }
 
     #[test]
-    fn gateway_control_key_rejects_missing_in_non_dev() {
-        let err =
-            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
+    fn gateway_control_key_rejects_missing() {
+        let err = require_nonempty("CONTROL_KEY / --control-key", "").unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
-    fn gateway_control_key_accepts_nonempty_in_non_dev() {
-        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
-    }
-
-    #[test]
-    fn gateway_control_key_allows_missing_in_insecure_dev() {
-        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
+    fn gateway_control_key_accepts_nonempty() {
+        assert!(require_nonempty("CONTROL_KEY / --control-key", "secret").is_ok());
     }
 
     #[test]
@@ -1137,27 +1026,15 @@ mod tests {
     }
 
     #[test]
-    fn gateway_stash_key_rejects_dev_default_in_non_dev() {
-        let err = validate_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
-        assert!(err.contains("dev default"), "{err}");
-    }
-
-    #[test]
-    fn gateway_stash_key_rejects_short_in_non_dev() {
-        let err = validate_stash_key("short", false).unwrap_err();
+    fn gateway_stash_key_rejects_short() {
+        let err = validate_stash_key("short").unwrap_err();
         assert!(err.contains("too short"), "{err}");
     }
 
     #[test]
-    fn gateway_stash_key_accepts_strong_in_non_dev() {
+    fn gateway_stash_key_accepts_strong() {
         let key = "0123456789abcdef0123456789abcdef";
-        assert!(validate_stash_key(key, false).is_ok());
-    }
-
-    #[test]
-    fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
-        assert!(validate_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
-        assert!(validate_stash_key("", true).is_ok());
+        assert!(validate_stash_key(key).is_ok());
     }
 
     // --- secret-reference resolver wiring (server-config) ---
@@ -1192,7 +1069,7 @@ mod tests {
         let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(literal);
         assert!(runs_guard, "literal in check-config must run the strength guard");
         assert!(
-            validate_stash_key(literal, false).is_err(),
+            validate_stash_key(literal).is_err(),
             "the short literal would fail the guard once it runs"
         );
 

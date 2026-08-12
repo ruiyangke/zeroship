@@ -1,4 +1,4 @@
-//! zeroship-migrated — standalone creator migration service.
+//! zeroship-migrated - standalone creator migration service.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,15 +7,12 @@ use clap::Parser;
 use compio_postgres::NoTls;
 use ntex::web;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
-use zeroship_core::config::parse_bool_flag;
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
 use zeroship_migrated::policy::ManagedPolicyConfig;
 use zeroship_migrated::MigrationServiceState;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:9092/oauth2";
 
 #[derive(Parser, Debug)]
 #[command(name = "zeroship-migrated")]
@@ -53,19 +50,6 @@ struct MigratedCli {
     /// PEM/PKCS#8 signing key file for PAT verification.
     #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
     signing_key_file: String,
-
-    /// Allow explicitly insecure local development startup.
-    ///
-    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
-    /// disables (overriding a stray `ZEROSHIP_DEV_INSECURE=1` in the env).
-    #[arg(
-        long = "dev-insecure",
-        env = "ZEROSHIP_DEV_INSECURE",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    dev_insecure: Option<bool>,
 
     /// Expected OAuth audience for accepted bearer tokens.
     #[arg(
@@ -116,7 +100,6 @@ struct MigratedCli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     zeroship_core::observability::init_tracing("info,zeroship_migrated=debug");
     let cli = MigratedCli::parse();
-    let insecure_dev = cli.dev_insecure.unwrap_or(false);
 
     if cli.provision_db.trim().is_empty() {
         tracing::error!(
@@ -136,12 +119,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind = %cli.bind,
         port = cli.port,
         control_key_present,
-        insecure_dev,
         tmp_dir = %tmp_dir.display(),
         "starting zeroship-migrated"
     );
 
-    let pat_issuer = match build_pat_issuer(&cli.signing_key_file, insecure_dev) {
+    let pat_issuer = match build_pat_issuer(&cli.signing_key_file) {
         Ok(issuer) => Arc::new(issuer),
         Err(message) => {
             eprintln!("migrated: {message}");
@@ -156,7 +138,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_provider = match build_auth_provider(
         &cli.auth_platform_issuer,
         &cli.auth_platform_jwks_url,
-        insecure_dev,
     ) {
         Ok(provider) => Arc::new(provider),
         Err(message) => {
@@ -172,7 +153,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy_config = match build_policy_config(
         &cli.policy_seal_key,
         cli.policy_ceiling_version,
-        insecure_dev,
     ) {
         Ok(config) => config,
         Err(message) => {
@@ -239,71 +219,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_policy_config(
     policy_seal_key: &str,
     ceiling_version: u64,
-    insecure_dev: bool,
 ) -> Result<ManagedPolicyConfig, String> {
-    let key = if policy_seal_key.is_empty() {
-        if insecure_dev {
-            tracing::warn!("migrated: --dev-insecure set; using dev-only migration policy seal key");
-            b"migrated dev-only policy seal key 32 bytes min".to_vec()
-        } else {
-            return Err(
-                "--policy-seal-key / MIGRATED_POLICY_SEAL_KEY is required for shared-infra \
-                 migration policy sealing. Pass --dev-insecure only for local development."
-                    .to_string(),
-            );
-        }
-    } else {
-        policy_seal_key.as_bytes().to_vec()
-    };
+    if policy_seal_key.is_empty() {
+        return Err(
+            "--policy-seal-key / MIGRATED_POLICY_SEAL_KEY is required for shared-infra \
+             migration policy sealing."
+                .to_string(),
+        );
+    }
 
-    ManagedPolicyConfig::default_confined(key, ceiling_version)
+    ManagedPolicyConfig::default_confined(policy_seal_key.as_bytes().to_vec(), ceiling_version)
         .map_err(|err| format!("invalid migration policy seal config: {err}"))
 }
 
 fn build_auth_provider(
     platform_issuer: &str,
     platform_jwks_url: &str,
-    insecure_dev: bool,
 ) -> Result<AuthProvider, String> {
-    let issuer = if platform_issuer.trim().is_empty() {
-        if insecure_dev {
-            tracing::warn!(
-                "migrated: --dev-insecure set; using dev platform auth issuer"
-            );
-            DEV_AUTH_PLATFORM_ISSUER.to_string()
-        } else {
-            return Err(
-                "--auth-platform-issuer / AUTH_PLATFORM_ISSUER is required for OAuth bearer \
-                 verification. Pass --dev-insecure only for local development."
-                    .to_string(),
-            );
-        }
-    } else {
-        platform_issuer.to_string()
-    };
+    if platform_issuer.trim().is_empty() {
+        return Err(
+            "--auth-platform-issuer / AUTH_PLATFORM_ISSUER is required for OAuth bearer verification."
+                .to_string(),
+        );
+    }
 
     let jwks_url = if platform_jwks_url.trim().is_empty() {
         None
     } else {
         Some(platform_jwks_url.to_string())
     };
-    let config = PlatformConfig::new(issuer, jwks_url)
+    let config = PlatformConfig::new(platform_issuer.to_string(), jwks_url)
         .map_err(|err| format!("invalid platform auth provider config: {err}"))?;
     Ok(AuthProvider::Platform(PlatformProvider::new(config)))
 }
 
-fn build_pat_issuer(
-    signing_key_file: &str,
-    insecure_dev: bool,
-) -> Result<zeroship_authn::PatIssuer, String> {
+fn build_pat_issuer(signing_key_file: &str) -> Result<zeroship_authn::PatIssuer, String> {
     if signing_key_file.is_empty() {
-        if insecure_dev {
-            tracing::warn!("migrated: --dev-insecure set; using dev-only PAT signing key");
-            return Ok(zeroship_authn::PatIssuer::dev_insecure());
-        }
         return Err(
-            "--signing-key-file / SIGNING_KEY_FILE is required for PAT verification. \
-             Pass --dev-insecure (or ZEROSHIP_DEV_INSECURE=1) to run without it — NEVER in production."
+            "--signing-key-file / SIGNING_KEY_FILE is required for PAT verification."
                 .to_string(),
         );
     }
@@ -320,50 +273,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pat_signing_key_refuses_missing_without_dev_insecure() {
-        let err = build_pat_issuer("", false).expect_err("missing signing key must fail closed");
+    fn pat_signing_key_refuses_missing() {
+        let err = build_pat_issuer("").expect_err("missing signing key must fail closed");
 
         assert!(err.contains("--signing-key-file / SIGNING_KEY_FILE"));
-        assert!(err.contains("--dev-insecure"));
     }
 
     #[test]
-    fn pat_signing_key_allows_missing_with_explicit_dev_insecure() {
-        build_pat_issuer("", true).expect("explicit dev-insecure allows dev PAT key");
+    fn migrated_cli_rejects_deleted_security_relaxation_flag() {
+        let error = MigratedCli::try_parse_from(["zeroship-migrated", "--dev-insecure"])
+            .expect_err("deleted --dev-insecure flag must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn dev_insecure_cli_false_overrides_env_one() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-
-        let cli =
-            MigratedCli::try_parse_from(["zeroship-migrated"]).expect("parse with env only");
-        assert_eq!(cli.dev_insecure, Some(true));
-
-        let cli = MigratedCli::try_parse_from(["zeroship-migrated", "--dev-insecure=false"])
-            .expect("parse explicit false");
-        assert_eq!(cli.dev_insecure, Some(false));
-
-        match old {
-            Some(value) => std::env::set_var("ZEROSHIP_DEV_INSECURE", value),
-            None => std::env::remove_var("ZEROSHIP_DEV_INSECURE"),
-        }
-    }
-
-    #[test]
-    fn policy_config_refuses_missing_key_without_dev_insecure() {
-        let err = build_policy_config("", 1, false)
+    fn policy_config_refuses_missing_key() {
+        let err = build_policy_config("", 1)
             .expect_err("missing policy seal key must fail closed");
 
         assert!(err.contains("--policy-seal-key / MIGRATED_POLICY_SEAL_KEY"));
     }
 
     #[test]
-    fn policy_config_refuses_one_byte_key_without_dev_insecure() {
-        let result = build_policy_config("x", 1, false);
+    fn policy_config_refuses_one_byte_key() {
+        let result = build_policy_config("x", 1);
         assert!(result.is_err(), "one-byte policy seal key must fail closed");
         let err = result.expect_err("one-byte policy seal key must fail closed");
 
@@ -372,8 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn policy_config_allows_missing_key_with_explicit_dev_insecure() {
-        build_policy_config("", 1, true)
-            .expect("explicit dev-insecure allows dev policy seal key");
+    fn empty_platform_issuer_is_rejected() {
+        let error = build_auth_provider("", "").expect_err("missing issuer must fail closed");
+        assert!(error.contains("AUTH_PLATFORM_ISSUER"));
     }
 }

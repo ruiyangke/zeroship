@@ -440,12 +440,11 @@ pub struct AppState {
     pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,
-    /// Stripe webhook signing secret. Required in prod; empty +
-    /// `insecure_dev=true` skips verification.
+    /// Stripe webhook signing secret. An empty value makes every webhook fail
+    /// closed; it never disables verification.
     pub stripe_webhook_secret: SecretString,
-    /// Stripe secret API key (`sk_…`) for outbound reconciliation and
-    /// `billing/setup` calls. Required in prod; empty allowed only
-    /// under `insecure_dev`. Never logged — `SecretString`.
+    /// Stripe secret API key (`sk_...`) for outbound reconciliation and
+    /// `billing/setup` calls. Never logged (`SecretString`).
     pub stripe_secret_key: SecretString,
     /// Stripe REST API base URL the outbound client targets. Defaults to
     /// `https://api.stripe.com`; the integration tests override it to point the
@@ -457,8 +456,7 @@ pub struct AppState {
     pub gateway_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
-    /// Shared secret for worker admin endpoints. Empty means dev-only
-    /// unauthenticated workers, matching `zeroship-worker`.
+    /// Shared secret for worker admin endpoints.
     pub worker_key: SecretString,
     /// Per-IP rate limiter for mutating admin endpoints. Burst 30,
     /// 60/min steady — generous for honest tooling, fatal for loops.
@@ -467,12 +465,6 @@ pub struct AppState {
     /// Burst 50, 600/min — Stripe's healthy rate is ~1/sec; the
     /// burst cushion handles bulk replays.
     pub webhook_limiter: Arc<RateLimiter>,
-    /// Set to `true` by the `--dev-insecure` CLI flag (or
-    /// `ZEROSHIP_DEV_INSECURE=1` env var). ONLY permits empty admin /
-    /// control / webhook secrets when explicitly opted in. Production
-    /// must leave this false; the startup guard in `main.rs` refuses
-    /// to boot with missing secrets otherwise.
-    pub insecure_dev: bool,
     /// Set via `--trust-proxy` (or `TRUST_PROXY=1`). When `false`
     /// (default), `X-Forwarded-For` is ignored — peer_addr is the
     /// only source-IP signal. Set to `true` ONLY when the control

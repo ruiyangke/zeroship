@@ -713,7 +713,7 @@ async fn verify_access_jwt(
         validation.algorithms = vec![Algorithm::EdDSA];
         validation.set_issuer(&[expected_iss]);
         // Access-token `aud` is the resource-server audience, NOT the
-        // OAuth client — so we do NOT pin it here. The Bearer arm enforces
+        // OAuth client, so we do NOT pin it here. The Bearer arm enforces
         // `client_id` and the route's resource audience after decoding.
         validation.validate_aud = false;
         validation.validate_nbf = true;
@@ -954,17 +954,11 @@ impl Stash {
 //   set on the redirect to op, cleared on callback.
 //
 // Both use the `__Host-` prefix which RFC 6265bis (§4.1.3) requires
-// `Path=/`, no `Domain=`, and `Secure`. RFC 6265bis §4.1.3.2 makes
-// `Secure` non-optional for `__Host-`; compliant clients silently reject
-// `__Host-` cookies missing `Secure`. Dev mode (HTTP localhost) therefore
-// drops `Secure` AND the prefix together — without that the cookie never
-// makes the round-trip and downstream double-submit / session lookup
-// fails with "invalid request".
+// `Path=/`, no `Domain=`, and `Secure`. These properties are unconditional:
+// local development must satisfy the same cookie contract as a deployment.
 
-/// Production app session cookie name (`__Host-` prefix → Secure required).
-pub const APP_SESSION_COOKIE_PROD: &str = "__Host-zeroship_app_session";
-/// Dev app session cookie name (no `__Host-` prefix).
-pub const APP_SESSION_COOKIE_DEV: &str = "zeroship_app_session";
+/// App session cookie name (`__Host-` prefix requires `Secure`).
+pub const APP_SESSION_COOKIE: &str = "__Host-zeroship_app_session";
 
 /// Cookie `Max-Age` for the SIGNED STATELESS session cookie (BFF redesign slice
 /// R1b). The cookie is a gateway-signed `zeroship-sess+jwt` identity assertion with a
@@ -974,34 +968,30 @@ pub const APP_SESSION_COOKIE_DEV: &str = "zeroship_app_session";
 /// re-signs a fresh cookie via `GET /__zeroship/auth/session` when this one lapses.
 pub const APP_SESSION_MAX_AGE_SECS: i64 = crate::session_token::SESSION_TOKEN_TTL_SECS;
 
-/// Resolve the app session cookie name for the current environment.
 #[must_use]
-pub fn app_session_cookie_name(insecure_dev: bool) -> &'static str {
-    if insecure_dev { APP_SESSION_COOKIE_DEV } else { APP_SESSION_COOKIE_PROD }
+pub const fn app_session_cookie_name() -> &'static str {
+    APP_SESSION_COOKIE
 }
 
 /// Build the `Set-Cookie` header value for the per-app session.
 ///
 /// The value is the gateway-SIGNED `zeroship-sess+jwt` token (BFF slice R1b), NOT an
-/// opaque session id. `insecure_dev = true` drops the `Secure` flag AND the
-/// `__Host-` prefix (RFC 6265bis §4.1.3.2 — `__Host-` requires Secure). The
-/// cookie stays HttpOnly + SameSite=Lax (XSS cannot read it; the signed token
-/// is an identity assertion, never a power token).
+/// opaque session id. The cookie is always `Secure`, `HttpOnly`, and
+/// `SameSite=Lax` (XSS cannot read it; the signed token is an identity
+/// assertion, never a power token).
 #[must_use]
-pub fn set_app_session_cookie(token: &str, insecure_dev: bool) -> String {
-    let name = app_session_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
+pub fn set_app_session_cookie(token: &str) -> String {
+    let name = app_session_cookie_name();
     format!(
-        "{name}={token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={APP_SESSION_MAX_AGE_SECS}"
+        "{name}={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={APP_SESSION_MAX_AGE_SECS}"
     )
 }
 
 /// Clear the per-app session cookie on logout.
 #[must_use]
-pub fn clear_app_session_cookie(insecure_dev: bool) -> String {
-    let name = app_session_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+pub fn clear_app_session_cookie() -> String {
+    let name = app_session_cookie_name();
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0")
 }
 
 /// Parse the raw signed session token out of a `Cookie` header value (BFF slice
@@ -1009,8 +999,8 @@ pub fn clear_app_session_cookie(insecure_dev: bool) -> String {
 /// string for the cookie arm to verify LOCALLY via
 /// [`crate::session_token::Verifier`] — no DB round-trip.
 #[must_use]
-pub fn parse_app_session_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
-    let name = app_session_cookie_name(insecure_dev);
+pub fn parse_app_session_cookie(cookie_header: &str) -> Option<String> {
+    let name = app_session_cookie_name();
     let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -1024,46 +1014,39 @@ pub fn parse_app_session_cookie(cookie_header: &str, insecure_dev: bool) -> Opti
     None
 }
 
-/// Production stash cookie name (`__Host-` prefix → Secure required).
-pub const STASH_COOKIE_PROD: &str = "__Host-zs_oidc_stash";
-/// Dev stash cookie name (no `__Host-` prefix).
-pub const STASH_COOKIE_DEV: &str = "zs_oidc_stash";
+/// Stash cookie name (`__Host-` prefix requires `Secure`).
+pub const STASH_COOKIE: &str = "__Host-zs_oidc_stash";
 
 /// 10-minute window for the OIDC dance to complete. After this the user
 /// has to re-initiate.
 pub const STASH_MAX_AGE_SECS: i64 = 600;
 
-/// Resolve the stash cookie name for the current environment.
 #[must_use]
-pub fn stash_cookie_name(insecure_dev: bool) -> &'static str {
-    if insecure_dev { STASH_COOKIE_DEV } else { STASH_COOKIE_PROD }
+pub const fn stash_cookie_name() -> &'static str {
+    STASH_COOKIE
 }
 
 /// Build the `Set-Cookie` header value for the OIDC stash.
 #[must_use]
-pub fn set_stash_cookie(value: &str, insecure_dev: bool) -> String {
-    let name = stash_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!(
-        "{name}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={STASH_MAX_AGE_SECS}"
-    )
+pub fn set_stash_cookie(value: &str) -> String {
+    let name = stash_cookie_name();
+    format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={STASH_MAX_AGE_SECS}")
 }
 
 /// Clear the OIDC stash cookie. Set on the callback response so the
 /// short-lived stash doesn't linger after the dance completes.
 #[must_use]
-pub fn clear_stash_cookie(insecure_dev: bool) -> String {
-    let name = stash_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+pub fn clear_stash_cookie() -> String {
+    let name = stash_cookie_name();
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0")
 }
 
 /// Parse the raw stash value out of a `Cookie` header. Returns the
 /// signed-blob string; pass it to `Stash::decode` (via
 /// `OidcRp::finish_callback`) to verify and recover the payload.
 #[must_use]
-pub fn parse_stash_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
-    let name = stash_cookie_name(insecure_dev);
+pub fn parse_stash_cookie(cookie_header: &str) -> Option<String> {
+    let name = stash_cookie_name();
     let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -1420,10 +1403,10 @@ mod tests {
     // ─── App session cookie ─────────────────────────────────────────
 
     #[test]
-    fn app_session_set_cookie_has_secure_in_prod() {
+    fn app_session_set_cookie_is_always_host_secure() {
         // The cookie now carries a signed zeroship-sess+jwt token, not a UUID.
         let token = "eyJ.signed.token";
-        let c = set_app_session_cookie(token, false);
+        let c = set_app_session_cookie(token);
         assert!(c.starts_with("__Host-zeroship_app_session="));
         assert!(c.contains(token));
         assert!(c.contains("Path=/"));
@@ -1435,27 +1418,11 @@ mod tests {
     }
 
     #[test]
-    fn app_session_set_cookie_drops_secure_and_host_prefix_in_dev() {
-        // RFC 6265bis §4.1.3.2: __Host- cookies require Secure. Dev
-        // runs over plain HTTP without Secure, so the prefix MUST be
-        // dropped too — otherwise compliant clients silently reject
-        // the cookie.
-        let c = set_app_session_cookie("eyJ.signed.token", true);
-        assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
-        assert!(c.starts_with("zeroship_app_session="), "dev cookie name: {c}");
-        assert!(!c.contains("Secure"), "dev cookie must NOT have Secure: {c}");
-        assert!(c.contains("HttpOnly"));
-        assert!(c.contains("SameSite=Lax"));
-    }
-
-    #[test]
     fn app_session_clear_cookie_zero_max_age() {
-        let c = clear_app_session_cookie(false);
+        let c = clear_app_session_cookie();
         assert!(c.contains("Max-Age=0"));
         assert!(c.contains("Secure"));
-        let dev = clear_app_session_cookie(true);
-        assert!(!dev.contains("Secure"));
-        assert!(!dev.starts_with("__Host-"));
+        assert!(c.starts_with("__Host-"));
     }
 
     #[test]
@@ -1463,23 +1430,18 @@ mod tests {
         // The value is now a signed token string (opaque to the parser).
         let token = "eyJhbGc.eyJzdWI.sig";
         let header = format!("foo=bar; __Host-zeroship_app_session={token}; baz=qux");
-        assert_eq!(parse_app_session_cookie(&header, false).as_deref(), Some(token));
-        assert_eq!(parse_app_session_cookie("nothing-here", false), None);
+        assert_eq!(parse_app_session_cookie(&header).as_deref(), Some(token));
+        assert_eq!(parse_app_session_cookie("nothing-here"), None);
         // Empty value ⇒ None (no token to verify).
-        assert_eq!(parse_app_session_cookie("__Host-zeroship_app_session=", false), None);
-
-        // Dev mode reads the bare-name cookie.
-        let dev_header = format!("zeroship_app_session={token}");
-        assert_eq!(parse_app_session_cookie(&dev_header, true).as_deref(), Some(token));
-        // Prod-prefixed cookie is ignored in dev mode (looks for bare name).
-        assert_eq!(parse_app_session_cookie(&header, true), None);
+        assert_eq!(parse_app_session_cookie("__Host-zeroship_app_session="), None);
+        assert_eq!(parse_app_session_cookie(&format!("zeroship_app_session={token}")), None);
     }
 
     // ─── Stash cookie ───────────────────────────────────────────────
 
     #[test]
-    fn stash_set_cookie_has_secure_in_prod() {
-        let c = set_stash_cookie("payload.signed", false);
+    fn stash_set_cookie_is_always_host_secure() {
+        let c = set_stash_cookie("payload.signed");
         assert!(c.starts_with("__Host-zs_oidc_stash=payload.signed"));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
@@ -1489,33 +1451,19 @@ mod tests {
     }
 
     #[test]
-    fn stash_set_cookie_drops_secure_and_host_prefix_in_dev() {
-        let c = set_stash_cookie("v", true);
-        assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
-        assert!(c.starts_with("zs_oidc_stash=v"));
-        assert!(!c.contains("Secure"));
-    }
-
-    #[test]
     fn stash_clear_cookie_zero_max_age() {
-        let c = clear_stash_cookie(false);
+        let c = clear_stash_cookie();
         assert!(c.contains("Max-Age=0"));
         assert!(c.contains("Secure"));
-        let dev = clear_stash_cookie(true);
-        assert!(!dev.contains("Secure"));
-        assert!(!dev.starts_with("__Host-"));
+        assert!(c.starts_with("__Host-"));
     }
 
     #[test]
     fn stash_parse_cookie_roundtrips() {
         let header = "foo=bar; __Host-zs_oidc_stash=abc.def; baz=qux";
-        assert_eq!(parse_stash_cookie(header, false), Some("abc.def".into()));
-        assert_eq!(parse_stash_cookie("nothing", false), None);
-
-        let dev_header = "zs_oidc_stash=abc.def";
-        assert_eq!(parse_stash_cookie(dev_header, true), Some("abc.def".into()));
-        // Prod-named cookie must not match in dev mode.
-        assert_eq!(parse_stash_cookie(header, true), None);
+        assert_eq!(parse_stash_cookie(header), Some("abc.def".into()));
+        assert_eq!(parse_stash_cookie("nothing"), None);
+        assert_eq!(parse_stash_cookie("zs_oidc_stash=abc.def"), None);
     }
 
     // ----- Cookie-arm granted-scope resolution --------------------------------

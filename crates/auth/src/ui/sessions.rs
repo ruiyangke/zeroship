@@ -61,10 +61,10 @@ struct SessionView {
 #[allow(clippy::future_not_send)]
 pub async fn list(
     req: HttpRequest,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let Some(caller) = resolve_caller(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(caller) = resolve_caller(&req, db.as_ref()).await else {
         return unauthorized();
     };
 
@@ -107,7 +107,7 @@ pub async fn revoke(
     req: HttpRequest,
     path: ntex::web::types::Path<(String,)>,
     form: ntex::web::types::Form<RevokeForm>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     issuer: ntex::web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
@@ -117,7 +117,7 @@ pub async fn revoke(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -134,7 +134,7 @@ pub async fn revoke(
     };
 
     // 3. Resolve the caller (authentication).
-    let Some(caller) = resolve_caller(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(caller) = resolve_caller(&req, db.as_ref()).await else {
         return unauthorized();
     };
 
@@ -181,14 +181,13 @@ pub async fn revoke(
 async fn resolve_caller(
     req: &HttpRequest,
     db: &compio_postgres::Client,
-    insecure_dev: bool,
 ) -> Option<Caller> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let session_id = session_cookie::parse_cookie(cookie_header, insecure_dev)?;
+    let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
     Some(Caller {
         user_id: session.user_id,

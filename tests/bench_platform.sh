@@ -12,6 +12,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
+# shellcheck source=tests/lib/e2e_stack.sh
+source "$ROOT/tests/lib/e2e_stack.sh"
 
 # PREFLIGHT. Every service below is started as `"$BIN/name" ... > /dev/null 2>&1 &`,
 # which swallows "No such file or directory" and backgrounds it, so a missing
@@ -60,28 +64,36 @@ for port in 9090 8080 8000 5100 5101; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 rm -rf /tmp/zeroship-bench-bundles
+BENCH_SECURITY_DIR="/tmp/zeroship-bench-security-$$"
+SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$BENCH_SECURITY_DIR"
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start platform
 "$BIN/zeroship-control" --port 9090 --db "postgres://postgres:test@localhost:5434/postgres" \
-    --blob-store /tmp/zeroship-bench-bundles --control-key bk --master-key bm > /dev/null 2>&1 &
+    --blob-store /tmp/zeroship-bench-bundles --signing-key-file "$SIGNING_KEY_FILE" > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
 "$BIN/zeroship-worker" --port 8080 --worker-threads $CORES --control http://localhost:9090 \
-    --control-key bk --poll-interval 60 > /dev/null 2>&1 &
+    --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 2
 
 "$BIN/zeroship-gate" --port 8000 --control http://localhost:9090 \
-    --control-key bk --workers http://localhost:8080 --poll-interval 60 > /dev/null 2>&1 &
+    --workers http://localhost:8080 --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
 # Create + deploy
+WORK="$BENCH_SECURITY_DIR"
+PG_CONTAINER=pg-test
+E2E_PG_DATABASE=postgres
+mint_admin_pat || { echo "FAIL: could not mint benchmark admin PAT" >&2; exit 1; }
 APP=$(curl -sf -X POST http://localhost:9090/api/apps \
     -H 'Content-Type: application/json' \
-    -H 'Authorization: Bearer bm' \
+    -H "Authorization: Bearer $PAT" \
     -d '{"name":"bench"}')
 APP_ID=$(echo "$APP" | jq -r '.id')
 API_KEY=$(echo "$APP" | jq -r '.api_key')
@@ -89,7 +101,7 @@ API_KEY=$(echo "$APP" | jq -r '.api_key')
 mkdir -p /tmp/zeroship-bench-app
 echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index.js
 "$BIN/zeroship" deploy /tmp/zeroship-bench-app/index.js --app="$APP_ID" \
-    --control=http://localhost:9090 --key=bm > /dev/null 2>&1
+    --control=http://localhost:9090 --token="$PAT" > /dev/null 2>&1
 
 # Baseline
 "$BIN/zeroship-bench-server" --port=5100 --workers=1 > /dev/null 2>&1 &
@@ -153,6 +165,7 @@ cat > "$LUA_RPC" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'
 wrk.headers["Content-Type"] = "application/json"
+wrk.headers["Authorization"] = "Bearer $WORKER_KEY"
 EOF
 
 LUA_GATE=$(mktemp)

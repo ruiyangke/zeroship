@@ -12,7 +12,7 @@
 #                   set from db/migrations-ts applied from scratch via the
 #                   `zeroship-platform-migrate` bin (Platform profile).
 #   stack_up        stack_workspace + stack_pg_up, then control + worker +
-#                   gateway booted with --dev-insecure and
+#                   gateway booted with generated service credentials and
 #                   health-polled. Non-blocking: binaries run in the background;
 #                   the function returns once all three are health-green.
 #                   A harness whose topology differs (e.g. e2e_platform.sh's
@@ -50,6 +50,8 @@ if [ -z "${E2E_ROOT:-}" ]; then
 fi
 E2E_BIN="$E2E_ROOT/target/release"
 E2E_JOSE_JS="$E2E_ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$E2E_ROOT/tests/lib/runtime_secrets.sh"
 
 # --- defaults (private/non-colliding band; override before stack_up) --------
 : "${CONTROL_PORT:=9120}"
@@ -160,6 +162,14 @@ stack_workspace() {
   openssl rand -base64 48 > "$WORK/gate-secret"
   chmod 600 "$WORK/gate-secret"
 
+  # Keep the explicit signing/broker files above because PAT minting consumes
+  # them. Generate every other mandatory service input and export it through
+  # the binaries' normal CLI/env configuration surface.
+  SIGNING_KEY_FILE="$WORK/signing-key.pem"
+  GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+  GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+  e2e_export_runtime_secrets "$WORK" || return 1
+
   export WORK PIDFILE DBURL PG_CONTAINER
   return 0
 }
@@ -237,7 +247,7 @@ stack_up() {
   # --- control --------------------------------------------------------------
   "$E2E_BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-    --dev-insecure > "$WORK/control.log" 2>&1 &
+    > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
   curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
@@ -246,7 +256,7 @@ stack_up() {
   # --- worker ---------------------------------------------------------------
   "$E2E_BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
     --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
-    --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+    --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
   curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
@@ -258,7 +268,7 @@ stack_up() {
     --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
     --signing-key-file "$WORK/signing-key.pem" \
     --gateway-broker-secret-file "$WORK/gate-secret" \
-    --dev-insecure > "$WORK/gate.log" 2>&1 &
+    > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
   curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
@@ -269,7 +279,9 @@ stack_up() {
 
 # --- mint_admin_pat: offline-signed platform-admin PAT, exports $PAT --------
 mint_admin_pat() {
-  local policy_json policy_hash owner tokid exp
+  local policy_json policy_hash owner tokid exp pg_database pat_signing_key
+  pg_database="${E2E_PG_DATABASE:-zeroship}"
+  pat_signing_key="${SIGNING_KEY_FILE:-$WORK/signing-key.pem}"
   policy_json='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
   policy_hash="$(node -e '
 const {createHash}=require("crypto");
@@ -282,7 +294,7 @@ process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1])))
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"
   tokid="$(node -e 'console.log(require("crypto").randomUUID())')"
   exp=$(( $(date +%s) + 86400 ))
-  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d "$pg_database" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$owner', 'e2e-$owner@zeroship.test'::citext, 'E2E Stack Admin', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
@@ -304,7 +316,7 @@ const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", pol
   .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
   .sign(key);
 process.stdout.write(jwt);
-' "$WORK/signing-key.pem" "$owner" "$tokid" "$policy_hash" "$exp")"
+' "$pat_signing_key" "$owner" "$tokid" "$policy_hash" "$exp")"
   export PAT
   if [ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ]; then
     _stk_ok "minted pat+jwt"

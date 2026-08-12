@@ -107,7 +107,6 @@ impl Fixture {
             "127.0.0.1:0",
             "--db-url",
             &db_url,
-            "--dev-insecure",
             "--stash-signing-key",
             STASH_KEY,
             "--totp-enc-key",
@@ -273,23 +272,23 @@ fn link_param(link: &str, key: &str) -> String {
 #[allow(clippy::future_not_send)]
 async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> String {
     let status = resp.status().as_u16();
-    let session = read_set_cookie(&resp, "zsidp_session");
-    let challenge = read_set_cookie(&resp, "zsidp_2fa");
-    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf");
+    let session = read_set_cookie(&resp, "__Host-zsidp_session");
+    let challenge = read_set_cookie(&resp, "__Host-zsidp_2fa");
+    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf");
     let body = resp.text().await.expect("read body");
     assert!(
         session.is_none(),
         "{what}: a confirmed second factor must block the session mint, \
-         but a zsidp_session cookie was issued (status {status})"
+         but a __Host-zsidp_session cookie was issued (status {status})"
     );
     assert_eq!(status, 200, "{what}: expected the challenge page, body={body}");
     assert!(
         body.contains(CHALLENGE_MARKER),
         "{what}: expected the TOTP challenge form, body={body}"
     );
-    let challenge = challenge.unwrap_or_else(|| panic!("{what}: no zsidp_2fa challenge cookie"));
-    let csrf_cookie = csrf_cookie.unwrap_or_else(|| panic!("{what}: no zsidp_csrf cookie"));
-    format!("zsidp_2fa={challenge}; zsidp_csrf={csrf_cookie}")
+    let challenge = challenge.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_2fa challenge cookie"));
+    let csrf_cookie = csrf_cookie.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_csrf cookie"));
+    format!("__Host-zsidp_2fa={challenge}; __Host-zsidp_csrf={csrf_cookie}")
 }
 
 /// Read the single session row for `user_id` as `(auth_method, amr, acr)`.
@@ -324,7 +323,7 @@ async fn cleanup(pg: &compio_postgres::Client, email: &str) {
 }
 
 /// Issue a magic link for `email` and return the requesting device's
-/// `zsidp_magic_csrf` nonce, its `zsidp_csrf` token, and the emailed link.
+/// `__Host-zsidp_magic_csrf` nonce, its `__Host-zsidp_csrf` token, and the emailed link.
 #[allow(clippy::future_not_send)]
 async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, String, String) {
     let csrf_token = csrf::generate_token();
@@ -334,12 +333,12 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
         .append_pair("return_to", return_to)
         .finish();
     let resp = fx
-        .post_form("/magic/start", &format!("zsidp_csrf={csrf_token}"), body)
+        .post_form("/magic/start", &format!("__Host-zsidp_csrf={csrf_token}"), body)
         .await;
     assert_eq!(resp.status().as_u16(), 200, "magic start");
     let magic_nonce =
-        read_set_cookie(&resp, "zsidp_magic_csrf").expect("magic csrf cookie on start");
-    let requester_csrf = read_set_cookie(&resp, "zsidp_csrf").unwrap_or(csrf_token);
+        read_set_cookie(&resp, "__Host-zsidp_magic_csrf").expect("magic csrf cookie on start");
+    let requester_csrf = read_set_cookie(&resp, "__Host-zsidp_csrf").unwrap_or(csrf_token);
     (magic_nonce, requester_csrf, fx.mailer.last_magic_link())
 }
 
@@ -365,7 +364,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         .http
         .request(http::Method::GET, fx.magic_url(&link))
         .expect("build /magic/verify")
-        .header("cookie", format!("zsidp_magic_csrf={magic_nonce}"))
+        .header("cookie", format!("__Host-zsidp_magic_csrf={magic_nonce}"))
         .expect("cookie")
         .send()
         .await
@@ -381,7 +380,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
     let redeem = fx
         .post_form(
             "/magic/verify/redeem",
-            &format!("zsidp_magic_csrf={magic_nonce}"),
+            &format!("__Host-zsidp_magic_csrf={magic_nonce}"),
             redeem_body,
         )
         .await;
@@ -390,7 +389,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         assert_demands_second_factor(redeem, "magic same-device redeem").await;
 
     let csrf_token = challenge_cookies
-        .split("zsidp_csrf=")
+        .split("__Host-zsidp_csrf=")
         .nth(1)
         .expect("csrf in challenge cookies")
         .to_string();
@@ -409,7 +408,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         .await;
     assert_eq!(wrong.status().as_u16(), 401, "a wrong code is rejected");
     assert!(
-        read_set_cookie(&wrong, "zsidp_session").is_none(),
+        read_set_cookie(&wrong, "__Host-zsidp_session").is_none(),
         "a wrong code must not mint a session"
     );
 
@@ -424,7 +423,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         .await;
     assert_eq!(done.status().as_u16(), 303, "second factor completes login");
     assert_eq!(location(&done), return_to);
-    assert!(read_set_cookie(&done, "zsidp_session").is_some());
+    assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
     let (auth_method, amr, acr) = session_claims(&fx.pg, user.id).await;
     assert_eq!(auth_method, "magic");
@@ -462,7 +461,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
         .expect("send /magic/verify");
     assert_eq!(verify.status().as_u16(), 200);
     let redeem_nonce =
-        read_set_cookie(&verify, "zsidp_magic_csrf").expect("redeeming device nonce");
+        read_set_cookie(&verify, "__Host-zsidp_magic_csrf").expect("redeeming device nonce");
 
     let token = link_param(&link, "token");
     let redeem_body = url::form_urlencoded::Serializer::new(String::new())
@@ -473,13 +472,13 @@ async fn magic_cross_device_complete_demands_second_factor() {
     let redeem = fx
         .post_form(
             "/magic/verify/redeem",
-            &format!("zsidp_magic_csrf={redeem_nonce}"),
+            &format!("__Host-zsidp_magic_csrf={redeem_nonce}"),
             redeem_body,
         )
         .await;
     assert_eq!(redeem.status().as_u16(), 200, "cross-device shows a code");
     assert!(
-        read_set_cookie(&redeem, "zsidp_session").is_none(),
+        read_set_cookie(&redeem, "__Host-zsidp_session").is_none(),
         "the redeeming device never gets a session on the cross-device path"
     );
 
@@ -503,7 +502,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
     let complete = fx
         .post_form(
             "/magic/complete",
-            &format!("zsidp_csrf={requester_csrf}"),
+            &format!("__Host-zsidp_csrf={requester_csrf}"),
             complete_body,
         )
         .await;
@@ -512,7 +511,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
         assert_demands_second_factor(complete, "magic cross-device complete").await;
 
     let csrf_token = challenge_cookies
-        .split("zsidp_csrf=")
+        .split("__Host-zsidp_csrf=")
         .nth(1)
         .expect("csrf in challenge cookies")
         .to_string();
@@ -526,7 +525,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
         .await;
     assert_eq!(done.status().as_u16(), 303, "second factor completes login");
     assert_eq!(location(&done), return_to);
-    assert!(read_set_cookie(&done, "zsidp_session").is_some());
+    assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
     let (auth_method, amr, acr) = session_claims(&fx.pg, user.id).await;
     assert_eq!(auth_method, "magic");
@@ -577,7 +576,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .append_pair("password", LINK_PASSWORD)
         .finish();
     let resp = fx
-        .post_form("/link", &format!("zsidp_csrf={csrf_token}"), link_body)
+        .post_form("/link", &format!("__Host-zsidp_csrf={csrf_token}"), link_body)
         .await;
 
     let challenge_cookies = assert_demands_second_factor(resp, "/link confirm").await;
@@ -600,7 +599,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
     );
 
     let csrf_token = challenge_cookies
-        .split("zsidp_csrf=")
+        .split("__Host-zsidp_csrf=")
         .nth(1)
         .expect("csrf in challenge cookies")
         .to_string();
@@ -614,7 +613,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .await;
     assert_eq!(done.status().as_u16(), 303, "second factor completes the link");
     assert_eq!(location(&done), return_to);
-    assert!(read_set_cookie(&done, "zsidp_session").is_some());
+    assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
     let linked_after: i64 = fx
         .pg

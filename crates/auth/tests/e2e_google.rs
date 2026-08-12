@@ -164,8 +164,8 @@ async fn google_federation_creates_new_user() {
         common::extract_query_param(&mock_authorize_loc, "max_age").as_deref(),
         Some("0")
     );
-    let stash_cookie = read_set_cookie(&resp, "zsidp_google_stash")
-        .expect("zsidp_google_stash on /oauth/google/start");
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_google_stash")
+        .expect("__Host-zsidp_google_stash on /oauth/google/start");
 
     // 6. Follow the redirect to the mock's /authorize. The mock echoes
     //    code+state back to our callback. We don't follow it
@@ -199,7 +199,7 @@ async fn google_federation_creates_new_user() {
     //    handler reads the stash, exchanges the code (against the mock
     //    /token), verifies the ID token (against the mock JWKS), and
     //    resumes the native OP authorize request.
-    jar.set("zsidp_google_stash", &stash_cookie);
+    jar.set("__Host-zsidp_google_stash", &stash_cookie);
     let resp = http
         .request(http::Method::GET, &callback_with_local)
         .expect("build /oauth/google/callback")
@@ -365,8 +365,8 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
         .expect("send /oauth/google/start");
     assert_eq!(resp.status().as_u16(), 302);
     let mock_authorize_loc = location(&resp);
-    let stash_cookie = read_set_cookie(&resp, "zsidp_google_stash")
-        .expect("zsidp_google_stash on /oauth/google/start");
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_google_stash")
+        .expect("__Host-zsidp_google_stash on /oauth/google/start");
 
     let resp = http
         .request(http::Method::GET, &mock_authorize_loc)
@@ -381,7 +381,7 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
         &format!("{auth_base}/oauth/google/callback"),
     );
 
-    jar.set("zsidp_google_stash", &stash_cookie);
+    jar.set("__Host-zsidp_google_stash", &stash_cookie);
     let resp = http
         .request(http::Method::GET, &callback_with_local)
         .expect("build /oauth/google/callback")

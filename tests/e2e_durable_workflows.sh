@@ -25,6 +25,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 
 PG_PORT="${PG_PORT:-5440}"
 PG_CONTAINER="${PG_CONTAINER:-zs-dw07-pg}"
@@ -586,12 +588,12 @@ GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
 printf '%s' "dw07-gateway-broker-secret-32-bytes-minimum-ok" > "$GATEWAY_BROKER_SECRET_FILE"
 chmod 0600 "$GATEWAY_BROKER_SECRET_FILE"
 
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" \
   --port "$CONTROL_PORT" \
   --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$GATE_PORT" \
-  --dev-insecure \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control.log"
@@ -604,7 +606,6 @@ ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --blob-store "$WORK/blobs" \
   --poll-interval 1 \
   --max-step-blob-bytes 2097152 \
-  --dev-insecure \
   --workflow-advance-unsigned > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
@@ -618,12 +619,12 @@ wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
   --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE" \
   --db "$DBURL" \
   --poll-interval 1 \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate.log"
 
 echo "=== DW-07 deploy ==="
-ZEROSHIP_DEV_INSECURE=1 "$BIN/dev-provision" \
+"$BIN/dev-provision" \
   --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --name "$APP_NAME" \

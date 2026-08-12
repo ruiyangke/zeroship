@@ -27,6 +27,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 WORK="$(mktemp -d)"
 
 PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
@@ -39,7 +41,6 @@ WORKER_PORT="${WORKER_PORT:-8393}"
 GATE_PORT="${GATE_PORT:-8303}"
 REDIS_PORT="${REDIS_PORT:-6397}"
 REDIS_CONTAINER="zs-redeploy-redis"
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
 APP_NAME="redep"
 ZSHIP_A="${ZSHIP_A:-$ROOT/examples/kv-dashboard/dist/app.zship}"
@@ -85,16 +86,20 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key rd-ck --master-key rd-mk > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # env.kv is absent without --kv-url by design, and kv-dashboard needs it.
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
-  --control-key rd-ck --blob-store "$WORK/bundles" --poll-interval 2 \
+  --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
   --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key rd-ck \
+"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+  --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4

@@ -12,9 +12,14 @@ See `docs/reference/auth.md` for the current architecture.
 # Start auth:
 AUTH_DB_URL=postgres://zeroship@localhost/zeroship \
 AUTH_BOOTSTRAP=1 \
-AUTH_INSECURE_DEV=1 \
+AUTH_STASH_SIGNING_KEY="$(openssl rand -hex 32)" \
+AUTH_TOTP_ENC_KEY="$(openssl rand -hex 32)" \
 cargo run -p zeroship-auth
 ```
+
+Browser flows always use Secure `__Host-*` cookies. The compose topology uses
+`*.zeroship.localhost`, which browsers treat as potentially trustworthy; local
+runs use the same cookie shape and have no plaintext-cookie mode.
 
 ## Important files
 - `src/main.rs` — binary entrypoint.

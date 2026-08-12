@@ -89,6 +89,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 APP="$ROOT/examples/db-todos"
 ZSHIP="$APP/dist/app.zship"
 WORK="$(mktemp -d -t zs-devdeploy-db-XXXXXX)"
@@ -111,7 +113,6 @@ PG_PORT="${PG_PORT:-5487}"
 PGC="zs-devdeploy-db-pg"
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="dbtodos"
 
@@ -818,12 +819,16 @@ openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null
 chmod 600 "$WORK/sk.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
 
+SIGNING_KEY_FILE="$WORK/sk.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
-  --signing-key-file "$WORK/sk.pem" --dev-insecure > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  --signing-key-file "$WORK/sk.pem" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
-  --dev-insecure > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
+ > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control did not come up"; tail -30 "$WORK/control.log"; exit 1; }
@@ -836,7 +841,7 @@ curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null 2>&1 \
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
   --db "$DBURL" --blob-store "$WORK/bundles" --poll-interval 2 \
-  --dev-insecure > "$WORK/worker.log" 2>&1 & PIDS+=($!)
+ > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker did not come up"; tail -30 "$WORK/worker.log"; exit 1; }
@@ -844,7 +849,7 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" \
   --blob-store "$WORK/bundles" --gateway-broker-secret-file "$WORK/gate-secret" \
-  --poll-interval 2 --dev-insecure > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+  --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }

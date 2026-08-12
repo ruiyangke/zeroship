@@ -25,6 +25,12 @@ fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let path = std::env::var("PATH").unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     let out = Command::new(auth_bin())
+        .args([
+            "--stash-signing-key",
+            "test-stash-key-not-for-prod-32bytes!",
+            "--totp-enc-key",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        ])
         .args(args)
         .env_clear()
         .env("PATH", path)
@@ -49,7 +55,6 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
         "--check-config",
         "--db-url",
         "postgres://check-config",
-        "--dev-insecure",
         // Explicit default — make the SMTP-host requirement unambiguous.
         "--relay-forward-mailer=smtp",
     ]);
@@ -82,7 +87,6 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
         "--check-config",
         "--db-url",
         "postgres://check-config",
-        "--dev-insecure",
         "--mailer=smtp",
         // Relay set to stdout so ONLY the transactional SMTP requirement is in play.
         "--relay-forward-mailer=stdout",
@@ -115,7 +119,6 @@ fn real_boot_still_enforces_relay_smtp_host() {
         // NOTE: no --check-config — this is the real boot path.
         "--db-url",
         "postgres://127.0.0.1:1/unreachable-on-purpose",
-        "--dev-insecure",
         "--relay-forward-mailer=smtp",
     ]);
 

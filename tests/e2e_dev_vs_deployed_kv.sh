@@ -66,6 +66,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 APP="$ROOT/examples/kv-dashboard"
 ZSHIP="$APP/dist/app.zship"
 WORK="$(mktemp -d)"
@@ -92,7 +94,6 @@ VITE_PORT="${VITE_PORT:-5011}"
 REDIS_PORT="${REDIS_PORT:-6396}"
 REDIS_CONTAINER="zs-devdeploy-redis"
 CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="kvdash"
 MUTATE="${MUTATE:-none}"
@@ -317,6 +318,8 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { fail "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4

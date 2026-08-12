@@ -27,8 +27,6 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:9092/oauth2";
-
 /// Single-binary dev fallback DSN. NOT a clap `default_value` — see the `--db`
 /// field doc: a non-empty clap default occupies `obtain_secret`'s CLI tier and
 /// silently shadows the `[secrets] database_url` reference. It is applied after
@@ -98,9 +96,9 @@ struct ControlCli {
     )]
     stripe_webhook_secret: String,
 
-    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing
-    /// reconciler + `billing/setup`). Required in prod; empty allowed only
-    /// under `--dev-insecure`.
+    /// Stripe secret API key (`sk_...`) for outbound calls (the billing
+    /// reconciler + `billing/setup`). Operations that need Stripe reject an
+    /// empty value; webhook verification uses its separate signing secret.
     #[arg(
         long = "stripe-secret-key",
         env = "STRIPE_SECRET_KEY",
@@ -224,19 +222,6 @@ struct ControlCli {
     )]
     legacy_master_keys: String,
 
-    /// Allow explicitly insecure local development startup.
-    ///
-    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
-    /// disables (overriding a stray `ZEROSHIP_DEV_INSECURE=1` in the env).
-    #[arg(
-        long = "dev-insecure",
-        env = "ZEROSHIP_DEV_INSECURE",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    dev_insecure: Option<bool>,
-
     /// Trust `X-Forwarded-For` from an upstream proxy.
     #[arg(
         long = "trust-proxy",
@@ -336,15 +321,6 @@ struct ControlCli {
     )]
     auth_platform_jwks_url: String,
 
-    /// HMAC key for short-lived OIDC stash cookies.
-    #[arg(
-        long = "stash-signing-key",
-        env = "STASH_SIGNING_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    stash_signing_key: String,
-
     /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
     /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
     /// the rotatable stash key. MUST be identical to the gateway's value and
@@ -405,7 +381,7 @@ struct ControlCli {
 // S2: hand-written `Debug` that redacts every raw-secret field. The derive is
 // intentionally dropped so a stray `{:?}` (e.g. in a clap parse error or a test
 // `.unwrap_err()`) can never echo a DSN, master key, control key, worker key,
-// stash key, Stripe secret, console OIDC secret, or legacy master keys.
+// Stripe secrets, console OIDC secrets, or legacy master keys.
 impl std::fmt::Debug for ControlCli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlCli")
@@ -421,7 +397,6 @@ impl std::fmt::Debug for ControlCli {
             .field("stripe_webhook_secret", &"<redacted>")
             .field("gateway_url", &self.gateway_url)
             .field("legacy_master_keys", &"<redacted>")
-            .field("dev_insecure", &self.dev_insecure)
             .field("trust_proxy", &self.trust_proxy)
             .field("deploy_tmp_dir", &self.deploy_tmp_dir)
             .field("config_path", &self.config_path)
@@ -438,7 +413,6 @@ impl std::fmt::Debug for ControlCli {
             .field("supabase_jwt_issuer", &self.supabase_jwt_issuer)
             .field("auth_platform_issuer", &self.auth_platform_issuer)
             .field("auth_platform_jwks_url", &self.auth_platform_jwks_url)
-            .field("stash_signing_key", &"<redacted>")
             .field("pairwise_salt", &"<redacted>")
             .field("pairwise_salt_file", &self.pairwise_salt_file)
             .field("oauth_audience", &self.oauth_audience)
@@ -650,9 +624,6 @@ fn main() -> std::io::Result<()> {
     let file_metering = boot.overlay.config.metering.clone();
     let filter = &boot.log_filter;
 
-    // CLI presence overrides env, so `--dev-insecure=false` disables a stray
-    // `ZEROSHIP_DEV_INSECURE=1`.
-    let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let origin_scheme = resolve_origin_scheme(cli.origin_scheme, file.origin_scheme);
 
@@ -678,7 +649,7 @@ fn main() -> std::io::Result<()> {
             Some(cli.auth_platform_issuer.clone())
         },
         file.auth.platform_issuer.clone(),
-        insecure_dev.then_some(DEV_AUTH_PLATFORM_ISSUER),
+        None,
     );
     let auth_platform_jwks_url = resolve_overlay_string(
         if cli.auth_platform_jwks_url.is_empty() {
@@ -810,12 +781,6 @@ fn main() -> std::io::Result<()> {
             .collect()
     };
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
-    let stash_signing_key = zeroship_core::config::obtain_secret(
-        "STASH_SIGNING_KEY / --stash-signing-key",
-        &cli.stash_signing_key,
-        file_secrets.stash_signing_key.as_deref(),
-        cli.check_config,
-    );
     // Dedicated pairwise-salt secret (auth-sdk §6.2). MUST match the gateway's
     // value — both derive the per-app `pws_`. `--pairwise-salt-file` wins over
     // the inline value / overlay reference.
@@ -842,116 +807,90 @@ fn main() -> std::io::Result<()> {
 
     // S3 / L6: control authenticates the worker admin log fan-out with
     // WORKER_KEY. The same key gates the worker's dispatch bearer AND keys the
-    // per-request ZeroShip-User HMAC, so it carries the ≥32-byte strength floor
-    // (empty rejected outside dev, present-but-weak rejected). Skipped for a
+    // per-request ZeroShip-User HMAC, so it carries the >=32-byte strength floor
+    // (empty and present-but-weak values are rejected). Skipped for a
     // secret REFERENCE under --check-config (the local is then the raw ref
     // string, which would wrongly fail the length check); it runs on the
     // resolved value at real boot.
     if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
-        if let Err(message) =
-            zeroship_core::config::validate_worker_key(&worker_key, insecure_dev)
-        {
+        if let Err(message) = zeroship_core::config::validate_worker_key(&worker_key) {
             eprintln!("control: {message}");
             tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
             std::process::exit(1);
         }
     }
 
-    if !insecure_dev {
-        let mut missing = Vec::new();
-        if master_key.is_empty() {
-            missing.push("--master-key / MASTER_KEY");
-        }
-        if control_key.is_empty() {
-            missing.push("--control-key / CONTROL_KEY");
-        }
-        if signing_key_file.is_empty() {
-            missing.push("--signing-key-file / SIGNING_KEY_FILE");
-        }
-        if !missing.is_empty() {
-            tracing::error!(
-                missing = %missing.join(", "),
-                "control: refusing to start; required secrets missing. \
-                 Pass --dev-insecure (or ZEROSHIP_DEV_INSECURE=1) to run \
-                 without them — NEVER in production."
-            );
+    let mut missing = Vec::new();
+    if master_key.is_empty() {
+        missing.push("--master-key / MASTER_KEY");
+    }
+    if control_key.is_empty() {
+        missing.push("--control-key / CONTROL_KEY");
+    }
+    if signing_key_file.is_empty() {
+        missing.push("--signing-key-file / SIGNING_KEY_FILE");
+    }
+    if !missing.is_empty() {
+        tracing::error!(
+            missing = %missing.join(", "),
+            "control: refusing to start; required secrets missing"
+        );
+        std::process::exit(1);
+    }
+    // Strength guards run on the RESOLVED value at real boot. During
+    // `--check-config` a secret REFERENCE is still the raw `urn:`/`arn:`
+    // string (not yet dereferenced), so skip the strength check for a ref - it
+    // would wrongly fail length/entropy on the reference text. A literal is
+    // checked in both modes.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&master_key) {
+        if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key) {
+            tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
             std::process::exit(1);
         }
-        // Strength guards run on the RESOLVED value at real boot. During
-        // `--check-config` a secret REFERENCE is still the raw `urn:`/`arn:`
-        // string (not yet dereferenced), so skip the strength check for a ref —
-        // it would wrongly fail length/entropy on the reference text. A literal
-        // is checked in both modes.
-        if !cli.check_config || !zeroship_core::config::is_secret_ref(&master_key) {
-            if let Err(message) =
-                validate_master_key_material("MASTER_KEY", &master_key, insecure_dev)
-            {
-                tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
-                std::process::exit(1);
-            }
-        }
-        for (idx, legacy_key) in legacy_keys.iter().enumerate() {
-            let label = format!("LEGACY_MASTER_KEYS[{idx}]");
-            if !cli.check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
-                if let Err(message) =
-                    validate_master_key_material(&label, legacy_key, insecure_dev)
-                {
-                    tracing::error!(
-                        error = %message,
-                        "control: refusing to start with weak legacy master key"
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        if stripe_webhook_secret.is_empty() {
-            // Not fatal — operators may run a control plane without
-            // Stripe entirely. But every webhook delivery will reject
-            // with 500, so log loudly at startup so a misconfigured
-            // deploy isn't noticed only via Stripe-side retries.
-            tracing::warn!(
-                "control: stripe_webhook_secret unset — /internal/webhooks/stripe will reject every request. \
-                 Set --stripe-webhook-secret if you need Stripe integration."
-            );
-        }
-        // The OUTBOUND Stripe secret key (sk_…) is REQUIRED in prod: the billing
-        // reconciler and `billing/setup` cannot bill without it, and silently
-        // running with an empty key would drop revenue on the floor. Empty is
-        // allowed ONLY under --dev-insecure (this block is the prod path). Skip
-        // when --check-config still holds a raw secret reference.
-        if stripe_secret_key.is_empty()
-            && (!cli.check_config || !zeroship_core::config::is_secret_ref(&stripe_secret_key))
-        {
-            tracing::error!(
-                "control: STRIPE_SECRET_KEY unset — the billing reconciler + /api/creators/:id/billing/setup \
-                 cannot call Stripe. Set --stripe-secret-key, or run with --dev-insecure for local dev."
-            );
-            std::process::exit(1);
-        }
-        // The dedicated pairwise-salt secret MUST be a strong, stable,
-        // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
-        // anchor and MUST equal the gateway's value. Skip the strength check
-        // when `--check-config` still holds a raw reference.
-        if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
-            if let Err(message) =
-                zeroship_core::config::validate_pairwise_salt(&pairwise_salt, insecure_dev)
-            {
-                tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
+    }
+    for (idx, legacy_key) in legacy_keys.iter().enumerate() {
+        let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+        if !cli.check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
+            if let Err(message) = validate_master_key_material(&label, legacy_key) {
+                tracing::error!(
+                    error = %message,
+                    "control: refusing to start with weak legacy master key"
+                );
                 std::process::exit(1);
             }
         }
     }
-    if insecure_dev {
-        tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
+    if stripe_webhook_secret.is_empty() {
+        // Not fatal: operators may run without Stripe. Every webhook will
+        // reject with 500, so warn before Stripe-side retries reveal it.
+        tracing::warn!(
+            "control: stripe_webhook_secret unset; /internal/webhooks/stripe will reject every request. \
+             Set --stripe-webhook-secret if you need Stripe integration."
+        );
+    }
+    // STRIPE_SECRET_KEY is optional at process scope because a deployment may
+    // not enable outbound Stripe operations. A provider that requires it
+    // rejects an empty resolved key, and direct Stripe calls cannot authenticate
+    // without it. This never changes webhook verification, which uses the
+    // independent STRIPE_WEBHOOK_SECRET and always fails closed when absent.
+    //
+    // The dedicated pairwise-salt secret must be strong and stable. It seeds
+    // the permanent per-app `pws_` anchor and must equal the gateway's value.
+    // Skip the strength check when `--check-config` holds a raw reference.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+        if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
+            tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
+            std::process::exit(1);
+        }
     }
 
     // Control plane resource-server prerequisites. The console is now a
     // gateway-fronted regular app authenticated via `@zeroship/auth` (BFF) —
     // control has NO OIDC RP of its own anymore. The `AuthzGuard` bearer path +
     // audit run on the SINGLE `--db` connection (there is no separate auth DB
-    // any more). Platform mode requires the native OP issuer (`--dev-insecure`
-    // permits the localhost default).
-    if !insecure_dev && auth_provider_kind == "platform" {
+    // any more). Platform mode requires an explicit native OP issuer; this is
+    // deployment topology and must match the issuer embedded in access tokens.
+    if auth_provider_kind == "platform" {
         let mut missing = Vec::new();
         if auth_platform_issuer.is_empty() {
             missing.push("--auth-platform-issuer / AUTH_PLATFORM_ISSUER");
@@ -959,8 +898,7 @@ fn main() -> std::io::Result<()> {
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
-                "control: refusing to start; the resource-server auth path requires these flags. \
-                 Pass --dev-insecure to run with localhost defaults."
+                "control: refusing to start; the resource-server auth path requires these flags"
             );
             std::process::exit(1);
         }
@@ -1032,7 +970,6 @@ fn main() -> std::io::Result<()> {
         );
         report.field("log_filter", CheckValue::Plain(filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format_str));
-        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
         report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
@@ -1099,22 +1036,17 @@ fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&probe);
     tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
 
-    let pat_issuer = if signing_key_file.is_empty() {
-        tracing::warn!("control: using dev-only PAT signing key");
-        Arc::new(zeroship_authn::PatIssuer::dev_insecure())
-    } else {
-        let signing_key = zeroship_authn::load_signing_key_from_path(
-            std::path::Path::new(&signing_key_file),
-        )
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: failed to load PAT signing key");
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?;
-        Arc::new(zeroship_authn::PatIssuer::new(&signing_key).map_err(|err| {
-            tracing::error!(error = %err, "control: failed to initialize PAT issuer");
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?)
-    };
+    let signing_key = zeroship_authn::load_signing_key_from_path(
+        std::path::Path::new(&signing_key_file),
+    )
+    .map_err(|err| {
+        tracing::error!(error = %err, "control: failed to load PAT signing key");
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+    })?;
+    let pat_issuer = Arc::new(zeroship_authn::PatIssuer::new(&signing_key).map_err(|err| {
+        tracing::error!(error = %err, "control: failed to initialize PAT issuer");
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+    })?);
 
     ntex::rt::System::build()
         .name("zeroship-control")
@@ -1146,29 +1078,17 @@ fn main() -> std::io::Result<()> {
         registry.clone(),
         &master_key,
         &legacy_key_refs,
-        insecure_dev,
     )
     .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
-    // `stash_signing_key` is validated above for shared-secret hygiene (it is
-    // the same STASH_SIGNING_KEY the gateway uses); control no longer consumes
-    // it directly now that the bespoke console OIDC RP (and its stash cookie)
-    // is gone, so it is not threaded any further.
-    let _ = &stash_signing_key;
     // Platform-wide pairwise salt (auth-sdk §6.2) — derived from the DEDICATED
     // `PAIRWISE_SALT` secret (NOT the stash key), via the SHARED helper, so
     // control's disconnect-app revocation writes the family marker on the SAME
     // `(client_id, pws_)` key the gateway arms read (Batch A fix 4). The SAME
     // `PAIRWISE_SALT` value must be configured on gateway + control, and is the
     // PERMANENT per-app identity anchor (never rotate without a migration).
-    let pairwise_salt_secret = if pairwise_salt.is_empty() {
-        zeroship_core::config::DEV_PAIRWISE_SALT.to_string()
-    } else {
-        pairwise_salt
-    };
-    let pairwise_salt =
-        zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt.as_bytes());
     // Control plane is a pure API resource server: no console OIDC RP. The
     // selected auth provider still drives the OAuth-bearer arm of the
     // `AuthzGuard` after local PAT verification fails.
@@ -1294,7 +1214,7 @@ fn main() -> std::io::Result<()> {
         &zeroship_control::metering::provider::BillingStackConfig {
             meter_provider: cli.meter_provider.clone(),
             invoicer_provider: cli.invoicer_provider.clone(),
-            production: !insecure_dev,
+            production: true,
             allow_unsupported_billing: cli.allow_unsupported_billing,
         },
     ) {
@@ -1460,7 +1380,6 @@ fn main() -> std::io::Result<()> {
         worker_key: zeroship_control::SecretString::new(worker_key),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
-        insecure_dev,
         trust_proxy,
         deploy_tmp_dir,
         control_pg,
@@ -1511,13 +1430,6 @@ fn main() -> std::io::Result<()> {
     );
 
     let bind_addr = format!("{bind_host}:{port}");
-    if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
-        tracing::warn!(
-            bind = %bind_addr,
-            "control: binding a non-loopback address under --dev-insecure (admin + internal \
-             auth disabled) — do NOT expose this on an untrusted network"
-        );
-    }
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
     web::server(async move || {
@@ -1750,7 +1662,6 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::require_unless_dev;
 
     static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1939,57 +1850,19 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // Master-key strength logic now lives in `zeroship_core::config::secrets`
-    // (fully tested there). These two assert control still calls *through* to
-    // the shared validator with the expected outcomes.
+    // Master-key strength logic lives in `zeroship_core::config::secrets`.
+    // This asserts control still calls through to the shared validator.
     #[test]
-    fn master_key_accepts_32_byte_hex_in_non_dev() {
+    fn master_key_accepts_32_byte_hex() {
         let key = "00".repeat(32);
-        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+        assert!(validate_master_key_material("MASTER_KEY", &key).is_ok());
     }
 
     #[test]
-    fn master_key_allows_dev_shortcut_in_insecure_dev() {
-        assert!(validate_master_key_material("MASTER_KEY", "password", true).is_ok());
-    }
-
-    // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
-    // overridable from the CLI. `--dev-insecure=false` resolves to false,
-    // while env=1 alone (no CLI flag) enables.
-    #[test]
-    fn dev_insecure_cli_false_overrides_env_one() {
-        // Serialise process-wide environment mutation across config tests.
-        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-
-        // env=1 alone (no CLI flag) enables.
-        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse with env only");
-        assert_eq!(
-            cli.dev_insecure,
-            Some(true),
-            "ZEROSHIP_DEV_INSECURE=1 should enable"
-        );
-        assert!(cli.dev_insecure.unwrap_or(false));
-
-        // explicit CLI false beats the stray env=1.
-        let cli = ControlCli::try_parse_from(["zeroship-control", "--dev-insecure=false"])
-            .expect("parse with explicit false");
-        let insecure_dev = cli.dev_insecure.unwrap_or(false);
-        assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
-
-        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
-    }
-
-    // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.
-    #[test]
-    fn missing_worker_key_is_fatal_outside_dev() {
-        // Outside dev: empty worker key rejected.
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", false).is_err());
-        // Inside dev: allowed.
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
-        // Present: allowed even outside dev.
-        assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
+    fn control_rejects_removed_relaxation_flag() {
+        let err = ControlCli::try_parse_from(["zeroship-control", "--dev-insecure"])
+            .expect_err("removed flag must be unknown");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     // M4: resolve_trusted_oauth_clients distinguishes absent / present.

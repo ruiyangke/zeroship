@@ -19,12 +19,14 @@ const SECRET_FILES: [&str; 7] = [
     "refresh-idem-key",
 ];
 
-const ENV_KEYS: [&str; 8] = [
+const ENV_KEYS: [&str; 10] = [
     "AUTH_STASH_SIGNING_KEY",
     "AUTH_TOTP_ENC_KEY",
     "GATEWAY_OIDC_SECRET",
+    "MIGRATED_POLICY_SEAL_KEY",
     "PAIRWISE_SALT",
     "STASH_SIGNING_KEY",
+    "STRIPE_WEBHOOK_SECRET",
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
@@ -110,17 +112,17 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         );
     }
 
-    validate_master_key_material("MASTER_KEY", &overlay["ZEROSHIP_MASTER_KEY"], false)
+    validate_master_key_material("MASTER_KEY", &overlay["ZEROSHIP_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
-    validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"], false)
+    validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"])
         .expect("generated worker key must pass the production boot guard");
-    validate_stash_key(&overlay["STASH_SIGNING_KEY"], false)
+    validate_stash_key(&overlay["STASH_SIGNING_KEY"])
         .expect("generated gateway stash key must pass the production boot guard");
-    validate_stash_key(&overlay["AUTH_STASH_SIGNING_KEY"], false)
+    validate_stash_key(&overlay["AUTH_STASH_SIGNING_KEY"])
         .expect("generated auth stash key must pass the production boot guard");
-    validate_pairwise_salt(&overlay["PAIRWISE_SALT"], false)
+    validate_pairwise_salt(&overlay["PAIRWISE_SALT"])
         .expect("generated pairwise salt must pass the production boot guard");
-    validate_master_key_material("AUTH_TOTP_ENC_KEY", &overlay["AUTH_TOTP_ENC_KEY"], false)
+    validate_master_key_material("AUTH_TOTP_ENC_KEY", &overlay["AUTH_TOTP_ENC_KEY"])
         .expect("generated TOTP key must pass the production boot guard");
 
     let broker = std::fs::read(secrets_dir.join("broker-secret"))
@@ -277,6 +279,18 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     let worker = service_block(&compose, "worker");
     let auth = service_block(&compose, "auth");
 
+    for (name, block) in [
+        ("control", control),
+        ("migrated", migrated),
+        ("gateway", gateway),
+        ("auth", auth),
+    ] {
+        assert!(
+            !block.contains("--dev-insecure"),
+            "{name} still enables the deleted security-relaxation flag"
+        );
+    }
+
     assert!(gateway.contains("GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
     assert!(auth.contains("AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
     assert_eq!(
@@ -319,6 +333,16 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         5,
         "all five native services must consume one generated control key"
     );
+
+    assert!(control.contains(
+        "STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?run zeroship dev init}"
+    ));
+    assert!(migrated.contains(
+        "MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
+    ));
+    assert!(migrated.contains(
+        "AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2"
+    ));
 
     let active_compose = compose
         .lines()

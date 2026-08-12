@@ -44,7 +44,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "zeroship-auth",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);
@@ -168,8 +167,8 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
     )
     .await;
     assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-        .expect("zsidp_csrf cookie set on GET /signup");
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /signup");
 
     let email = format!("signup-native-{}@zeroship.test", Uuid::new_v4().simple());
     let body = signup_body(&csrf, "return_to", &return_to, &email);
@@ -179,7 +178,7 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
             .uri("/signup")
             .header("x-forwarded-for", unique_loopback().to_string())
             .header("content-type", "application/x-www-form-urlencoded")
-            .header("cookie", format!("zsidp_csrf={csrf}"))
+            .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
             .set_payload(body)
             .to_request(),
     )
@@ -292,8 +291,8 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     )
     .await;
     assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-        .expect("zsidp_csrf cookie set on GET /signup");
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /signup");
 
     let peer = SocketAddr::new(unique_loopback(), 49152);
     let signup_ip_key = format!("signup_ip:{}", peer.ip());
@@ -330,7 +329,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
             // the single `signup_ip:0.0.0.0` bucket and drain it.
             .header("x-forwarded-for", peer.ip().to_string())
             .header("content-type", "application/x-www-form-urlencoded")
-            .header("cookie", format!("zsidp_csrf={csrf}"))
+            .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
             .set_payload(body)
             .to_request(),
     )
@@ -415,8 +414,8 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
     )
     .await;
     assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-        .expect("zsidp_csrf cookie set on GET /signup");
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /signup");
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)
@@ -431,7 +430,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
             .uri("/signup")
             .peer_addr(SocketAddr::new(unique_loopback(), 49154))
             .header("content-type", "application/x-www-form-urlencoded")
-            .header("cookie", format!("zsidp_csrf={csrf}"))
+            .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
             .set_payload(body)
             .to_request(),
     )
@@ -514,8 +513,8 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
     )
     .await;
     assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-        .expect("zsidp_csrf cookie set on GET /forgot");
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /forgot");
 
     let peer = SocketAddr::new(unique_loopback(), 49153);
     for i in 0..6 {
@@ -531,7 +530,7 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
                 // See signup test: forwarded IP, not socket peer.
                 .header("x-forwarded-for", peer.ip().to_string())
                 .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("zsidp_csrf={csrf}"))
+                .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
                 .set_payload(body)
                 .to_request(),
         )

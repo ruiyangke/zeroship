@@ -164,7 +164,7 @@ async fn post_native(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -272,10 +272,10 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
     };
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.header(
         SET_COOKIE,
-        totp_challenge::set_cookie(&cookie, cfg.insecure_dev),
+        totp_challenge::set_cookie(&cookie),
     );
     resp.body(body)
 }
@@ -323,7 +323,7 @@ async fn finish_login(
 
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn finish_login_native(
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
     user_id: uuid::Uuid,
     credential_version: i64,
@@ -339,11 +339,11 @@ async fn finish_login_native(
     let mut resp = return_to::see_other(&return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
     if clear_challenge_cookie.is_some() {
-        resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
+        resp.header(SET_COOKIE, totp_challenge::clear_cookie());
     }
     resp.finish()
 }
@@ -396,7 +396,7 @@ pub async fn post_2fa(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -405,7 +405,7 @@ pub async fn post_2fa(
     }
 
     // 2. Decode + verify the factor-1 challenge cookie.
-    let Some(stash) = totp_challenge::parse_cookie(cookie_header, cfg.insecure_dev)
+    let Some(stash) = totp_challenge::parse_cookie(cookie_header)
         .and_then(|raw| TotpChallenge::decode(&raw, cfg.stash_signing_key.as_bytes()))
     else {
         return redirect_to_login(&return_to);
@@ -582,7 +582,7 @@ pub async fn post_2fa(
 /// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
 fn render_2fa_error(
     return_to: &str,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     err: &str,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
@@ -594,7 +594,7 @@ fn render_2fa_error(
     let body = page.render().unwrap_or_else(|_| format!("<h1>{err}</h1>"));
     let mut resp = HttpResponse::build(ntex::http::StatusCode::UNAUTHORIZED);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -640,7 +640,7 @@ fn render_login_error(
         .unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -669,14 +669,14 @@ fn render_login_form_native(
         .unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
 #[allow(clippy::future_not_send)]
 async fn resolve_native_session(
     req: &HttpRequest,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
 ) -> Result<Option<sessions::Session>, HttpResponse> {
     let cookie_header = req
@@ -684,7 +684,7 @@ async fn resolve_native_session(
         .get(COOKIE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let Some(session_id) = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev) else {
+    let Some(session_id) = session_cookie::parse_cookie(cookie_header) else {
         return Ok(None);
     };
     sessions::validate(db, session_id).await.map_err(|err| {

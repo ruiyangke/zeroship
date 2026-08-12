@@ -862,7 +862,7 @@ async fn revoke_replayed_authorization_code_lineage(
 
 async fn resolve_session(
     req: &HttpRequest,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &Client,
 ) -> Result<Option<session_store::Session>, OAuthError> {
     let cookie_header = req
@@ -870,7 +870,7 @@ async fn resolve_session(
         .get(COOKIE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let Some(session_id) = login_session::parse_cookie(cookie_header, cfg.insecure_dev) else {
+    let Some(session_id) = login_session::parse_cookie(cookie_header) else {
         return Ok(None);
     };
     session_store::validate(db, session_id).await.map_err(|err| {

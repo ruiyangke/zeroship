@@ -34,7 +34,7 @@ pub struct LogoutForm {
 #[allow(clippy::future_not_send)]
 pub async fn get(
     _query: ntex::web::types::Query<LogoutQuery>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LogoutPage {
@@ -48,7 +48,7 @@ pub async fn get(
 
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -58,7 +58,7 @@ pub async fn get(
 pub async fn post(
     req: HttpRequest,
     form: ntex::web::types::Form<LogoutForm>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    _cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     issuer: ntex::web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
@@ -68,8 +68,8 @@ pub async fn post(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
-    let local_session_id = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
+    let local_session_id = session_cookie::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -124,7 +124,7 @@ pub async fn post(
     );
     http_resp.header(
         SET_COOKIE,
-        session_cookie::clear_cookie(cfg.insecure_dev),
+        session_cookie::clear_cookie(),
     );
     http_resp.finish()
 }

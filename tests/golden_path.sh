@@ -21,6 +21,9 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
+GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 
 # A MISSING TOOL MUST SAY SO, not fail somewhere in the middle.
 #
@@ -76,12 +79,6 @@ REDIS_PORT="${REDIS_PORT:-6390}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
 CONTROL_KEY="gp-ck"
 MASTER_KEY="gp-mk"
-# Local dev: run the platform without the production secret set (signing keys,
-# worker key, …). NEVER use this outside local dev. This used to cite
-# tests/m0_gate.sh as the harness it mirrors; that file was deleted once its
-# subject moved to the sibling zeroship-builder repo, so the pattern now stands
-# on its own rather than pointing at something gone.
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-golden-path-worker-key-0123456789abcdef}"
 APP_NAME="starter"
 STARTER="$ROOT/examples/starter"
@@ -216,6 +213,7 @@ cleanup() {
   # measurement into the control. Removed here too, not only on the happy path,
   # because the failure that matters is the one that aborts mid-step.
   rm -rf "$ROOT/examples/scaffold-app/src/server" 2>/dev/null || true
+  rm -rf "$GP_SECURITY_DIR" 2>/dev/null || true
   # The fault-classification leg (#269) arms a PLATFORM fault by making the
   # generated dir read-only. Restored here as well as inline: if the script
   # aborts between the chmod and its restore, read-only artifacts would make
@@ -774,6 +772,9 @@ docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
 GP_SIGNING_KEY=/tmp/gp-signing-key.pem
 openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
 chmod 600 "$GP_SIGNING_KEY"
+SIGNING_KEY_FILE="$GP_SIGNING_KEY"
+GATEWAY_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
+e2e_export_runtime_secrets "$GP_SECURITY_DIR" || exit 1
 
 # WHY control gets --audit-retention-check-secs 1 below.
 #
@@ -835,7 +836,7 @@ chmod 600 "$GP_SIGNING_KEY"
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
   --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
-  --dev-insecure >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
+  >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
 # ONE definition of the worker command line, because there are TWO places that
 # start it: here, and step 8, which kills it to measure the runtime-unavailable
@@ -897,7 +898,7 @@ chmod 600 "$GATE_BROKER_SECRET"
 # harness never sets that variable (line 64 only READS it as a default for
 # $DB_URL). So before this flag, whether the gateway could validate a session
 # depended on the operator's shell. MEASURED 2026-08-12, three arms one variable
-# apart, `zeroship-gate` under ZEROSHIP_DEV_INSECURE=1:
+# apart:
 #     no --db, DATABASE_URL unset  -> "session validation disabled"
 #     --db "$DB_URL"               -> "pg connection pool configured"
 #     no --db, DATABASE_URL set    -> "pg connection pool configured"
@@ -3600,13 +3601,9 @@ gp_close_step
 # was written, so a red below is an ownership finding rather than a stack
 # problem. Two of the four are worth restating because they are counter-
 # intuitive:
-#   - COOKIE NAME is the DEV one, `zeroship_app_session`, UNPREFIXED. This file
-#     exports ZEROSHIP_DEV_INSECURE=1 (line 81) and the gateway declares
-#     `#[arg(long = "dev-insecure", env = "ZEROSHIP_DEV_INSECURE")]`
-#     (crates/gateway/src/main.rs:165-166), so `insecure_dev` is TRUE even
-#     though the launch line carries no flag, and oidc_rp.rs:980 selects
-#     APP_SESSION_COOKIE_DEV. Reading the launch line alone gives the WRONG
-#     answer here; `tests/e2e_auth_rpc.sh:157-159` already had it right.
+#   - COOKIE NAME is always `__Host-zeroship_app_session`. curl supplies that
+#     Secure cookie explicitly over loopback so the gateway exercises its
+#     production parser without weakening cookie construction.
 #   - SUBJECT must satisfy is_pairwise_subject: "pws_" + EXACTLY 20 ascii
 #     alphanumerics (PAIRWISE_SUB_BODY_LEN, crates/core/src/auth/mod.rs).
 #     router/auth.rs rejects anything else by returning CookieOutcome::None,
@@ -3748,7 +3745,7 @@ process.stdout.write(await new SignJWT({
         local ck="$1" proc="$2" body="${3:-{\}}"
         local args=(-s -m 25 -o /tmp/gp-notes.body -w '%{http_code}' -H "Host: $AN_HOST"
                     -X POST -H 'content-type: application/json')
-        [ "$ck" != "-" ] && args+=(-H "Cookie: zeroship_app_session=$ck" -H "Origin: http://$AN_HOST")
+        [ "$ck" != "-" ] && args+=(-H "Cookie: __Host-zeroship_app_session=$ck" -H "Origin: http://$AN_HOST")
         local code; code=$(curl "${args[@]}" "http://localhost:$GATE_PORT/__zeroship/v1/$proc" -d "{\"json\":$body}")
         echo "$code $(cat /tmp/gp-notes.body)"
       }

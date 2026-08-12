@@ -452,7 +452,7 @@ fn oauth_error_redirect(ctx: &NativeConsentContext, error: &str, issuer: &str) -
 #[allow(clippy::future_not_send)]
 async fn resolve_native_session(
     req: &HttpRequest,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
 ) -> Result<Option<session_store::Session>, HttpResponse> {
     let cookie_header = req
@@ -460,7 +460,7 @@ async fn resolve_native_session(
         .get(COOKIE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let Some(session_id) = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev) else {
+    let Some(session_id) = session_cookie::parse_cookie(cookie_header) else {
         return Ok(None);
     };
     session_store::validate(db, session_id).await.map_err(|err| {
@@ -487,7 +487,7 @@ async fn render_consent_page(
     return_to: &str,
     info: &NativeConsentRequest,
     db: &compio_postgres::Client,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     can_grant: bool,
     app_scope_defs: &HashMap<String, ScopeDef>,
 ) -> HttpResponse {
@@ -513,7 +513,7 @@ async fn render_consent_page(
 
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -880,14 +880,14 @@ fn standard_scope_label(scope: &str) -> Option<&'static str> {
 fn csrf_valid(
     req: &HttpRequest,
     form: &ConsentDecisionForm,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
 ) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     let Some(form_token) = form.csrf.as_deref() else {
         return false;
     };

@@ -15,10 +15,9 @@
 # literal hostname back into this file: it becomes a hostname in every
 # deployment that copies it.
 #
-# WARNING: DEV ONLY - NOT for production. Strong local secrets are generated
+# This is the local-development topology. Strong local secrets are generated
 # once by `zeroship dev init` and loaded from this directory's gitignored .env
-# and secrets/ files, but services still run with --dev-insecure until the later
-# guard-by-guard migration removes that flag.
+# and secrets/ files. The service binaries run their normal security checks.
 #
 # Usage:
 #   docker compose build && docker compose pull   # build/pull all images AHEAD
@@ -227,7 +226,7 @@ services:
         --port 9090
         --bind 0.0.0.0
         --blob-store /data/bundles
-        --dev-insecure
+        --allow-unsupported-billing
         --app-base-domain ${ZEROSHIP_DOMAIN:-zeroship.localhost}
         --signing-key-file /etc/zeroship/secrets/control-signing.pem
     environment:
@@ -235,8 +234,11 @@ services:
       # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
       ZEROSHIP_DATABASE_URL: ${CONTROL_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
       # Public-edge topology, independent of the origin's plain HTTP transport
-      # and of every security-relaxation flag.
+      # and of the service's security posture.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
+      # Control validates platform-issued access tokens against this explicit
+      # issuer. It is deployment topology, not a switch that relaxes checks.
+      AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
       # Privileged provisioning DSN for deploy-time migrations ONLY: control
       # opens this to CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv zeroship_control role above CANNOT do (no CREATEROLE /
@@ -251,6 +253,10 @@ services:
       # so control crash-looped with `secret reference env var
       # 'ZEROSHIP_WORKER_KEY' is not set`. MUST match the worker's value.
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
+      # The webhook handler always verifies Stripe-Signature. Local senders must
+      # sign with this generated value; a real Stripe CLI listener should
+      # override it with the whsec value printed by `stripe listen`.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?run zeroship dev init}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST be
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
@@ -281,21 +287,14 @@ services:
       # In-cluster control-plane base URL the deployed console's control-client
       # calls (the localhost default is wrong inside the compose network).
       ZEROSHIP_CONTROL_URL: http://control:9090
-    # No host port. Compose peers reach `control:9090` by service name. The
-    # public control.<domain> Caddy route is staged but commented out until
-    # --dev-insecure and the hardcoded platform-key are both gone. Operators
-    # that still need host access must add an explicit loopback-only override;
-    # see docs/runbooks/deploy-server.md.
+    # No host port. Caddy reaches control over the compose network through the
+    # authenticated control.<domain> route.
     volumes:
       - bundles:/data/bundles
       - ../../data:/data
       # Control MINTS PATs, so it needs the same key material gateway and auth
-      # already mount. Without --signing-key-file it falls back to
-      # PatIssuer::dev_insecure(), which GENERATES A FRESH RANDOM KEY EVERY BOOT
-      # (crates/authn: SigningKey::generate(&mut OsRng)) - so every PAT ever
-      # issued stops verifying the moment control restarts, and none can be
-      # minted out-of-band. The `migrated` service verifies against this SAME
-      # file, which is what lets a creator PAT authorize a migration apply.
+      # already mount. The `migrated` service verifies against this SAME file,
+      # which is what lets a creator PAT authorize a migration apply.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -332,7 +331,6 @@ services:
       zeroship-migrated
         --port 9091
         --bind 0.0.0.0
-        --dev-insecure
     ports:
       - "127.0.0.1:9091:9091"
     environment:
@@ -348,6 +346,12 @@ services:
       # Unlike the other four services, migrated reads CONTROL_KEY directly and
       # does not resolve the ZEROSHIP_CONTROL_KEY reference from zeroship.toml.
       CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      # Seals the server-composed migration policy. It is stable across restarts
+      # and independent from the platform encryption and transport keys.
+      MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}
+      # OAuth issuer topology, not a relaxed security posture. Containers reach
+      # this public hostname through Caddy's compose-network alias.
+      AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
     volumes:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -387,8 +391,7 @@ services:
           --blob-store /data/bundles \
           --poll-interval 3 \
           --auth-ui-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
-          --gateway-public-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
-          --dev-insecure
+          --gateway-public-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
       # pairwise salt). The default host directory is explicitly gitignored.
@@ -403,6 +406,8 @@ services:
       # DSN; --control-key/--worker-key flow through the file, not literal flags.
       # `--worker-key` MUST match the worker's WORKER_KEY.
       ZEROSHIP_DATABASE_URL: ${GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
+      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       # Public-edge topology consumed by the gateway's --origin-scheme setting.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
       # Counterpart to auth AUTH_BROKER_SECRET_FILE -- same file, same bytes.
@@ -598,7 +603,6 @@ services:
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
-        --dev-insecure
         --relay-forward-mailer stdout
     environment:
       # auth's least-priv DSN, resolved from deploy/ops/zeroship.toml's

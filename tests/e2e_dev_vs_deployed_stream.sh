@@ -74,6 +74,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 APP_DIR="$ROOT/examples/stream-probe"
 ZSHIP="$APP_DIR/dist/app.zship"
 WORK="$(mktemp -d)"
@@ -107,7 +109,6 @@ DEV_PORT="${DEV_PORT:-3061}"
 # Checked the rest of the mapping against that list too -- 5011, 5021, 5081,
 # 5091, 5092, 5093, 5097 are all clear; 5061 was the only collision.
 VITE_PORT="${VITE_PORT:-5062}"
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
 APP_NAME="streamp"
 # Set to 1 to run the buffering mutation described in the header.
@@ -318,14 +319,19 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key st-ck --master-key st-mk > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
-  --control-key st-ck --blob-store "$WORK/bundles" --poll-interval 2 > "$WORK/worker.log" 2>&1 & PIDS+=($!)
+  --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" \
+  --blob-store "$WORK/bundles" --poll-interval 2 > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key st-ck \
+"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+  --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4

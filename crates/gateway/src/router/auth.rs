@@ -680,7 +680,7 @@ async fn resolve_bearer_user_header(
         // ── RAW-OP path (RFC 9068, non-browser clients) ────────────
         let Some(expected_client_id) = oauth_client_id else {
             tracing::warn!(
-                "raw OP Bearer presented but route has no oauth_client_id — rejecting"
+                "raw OP Bearer presented but route has no oauth_client_id; rejecting"
             );
             return BearerOutcome::Invalid;
         };
@@ -936,9 +936,7 @@ async fn resolve_app_session_user_header_inner(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(token) =
-        oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)
-    else {
+    let Some(token) = oidc_rp::parse_app_session_cookie(cookie_header) else {
         return CookieOutcome::None;
     };
 
@@ -946,7 +944,7 @@ async fn resolve_app_session_user_header_inner(
     // client_id (un-provisioned app) we cannot bind, so refuse rather than
     // accept an unbound cookie — mirrors the raw OP Bearer arm.
     let Some(expected_client_id) = oauth_client_id else {
-        tracing::warn!("signed session cookie presented but route has no oauth_client_id — rejecting");
+        tracing::warn!("signed session cookie presented but route has no oauth_client_id; rejecting");
         return CookieOutcome::None;
     };
     let Some(verifier) = state.session_verifier.as_ref() else {
@@ -1043,18 +1041,13 @@ pub(super) fn jwt_subject_unverified(jwt: &str) -> Option<String> {
 
 /// Pull the app-session cookie value out of a Cookie header.
 ///
-/// Cookie name is `__Host-zeroship_app_session` in production and
-/// `zeroship_app_session` in dev (RFC 6265bis §4.1.3.2 — `__Host-` mandates
-/// Secure, which dev runs over plain HTTP without). Returns `None`
-/// when the cookie is missing or empty so callers can fall back to a
-/// different discriminator (e.g. per-rule rate-limit session-keyed
-/// buckets falling back to IP).
-pub(super) fn extract_session_cookie(
-    cookie_header: Option<&str>,
-    insecure_dev: bool,
-) -> Option<String> {
+/// The cookie name is always `__Host-zeroship_app_session`. Returns `None`
+/// when the cookie is missing or empty so callers can fall back to a different
+/// discriminator (for example, session-keyed rate-limit buckets fall back to
+/// the client IP).
+pub(super) fn extract_session_cookie(cookie_header: Option<&str>) -> Option<String> {
     let s = cookie_header?;
-    let prefix = format!("{}=", oidc_rp::app_session_cookie_name(insecure_dev));
+    let prefix = format!("{}=", oidc_rp::app_session_cookie_name());
     let token = s
         .split(';')
         .map(|p| p.trim())
@@ -1077,34 +1070,26 @@ mod tests {
         // falls back to IP. Treating empty as a real bucket key would
         // collapse every cookie-empty client into one shared bucket.
         assert_eq!(
-            extract_session_cookie(Some("__Host-zeroship_app_session="), false),
+            extract_session_cookie(Some("__Host-zeroship_app_session=")),
             None
         );
-        assert_eq!(extract_session_cookie(None, false), None);
-        assert_eq!(extract_session_cookie(Some("other=foo"), false), None);
+        assert_eq!(extract_session_cookie(None), None);
+        assert_eq!(extract_session_cookie(Some("other=foo")), None);
     }
 
     #[test]
     fn extract_session_cookie_reads_app_session_value() {
         let id = uuid::Uuid::new_v4();
         let header = format!("foo=bar; __Host-zeroship_app_session={id}; baz=qux");
-        let extracted = extract_session_cookie(Some(&header), false).expect("present");
+        let extracted = extract_session_cookie(Some(&header)).expect("present");
         assert_eq!(extracted, id.to_string());
     }
 
     #[test]
-    fn extract_session_cookie_dev_uses_bare_name_and_rejects_host_prefix() {
-        // Regression for the __Host- + insecure-dev incompatibility:
-        // dev cookies have no __Host- prefix (RFC 6265bis §4.1.3.2),
-        // so the dev parser must look for the bare name and ignore a
-        // stale __Host- cookie of the same suffix.
+    fn extract_session_cookie_rejects_bare_name() {
         let id = uuid::Uuid::new_v4();
-        let dev_header = format!("zeroship_app_session={id}");
-        let extracted = extract_session_cookie(Some(&dev_header), true).expect("present");
-        assert_eq!(extracted, id.to_string());
-
-        let prod_header = format!("__Host-zeroship_app_session={id}");
-        assert_eq!(extract_session_cookie(Some(&prod_header), true), None);
+        let bare_header = format!("zeroship_app_session={id}");
+        assert_eq!(extract_session_cookie(Some(&bare_header)), None);
     }
 
     // ─── Worker-user builders (raw OP Bearer) ─────────────────────
@@ -1331,7 +1316,6 @@ mod tests {
                 auth_ui_url: oidc_rp.auth_ui_url.clone(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
-                insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
             },
@@ -1593,7 +1577,6 @@ mod tests {
 
     fn csrf_config(
         origin_scheme: zeroship_core::config::OriginScheme,
-        insecure_dev: bool,
         trusted_origins: &[&str],
     ) -> crate::GateConfig {
         crate::GateConfig {
@@ -1608,7 +1591,6 @@ mod tests {
                 .iter()
                 .map(|origin| origin.parse().expect("validated trusted origin"))
                 .collect(),
-            insecure_dev,
             trust_proxy: false,
             public_url: String::new(),
         }
@@ -1619,7 +1601,7 @@ mod tests {
         // GET/HEAD are non-state-changing: never rejected, even with a foreign
         // Origin (the cookie still authenticates reads).
         let host = "myapp.zeroship.ai";
-        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::GET, host, Some("https://evil.example"), None),
             &config,
@@ -1634,7 +1616,7 @@ mod tests {
     fn csrf_gate_accepts_same_origin_state_change() {
         // POST with the app's own HTTP origin and same-origin Sec-Fetch.
         let host = "myapp.zeroship.ai";
-        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(
                 ntex::http::Method::POST,
@@ -1656,7 +1638,6 @@ mod tests {
         let host = "myapp.zeroship.ai";
         let config = csrf_config(
             zeroship_core::config::OriginScheme::Https,
-            false,
             &[
                 "https://console.zeroship.ai",
                 "https://console.zeroship.example",
@@ -1695,7 +1676,6 @@ mod tests {
         let host = "myapp.zeroship.ai";
         let config = csrf_config(
             zeroship_core::config::OriginScheme::Https,
-            false,
             &["https://console.zeroship.example"],
         );
         for fetch_site in ["none", "unknown"] {
@@ -1714,7 +1694,7 @@ mod tests {
     #[test]
     fn csrf_gate_rejects_foreign_missing_and_cross_site_state_change() {
         let host = "myapp.zeroship.ai";
-        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         // Foreign Origin on a state-changing POST rejects the cookie credential.
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("https://evil.example"), None),
@@ -1753,28 +1733,26 @@ mod tests {
     }
 
     #[test]
-    fn csrf_gate_origin_scheme_is_independent_of_insecure_dev() {
+    fn csrf_gate_uses_public_origin_scheme() {
         let host = "myapp.zeroship.ai";
-        let https_with_insecure_cookies =
-            csrf_config(zeroship_core::config::OriginScheme::Https, true, &[]);
+        let https_config = csrf_config(zeroship_core::config::OriginScheme::Https, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), Some("same-origin")),
-            &https_with_insecure_cookies,
+            &https_config,
         ));
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
-            &https_with_insecure_cookies,
+            &https_config,
         ));
 
-        let http_with_secure_cookies =
-            csrf_config(zeroship_core::config::OriginScheme::Http, false, &[]);
+        let http_config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
-            &http_with_secure_cookies,
+            &http_config,
         ));
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), None),
-            &http_with_secure_cookies,
+            &http_config,
         ));
     }
 
@@ -1902,7 +1880,7 @@ mod tests {
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token =
             issue_signed_session_cookie(state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
-        let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev fixture
+        let cookie_name = oidc_rp::app_session_cookie_name();
         ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -2640,7 +2618,7 @@ mod tests {
         let signed = issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
 
         // Sanity: that cookie ALONE (no Bearer) authenticates the User route.
-        let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let cookie_only_req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -2728,7 +2706,7 @@ mod tests {
         let scopes = vec!["openid".to_string(), "read:billing".to_string()];
         let signed = issue_signed_session_cookie(&state, client_id, &pws, "", &scopes);
 
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/billing")
             .header(http::header::HOST, aud)
@@ -2768,7 +2746,7 @@ mod tests {
         let scopes = vec!["openid".to_string(), "email".to_string()];
         let signed = issue_signed_session_cookie(&state, client_id, &pws, "", &scopes);
 
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/billing")
             .header(http::header::HOST, aud)
@@ -3064,7 +3042,7 @@ mod tests {
         let token =
             issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
 
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -3110,7 +3088,7 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let rid = Uuid::new_v4();
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
 
         let arm = |token: String, client: &str| {
             let req = ntex::web::test::TestRequest::default()
@@ -3289,7 +3267,7 @@ mod tests {
         // (2) An at+jwt-typ token presented to the session-cookie arm → None
         //     (the session verifier hard-rejects a non-`zeroship-sess+jwt` typ).
         let at_jwt = sign_at_jwt_typ_token(&gateway_signing, &pws, aud);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -3352,7 +3330,7 @@ mod tests {
             })
             .expect("issue under prev key");
 
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -3390,7 +3368,7 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
@@ -3502,7 +3480,7 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
@@ -3595,7 +3573,7 @@ mod tests {
             .ok();
         }
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
@@ -3686,7 +3664,7 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
@@ -3754,7 +3732,7 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
@@ -3794,7 +3772,7 @@ mod tests {
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token =
             issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
-        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let cookie_name = oidc_rp::app_session_cookie_name();
         let request_id = Uuid::new_v4();
 
         // Safe GET with the signed cookie: Allow with the pws_ header.

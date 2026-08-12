@@ -8,13 +8,11 @@
 # The identity injection (the crux):
 #   env.auth identity normally arrives via the gateway's HMAC-signed
 #   `ZeroShip-User` header. For a DIRECT worker /dispatch test (bypassing the
-#   gateway), the worker STILL verifies that header — `worker_key.is_empty()`
-#   disables the *bearer* gate on /dispatch but NOT the user-header HMAC
-#   (crates/worker/src/handler.rs verified_user_json). With an empty dev
-#   worker_key the HMAC key is the empty byte string, so the harness mints a
-#   fully-formed, request-bound, empty-key-signed header itself:
+#   gateway), the worker still requires its generated bearer and verifies the
+#   user-header HMAC with the same generated WORKER_KEY. The harness therefore
+#   mints a fully formed, request-bound header with that real key:
 #
-#     <base64(userJson)>.<request_id>.<issued_at>.<hmac_sha256_hex("", signed)>
+#     <base64(userJson)>.<request_id>.<issued_at>.<hmac_sha256_hex(key, signed)>
 #
 #   where signed = "<base64(userJson)>.<request_id>.<issued_at>" and the
 #   request_id MUST equal the `x-request-id` header on the dispatch POST
@@ -26,7 +24,7 @@
 #   1. Ephemeral Postgres + deploy/ops/postgres-init.sql + the full platform migration set
 #      (control needs a DB for app CRUD + deploy).
 #   2. Throwaway Redis (auth-notes scopes notes in env.kv → Redis backend).
-#   3. control + worker + gateway with `--dev-insecure`; worker gets `--kv-url`.
+#   3. control + worker + gateway with generated keys; worker gets `--kv-url`.
 #   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + permission_tokens
 #      row), exactly as the sibling harnesses do.
 #   5. Create + deploy examples/auth-notes.
@@ -57,6 +55,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset again to avoid colliding with the sibling harnesses)
@@ -106,20 +106,19 @@ jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{co
 # Mint a FRESH request id (UUID) on stdout.
 new_request_id() { node -e 'console.log(require("crypto").randomUUID())'; }
 
-# Mint a request-bound, empty-key-signed ZeroShip-User header for `userJson`
-# bound to `request_id`, issued now. Mirrors Rust sign_zeroship_user_header_at
-# with an empty HMAC key (the dev worker_key). Echoes the header on stdout.
+# Mint a request-bound ZeroShip-User header for `userJson`, bound to
+# `request_id` and signed with the generated worker key.
 sign_user_header() {
   local user_json="$1" request_id="$2"
   node -e '
     const c = require("crypto");
-    const [userJson, rid] = process.argv.slice(1);
+    const [userJson, rid, workerKey] = process.argv.slice(1);
     const iat = Math.floor(Date.now() / 1000);
     const b64 = Buffer.from(userJson, "utf8").toString("base64");
     const signed = `${b64}.${rid}.${iat}`;
-    const mac = c.createHmac("sha256", Buffer.alloc(0)).update(signed).digest("hex");
+    const mac = c.createHmac("sha256", workerKey).update(signed).digest("hex");
     process.stdout.write(`${signed}.${mac}`);
-  ' "$user_json" "$request_id"
+  ' "$user_json" "$request_id" "$WORKER_KEY"
 }
 
 # POST an envelope to the worker /dispatch for $APP_ID; echo "<body>\n<code>".
@@ -135,12 +134,14 @@ dispatch() {
   if [ -n "$user_json" ]; then
     local hdr; hdr="$(sign_user_header "$user_json" "$rid")"
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
+      -H "Authorization: Bearer $WORKER_KEY" \
       -H 'content-type: application/octet-stream' \
       -H "x-request-id: $rid" \
       -H "zeroship-user: $hdr" \
       --data-binary @"$frame"
   else
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
+      -H "Authorization: Bearer $WORKER_KEY" \
       -H 'content-type: application/octet-stream' \
       --data-binary @"$frame"
   fi
@@ -223,7 +224,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot stack (--dev-insecure, worker with --kv-url) ==="
+echo "=== Stage 2: boot secured stack (worker with --kv-url) ==="
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
@@ -231,21 +232,24 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: env.kv ← --kv-url (Redis), env.auth ← AuthPlugin (always registered).
-# Empty worker_key (dev) ⇒ /dispatch bearer gate is open on loopback, but the
-# ZeroShip-User header is STILL HMAC-verified (with the empty key) — which is
-# exactly why the harness signs the header it injects.
+# The generated worker key authenticates /dispatch and signs ZeroShip-User,
+# exactly matching the gateway-to-worker trust contract.
 "$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
   --kv-url "$KVURL" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
@@ -260,7 +264,7 @@ chmod 600 "$WORK/gate-secret"
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --gateway-broker-secret-file "$WORK/gate-secret" \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }

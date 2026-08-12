@@ -57,6 +57,8 @@ use zeroship_control::{
     SecretString, StripeStore,
 };
 
+const TEST_WEBHOOK_SECRET: &str = "whsec_billing_dispute_test_unconditional";
+
 fn db_url() -> String {
     common::require_control_db()
 }
@@ -82,7 +84,7 @@ impl Fixture {
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
         let env_store =
-            EnvStore::new(registry.clone(), "test-master-key", false).expect("env store");
+            EnvStore::new(registry.clone(), "test-master-key").expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -108,8 +110,7 @@ impl Fixture {
             workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
-            // insecure_dev with empty secret ⇒ signature verification skipped.
-            stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_webhook_secret: SecretString::new(TEST_WEBHOOK_SECRET.to_string()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".to_string(),
             gateway_url: "http://127.0.0.1:9".to_string(),
@@ -118,7 +119,6 @@ impl Fixture {
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Http,
-            insecure_dev: true,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
@@ -127,7 +127,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
@@ -165,13 +165,30 @@ macro_rules! init_control {
 
 macro_rules! post_webhook {
     ($app:expr, $body:expr) => {{
+        let body = $body.to_string();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after Unix epoch")
+            .as_secs() as i64;
+        let signature = stripe_signature(TEST_WEBHOOK_SECRET, timestamp, &body);
         let req = test::TestRequest::post()
             .uri("/internal/webhooks/stripe")
             .header("content-type", "application/json")
-            .set_payload($body.to_string())
+            .header("stripe-signature", signature)
+            .set_payload(body)
             .to_request();
         test::call_service(&$app, req).await
     }};
+}
+
+fn stripe_signature(secret: &str, timestamp: i64, body: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()).expect("HMAC key");
+    mac.update(format!("{timestamp}.").as_bytes());
+    mac.update(body.as_bytes());
+    format!("t={timestamp},v1={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 // ─── seeding helpers (parallel-safe: unique creator/invoice/refs per call) ───
