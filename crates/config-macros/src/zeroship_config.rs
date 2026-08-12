@@ -348,9 +348,12 @@ fn emit(
                 quote!(::core::option::Option::Some(::core::stringify!(#value)))
             })
             .unwrap_or_else(|| quote!(::core::option::Option::None));
-        let constructor = match config.class {
-            SupplyClass::Operational => quote!(operational),
-            SupplyClass::Secret => quote!(secret),
+        // `ConfigSpec::secret` takes no default parameter at all, so a compiled
+        // secret default is not merely rejected by the attribute above but
+        // unspellable in the emitted call.
+        let (constructor, trailing) = match config.class {
+            SupplyClass::Operational => (quote!(operational), quote!(#default,)),
+            SupplyClass::Secret => (quote!(secret), quote!()),
         };
         quote! {
             #(#cfg_attrs)*
@@ -360,7 +363,7 @@ fn emit(
                 #field,
                 #field,
                 ::core::stringify!(#inner),
-                #default,
+                #trailing
             )
         }
     });

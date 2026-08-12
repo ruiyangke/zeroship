@@ -24,7 +24,6 @@ fn secret(name: &'static str, consumers: &'static [Consumer]) -> ConfigSpec {
         "fixture",
         "fixture",
         "String",
-        None,
     )
 }
 

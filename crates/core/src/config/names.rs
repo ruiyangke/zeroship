@@ -203,6 +203,11 @@ impl ConfigSpec {
     }
 
     /// Declare a secret setting.
+    ///
+    /// There is deliberately no default parameter: a compiled default for a
+    /// secret would put credential material in the binary. The attribute
+    /// rejects `default` on a `Secret<T>` field, and this signature makes the
+    /// same rule unrepresentable for a hand-written spec.
     #[must_use]
     pub const fn secret(
         canonical: CanonicalName<'static>,
@@ -210,7 +215,6 @@ impl ConfigSpec {
         field: &'static str,
         arg_id: &'static str,
         rust_type: &'static str,
-        _default: Option<&'static str>,
     ) -> Self {
         Self {
             canonical,
@@ -548,9 +552,18 @@ impl<T> fmt::Debug for Secret<T> {
     }
 }
 
+/// Vocabulary the later migration steps need, with NO machinery behind it yet.
+///
+/// The attribute accepts `Operational<T>` and `Secret<T>` only, and rejects
+/// every wrapper below by name. They exist so the classification in the design
+/// has one spelling, not because declaring one does anything today. Do not read
+/// a wrapper's presence as a source policy that is being enforced.
 macro_rules! policy_wrapper {
     ($name:ident) => {
-        #[doc = concat!("Type-driven source policy wrapper `", stringify!($name), "`.")]
+        #[doc = concat!(
+            "Placeholder source-policy wrapper `", stringify!($name),
+            "`. The `zeroship_config` attribute does NOT accept it yet."
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name<T>(pub T);
     };
@@ -877,7 +890,6 @@ database_url = "postgres://operator-mounted-secret"
             "database_url",
             "database_url",
             "String",
-            None,
         );
         assert_eq!(spec.env_name().as_deref(), Some("ZEROSHIP_CONTROL_DATABASE_URL"));
         assert_eq!(spec.flag_name(CONSUMERS[0]).as_deref(), Some("database-url-file"));
