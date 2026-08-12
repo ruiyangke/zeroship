@@ -29,23 +29,33 @@ type SubEvent =
   | { kind: "closed" };
 
 interface FakeSub {
+  ready(): Promise<void>;
   next(): Promise<SubEvent | null>;
   close(): void;
   emit(ev: SubEvent): void;
+  fail(error: Error): void;
 }
 
 /** Build a queue-backed fake Subscription whose `next()` resolves to
  *  the next event pushed via `emit()`, blocking until one arrives. */
-function makeFakeSub(): FakeSub & { closes: number } {
+function makeFakeSub(
+  onReady: () => Promise<void> = async () => undefined,
+): FakeSub & { closes: number } {
   const queue: SubEvent[] = [];
-  let pending: ((ev: SubEvent | null) => void) | null = null;
+  let pending: {
+    resolve: (ev: SubEvent | null) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   let closed = false;
   const state = { closes: 0 };
   const sub = {
+    ready: onReady,
     async next(): Promise<SubEvent | null> {
       if (closed) return null;
       if (queue.length > 0) return queue.shift()!;
-      return new Promise<SubEvent | null>((resolve) => { pending = resolve; });
+      return new Promise<SubEvent | null>((resolve, reject) => {
+        pending = { resolve, reject };
+      });
     },
     close(): void {
       if (closed) return;
@@ -54,7 +64,7 @@ function makeFakeSub(): FakeSub & { closes: number } {
       if (pending) {
         const p = pending;
         pending = null;
-        p(null);
+        p.resolve(null);
       }
     },
     emit(ev: SubEvent): void {
@@ -62,9 +72,17 @@ function makeFakeSub(): FakeSub & { closes: number } {
       if (pending) {
         const p = pending;
         pending = null;
-        p(ev);
+        p.resolve(ev);
       } else {
         queue.push(ev);
+      }
+    },
+    fail(error: Error): void {
+      if (closed) return;
+      if (pending) {
+        const p = pending;
+        pending = null;
+        p.reject(error);
       }
     },
   };
@@ -75,7 +93,7 @@ function makeFakeSub(): FakeSub & { closes: number } {
 /** Mock native + a row table mutated by tests directly. The `find`
  *  callback returns a deep-snapshot of the current rows so a rerun
  *  picks up the latest mutation. */
-function makeMockNative() {
+function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
   const rowsByTable: Record<string, AnyRec[]> = {};
   // `& { closes: number }` - the assertions below read `.closes` (the
   // close-count `makeFakeSub()` tracks), not `.close` (the method). A
@@ -83,7 +101,7 @@ function makeMockNative() {
   // through this array, even though every element pushed in is always
   // a `makeFakeSub()` result and genuinely carries it at runtime.
   const subs: Record<string, (FakeSub & { closes: number })[]> = {};
-  const calls = { find: 0, openSubscription: 0 };
+  const calls = { find: 0, openSubscription: 0, ready: 0 };
 
   const native = {
     registerModel: async () => undefined,
@@ -116,7 +134,10 @@ function makeMockNative() {
         // entry was removed).
         openSubscription(): FakeSub {
           calls.openSubscription += 1;
-          const sub = makeFakeSub();
+          const sub = makeFakeSub(async () => {
+            calls.ready += 1;
+            await options?.ready?.(name);
+          });
           (subs[name] ??= []).push(sub);
           return sub;
         },
@@ -162,6 +183,72 @@ describe("db.live — reactive query layer", () => {
     assert.equal(first.value!.length, 1);
     assert.equal((first.value![0] as AnyRec).title, "first");
     live.close();
+  });
+
+  test("arms subscriptions and reruns before emitting the initial snapshot", async () => {
+    let releaseReady!: () => void;
+    const readyGate = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const ctx = makeMockNative({ ready: async () => readyGate });
+    installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });
+    const db = installSchemaForTest(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+    await db.todos.insert({ title: "discovery" });
+
+    const live = db.live(() => db.todos.find({}));
+    const firstPromise = live.next();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(ctx.calls.find, 1, "discovery query ran once");
+    assert.equal(ctx.calls.openSubscription, 1, "subscription opened after discovery");
+    assert.equal(ctx.calls.ready, 1, "CDC readiness was requested");
+
+    await db.todos.insert({ title: "written while CDC starts" });
+    releaseReady();
+
+    const first = await firstPromise;
+    assert.equal(ctx.calls.find, 2, "query reran after CDC became ready");
+    assert.deepEqual(
+      (first.value as AnyRec[]).map((row) => row.title),
+      ["discovery", "written while CDC starts"],
+    );
+    live.close();
+  });
+
+  test("readiness failure rejects the first snapshot and closes subscriptions", async () => {
+    const startupError = new Error("logical replication unavailable");
+    const ctx = makeMockNative({ ready: async () => { throw startupError; } });
+    installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });
+    const db = installSchemaForTest(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+
+    const live = db.live(() => db.todos.find({}));
+    await assert.rejects(live.next(), (error) => error === startupError);
+    assert.equal(ctx.calls.find, 1, "must not emit or run the post-ready snapshot");
+    assert.equal(ctx.subs.todos[0].closes, 1);
+    assert.equal((await live.next()).done, true);
+  });
+
+  test("subscription driver errors reject pending consumers instead of stalling", async () => {
+    const ctx = makeMockNative();
+    installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });
+    const db = installSchemaForTest(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+
+    const live = db.live(() => db.todos.find({}));
+    await live.next();
+    const pending = live.next();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const driverError = new Error("WAL consumer stopped");
+    ctx.subs.todos[0].fail(driverError);
+
+    await assert.rejects(pending, (error) => error === driverError);
+    assert.equal((await live.next()).done, true);
   });
 
   test("an event on a watched table triggers a rerun", async () => {

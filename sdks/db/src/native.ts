@@ -4,6 +4,7 @@ type RequiredSurfaceError = {
 };
 
 export interface NativeSubscriptionLike<TEvent = unknown> {
+  ready(): Promise<void>;
   next(): Promise<TEvent | null>;
   close(): void;
 }

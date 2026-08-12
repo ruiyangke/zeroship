@@ -34,6 +34,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     let pending: ((ev: SubEvent | null) => void) | null = null;
     let closed = false;
     return {
+      async ready() {},
       async next(): Promise<SubEvent | null> {
         if (closed) return null;
         if (queue.length > 0) return queue.shift()!;
@@ -157,10 +158,11 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
       collection: () => ({
         async find() {
           runCount += 1;
-          // First run (initial result) succeeds; every rerun throws so
+          // Discovery and the post-ready initial run succeed; every
+          // event-driven rerun throws so
           // pump({kind:"error", error}) fires while two consumers are
           // pending.
-          if (runCount === 1) return [{ id: 1, title: "ok" }];
+          if (runCount <= 2) return [{ id: 1, title: "ok" }];
           throw new Error("rerun failed: synthetic");
         },
         openSubscription: () => {

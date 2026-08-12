@@ -20,6 +20,7 @@ type AnyRec = Record<string, unknown>;
 function makeFakeSub() {
   let closed = false;
   return {
+    async ready() {},
     async next() { if (closed) return null; return new Promise(() => undefined); },
     close() { closed = true; },
   };

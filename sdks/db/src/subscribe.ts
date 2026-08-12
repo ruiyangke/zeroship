@@ -2,15 +2,14 @@
  * Reactive-query subscription primitive — P8a of the C1 reactive
  * queries phase of the @zeroship/db proposal.
  *
- * P8a-scope: coarse-grained, in-process. A subscription on
- * `collection` fires for every change to that collection by
- * subscribers in the same isolate. Read-set narrowing (P8b) +
- * cross-worker WAL fanout (P8a.2) + React `useQuery` (P8b) are
- * deferred.
+ * A subscription on `collection` fires for every change to that
+ * collection. The runtime arms distributed WAL delivery before
+ * `ready()` resolves. Read-set narrowing and React `useQuery` remain
+ * outside this primitive.
  *
  * The native surface is the Subscription v8_class (returned from
- * `env.db.<collection>.openSubscription()`) with `.next()` →
- * Promise<SubscriptionEvent | null> and `.close()`. This module
+ * `env.db.<collection>.openSubscription()`) with `.ready()`, `.next()`
+ * returning Promise<SubscriptionEvent | null>, and `.close()`. This module
  * wraps it into an `AsyncIterable` so callers can write:
  *
  * ```ts
@@ -79,6 +78,10 @@ type _SubscriptionEventPkMatchesPublished = _Assert<
  *   finalizer is the safety-net release).
  */
 export interface Subscription extends AsyncIterable<SubscriptionEvent> {
+  /** Resolve once the runtime has armed change delivery. Reject if CDC
+   *  cannot start, so callers never mistake a static snapshot for a live
+   *  subscription. Calls are idempotent. */
+  ready(): Promise<void>;
   /** Idempotent close. Subsequent iterator polls resolve with
    *  `{kind:"closed"}` and the iterator terminates. */
   close(): void;
@@ -124,6 +127,7 @@ export function subscribe(collection: string): Subscription {
   );
   const sub = openSubscription();
   let closed = false;
+  let readiness: Promise<void> | undefined;
 
   function doClose(): void {
     if (closed) return;
@@ -136,12 +140,34 @@ export function subscribe(collection: string): Subscription {
     }
   }
 
+  function ensureReady(): Promise<void> {
+    if (readiness === undefined) {
+      readiness = Promise.resolve()
+        .then(() => sub.ready())
+        .catch((error) => {
+          doClose();
+          throw error;
+        });
+    }
+    return readiness;
+  }
+
   const iter: AsyncIterator<SubscriptionEvent> = {
     async next(): Promise<IteratorResult<SubscriptionEvent>> {
       if (closed) {
         return { value: undefined, done: true };
       }
-      const parsed = await sub.next();
+      await ensureReady();
+      if (closed) {
+        return { value: undefined, done: true };
+      }
+      let parsed: SubscriptionEvent | null;
+      try {
+        parsed = await sub.next();
+      } catch (error) {
+        doClose();
+        throw error;
+      }
       if (parsed === null) {
         // Wrapper is closed — equivalent to a closed event we missed.
         closed = true;
@@ -163,6 +189,7 @@ export function subscribe(collection: string): Subscription {
   };
 
   return {
+    ready: ensureReady,
     close: doClose,
     [Symbol.asyncIterator](): AsyncIterator<SubscriptionEvent> {
       return iter;

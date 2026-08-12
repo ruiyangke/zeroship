@@ -16,16 +16,19 @@ type SubEvent =
   | { kind: "closed" };
 
 interface FakeSub {
+  ready(): Promise<void>;
   next(): Promise<SubEvent | null>;
   close(): void;
 }
 
-function makeFakeSub(events: (SubEvent | null)[]): FakeSub & { closes: number; pulls: number } {
+function makeFakeSub(events: (SubEvent | null)[]): FakeSub & { closes: number; pulls: number; readies: number } {
   let i = 0;
-  const state = { closes: 0, pulls: 0 };
+  const state = { closes: 0, pulls: 0, readies: 0 };
   const sub: FakeSub & typeof state = {
     closes: 0,
     pulls: 0,
+    readies: 0,
+    async ready() { state.readies += 1; },
     async next() {
       state.pulls += 1;
       const ev = events[i++];
@@ -38,6 +41,7 @@ function makeFakeSub(events: (SubEvent | null)[]): FakeSub & { closes: number; p
   };
   Object.defineProperty(sub, "closes", { get: () => state.closes });
   Object.defineProperty(sub, "pulls", { get: () => state.pulls });
+  Object.defineProperty(sub, "readies", { get: () => state.readies });
   return sub;
 }
 
@@ -50,6 +54,69 @@ before(async () => {
 });
 
 describe("Subscription iterator — close semantics", () => {
+  test("next() waits for native readiness exactly once", async () => {
+    const fake = makeFakeSub([
+      { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },
+      { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
+    ]);
+    (env as { db?: unknown }).db = {
+      collection: (_c: string) => ({ openSubscription: () => fake }),
+    };
+    const sub = subscribe("messages");
+
+    await sub.ready();
+    await sub.ready();
+    const iter = sub[Symbol.asyncIterator]();
+    await iter.next();
+    await iter.next();
+
+    assert.equal(fake.readies, 1);
+    sub.close();
+  });
+
+  test("readiness failure rejects iteration and closes the native handle", async () => {
+    const startupError = new Error("CDC startup failed");
+    let closes = 0;
+    let pulls = 0;
+    const fake: FakeSub = {
+      async ready() { throw startupError; },
+      async next() { pulls += 1; return null; },
+      close() { closes += 1; },
+    };
+    (env as { db?: unknown }).db = {
+      collection: (_c: string) => ({ openSubscription: () => fake }),
+    };
+
+    const sub = subscribe("messages");
+    await assert.rejects(
+      sub[Symbol.asyncIterator]().next(),
+      (error) => error === startupError,
+    );
+    assert.equal(closes, 1);
+    assert.equal(pulls, 0, "must not poll an unarmed subscription");
+  });
+
+  test("native polling failure rejects iteration and closes the native handle", async () => {
+    const driverError = new Error("WAL consumer stopped");
+    let closes = 0;
+    const fake: FakeSub = {
+      async ready() {},
+      async next() { throw driverError; },
+      close() { closes += 1; },
+    };
+    (env as { db?: unknown }).db = {
+      collection: (_c: string) => ({ openSubscription: () => fake }),
+    };
+
+    const sub = subscribe("messages");
+    await assert.rejects(
+      sub[Symbol.asyncIterator]().next(),
+      (error) => error === driverError,
+    );
+    assert.equal(closes, 1);
+    assert.equal((await sub[Symbol.asyncIterator]().next()).done, true);
+  });
+
   test("next() after explicit close() returns {done: true} cleanly", async () => {
     const fake = makeFakeSub([
       { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },

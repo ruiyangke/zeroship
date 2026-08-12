@@ -399,6 +399,8 @@ type ZeroshipSubscriptionEvent =
  * async.
  */
 interface ZeroshipSubscription {
+  /** Resolves only after distributed change delivery is armed. */
+  ready(): Promise<void>;
   next(): Promise<ZeroshipSubscriptionEvent | null>;
   /** Idempotent synchronous teardown — see comment above. */
   close(): void;
