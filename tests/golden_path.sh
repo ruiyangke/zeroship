@@ -422,11 +422,25 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regcl
 # WHAT THIS DOES NOT CATCH: privilege, not behaviour. It proves the GRANT
 # exists, not that the sweep runs, deletes the right rows, or is scheduled. A
 # sweep that never fires still satisfies it.
+# SELECT is checked alongside DELETE for the reason the control-side sweep check
+# below states in full: the statement is
+#   DELETE FROM zeroship.token_revocations WHERE revoked_after < NOW() - ...
+# (crates/authz/src/wrapper_revocation.rs, reached from
+# crates/auth/src/cron/token_sweep.rs:125) and PostgreSQL requires SELECT on any
+# column named in the WHERE clause. This assertion tested DELETE ALONE until
+# 2026-08-12, so a migration granting DELETE without SELECT would have broken the
+# sweep exactly as #319 did and left this line green. Both privileges are granted
+# today - measured, so this is a latent hole closed, not a live defect fixed.
+#
+# BOTH ARMS PROVEN LOAD-BEARING against the live schema, no DB mutation needed for
+# the first: zeroship_auth on zeroship.email_suppressions is select=t delete=f and
+# yields 1. For the second no shipped pair grants DELETE without SELECT, so it was
+# built: a scratch table with only DELETE granted also yielded 1, then dropped.
 auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-  "select has_table_privilege('zeroship_auth','zeroship.token_revocations','DELETE')" 2>/dev/null | tr -d '[:space:]')
-[ "$auth_del" = "t" ] \
-  && pass "zeroship_auth can DELETE token_revocations (its sweep needs it)" \
-  || fail "zeroship_auth lacks DELETE on token_revocations: token_sweep cannot succeed (#319)"
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('DELETE')) p(v) where n.nspname='zeroship' and c.relname='token_revocations' and has_table_privilege('zeroship_auth',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$auth_del" = "2" ] \
+  && pass "zeroship_auth holds SELECT+DELETE on token_revocations (its sweep needs both)" \
+  || fail "zeroship_auth token_revocations privileges read $auth_del of 2: token_sweep cannot succeed (#319)"
 
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
