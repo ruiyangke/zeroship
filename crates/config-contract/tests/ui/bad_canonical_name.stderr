@@ -1,0 +1,5 @@
+error: canonical config name must be ASCII lowercase dotted snake_case
+ --> tests/ui/bad_canonical_name.rs
+  |
+  |     #[config(name = "Control.Port")]
+  |                     ^^^^^^^^^^^^^^

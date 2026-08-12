@@ -125,8 +125,9 @@ fn a_removed_reader_fails_set_but_unread_equality() {
 fn a_wrong_consumer_is_both_unread_and_undeclared() {
     // Mutation: the read site keeps the identity/source but claims worker as
     // consumer instead of control.
-    // Does not cover: the compile-time EnvKey consumer mismatch; a trybuild
-    // fixture proves that accidental typed misuse does not compile.
+    // Does not cover: the compile-time EnvKey consumer mismatch. That is
+    // tests/ui/wrong_consumer.rs, with its positive control in
+    // linked_registry.rs.
     let specs = [operational("control.port", CONTROL_ONLY)];
     let mut reads = sites(&specs);
     let env = reads
