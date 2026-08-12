@@ -1141,8 +1141,13 @@ async function searchBugsInternal(
   // Enforcing on the detail route alone would keep a restricted bug's summary,
   // status and assignee listed on the bug list and in reports -- which is most
   // of what a confidential bug is trying not to leak.
+  // Chunked for the same reason every `$in` in this file is: the list is
+  // unbounded (one entry per restricted bug the viewer cannot see) and each
+  // entry becomes a bind parameter, so one `NOT IN` would grow without limit.
+  // `$nin` chunks cleanly where `$in` would not -- excluding A and excluding B
+  // is the AND of the two, whereas including A or B is the OR.
   const hidden = await hiddenBugIds(await appUserForIdentity(identity));
-  if (hidden.length > 0) clauses.push({ id: { $nin: hidden } });
+  for (const page of chunks(hidden)) clauses.push({ id: { $nin: page } });
 
   const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
   const sortBy = input.sortBy ?? "updated_at";
