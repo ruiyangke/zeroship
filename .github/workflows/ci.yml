@@ -1254,6 +1254,19 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_account_status_enforcement.sh 2>&1 | tee "$RUNNER_TEMP/dvd-acctstatus.log"
+      # Scenario 16's harness (#306) - the spend ladder, Allow -> Warn ->
+      # Degrade -> Block and recovery, enforced at the gateway. THIRD
+      # consecutive walked-and-proved harness found ungated (after render 29/0
+      # and account-status 16/0). Run by me at HEAD: 28 passed, 0 failed,
+      # rc=0 - the same 28/0 #306 recorded.
+      #
+      # Worth keeping because the commercial ladder is the one place a bug is
+      # silently expensive: a broken Block arm serves traffic nobody is paying
+      # for, and #306 found this harness had also been exiting 0 without docker.
+      - name: Spend state transitions (scenario 16, 28/0 at HEAD)
+        run: |
+          set -o pipefail
+          tests/e2e_spend_state_transitions.sh 2>&1 | tee "$RUNNER_TEMP/dvd-spend.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
