@@ -68,6 +68,47 @@ rpc() {
 status_of() { printf '%s' "$1" | tail -1; }
 body_of()   { printf '%s' "$1" | sed '$d'; }
 
+# PREFLIGHT: prove we are talking to THIS app before asserting anything about it.
+#
+# `$URL` defaults to :5173, which is vite's default and therefore NOT ours alone.
+# Measured 2026-08-12: examples/db-chat was serving :5173 on this machine while
+# this harness's default still pointed there. It does not fail silently - db-chat
+# has no `notes.*` procedure and no devAuth users, so step [0] and step [1] both
+# go red. But they go red MISDIRECTINGLY:
+#
+#   [FAIL] alice: no CSRF token in the login form
+#   [FAIL] anonymous notes.list is 401        (it is 404 - no such procedure)
+#
+# which reads as "this app's auth is broken" when the truth is "that is not this
+# app". One probe with a specific expected value tells the two apart. 401 is the
+# right signal: only an app that HAS notes.list and gates it answers 401 here.
+echo "[preflight] confirm \$ZEROSHIP_URL is serving auth-notes-db"
+PRE=$(rpc - notes.list)
+PRE_CODE=$(status_of "$PRE")
+echo "  ${RPC}/notes.list (anon) -> $PRE_CODE"
+if [ "$PRE_CODE" != "401" ]; then
+  echo "  [FAIL] $URL is not serving auth-notes-db (anon notes.list -> $PRE_CODE, want 401)."
+  # The split is "did anything answer", NOT a specific error code. I first wrote
+  # this with a 404 arm for the wrong-app case, predicting that a foreign app
+  # would 404 an unknown procedure. MEASURED 2026-08-12 against examples/db-chat
+  # actually serving :5173: it answers 503, so the useful hint never fired and
+  # the catch-all did. Any status other than 000 means SOMETHING is serving this
+  # port and it is not this app; which 4xx/5xx it happens to pick is that app's
+  # business, not a signal worth branching on.
+  if [ "$PRE_CODE" = "000" ]; then
+    echo "         Nothing answered at all: no dev server is running on $URL."
+    echo "         Start it first:  pnpm migrate && pnpm dev"
+  else
+    echo "         Something IS serving $URL, but it does not have this app's"
+    echo "         notes.list. The usual cause is another example on this port -"
+    echo "         :5173 is vite's default, not ours. Start THIS app and point at it:"
+    echo "           ZEROSHIP_URL=http://localhost:5199 pnpm smoke"
+  fi
+  echo "  Refusing to run the ownership assertions against an unidentified server."
+  exit 2
+fi
+echo "  [ok]   $URL is serving auth-notes-db (anon notes.list gated with 401)"
+
 echo "[0] sign in as two distinct dev users"
 login alice alice@localhost alice
 login bob   bob@localhost   bob
