@@ -1092,9 +1092,7 @@ impl Drop for BrokerPauseGuard {
         //    Subscribers refetch + continue catching up. The broker
         //    primitive is idempotent on closed entries (skipped) and
         //    fast-noop on apps with zero subscribers.
-        crate::broker::BROKER.with(|b| {
-            b.borrow_mut().resume_app_with_resync(&self.app_id);
-        });
+        crate::broker::resume_app_with_resync(&self.app_id);
         tracing::trace!(
             app_id = %self.app_id,
             "BrokerPauseGuard dropped: unsuppress + resume_app_with_resync emitted"
@@ -1575,9 +1573,7 @@ impl Drop for SchemaPendingGuard {
         crate::broker::disengage_schema_pending(&self.app_id);
         // 2. Push one `Resync` per active subscription on `app_id` —
         //    same primitive the backfill-pause path uses.
-        crate::broker::BROKER.with(|b| {
-            b.borrow_mut().resume_app_with_resync(&self.app_id);
-        });
+        crate::broker::resume_app_with_resync(&self.app_id);
         tracing::trace!(
             app_id = %self.app_id,
             "SchemaPendingGuard dropped: disengage + resume_app_with_resync emitted"

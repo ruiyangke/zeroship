@@ -1,8 +1,9 @@
 //! In-memory subscription broker — foundation for C1 reactive queries.
 //!
 //! The broker is the routing table between change events (local
-//! mutations within the same isolate, and pgoutput WAL frames decoded
-//! by the streaming consumer) and the subscribers who care about them.
+//! mutations within any isolate in this process, and pgoutput WAL
+//! frames decoded by the streaming consumer) and the subscribers who
+//! care about them.
 //!
 //! ## Scope
 //!
@@ -17,12 +18,10 @@
 //!   behind" path.
 //! - **Lifecycle:** a subscription is a [`Subscription`] held by the
 //!   V8 callback that opened it. Drop = unsubscribe.
-//! - **Threading:** the broker is thread-local. The compio runtime is
-//!   single-threaded per worker, and every callback that writes events
-//!   (`insert`, `updateOne`, `deleteOne`, ...) runs in the same isolate
-//!   thread. A future cross-thread broker would replace `RefCell` with
-//!   a `Mutex` and add a per-worker dispatcher; we don't do that yet
-//!   because there's nothing to dispatch across threads.
+//! - **Threading:** one process-wide broker connects every isolate thread
+//!   in a worker process. The routing table and each subscription queue
+//!   use separate mutexes. Broker operations never await while holding a
+//!   lock, and the lock order is always broker then subscription.
 //!
 //! ## How an event reaches a subscriber
 //!
@@ -54,9 +53,8 @@
 //!   and by the local-emit path from the mutation handler's `SET`
 //!   clause for INSERT/UPDATE; DELETE reports an empty set.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::task::Waker;
 
 use serde_json::Value;
@@ -155,14 +153,14 @@ pub(crate) const MAX_SUBSCRIPTIONS_PER_APP: usize = 256;
 /// One subscriber's view of the broker.
 ///
 /// Held by the V8 layer (one per `subscribe()` call). Owned via
-/// `Rc<RefCell<Inner>>` so the broker can push events into it without
-/// holding a borrow across `.await`.
+/// `Arc<Mutex<Inner>>` so a publisher on one isolate thread can wake
+/// a subscriber on another isolate thread.
 #[derive(Clone)]
-pub struct Subscription(Rc<RefCell<SubscriptionInner>>);
+pub struct Subscription(Arc<Mutex<SubscriptionInner>>);
 
 impl std::fmt::Debug for Subscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.0.borrow();
+        let inner = self.lock_inner();
         f.debug_struct("Subscription")
             .field("id", &inner.id)
             .field("app_id", &inner.app_id)
@@ -205,19 +203,22 @@ struct SubscriptionInner {
     /// against the event tuple and delivers only if at least one entry
     /// for the matching collection matches.
     read_set: Option<Vec<ReadSetEntry>>,
+    /// Unit tests run in parallel while sharing the production-style
+    /// process broker. Track ownership so test-only global cleanup and
+    /// counts do not interfere with unrelated test threads.
+    #[cfg(test)]
+    owner_thread: std::thread::ThreadId,
 }
 
 /// A single message the iterator yields. `Resync` is special — see
 /// the proposal's backpressure section.
 ///
-/// `Change` carries the event behind an `Rc` so the broker can fan
+/// `Change` carries the event behind an `Arc` so the broker can fan
 /// the same payload out to N subscribers without deep-cloning the
 /// `new_tuple` HashMap (and the rest of the event) per subscriber.
-/// The broker is per-isolate / single-threaded compio, so `Rc` is the
-/// correct primitive — no `Arc` synchronisation cost.
 #[derive(Debug, Clone)]
 pub enum SubscriptionMessage {
-    Change(Rc<ChangeEvent>),
+    Change(Arc<ChangeEvent>),
     /// Bounded queue overflowed; client should refetch and drop
     /// any cached results.
     Resync,
@@ -232,7 +233,7 @@ impl Subscription {
     /// constructor doesn't take the broker because tests construct
     /// subscriptions standalone.
     pub fn new(id: u64, app_id: String, collection: String, max_queue: usize) -> Self {
-        Self(Rc::new(RefCell::new(SubscriptionInner {
+        Self(Arc::new(Mutex::new(SubscriptionInner {
             id,
             app_id,
             collection,
@@ -242,7 +243,13 @@ impl Subscription {
             closed: false,
             resync_pending: false,
             read_set: None,
+            #[cfg(test)]
+            owner_thread: std::thread::current().id(),
         })))
+    }
+
+    fn lock_inner(&self) -> MutexGuard<'_, SubscriptionInner> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Attach a read-set to this subscription. Called after the
@@ -258,7 +265,7 @@ impl Subscription {
     /// subscription and open a new one with the fresh read-set —
     /// matches the proposal's "fingerprint change ⇒ resubscribe" rule.
     pub fn set_read_set(&self, entries: Vec<ReadSetEntry>) {
-        self.0.borrow_mut().read_set = Some(entries);
+        self.lock_inner().read_set = Some(entries);
     }
 
     /// Evaluate this subscription's read-set against an event tuple.
@@ -272,7 +279,7 @@ impl Subscription {
     /// For UPDATE events the broker also checks `old_tuple` so a row
     /// "leaving the view" still fires.
     pub(crate) fn accepts(&self, event: &ChangeEvent) -> bool {
-        let inner = self.0.borrow();
+        let inner = self.lock_inner();
         let Some(rs) = inner.read_set.as_ref() else {
             return true;
         };
@@ -293,13 +300,13 @@ impl Subscription {
     }
 
     pub fn id(&self) -> u64 {
-        self.0.borrow().id
+        self.lock_inner().id
     }
     pub fn app_id(&self) -> String {
-        self.0.borrow().app_id.clone()
+        self.lock_inner().app_id.clone()
     }
     pub fn collection(&self) -> String {
-        self.0.borrow().collection.clone()
+        self.lock_inner().collection.clone()
     }
 
     /// Push an event onto this subscription's queue. Called by
@@ -309,25 +316,25 @@ impl Subscription {
     /// single `Resync`. The iterator sees the resync, refetches once,
     /// and starts catching up again.
     pub fn push(&self, msg: SubscriptionMessage) {
-        let mut inner = self.0.borrow_mut();
-        if inner.closed {
-            return;
-        }
-        if inner.queue.len() >= inner.max_queue {
-            // Overflow — drop everything, emit one Resync. The
-            // subscriber's job is then to fetch fresh state.
-            if !inner.resync_pending {
-                inner.queue.clear();
-                inner.queue.push_back(SubscriptionMessage::Resync);
-                inner.resync_pending = true;
+        let wake = {
+            let mut inner = self.lock_inner();
+            if inner.closed {
+                return;
             }
-            if let Some(w) = inner.waker.take() {
-                w.wake();
+            if inner.queue.len() >= inner.max_queue {
+                // Overflow - drop everything, emit one Resync. The
+                // subscriber's job is then to fetch fresh state.
+                if !inner.resync_pending {
+                    inner.queue.clear();
+                    inner.queue.push_back(SubscriptionMessage::Resync);
+                    inner.resync_pending = true;
+                }
+            } else {
+                inner.queue.push_back(msg);
             }
-            return;
-        }
-        inner.queue.push_back(msg);
-        if let Some(w) = inner.waker.take() {
+            inner.waker.take()
+        };
+        if let Some(w) = wake {
             w.wake();
         }
     }
@@ -336,7 +343,7 @@ impl Subscription {
     /// The iterator stores `waker` via [`Subscription::register_waker`]
     /// before checking `pop` again so it gets woken on the next push.
     pub fn pop(&self) -> Option<SubscriptionMessage> {
-        let mut inner = self.0.borrow_mut();
+        let mut inner = self.lock_inner();
         let msg = inner.queue.pop_front();
         if matches!(msg, Some(SubscriptionMessage::Resync)) {
             // Reset so a future overflow can re-emit.
@@ -349,33 +356,41 @@ impl Subscription {
     /// Overwrites any prior waker — only the latest iterator poll
     /// is observed.
     pub fn register_waker(&self, w: Waker) {
-        let mut inner = self.0.borrow_mut();
+        let mut inner = self.lock_inner();
         inner.waker = Some(w);
     }
 
     /// True if the iterator should terminate (closed + queue empty).
     pub fn is_terminal(&self) -> bool {
-        let inner = self.0.borrow();
+        let inner = self.lock_inner();
         inner.closed && inner.queue.is_empty()
     }
 
     /// Close the subscription. Iterators return `Closed` on next poll
     /// and the broker removes the entry on its next sweep.
     pub fn close(&self) {
-        let mut inner = self.0.borrow_mut();
-        if inner.closed {
-            return;
-        }
-        inner.closed = true;
-        inner.queue.push_back(SubscriptionMessage::Closed);
-        if let Some(w) = inner.waker.take() {
+        let wake = {
+            let mut inner = self.lock_inner();
+            if inner.closed {
+                return;
+            }
+            inner.closed = true;
+            inner.queue.push_back(SubscriptionMessage::Closed);
+            inner.waker.take()
+        };
+        if let Some(w) = wake {
             w.wake();
         }
     }
 
     /// True if `close()` has been called. Broker uses this to GC.
     pub fn is_closed(&self) -> bool {
-        self.0.borrow().closed
+        self.lock_inner().closed
+    }
+
+    #[cfg(test)]
+    fn is_owned_by_current_thread(&self) -> bool {
+        self.lock_inner().owner_thread == std::thread::current().id()
     }
 }
 
@@ -548,44 +563,34 @@ impl Broker {
     /// hot inner check is `O(entries_in_read_set)` per event per
     /// matching subscriber and short-circuits on the first match.
     pub fn publish(&mut self, event: &ChangeEvent) {
+        let subscribers = self.matching_subscriptions(event);
+        deliver_event(event, subscribers);
+    }
+
+    /// Select and clone matching subscriber handles while pruning dead
+    /// routing entries. The process-wide accessor releases the broker
+    /// lock before it pushes messages and wakes tasks.
+    fn matching_subscriptions(&mut self, event: &ChangeEvent) -> Vec<Subscription> {
         // Two-level lookup via `&str` — no `(String, String)`
         // allocation per call. Borrow-based `HashMap::get_mut` lookup
         // (`Borrow<str>` impl on the `String` key) keeps the hot path
         // alloc-free.
         let Some(by_collection) = self.by_key.get_mut(event.app_id.as_str()) else {
-            return;
+            return Vec::new();
         };
         let Some(subs) = by_collection.get_mut(event.collection.as_str()) else {
-            return;
+            return Vec::new();
         };
         // Prune dead entries in-place so the bucket stays bounded.
         subs.retain(|s| !s.is_closed());
         let is_empty = subs.is_empty();
-        if !is_empty {
-            // Share the event payload across all live subscribers via
-            // Rc — `Subscription::push` clones the SubscriptionMessage
-            // into each per-subscriber queue, but each clone is now a
-            // single refcount bump on the Rc, NOT a deep clone of the
-            // ChangeEvent (and especially not of the `new_tuple`
-            // HashMap, which on a busy collection dominated the
-            // publish cost). The broker is per-isolate / single-
-            // threaded, so Rc is sound here — no cross-thread
-            // sharing, no Arc atomic cost.
-            let shared = Rc::new(event.clone());
-            // Iterate the live bucket directly — no intermediate
-            // `Vec<Subscription>` allocation. `Subscription::push`
-            // borrows the subscription's inner `RefCell` but does NOT
-            // re-enter the broker (no recursive `publish`), so it's
-            // safe to hold a `&` borrow of `subs` for the loop.
-            for s in subs.iter() {
-                if !s.accepts(&shared) {
-                    continue;
-                }
-                s.push(SubscriptionMessage::Change(Rc::clone(&shared)));
-            }
-        }
+        let matching = subs
+            .iter()
+            .filter(|subscription| subscription.accepts(event))
+            .cloned()
+            .collect();
         // Drop the bucket if pruning emptied it, so iteration stays
-        // bounded. Done AFTER the loop so the `&mut subs` borrow
+        // bounded. Done after the scan so the `&mut subs` borrow
         // has been released by the time we touch `self.by_key`. If
         // the per-app map empties out as a result, drop it too — keeps
         // `has_subscribers` cheap on apps that churn through ephemeral
@@ -596,6 +601,7 @@ impl Broker {
                 self.by_key.remove(event.app_id.as_str());
             }
         }
+        matching
     }
 
     /// Cheap predicate: is there at least one (possibly-still-closed)
@@ -623,14 +629,13 @@ impl Broker {
     }
 
     /// Count live (not-yet-closed) subscriptions for a single `app_id`
-    /// on this thread's broker. Used by the §17.7 drop-namespace
+    /// in this process's broker. Used by the drop-namespace
     /// subscription gate: a non-zero count means a subscriber is still
     /// observable, so the drop defers (or, under `--force`, the broker
     /// is drained first).
     ///
-    /// Per-isolate / per-thread like the rest of the broker — the
-    /// control plane aggregates across workers via the admin endpoint;
-    /// this is the in-process source for the single-worker / dev path.
+    /// The control plane aggregates across worker processes via the
+    /// admin endpoint; this is the process-local source.
     pub fn app_subscription_count(&self, app_id: &str) -> usize {
         let Some(by_collection) = self.by_key.get(app_id) else {
             return 0;
@@ -645,14 +650,70 @@ impl Broker {
     /// when the app is deleted. Each affected subscription is sent a
     /// `Closed` message.
     pub fn drop_app(&mut self, app_id: &str) {
-        let Some(by_collection) = self.by_key.remove(app_id) else {
-            return;
-        };
-        for (_collection, subs) in by_collection {
-            for s in subs {
-                s.close();
-            }
+        for subscription in self.take_app_subscriptions(app_id) {
+            subscription.close();
         }
+    }
+
+    fn take_app_subscriptions(&mut self, app_id: &str) -> Vec<Subscription> {
+        self.by_key
+            .remove(app_id)
+            .into_iter()
+            .flat_map(|by_collection| by_collection.into_values().flatten())
+            .collect()
+    }
+
+    #[cfg(not(test))]
+    fn take_all_subscriptions(&mut self) -> Vec<Subscription> {
+        std::mem::take(&mut self.by_key)
+            .into_values()
+            .flat_map(|by_collection| by_collection.into_values().flatten())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn take_current_thread_subscriptions(&mut self) -> Vec<Subscription> {
+        let mut taken = Vec::new();
+        self.by_key.retain(|_, by_collection| {
+            by_collection.retain(|_, subscriptions| {
+                subscriptions.retain(|subscription| {
+                    if subscription.is_owned_by_current_thread() {
+                        taken.push(subscription.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                !subscriptions.is_empty()
+            });
+            !by_collection.is_empty()
+        });
+        taken
+    }
+
+    #[cfg(test)]
+    fn current_thread_subscription_count(&self) -> usize {
+        self.by_key
+            .values()
+            .flat_map(|by_collection| by_collection.values())
+            .map(|subscriptions| {
+                subscriptions
+                    .iter()
+                    .filter(|subscription| {
+                        subscription.is_owned_by_current_thread() && !subscription.is_closed()
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    fn app_subscriptions(&self, app_id: &str) -> Vec<Subscription> {
+        self.by_key
+            .get(app_id)
+            .into_iter()
+            .flat_map(|by_collection| by_collection.values().flatten())
+            .cloned()
+            .collect()
     }
 
     /// Push a `Resync` to every active subscription registered for
@@ -675,20 +736,21 @@ impl Broker {
     /// Apps with no active subscriptions are a fast no-op — the
     /// two-level map lookup misses and the function returns immediately.
     pub fn resume_app_with_resync(&mut self, app_id: &str) {
-        let Some(by_collection) = self.by_key.get(app_id) else {
-            return;
-        };
-        // Iterate by &collection_name → &Vec<Subscription>. The push
-        // path is `Subscription::push`, which short-circuits on
-        // `inner.closed`, so we don't need to filter closed entries
-        // up-front — the per-entry check is the cheaper of the two
-        // choices (closed entries are rare; the bucket already prunes
-        // them in `publish`).
-        for subs in by_collection.values() {
-            for s in subs.iter() {
-                s.push(SubscriptionMessage::Resync);
-            }
+        for subscription in self.app_subscriptions(app_id) {
+            subscription.push(SubscriptionMessage::Resync);
         }
+    }
+}
+
+fn deliver_event(event: &ChangeEvent, subscribers: Vec<Subscription>) {
+    if subscribers.is_empty() {
+        return;
+    }
+    // Share the event payload across all matching subscribers without
+    // deep-cloning its tuple maps for every queue.
+    let shared = Arc::new(event.clone());
+    for subscription in subscribers {
+        subscription.push(SubscriptionMessage::Change(Arc::clone(&shared)));
     }
 }
 
@@ -713,35 +775,37 @@ impl std::fmt::Debug for Broker {
 }
 
 // ---------------------------------------------------------------------------
-// Thread-local accessor
+// Process-wide accessors
 // ---------------------------------------------------------------------------
 //
-// The broker lives in a thread-local cell mirroring the per-isolate
-// DB context: the compio runtime is single-threaded per worker and
-// every callback that needs the broker (mutation publish, subscribe,
-// unsubscribe) runs on the same isolate thread.
+// A worker process runs many single-threaded compio runtimes, one per
+// worker thread. WAL consumption may run on a different thread from a
+// V8 subscriber, so the routing table must span every isolate in the
+// process. Cross-container delivery remains the replication layer's
+// responsibility: each worker process consumes the app's WAL stream,
+// then publishes into its own process-wide broker.
 
-thread_local! {
-    pub(crate) static BROKER: RefCell<Broker> = RefCell::new(Broker::new());
+static BROKER: LazyLock<Mutex<Broker>> = LazyLock::new(|| Mutex::new(Broker::new()));
 
-    /// **Schema-pending decoder window** (design §16.7).
-    ///
-    /// App ids currently in the schema-pending state. Populated by
-    /// [`engage_schema_pending`] (called from
-    /// [`crate::backend::SchemaPendingGuard::new`]); cleared by
-    /// [`disengage_schema_pending`] (called from the guard's `Drop`).
-    /// Read by [`is_schema_pending`] on the [`Broker::try_subscribe`]
-    /// path and on the SQLite CDC publisher's per-packet drop check
-    /// (see `backend/sqlite/cdc.rs::publisher_loop`).
-    ///
-    /// Thread-local mirrors [`crate::wal_consumer::SUPPRESSED_APPS`]
-    /// (the matching rail for backfill pause). The broker is
-    /// thread-local too — both flags live on the compio runtime thread
-    /// that owns the per-app isolate; no cross-thread synchronisation.
-    static SCHEMA_PENDING_APPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+/// Schema-pending decoder window (design section 16.7).
+///
+/// This is process-wide for the same reason as the broker: a deploy on
+/// one worker thread must reject a subscription opened concurrently on
+/// another worker thread in the same process.
+static SCHEMA_PENDING_APPS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn lock_broker() -> MutexGuard<'static, Broker> {
+    BROKER.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Mark `app_id` as schema-pending on this thread. While engaged,
+fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
+    SCHEMA_PENDING_APPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Mark `app_id` as schema-pending in this process. While engaged,
 /// [`Broker::try_subscribe`] returns `DbError::Coded { code:
 /// "schema_pending" }` for the app, and the SQLite CDC publisher
 /// drops every packet whose `app_id` matches.
@@ -750,9 +814,7 @@ thread_local! {
 /// [`crate::backend::SchemaPendingGuard::new`]; production code should
 /// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
 pub fn engage_schema_pending(app_id: &str) {
-    SCHEMA_PENDING_APPS.with(|s| {
-        s.borrow_mut().insert(app_id.to_string());
-    });
+    lock_schema_pending().insert(app_id.to_string());
 }
 
 /// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
@@ -760,79 +822,97 @@ pub fn engage_schema_pending(app_id: &str) {
 /// [`crate::backend::SchemaPendingGuard::drop`] before
 /// `resume_app_with_resync` pushes the per-subscription `Resync`.
 pub fn disengage_schema_pending(app_id: &str) {
-    SCHEMA_PENDING_APPS.with(|s| {
-        s.borrow_mut().remove(app_id);
-    });
+    lock_schema_pending().remove(app_id);
 }
 
 /// True if `app_id` is currently in the schema-pending window on
-/// this thread. Used by [`Broker::try_subscribe`] and by the SQLite
+/// this process. Used by [`Broker::try_subscribe`] and by the SQLite
 /// CDC publisher's drop-packet check.
 pub fn is_schema_pending(app_id: &str) -> bool {
-    SCHEMA_PENDING_APPS.with(|s| s.borrow().contains(app_id))
+    lock_schema_pending().contains(app_id)
 }
 
 /// Convenience accessor — publish without locating the broker manually.
 pub fn publish(event: &ChangeEvent) {
-    BROKER.with(|b| b.borrow_mut().publish(event));
+    let subscribers = lock_broker().matching_subscriptions(event);
+    deliver_event(event, subscribers);
 }
 
-/// Convenience accessor — query the thread-local broker for whether
+/// Convenience accessor - query the process-wide broker for whether
 /// any subscriber is registered on `(app_id, collection)`. See
 /// [`Broker::has_subscribers`] for the conservative-true semantics.
 pub(crate) fn has_subscribers(app_id: &str, collection: &str) -> bool {
-    BROKER.with(|b| b.borrow().has_subscribers(app_id, collection))
+    lock_broker().has_subscribers(app_id, collection)
 }
 
 /// Convenience accessor — subscribe without locating the broker
 /// manually.
 pub fn subscribe(app_id: &str, collection: &str) -> Subscription {
-    BROKER.with(|b| b.borrow_mut().subscribe(app_id, collection))
+    lock_broker().subscribe(app_id, collection)
 }
 
 /// Fallible variant of [`subscribe`] — surfaces the schema-pending
 /// rejection branch. See [`Broker::try_subscribe`].
 pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbError> {
-    BROKER.with(|b| b.borrow_mut().try_subscribe(app_id, collection))
+    lock_broker().try_subscribe(app_id, collection)
 }
 
-/// Total live (not-yet-closed) subscriptions on this thread's broker.
+/// Total live (not-yet-closed) subscriptions in this process's broker.
 /// Tests use this to verify the [`crate::v8_classes::subscription`]
 /// Weak finalizer reclaims broker slots when V8 GCs an orphaned
 /// wrapper.
 pub fn live_subscription_count() -> usize {
-    BROKER.with(|b| b.borrow().subscription_count())
+    #[cfg(test)]
+    {
+        lock_broker().current_thread_subscription_count()
+    }
+    #[cfg(not(test))]
+    {
+        lock_broker().subscription_count()
+    }
 }
 
-/// Live subscription count for a single `app_id` on this thread's
+/// Live subscription count for a single `app_id` in this process's
 /// broker. The §17.7 drop-namespace subscription gate reads this for
 /// the in-process / single-worker path. See
 /// [`Broker::app_subscription_count`].
 pub fn app_subscription_count(app_id: &str) -> usize {
-    BROKER.with(|b| b.borrow().app_subscription_count(app_id))
+    lock_broker().app_subscription_count(app_id)
+}
+
+/// Push a resync marker to every live subscription for `app_id`.
+///
+/// Kept as a free function so backend guards do not reach through the
+/// process-wide synchronization boundary directly.
+pub(crate) fn resume_app_with_resync(app_id: &str) {
+    let subscriptions = lock_broker().app_subscriptions(app_id);
+    for subscription in subscriptions {
+        subscription.push(SubscriptionMessage::Resync);
+    }
 }
 
 /// Drop ALL subscribers (for an app, or globally with `None`). Tests
 /// + worker shutdown use this.
 pub fn drop_app(app_id: Option<&str>) {
-    BROKER.with(|b| {
-        let mut br = b.borrow_mut();
-        if let Some(id) = app_id {
-            br.drop_app(id);
-        } else {
-            // Drop everything — used by the "test cleanup" path. Take
-            // the whole map out in one shot; iterating after means we
-            // don't borrow `br.by_key` while also mutating it.
-            let drained = std::mem::take(&mut br.by_key);
-            for (_app, by_collection) in drained {
-                for (_collection, subs) in by_collection {
-                    for s in subs {
-                        s.close();
-                    }
+    let subscriptions = {
+        let mut broker = lock_broker();
+        match app_id {
+            Some(id) => broker.take_app_subscriptions(id),
+            None => {
+                #[cfg(test)]
+                {
+                    broker.take_current_thread_subscriptions()
+                }
+                #[cfg(not(test))]
+                {
+                    broker.take_all_subscriptions()
                 }
             }
         }
-    });
+    };
+    for subscription in subscriptions {
+        subscription.close();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,6 +1096,63 @@ mod tests {
     }
 
     #[test]
+    fn process_wide_broker_delivers_between_threads() {
+        struct WakeFlag(std::sync::atomic::AtomicBool);
+
+        impl std::task::Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        const APP: &str = "broker_cross_thread_regression_app";
+        const COLLECTION: &str = "messages";
+
+        drop_app(Some(APP));
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
+
+        let subscriber = std::thread::spawn(move || {
+            let sub = subscribe(APP, COLLECTION);
+            let wake_flag = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+            sub.register_waker(std::task::Waker::from(Arc::clone(&wake_flag)));
+            registered_tx.send(()).expect("signal subscription ready");
+            published_rx.recv().expect("wait for cross-thread publish");
+            let event_pk = match sub.pop() {
+                Some(SubscriptionMessage::Change(event)) => event.pk.clone(),
+                _ => None,
+            };
+            let was_woken = wake_flag.0.load(std::sync::atomic::Ordering::SeqCst);
+            (event_pk, was_woken)
+        });
+
+        let publisher = std::thread::spawn(move || {
+            registered_rx.recv().expect("wait for subscription");
+            publish(&ev(
+                APP,
+                COLLECTION,
+                ChangeOp::Insert,
+                Some("cross-thread-probe"),
+            ));
+            published_tx.send(()).expect("signal publish complete");
+        });
+
+        publisher.join().expect("publisher thread");
+        let (received, was_woken) = subscriber.join().expect("subscriber thread");
+        assert_eq!(received.as_deref(), Some("cross-thread-probe"));
+        assert!(was_woken, "publisher must wake the subscriber thread");
+        drop_app(Some(APP));
+    }
+
+    #[test]
+    fn subscription_payloads_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Subscription>();
+        assert_send_sync::<SubscriptionMessage>();
+    }
+
+    #[test]
     fn other_app_events_isolated() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
@@ -1084,19 +1221,19 @@ mod tests {
     fn overflow_collapses_to_resync() {
         // Tiny queue so we can overflow it in the test.
         let s = Subscription::new(1, "a".into(), "m".into(), 2);
-        s.push(SubscriptionMessage::Change(Rc::new(ev(
+        s.push(SubscriptionMessage::Change(Arc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
             Some("1"),
         ))));
-        s.push(SubscriptionMessage::Change(Rc::new(ev(
+        s.push(SubscriptionMessage::Change(Arc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
             Some("2"),
         ))));
-        s.push(SubscriptionMessage::Change(Rc::new(ev(
+        s.push(SubscriptionMessage::Change(Arc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
@@ -1109,7 +1246,7 @@ mod tests {
 
     #[test]
     fn message_to_json_change_shape() {
-        let m = SubscriptionMessage::Change(Rc::new(ChangeEvent {
+        let m = SubscriptionMessage::Change(Arc::new(ChangeEvent {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
@@ -1549,8 +1686,8 @@ mod tests {
         let app: &str = "a";
         let collection: &str = "messages";
         assert!(b.has_subscribers(app, collection));
-        // Also exercise the public free-function thread-local accessor
-        // pattern: lookup with literal `&'static str`s.
+        // Also exercise lookup with literal `&'static str`s through
+        // the same borrowed-key shape used by the global accessor.
         assert!(b.has_subscribers("a", "messages"));
     }
 
@@ -1627,7 +1764,7 @@ mod tests {
     #[test]
     fn disengage_schema_pending_is_idempotent_on_unengaged_app() {
         // Calling disengage on an app never engaged is a no-op — the
-        // RefCell HashSet `.remove` returns `false`, no panic.
+        // HashSet::remove returns false, with no panic.
         disengage_schema_pending("never_engaged_app");
         assert!(!is_schema_pending("never_engaged_app"));
     }
