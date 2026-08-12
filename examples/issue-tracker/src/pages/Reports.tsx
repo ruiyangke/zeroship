@@ -7,7 +7,7 @@ import {
   reportTimeToResolve,
   reportTrend,
 } from "../api";
-import { Cluster, PageHeader, Progress, StatCard } from "@zeroship/ui";
+import { Cluster, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
 
@@ -282,15 +282,20 @@ export function ReportsPage() {
         <PageHeader.Title>Reports</PageHeader.Title>
       </PageHeader>
       <div className="filter-bar">
-        <select value={productId} onChange={(e) => setProductId(e.target.value)}>
-          <option value="">All products</option>
+        <Select
+          value={productId}
+          onValueChange={(next) => setProductId(next ?? "")}
+          placeholder="All products"
+          aria-label="Product"
+          className="filter-select"
+        >
           {productsQ.state.status === "ready" &&
             productsQ.state.data.map((p) => (
-              <option key={p.id} value={p.id}>
+              <Select.Item key={p.id} value={p.id}>
                 {p.name}
-              </option>
+              </Select.Item>
             ))}
-        </select>
+        </Select>
         <label>
           Window (days)
           <input

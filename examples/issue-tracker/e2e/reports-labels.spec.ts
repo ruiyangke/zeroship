@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { chooseOption } from "./select";
 
 /**
  * The component report must let a reader tell its rows apart.
@@ -82,7 +83,7 @@ test("the component report distinguishes same-named components across products",
   // The qualifier is conditional, so the unambiguous case needs its own check:
   // filtered to one product, the name stands alone rather than repeating the
   // product already chosen in the filter.
-  await page.getByRole("combobox").first().selectOption({ label: productNames[0] });
+  await chooseOption(page, page, "Product", productNames[0]);
   await expect(section.locator("tbody tr")).toHaveCount(1);
   await expect(section.locator("tbody tr td:first-child")).toHaveText("Core");
 });

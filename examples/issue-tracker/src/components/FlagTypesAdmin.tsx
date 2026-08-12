@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { Select } from "@zeroship/ui";
+
 import { createFlagType, listFlagTypes, listProducts } from "../api";
 import { errorMessage } from "./rpc";
 
@@ -78,19 +80,18 @@ export function FlagTypesAdmin() {
         </label>
         <label>
           Product
-          <select value={productId} onChange={(e) => setProductId(e.target.value)}>
+          <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="All products" aria-label="Product">
             {/* A type with no product applies to EVERY product, which is
                 Bugzilla behaviour and worth choosing rather than defaulting
                 into: the first version of this panel always created global
                 types, so one product defining "review" silently offered it on
                 all of them. */}
-            <option value="">All products</option>
             {products.map((p) => (
-              <option key={p.id} value={p.id}>
+              <Select.Item key={p.id} value={p.id}>
                 {p.name}
-              </option>
+              </Select.Item>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           Applies to

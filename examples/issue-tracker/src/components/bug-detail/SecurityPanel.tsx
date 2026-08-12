@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Select } from "@zeroship/ui";
 
 import { listGroups, restrictBug, unrestrictBug } from "../../api";
 import { errorMessage } from "../rpc";
@@ -86,14 +87,22 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
         <>
           <label>
             Group
-            <select value={selected} onChange={(e) => setSelected(e.target.value)}>
-              <option value="">Select a group</option>
+            {/* The design system Select. The native one rendered its options
+                with the surrounding JSX whitespace, so selecting by label
+                matched nothing and silently left the control unset -- a spec
+                had to read the value off the option element to work around
+                it. */}
+            <Select
+              value={selected}
+              onValueChange={(next) => setSelected(next ?? "")}
+              placeholder="Select a group"
+            >
               {groups.map((group) => (
-                <option key={group.id} value={group.id}>
+                <Select.Item key={group.id} value={group.id}>
                   {group.name}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
           <button
             type="button"

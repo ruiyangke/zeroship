@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { otherUser, signIn } from "./session";
+import { chooseOption } from "./select";
 
 /**
  * The access-control model, driven in two real browsers.
@@ -101,16 +102,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   await page.goto(`/#/bugs/${bug.id}`);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
-  const groupSelect = security.getByLabel("Group");
-  // By value, read off the option. The options carry JSX whitespace, so a label
-  // match selects nothing and leaves the buttons disabled -- which reads as a
-  // broken panel rather than a mis-aimed selector.
-  const groupValue = await groupSelect
-    .locator("option")
-    .filter({ hasText: `vis-${RUN}` })
-    .getAttribute("value");
-  expect(groupValue, "the new group should appear in the security picker").toBeTruthy();
-  await groupSelect.selectOption(groupValue!);
+  await chooseOption(page, security, "Group", `vis-${RUN}`);
   await security.getByRole("button", { name: "Restrict", exact: true }).click();
   await expect(security.getByText(/only members of that group/i)).toBeVisible();
 

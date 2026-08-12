@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { chooseOption } from "./select";
 
 /**
  * Setting a flag on a bug, through the UI, end to end.
@@ -71,7 +72,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // Scoped to this run's product. Left global it would appear on every bug in
   // the database, which is what made the first version of this spec order-
   // dependent.
-  await admin.getByLabel("Product").selectOption({ label: `Flags ${RUN}` });
+  await chooseOption(page, admin, "Product", `Flags ${RUN}`);
   await admin.getByRole("button", { name: "Create" }).click();
   await expect(admin.locator("ul.flag-type-list")).toContainText(typeName);
 

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { chooseOption } from "./select";
 
 /**
  * The Bugzilla flow a real user walks, driven in a real browser: file a bug
@@ -321,19 +322,11 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   await page.goto(`/#/bugs/${bug.id}`);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
-  // Selected by VALUE, read off the option itself, rather than by label.
-  // These options are rendered as `<option>{'\n  '}{group.name}{'\n'}</option>`
-  // in JSX, so their text carries surrounding whitespace and a label match
-  // silently selects nothing -- the control stayed on "Select a group" and the
-  // buttons stayed disabled, which reads as a broken panel rather than a
-  // mis-aimed selector.
-  const groupSelect = security.getByLabel("Group");
-  const groupValue = await groupSelect
-    .locator("option")
-    .filter({ hasText: `sec-${RUN}` })
-    .getAttribute("value");
-  expect(groupValue, "the group created above should appear in the security picker").toBeTruthy();
-  await groupSelect.selectOption(groupValue!);
+  // One helper call. The native select rendered its options with the JSX
+  // whitespace around them, so selecting by label matched nothing and left the
+  // control unset -- which read as a broken panel. That workaround (read the
+  // value off the option, select by value) is gone with the native select.
+  await chooseOption(page, security, "Group", `sec-${RUN}`);
   await security.getByRole("button", { name: "Restrict", exact: true }).click();
 
   // The confirmation must state the consequence, not just "done" -- restricting
