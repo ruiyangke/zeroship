@@ -202,3 +202,67 @@ test.describe.serial("db-todos UI", () => {
     }
   });
 });
+
+// The APP's own subscribe call, asserted at the network layer.
+//
+// The gap this closes: nothing here watched the request the application
+// actually issues. `todo stream emits one snapshot for one committed create`
+// drives its own `fetch` inside `page.evaluate`, which proves the ENDPOINT
+// works and says nothing about whether the app calls it. `realtime sends a todo
+// created in tab A to tab B` asserts the visible outcome, which a refetch on
+// focus or a poll would also satisfy. So the app could stop subscribing
+// entirely and this suite would stay green.
+//
+// That is not hypothetical. Shipped behaviour on 2026-08-12 was a subscription
+// that returned 200 text/event-stream, delivered its initial snapshot, and then
+// never emitted again: cross-isolate delivery was unimplemented, so a write
+// served by a different V8 isolate was simply lost. Every signal short of "a
+// second frame arrives" looked healthy.
+test("the app subscribes over SSE and the stream carries a later write", async ({ page }) => {
+  const subscribeCalls: string[] = [];
+  let subscribeStatus: number | null = null;
+  let subscribeContentType: string | null = null;
+
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/__zeroship/v1/todos.subscribe") {
+      subscribeCalls.push(request.method());
+    }
+  });
+  page.on("response", (response) => {
+    if (new URL(response.url()).pathname === "/__zeroship/v1/todos.subscribe") {
+      subscribeStatus = response.status();
+      subscribeContentType = response.headers()["content-type"] ?? null;
+    }
+  });
+
+  await bootedPage(page);
+
+  // The app issued it, exactly once, and the server accepted it as a stream.
+  await expect.poll(() => subscribeCalls.length, { timeout: 20_000 }).toBe(1);
+  expect(subscribeCalls[0]).toBe("POST");
+  await expect.poll(() => subscribeStatus, { timeout: 20_000 }).toBe(200);
+  expect(subscribeContentType).toContain("text/event-stream");
+
+  // The UI's own readiness signal, which is driven by the stream opening.
+  await expect(page.locator(".live.on")).toBeVisible({ timeout: 15_000 });
+
+  // LOAD-BEARING: a write made AFTER the stream is open must reach it. Without
+  // this the test passes on a subscription that opens and then goes deaf, which
+  // is precisely the shipped defect described above. The write goes through a
+  // second browser context so it is a separate request the gateway is free to
+  // route to any worker, and the assertion is on the FIRST page, which never
+  // reloads.
+  const writer = await page.context().browser()!.newContext();
+  try {
+    const writerPage = await bootedPage(await writer.newPage());
+    const title = uniq("sse");
+    await writerPage.getByPlaceholder("Add a task…").fill(title);
+    await writerPage.locator("button.add").click();
+    await expect(writerPage.locator(".item", { hasText: title }).first()).toBeVisible({ timeout: 10_000 });
+
+    await expect(page.locator(".item", { hasText: title }).first()).toBeVisible({ timeout: 20_000 });
+    expect(subscribeCalls.length).toBe(1); // delivered by the stream, not a re-subscribe
+  } finally {
+    await writer.close();
+  }
+});
