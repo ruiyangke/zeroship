@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 #
-# zeroship platform image — builds all service binaries:
+# zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
 #   zeroship (CLI), and zeroship-platform-migrate (the platform DB migration
-#   one-shot — the compose `migrate` service runs it under the Platform trust
+#   one-shot - the compose `migrate` service runs it under the Platform trust
 #   profile). The migration path now runs on the published `zero-migrate` engine
 #   via the `zeroship-migrate-adapter` crate: it authors `db/migrations-ts/*.ts`
 #   in-process with zeroship-runtime's own V8 (no sandboxed recorder-child
@@ -17,16 +17,17 @@
 #   1. `sdks` (node:22) runs `pnpm build` to emit the bootstrap dist files
 #      (`sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`). The runtime
 #      crate `include_str!`s those at compile time
-#      (crates/runtime/src/core/init.rs → "../../../../sdks/bootstrap/dist/…"),
+#      (crates/runtime/src/core/init.rs -> "../../../../sdks/bootstrap/dist/..."),
 #      so they MUST exist before cargo touches zeroship-runtime.
 #   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
 #      deploy/policies/ tree (crates/authz/build.rs parses
-#      ../../deploy/policies/*.cedar at build time) and compiles the six
+#      ../../deploy/policies/*.cedar at build time) and compiles the seven
 #      binaries below plus two the control crate carries and we do not ship
 #      (zeroship-mock-stripe, dev-provision) - see the `--bin` note at the
 #      cargo line for why they come along.
-#   3. final (ubuntu) ships SIX binaries: zeroship-control, zeroship-gate,
-#      zeroship-worker, zeroship-auth, zeroship, zeroship-platform-migrate.
+#   3. final (ubuntu) ships SEVEN binaries: zeroship-control, zeroship-gate,
+#      zeroship-worker, zeroship-auth, zeroship, zeroship-platform-migrate,
+#      zeroship-migrated (the creator migration service).
 #      It ships NO console - see the apps/ note in stage 1.
 #
 # This header said "all seven binaries" until 2026-08-11, which was wrong in
@@ -34,7 +35,7 @@
 # exactly ONE.
 
 # ---------------------------------------------------------------------------
-# Stage 1 — build the SDK dist (bootstrap runtime-entry + dispatcher).
+# Stage 1 - build the SDK dist (bootstrap runtime-entry + dispatcher).
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm AS sdks
 WORKDIR /build
@@ -81,24 +82,24 @@ COPY examples/ examples/
 # script now compiles the addon out of this tree.
 COPY third_party/ third_party/
 RUN pnpm install --frozen-lockfile
-# Root build script only builds sdks/* (topo: @zeroship/db →
-# @zeroship/bootstrap → rest); it does not touch apps/ or examples/.
+# Root build script only builds sdks/* (topo: @zeroship/db ->
+# @zeroship/bootstrap -> rest); it does not touch apps/ or examples/.
 RUN pnpm build
 # Sanity: the two files the runtime crate include_str!s MUST exist.
 RUN test -f sdks/bootstrap/dist/runtime-entry.js \
  && test -f sdks/bootstrap/dist/dispatcher.js
 
 # ---------------------------------------------------------------------------
-# Stage 2 — native (Rust) build of all six binaries.
+# Stage 2 - native (Rust) build of all seven binaries.
 # ---------------------------------------------------------------------------
 FROM rust:latest AS builder
 WORKDIR /build
 # System build deps not in rust:latest:
-#   clang + libclang-dev  → bindgen (libsqlite3-sys, aws-lc-sys)
-#   cmake                 → aws-lc-sys / ring native build
-#   perl                  → aws-lc-sys / openssl-style asm generation
-#   nasm                  → aws-lc-sys x86_64 assembly
-#   pkg-config            → -sys crate probing
+#   clang + libclang-dev  -> bindgen (libsqlite3-sys, aws-lc-sys)
+#   cmake                 -> aws-lc-sys / ring native build
+#   perl                  -> aws-lc-sys / openssl-style asm generation
+#   nasm                  -> aws-lc-sys x86_64 assembly
+#   pkg-config            -> -sys crate probing
 # (gcc/g++/make come with rust:latest's buildpack-deps base.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang libclang-dev cmake perl nasm pkg-config \
@@ -135,7 +136,7 @@ COPY crates/ crates/
 # even resolve the workspace without it - this is not an optional dependency of
 # one crate, it is a member manifest the whole build needs.
 COPY third_party/ third_party/
-# Cedar authz policies — crates/authz/build.rs parses these at build time
+# Cedar authz policies - crates/authz/build.rs parses these at build time
 # (and engine.rs include_str!s them), both via `../../deploy/policies`.
 # The standalone compio drivers. crates/auth (and others) depend on
 # `compio-postgres` by path into libs/, and Cargo.toml globs crates/* as
@@ -169,7 +170,7 @@ COPY --from=sdks /build/sdks/ sdks/
 # five never did. One of six binaries, reported as success.
 #
 # Dropping `--bin` builds every target of every selected package, which is the
-# six we ship plus zeroship-control's `zeroship-mock-stripe` and
+# seven we ship plus zeroship-control's `zeroship-mock-stripe` and
 # `dev-provision`. Two extra links against libraries already compiled, and
 # neither is COPYed into the runtime stage. The alternative - two cargo
 # invocations - is correct too but costs a second full pass over the shared
@@ -185,11 +186,12 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
+    -p zeroship-migrated \
     -p zeroship-migrate-adapter \
     --features zeroship-migrate-adapter/platform-cli
 
 # ---------------------------------------------------------------------------
-# Stage 3 — runtime image.
+# Stage 3 - runtime image.
 # ---------------------------------------------------------------------------
 # Use Ubuntu 24.04 (glibc 2.39) instead of Debian bookworm (glibc 2.36)
 FROM ubuntu:24.04 AS runtime
@@ -202,14 +204,35 @@ COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # The platform DB migration one-shot the compose `migrate` service invokes. It
 # authors `db/migrations-ts/*.ts` in-process via zeroship-runtime's V8 and applies
-# over the native compio-postgres seam — no recorder-child subprocess.
+# over the native compio-postgres seam - no recorder-child subprocess.
 COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/bin/
+# The CREATOR migration service. Distinct from the platform one-shot above:
+# that one applies db/migrations-ts/*.ts (the platform's own schema) once at
+# boot; this is a long-running HTTP service that applies a DEPLOYED APP's
+# migrations into its per-app schema, under the operator-ceiling trust profile.
+#
+# It was missing from this image until 2026-08-11, and its absence is invisible
+# until you deploy an app that has migrations: the `.zship` deliberately does
+# NOT carry migration documents (crates/bundle/src/manifest.rs - they "are
+# applied through the standalone migration service"), so the deploy SUCCEEDS,
+# the app serves its assets and RPCs, and every env.db call then fails against
+# tables that were never created. Compose even set PROVISION_DATABASE_URL, the
+# superuser DSN this service needs, on the CONTROL service - which has no code
+# that reads it.
+COPY --from=builder /build/target/release/zeroship-migrated /usr/local/bin/
+# The migration SOURCE the one-shot above reads, baked in rather than
+# bind-mounted. The compose `migrate` service used to mount
+# `../../db/migrations-ts` from a repo checkout, which meant a host running this
+# image also had to hold the source tree. Baking it makes the image the whole
+# deploy unit, and pins the migrations to the same commit as the binary that
+# applies them - a bind mount let the two drift.
+COPY db/migrations-ts /db/migrations-ts
 
 # ---------------------------------------------------------------------------
-# Stage 4 — frontend dev image: the runtime image (so it has the `zeroship`
+# Stage 4 - frontend dev image: the runtime image (so it has the `zeroship`
 # CLI built for THIS glibc) PLUS Node 22. The AI builder's `vite dev` runs the
 # vite-plugin dev-bootstrap, which SPAWNS `zeroship` to host the app's server
-# functions in the real runtime — so the builder container needs both Node
+# functions in the real runtime - so the builder container needs both Node
 # (for vite) and the zeroship binary on PATH (built for ubuntu 24.04's glibc;
 # a plain node:22-bookworm image is glibc 2.36 and can't run it).
 # ---------------------------------------------------------------------------

@@ -1,7 +1,21 @@
-# zeroship platform — full-stack LOCAL DEV stack, fronted by Caddy on the
-# *.zeroship.co dev domain.
+# zeroship platform - full-stack LOCAL DEV stack, fronted by Caddy.
 #
-# ⚠️  DEV ONLY — NOT for production. Hardcodes weak secrets (platform-key,
+# THE DOMAIN IS A VARIABLE, NOT A CONSTANT. `${ZEROSHIP_DOMAIN}` drives the
+# gateway's --app-base-domain, the auth issuer, the gateway/auth public URLs,
+# Caddy's network aliases and (via the caddy service's environment) every site
+# block in deploy/ops/Caddyfile. Set it ONCE in deploy/compose/.env to move the
+# whole stack:
+#
+#   ZEROSHIP_DOMAIN=zeroship.localhost   # default; *.localhost resolves to 127.0.0.1
+#   ZEROSHIP_SCHEME=http                 # default; the scheme PUBLIC urls advertise
+#
+# Deployed behind a TLS-terminating proxy, set both (e.g. `example.com` +
+# `https`) so the OIDC issuer and gateway public URL advertise the scheme the
+# BROWSER sees, not the plain http the origin actually serves. Do not put a
+# literal hostname back into this file: it becomes a hostname in every
+# deployment that copies it.
+#
+# WARNING:  DEV ONLY - NOT for production. Hardcodes weak secrets (platform-key,
 #     master-key, worker-key), and runs every service with --dev-insecure
 #     (admin / internal auth relaxed). All of this is gated behind
 #     --dev-insecure and a private box.
@@ -14,15 +28,15 @@
 #   docker compose down                           # stop (keeps pnpm/verdaccio/bundle caches)
 #   docker compose down -v                        # stop + WIPE volumes (slow next boot)
 #
-# Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
-#   http://console.zeroship.co   — the creator console / AI app-builder
+# Once up, browse (with the default domain; any *.localhost resolves to 127.0.0.1):
+#   http://console.zeroship.localhost   - the creator console / AI app-builder
 #                                         (a gateway-fronted zeroship app; needs
 #                                          OPENAI_API_KEY on the console app env)
-#   http://auth.zeroship.co      — login / OIDC
-#   http://<app>.zeroship.co     — a deployed creator app (via gateway)
+#   http://auth.zeroship.localhost      - login / OIDC
+#   http://<app>.zeroship.localhost     - a deployed creator app (via gateway)
 #
 # Caddy also carries network ALIASES for the auth/console/api hosts so
-# CONTAINERS resolve those same names to Caddy — required for server-side OIDC
+# CONTAINERS resolve those same names to Caddy - required for server-side OIDC
 # token exchange / JWKS fetch to hit the same issuer the browser sees.
 
 services:
@@ -99,7 +113,7 @@ services:
   # against a fully-migrated schema. Hand-authored JS DSL migrations live in
   # db/migrations-ts/; the runner authors each `.ts` in-process (zeroship-runtime
   # V8 + the published `zero-migrate` v1 recorder), lowers under the Platform
-  # guard, and applies over the native compio-postgres seam — no Node, no
+  # guard, and applies over the native compio-postgres seam - no Node, no
   # recorder-child subprocess.
   #
   # Runs the SAME `zeroship-platform:dev` image the native services use (the
@@ -108,7 +122,7 @@ services:
   # widened guard for the zeroship/public schemas). The apply is idempotent: a
   # re-run re-derives byte-identical journal versions and skips already-applied
   # files. Destructive in-place evolutions (DROP CONSTRAINT/COLUMN, etc.) in the
-  # committed platform set are auto-approved by construction — this operator-side
+  # committed platform set are auto-approved by construction - this operator-side
   # one-shot treats the committed migrations as the intended apply.
   migrate:
     build:
@@ -122,7 +136,7 @@ services:
       - ../../db/migrations-ts:/db/migrations-ts:ro
     command:
       # NB: the bin's parser takes space-separated flag/value pairs only
-      # (no `--flag=value` form) — keep each flag and its value as separate
+      # (no `--flag=value` form) - keep each flag and its value as separate
       # list items.
       - zeroship-platform-migrate
       - --migrations-dir
@@ -166,7 +180,7 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile
     # All five native services share ONE built image (built+tagged once,
-    # not five times) — they differ only by `command`.
+    # not five times) - they differ only by `command`.
     image: zeroship-platform:dev
     # Self-heal transient first-boot races with auth on the shared
     # control/authz schema.
@@ -181,7 +195,8 @@ services:
         --bind 0.0.0.0
         --blob-store /data/bundles
         --dev-insecure
-        --app-base-domain zeroship.co
+        --app-base-domain ${ZEROSHIP_DOMAIN:-zeroship.localhost}
+        --signing-key-file /etc/zeroship/secrets/control-signing.pem
     environment:
       # Role-specific DSN + shared secrets, resolved from deploy/ops/zeroship.toml's
       # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
@@ -200,8 +215,8 @@ services:
       # so control crash-looped with `secret reference env var
       # 'ZEROSHIP_WORKER_KEY' is not set`. MUST match the worker's value.
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
-      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
-      # byte-identical on control + gateway — both derive the per-app `pws_`.
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST be
+      # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
       PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
       # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
@@ -223,7 +238,7 @@ services:
       # without it). Export it in the host shell before `docker compose up`;
       # the empty default lets the stack boot (console AI degrades) if absent.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # Sandbox/preview backend — same values the `sandbox` service is
+      # Sandbox/preview backend - same values the `sandbox` service is
       # configured with (URL on the compose network + its bearer token).
       SANDBOX_URL: http://sandbox:9091
       SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
@@ -235,7 +250,7 @@ services:
     # is RED on exactly this line and is meant to be.
     #
     # Unlike gateway and auth, the control plane has NO Caddy site block at all
-    # - `api.zeroship.co` proxies to `gateway:8000`, not here - so this
+    # - `api.<domain>` proxies to `gateway:8000`, not here - so this
     # published port is the ONLY way a creator's `zeroship deploy --control=...`
     # can reach it. Loopback-binding it would break the primary creator flow,
     # which is why it is not done here.
@@ -249,10 +264,70 @@ services:
     volumes:
       - bundles:/data/bundles
       - ../../data:/data
+      # Control MINTS PATs, so it needs the same key material gateway and auth
+      # already mount. Without --signing-key-file it falls back to
+      # PatIssuer::dev_insecure(), which GENERATES A FRESH RANDOM KEY EVERY BOOT
+      # (crates/authn: SigningKey::generate(&mut OsRng)) - so every PAT ever
+      # issued stops verifying the moment control restarts, and none can be
+      # minted out-of-band. The `migrated` service verifies against this SAME
+      # file, which is what lets a creator PAT authorize a migration apply.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
       - seccomp:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # The CREATOR migration service: applies a DEPLOYED APP's own migrations into
+  # its per-app schema. Distinct from the `migrate` one-shot above, which applies
+  # the PLATFORM's schema (db/migrations-ts) once at boot and exits.
+  #
+  # WHY THIS EXISTS, added 2026-08-11 while deploying examples/db-todos. It was
+  # absent, and the absence is silent: the `.zship` deliberately carries NO
+  # migration documents (crates/bundle/src/manifest.rs - they "are applied
+  # through the standalone migration service"), so a migration-carrying deploy
+  # SUCCEEDS, the gateway serves the app, and only then does every env.db call
+  # fail against tables nothing ever created. The tell was already in this file:
+  # PROVISION_DATABASE_URL was set on `control`, and the ONLY code that reads it
+  # is crates/migrated/src/main.rs - a service that was not here.
+  #
+  # LOOPBACK by default (MIGRATED_BIND): like gateway and auth, nothing outside
+  # the compose network should reach it. Creators drive it through control, and
+  # the operator drives it over an SSH tunnel.
+  migrated:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: zeroship-platform:dev
+    command: >
+      zeroship-migrated
+        --port 9091
+        --bind 0.0.0.0
+        --dev-insecure
+    ports:
+      - "127.0.0.1:9091:9091"
+    environment:
+      # Least-priv role for reading control-plane authz data (who owns the app).
+      DATABASE_URL: ${MIGRATED_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
+      # SUPERUSER DSN, and the reason this service exists: applying an app's
+      # migrations means CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
+      # which the least-priv role above cannot do.
+      PROVISION_DATABASE_URL: ${PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      # MUST be the same file control signs with, or a control-issued creator PAT
+      # will not verify here and every apply is 401.
+      SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
+      ZEROSHIP_CONTROL_KEY: platform-key
+    volumes:
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+      - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+    # compio/io_uring, same as every other native service here.
+    security_opt:
+      - seccomp:unconfined
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
@@ -284,8 +359,8 @@ services:
           --workers "$$WORKERS" \
           --blob-store /data/bundles \
           --poll-interval 3 \
-          --auth-ui-url https://auth.zeroship.co \
-          --gateway-public-url https://api.zeroship.co \
+          --auth-ui-url ${ZEROSHIP_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
+          --gateway-public-url ${ZEROSHIP_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
           --dev-insecure
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
@@ -304,7 +379,7 @@ services:
       ZEROSHIP_CONTROL_KEY: platform-key
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
       # OAuth2 client_secret for the `gateway` client. The gateway exchanges
-      # this on the per-app OIDC code-exchange (Phase 3 §10.2).
+      # this on the per-app OIDC code-exchange (Phase 3 sec. 10.2).
       GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
       # Counterpart to auth AUTH_BROKER_SECRET_FILE -- same file, same bytes.
       GATEWAY_SIGNING_KEY_FILE: /etc/zeroship/secrets/gateway-signing.pem
@@ -313,8 +388,8 @@ services:
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
       STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-signing-key-not-for-production}
-      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST equal the
-      # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST equal the
+      # control service's PAIRWISE_SALT - both derive the per-app `pws_`. Never
       # rotate without a per-app `pws_` migration.
       PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
     # LOOPBACK, and this costs the documented path nothing. Caddy reaches the
@@ -322,7 +397,7 @@ services:
     # gateway:8000`, three site blocks in deploy/ops/Caddyfile), never through
     # this published port. Publishing on 0.0.0.0 therefore bought only a SECOND
     # entrance - one that skips Caddy, and so skips Cloudflare, which is where
-    # TLS terminates for zeroship.co. 127.0.0.1 keeps every host-side `curl
+    # TLS terminates for the deployed domain. 127.0.0.1 keeps every host-side `curl
     # localhost:8000` and every local harness working; only remote reach goes.
     ports:
       - "127.0.0.1:8000:8000"
@@ -345,7 +420,7 @@ services:
     image: zeroship-platform:dev
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
-    # so we explicitly opt in to 0.0.0.0 AND set a WORKER_KEY — without
+    # so we explicitly opt in to 0.0.0.0 AND set a WORKER_KEY - without
     # the key the worker refuses to bind a non-loopback address (to
     # avoid exposing unauthenticated code execution). The key must match
     # the gateway's `--worker-key`.
@@ -357,11 +432,11 @@ services:
     # plugin-db's register_model creates per-app PG roles + schemas
     # (CREATEROLE/CREATEDB) and manages the WAL replication slot, so this
     # connection MUST stay a privileged principal (the postgres superuser here in
-    # dev) — a DIFFERENT role than control/gateway's least-priv DSNs, which is
+    # dev) - a DIFFERENT role than control/gateway's least-priv DSNs, which is
     # exactly why the shared `[secrets].database_url` reference reads a PER-BINARY
     # env value. The `zeroship_worker` role from changeset 0025 exists (and owns
     # ZERO zeroship.* system-table grants), but it is NOT the worker's login role
-    # — the worker never touches the system tables; its per-app tenant access is
+    # - the worker never touches the system tables; its per-app tenant access is
     # gated by plugin-db's own `SET LOCAL ROLE <per-app role>` mechanism, a
     # separate trust boundary.
     command:
@@ -379,7 +454,7 @@ services:
       - --kv-url
       - redis://redis:6379
       # env.storage backend: a bare path/`file://` is LocalFs (the shared
-      # volume below); an `s3://…` URL is S3/R2/MinIO (see the docker-compose
+      # volume below); an `s3://...` URL is S3/R2/MinIO (see the docker-compose
       # runbook "Production object storage" section). Same grammar as
       # --blob-store; S3 creds come from AWS_ACCESS_KEY_ID/SECRET in the env.
       - --storage-url
@@ -400,7 +475,7 @@ services:
       - bundles:/data/bundles
       # SHARED app object store for env.storage. Every worker replica mounts
       # the SAME named volume at the same path, so a `storage.put` on one
-      # replica is readable by another — the multi-node-consistent LocalFs
+      # replica is readable by another - the multi-node-consistent LocalFs
       # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
       # replaces this in prod behind the same Backend trait.
       - app-storage:/data/app-storage
@@ -414,7 +489,7 @@ services:
     depends_on:
       # --db now points at the shared Postgres, so wait for the schema to
       # exist (postgres healthy + the one-shot migrate completed) the same
-      # way control/gateway do — otherwise the first env.db op races the
+      # way control/gateway do - otherwise the first env.db op races the
       # migration.
       postgres:
         condition: service_healthy
@@ -425,7 +500,7 @@ services:
       redis:
         condition: service_started
 
-  # redis — the SHARED key-value store backing the deployed-app `env.kv`
+  # redis - the SHARED key-value store backing the deployed-app `env.kv`
   # namespace. The worker's `--kv-url redis://redis:6379` points every
   # worker replica at this ONE instance, so a `kv.set` on one replica is
   # visible to another (multi-node consistency). The bespoke compio-redis
@@ -443,7 +518,7 @@ services:
     volumes:
       - redis-data:/data
 
-  # redpanda — Kafka-wire durable stream for the billing-provider platform.
+  # redpanda - Kafka-wire durable stream for the billing-provider platform.
   # Host-side integration tests use:
   #   REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-stream --test redpanda_roundtrip
   # In-compose services should use REDPANDA_BROKERS=redpanda:9092 when S4/S5 wire
@@ -480,9 +555,9 @@ services:
       timeout: 5s
       retries: 20
 
-  # zeroship-auth — native OIDC OP + UI. The gateway redirects
+  # zeroship-auth - native OIDC OP + UI. The gateway redirects
   # unauthenticated end users to it (gateway's
-  # --auth-ui-url https://auth.zeroship.co). Binds loopback by default, so
+  # --auth-ui-url https://auth.<domain>). Binds loopback by default, so
   # compose passes --addr 0.0.0.0:9092 to be reachable across the network.
   auth:
     build:
@@ -508,7 +583,7 @@ services:
       AUTH_DB_URL: ${AUTH_DB_URL:-postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship}
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${AUTH_PUBLIC_URL}/oauth2`.
-      AUTH_PUBLIC_URL: https://auth.zeroship.co
+      AUTH_PUBLIC_URL: ${ZEROSHIP_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
       # auth loads the SAME ../ops/zeroship.toml overlay as control and gateway,
       # and that overlay declares control_key = urn:zeroship:env:ZEROSHIP_CONTROL_KEY.
       # Every binary reading the overlay must therefore supply the var; auth set only
@@ -544,7 +619,7 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  # zeroship-sandbox — the sandbox/preview backend now lives in the STANDALONE
+  # zeroship-sandbox - the sandbox/preview backend now lives in the STANDALONE
   # `zeroship-sandbox` project (sibling repo), NOT in this compose. It is built
   # and run there (it has its own compose). The control plane reaches it over
   # HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN` (see the `control` service env).
@@ -561,18 +636,18 @@ services:
   # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
   # The AI app-builder IS the console now: a regular zeroship app built to a
   # `.zship`, seeded by control's `--bootstrap-console`, served by the gateway
-  # at console.zeroship.co. Its OPENAI_API_KEY / sandbox creds are
+  # at console.<domain>. Its OPENAI_API_KEY / sandbox creds are
   # injected as server-side app env on the seeded console app (control env
   # store), not via a standalone Vite container. The builder's confidential
   # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
-  # caddy — dev reverse proxy on :80 for the *.zeroship.co domain.
-  # Routes auth/console/api + the {app}.zeroship.co catch-all to the
+  # caddy - dev reverse proxy on :80 for the *.<domain> domain.
+  # Routes auth/console/api + the {app}.<domain> catch-all to the
   # right upstream (see deploy/ops/Caddyfile). console.* now proxies to the GATEWAY
   # (the console is a gateway-fronted app). The network ALIASES make those
   # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
   # server-side OIDC (control/gateway verifying tokens, fetching JWKS,
-  # exchanging codes against http://auth.zeroship.co) hits the same
+  # exchanging codes against http://auth.<domain>) hits the same
   # issuer the browser does.
   caddy:
     image: caddy:2-alpine
@@ -580,12 +655,18 @@ services:
       - "80:80"
     volumes:
       - ../ops/Caddyfile:/etc/caddy/Caddyfile:ro
+    # The Caddyfile builds every site block from {$ZEROSHIP_DOMAIN}, so the
+    # proxy has to SEE the variable. Without this the Caddyfile silently falls
+    # back to its own default and the site blocks stop matching the aliases
+    # below - the stack comes up and every host 404s.
+    environment:
+      ZEROSHIP_DOMAIN: ${ZEROSHIP_DOMAIN:-zeroship.localhost}
     networks:
       default:
         aliases:
-          - auth.zeroship.co
-          - console.zeroship.co
-          - api.zeroship.co
+          - auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
+          - console.${ZEROSHIP_DOMAIN:-zeroship.localhost}
+          - api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
     depends_on:
       control:
         condition: service_started
@@ -600,7 +681,7 @@ volumes:
   pgdata:
   bundles:
   # Shared object store for deployed-app env.storage (LocalFs). One volume,
-  # mounted at the same path on every worker replica → cross-node-consistent.
+  # mounted at the same path on every worker replica -> cross-node-consistent.
   app-storage:
   # Persisted redis dataset for the deployed-app env.kv store.
   redis-data:
