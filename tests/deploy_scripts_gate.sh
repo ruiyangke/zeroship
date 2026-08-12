@@ -438,11 +438,35 @@ run_rollback() { # $1 sandbox, rest: extra argv. Sets ROLL_RC and CAP.
 seen() { grep -qF -- "$2" "$1"; }
 
 SB="$FIX/sb_main"; seed_sandbox "$SB" CURRENT
+
+# FIXTURE SELF-CHECK. If the mtimes are not inverted, a selector that reads
+# mtime and one that reads the stamp agree, and every assertion below passes
+# without discriminating between them.
+if [ "$(stat -c %Y "$SB/compose/.env.bak.20260812010101")" \
+   -lt "$(stat -c %Y "$SB/compose/.env.bak.20260101000000")" ]; then
+  pass "FIXTURE: the newest-stamp backup carries the OLDEST mtime, so stamp-order and mtime-order disagree"
+else
+  fail "FIXTURE: the two backups do not have inverted mtimes; the selection assertions below cannot discriminate"
+fi
+
 run_rollback "$SB"
 
 [ "$ROLL_RC" = 0 ] \
   && pass "--rollback exits 0" \
   || fail "--rollback exited $ROLL_RC; output: $ROLL_OUT"
+
+# One assertion per file: a restore loop that drops one file must redden
+# exactly one line, not collapse three into a single unreadable failure.
+for f in $ROLL_FILES; do
+  got="$(cat "$SB/$f" 2>/dev/null)"
+  if [ "$got" = "GEN2" ]; then
+    pass "$f restored from the MOST RECENT backup by stamp (.bak.20260812010101)"
+  elif [ "$got" = "GEN1" ]; then
+    fail "$f was restored from .bak.20260101000000 -- the OLDEST backup. The selector is reading mtime, which cp -a preserves from the source file, not the backup stamp"
+  else
+    fail "$f was not restored at all (content [$got], wanted GEN2)"
+  fi
+done
 
 seen "$CAP" 'docker compose up -d --remove-orphans' \
   && pass "--rollback restarts the whole stack (docker compose up -d --remove-orphans)" \
@@ -497,15 +521,43 @@ run_rollback "$FIX/no_such_dir"
   && pass "--rollback runs preflight first and refuses a remote dir that is not there" \
   || fail "--rollback did not preflight the remote dir (rc=$ROLL_RC): $ROLL_OUT"
 
+# --------------------------------------------- selection edge cases, pinned
+#
+# TIE. Two backups with byte-identical mtimes is not exotic: this script's own
+# rollback does `cp -a backup live`, so the NEXT deploy's backup inherits the
+# earlier backup's mtime exactly. MEASURED on GNU coreutils 9.10: `ls -1t`
+# breaks a tie by name ASCENDING, so `head -1` on a tie returned the OLDEST
+# stamp. Selecting on the stamp removes the tie from the question entirely.
+SB_TIE="$FIX/sb_tie"; seed_sandbox "$SB_TIE" CURRENT
+for f in $ROLL_FILES; do touch -d '2026-03-03 03:03:03' "$SB_TIE/$f".bak.*; done
+run_rollback "$SB_TIE"
+[ "$(cat "$SB_TIE/compose/.env")" = "GEN2" ] \
+  && pass "backups with IDENTICAL mtimes resolve to the newest stamp, not to ls -1t's name tie-break" \
+  || fail "a tie resolved to [$(cat "$SB_TIE/compose/.env")], wanted GEN2"
+
+# A hand-made backup has no stamp and therefore no position in the ordering,
+# so it is not a candidate. Under a plain name sort it would sort after every
+# digit and win forever; it carries the newest mtime here so it would also
+# have won under the old selector.
+SB_MAN="$FIX/sb_manual"; seed_sandbox "$SB_MAN" CURRENT
+for f in $ROLL_FILES; do
+  printf 'MANUAL\n' >"$SB_MAN/$f.bak.manual"
+  touch -d '2026-09-09 09:09:09' "$SB_MAN/$f.bak.manual"
+done
+run_rollback "$SB_MAN"
+[ "$(cat "$SB_MAN/compose/.env")" = "GEN2" ] \
+  && pass "a hand-made .bak.manual is not a rollback candidate (no stamp, no position in the ordering)" \
+  || fail "restored [$(cat "$SB_MAN/compose/.env")] instead of GEN2; an unstamped file was treated as a backup"
+
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an
 # outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
 # real-compose block is conditional and deliberately NOT counted in the floor.
-# MEASURED 2026-08-12: 42 unconditional assertions (43 ran with the shipped
+# MEASURED 2026-08-12: 48 unconditional assertions (49 ran with the shipped
 # compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-42}"
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-48}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

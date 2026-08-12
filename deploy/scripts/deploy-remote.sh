@@ -152,10 +152,24 @@ main() {
 
   if [ "$DO_ROLLBACK" = 1 ]; then
     say "rollback"
+    # PICK BY STAMP, NOT BY MTIME. This was `ls -1t | head -1`, and mtime is
+    # the wrong key twice over. `cp -a` PRESERVES mtime, so a backup carries
+    # the timestamp of the file's last content change, not the moment the
+    # backup was taken; and anything that puts an older mtime back on the live
+    # file -- this very rollback, or an operator's `cp -p` / `rsync -a` /
+    # `tar -xp` out of an archive -- makes the NEXT backup look older than an
+    # earlier one. On a tie (which `cp -a backup live` then a redeploy
+    # produces exactly), GNU `ls -1t` breaks by name ascending, so `head -1`
+    # returned the OLDEST stamp. The name is the only thing that actually
+    # records when a backup was taken, so sort on that.
+    #
+    # The glob is [0-9]* rather than *: only this script's own STAMPED backups
+    # have a position in that ordering. A hand-made `.env.bak.manual` sorts
+    # after every digit and would win forever.
     rsh "set -e
     cd '$REMOTE_DIR'
     for f in compose/.env compose/docker-compose.yml ops/Caddyfile; do
-      b=\$(ls -1t \"\$f\".bak.* 2>/dev/null | head -1)
+      b=\$(ls -1d \"\$f\".bak.[0-9]* 2>/dev/null | sort | tail -1)
       if [ -n \"\$b\" ]; then cp -a \"\$b\" \"\$f\"; echo \"restored \$f from \$b\"; else echo \"no backup for \$f\"; fi
     done
     cd compose && docker compose up -d --remove-orphans"
