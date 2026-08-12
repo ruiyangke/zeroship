@@ -1706,7 +1706,7 @@ else
   fi
 fi
 
-# --- 7b. The dev tier speaks WebSocket, and nothing else in this repo checks it -
+# --- 7e. The dev tier speaks WebSocket, and nothing else in this repo checks it -
 #
 # WHY THIS STEP EXISTS. `crates/gateway/src/router/dispatch.rs` says single-tenant
 # `zeroship serve` is what speaks WebSocket, and it is right - but that was a
@@ -1731,7 +1731,7 @@ fi
 # from the public client surface precisely because of it. Asserting the deployed
 # 500 here would need a second build+deploy for one status code; the worker suite
 # already pins it, and this step names where.
-step 7b "Dev tier: a creator's WebSocketPair app completes an RFC 6455 handshake"
+step 7e "Dev tier: a creator's WebSocketPair app completes an RFC 6455 handshake"
 WS_PORT=3391
 WS_TMP="$(mktemp -d)"
 WS_APP="$WS_TMP/wsapp.js"
@@ -4106,13 +4106,13 @@ gp_close_step
 # find which assertion stopped running. The whole point of the exact floor is
 # that the difference is visible.
 #
-# 108 -> 111, and this one is a DELTA again, not a measurement: step 7b adds
-# exactly three arms (non-upgrade control, 101, derived accept). I ran that step
-# standalone at 3 passed / 0 failed and mutation-proved both halves -- app
-# returns 200 instead of a socket: 0/3; wrong key with the expected accept still
-# derived from the original: 2/1, only the accept arm red. What I have NOT done
-# is re-run the whole harness, so 111 is 108 + 3 by arithmetic. The next full run
-# settles it, and if it disagrees the run wins.
+# 108 -> 111, raised as a delta for step 7e's three arms (non-upgrade control,
+# 101, derived accept) and then MEASURED the same day:
+#   golden path: 111 passed, 15 failed (floor 111)
+#   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
+# The delta and the run agree to the assertion, and the 15 reds are the same
+# ticketed set as before (#260 x6, #236 x2, #332/#333 x3, #331 x4) -- the new
+# step added no red and disturbed none.
 GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-111}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
