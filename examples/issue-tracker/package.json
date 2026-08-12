@@ -16,13 +16,14 @@
     "@zeroship/db": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
-    "react": "catalog:react18",
-    "react-dom": "catalog:react18"
+    "@zeroship/ui": "workspace:*",
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",
-    "@types/react": "catalog:react18",
-    "@types/react-dom": "catalog:react18",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@zeroship/types": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",

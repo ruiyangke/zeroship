@@ -13,7 +13,7 @@ const LINKS: { route: RouteName; label: string; href: string }[] = [
   { route: "reports", label: "Reports", href: "#/reports" },
 ];
 
-function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) {
+export function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) {
   if (userState.status === "loading") {
     return <span className="user-chip dim">checking session...</span>;
   }
@@ -36,7 +36,7 @@ function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) {
   );
 }
 
-function UnreadBadge({ signedIn }: { signedIn: boolean }) {
+export function UnreadBadge({ signedIn }: { signedIn: boolean }) {
   const [count, setCount] = useState<number | null>(null);
 
   useEffect(() => {

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { currentUser } from "./api";
-import { Nav } from "./components/Nav";
+import { Shell } from "./components/Shell";
 import { useAsync } from "./components/rpc";
 import { AdvancedSearchPage } from "./pages/AdvancedSearch";
 import { BugDetailPage } from "./pages/BugDetail";
@@ -81,9 +81,8 @@ export function App() {
   const { state: userState } = useAsync(() => currentUser({}), []);
 
   return (
-    <div className="shell">
-      <Nav route={route.name} userState={userState} />
-      <main className="content">{renderRoute(route)}</main>
-    </div>
+    <Shell route={route.name} userState={userState}>
+      {renderRoute(route)}
+    </Shell>
   );
 }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PageHeader } from "@zeroship/ui";
 import { listProducts, searchBugs } from "../api";
 import {
   ALL_BUG_COLUMNS,
@@ -94,12 +95,10 @@ export function BugListPage() {
 
   return (
     <div className="page bug-list-page">
-      <div className="page-head">
-        <h1>Bugs</h1>
-        <a className="btn primary" href="#/bugs/new">
-          New bug
-        </a>
-      </div>
+      {/* No page-level "New bug": the shell header carries it on every
+          page, and two of them side by side was the first thing the
+          screenshot showed. */}
+      <PageHeader title="Bugs" />
 
       <form
         className="filter-bar"
