@@ -153,6 +153,38 @@ Wall timeout is stored on `RuntimeLimits` and read through `Runtime::wall_timeou
 
 Unset means there is no runtime wall-clock cap.
 
+### Wall timeout is the one limit where dev is LOOSER than deployed
+
+The body-size section above says dev is the stricter tier, and for bodies it is. **Wall timeout runs
+the other way, and it is the difference most likely to bite you.**
+
+| tier | per-request wall clock |
+| --- | --- |
+| `pnpm dev` / `zeroship serve` | **unbounded** by default (`wall_timeout` is unset) |
+| deployed | **5s** on the free tier (`FREE_TIER_RUNTIME_LIMITS`) |
+
+So a handler that takes longer than 5s **works locally and fails in production**, and dev gives you
+no warning. Deployed, the request is answered by the worker with:
+
+```
+504  {"message":"request timed out"}
+```
+
+Measured on the same 6s handler: `pnpm dev` returns `200` after ~6.0s; deployed returns the `504`
+above at ~5s.
+
+**You can reproduce the deployed behaviour locally.** `zeroship serve` already accepts the cap:
+
+```bash
+zeroship serve app.js --wall-timeout=5000    # 504 at ~5s, same body as deployed
+zeroship serve app.js --cpu-limit=50         # the CPU half of the same budget
+```
+
+Neither flag is applied by default, and `pnpm dev` does not pass them, which is why the divergence
+is invisible until you deploy. If your app has any request that can run long (a slow upstream call,
+a large upload, a heavy loop), run it once with `--wall-timeout` set to your plan's budget before
+you ship.
+
 ## Heap limit
 
 Heap caps are configured in [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs):
