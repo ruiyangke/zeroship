@@ -2621,7 +2621,12 @@ fn diff_attrs(
                 &format_index_storage_params(ei.with.as_ref()),
                 &format_index_storage_params(ai.with.as_ref()),
             );
-            push(&obj, "only", &ei.only.to_string(), &ai.only.to_string());
+            // `only` is deliberately absent. PostgreSQL renders `ON ONLY` in
+            // `pg_get_indexdef` for every index on a partitioned parent, whether or
+            // not `ONLY` was authored, so introspection reports a constant `false`
+            // and comparing the field reported drift on every index that set it.
+            // `IndexSnapshot` excludes it from equality for the same reason, and
+            // documents the measurement.
             push(
                 &obj,
                 "comment",
@@ -2803,8 +2808,8 @@ fn constraint_definition_is_retained(kind: &str) -> bool {
 /// There is no matching change to the attribute pass. An alias is only accepted when
 /// `same_definition_except_name` holds, and that predicate covers exactly the
 /// attributes the index attribute diff compares (unique, columns, elements, access
-/// method, predicate, INCLUDE, storage params, ONLY, comment), so an accepted pair
-/// has no attribute left to report as altered.
+/// method, predicate, INCLUDE, storage params, comment), so an accepted pair has no
+/// attribute left to report as altered.
 fn diff_indexes(
     table: &str,
     expected: &[IndexSnapshot],

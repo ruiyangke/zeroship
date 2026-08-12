@@ -850,7 +850,27 @@ pub struct IndexSnapshot {
     pub include: Vec<String>,
     /// Typed storage parameters (`WITH (...)`).
     pub with: Option<IndexStorageParams>,
-    /// PostgreSQL `ON ONLY` for partitioned parents.
+    /// **Emission-only** PostgreSQL `ON ONLY` for partitioned parents. Like
+    /// [`Self::opclass`] and [`Self::nulls_not_distinct`] it is spelled by the PG
+    /// emitter and EXCLUDED from equality / hashing, because the catalog cannot
+    /// report it back.
+    ///
+    /// Measured on PostgreSQL 18.4. `pg_get_indexdef` renders `ON ONLY` for EVERY
+    /// index whose table is partitioned, whether or not `ONLY` was written:
+    ///
+    /// ```text
+    /// CREATE INDEX ON ONLY p (payload)  ->  CREATE INDEX p_payload_idx ON ONLY p ...
+    /// CREATE INDEX      ON q (payload)  ->  CREATE INDEX q_payload_idx ON ONLY q ...
+    /// ```
+    ///
+    /// The parent index is a template either way; the only difference `ONLY` makes
+    /// is whether PostgreSQL also builds the partitions' indexes for you, and once
+    /// those are attached the two end states are identical (`indisvalid` flips from
+    /// false to true and nothing else distinguishes them). So there is no reading of
+    /// the catalog that recovers the authored flag, and comparing it reported drift
+    /// on every index that set it. Teaching introspection to answer `true` for a
+    /// partitioned parent instead would only move the false report onto the far more
+    /// common index that did NOT ask for `ONLY`.
     pub only: bool,
     /// **Emission-only** per-column operator class for an `ivfflat`/`hnsw` ANN
     /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
@@ -934,7 +954,7 @@ impl IndexSnapshot {
     /// equality path pays only the comparisons it already paid.
     ///
     /// The bound on what this can see is
-    /// `same_definition_except_name`'s: `opclass`, `nulls_not_distinct` and
+    /// `same_definition_except_name`'s: `opclass`, `nulls_not_distinct`, `only` and
     /// `expr_cascade_columns` are emission-only, excluded from equality, and
     /// invisible here too.
     pub(crate) fn definition_differences_except_name(&self, other: &Self) -> Vec<String> {
@@ -971,9 +991,6 @@ impl IndexSnapshot {
                 "storage parameters {:?} -> {:?}",
                 self.with, other.with
             ));
-        }
-        if self.only != other.only {
-            out.push(format!("only {} -> {}", self.only, other.only));
         }
         if self.comment != other.comment {
             out.push(format!("comment {:?} -> {:?}", self.comment, other.comment));
@@ -1013,7 +1030,6 @@ impl std::hash::Hash for IndexSnapshot {
             .hash(state);
         self.include.hash(state);
         self.with.hash(state);
-        self.only.hash(state);
         self.comment.hash(state);
     }
 }

@@ -9,10 +9,10 @@
 //! index. The lifecycle tests apply and compare at every listed stable point.
 //!
 //! A clean drift result is strictly narrower than saying that the snapshots agree.
-//! `IndexSnapshot` equality excludes `opclass` and `nulls_not_distinct`. It does
-//! compare `only`, while PostgreSQL introspection hardcodes `only: false`, so a case
-//! that authors `only: true` would be a guaranteed false red. This file does not
-//! claim `fold_ops == snapshot_schema`.
+//! `IndexSnapshot` equality excludes `opclass`, `nulls_not_distinct` and `only`, so
+//! this file does not claim `fold_ops == snapshot_schema`. `only` joined that list
+//! because the case below authored it and measured the guaranteed false red this
+//! comment used to merely predict.
 //!
 //! The lifecycle cases cover the index facets equality does compare (a partial
 //! predicate, an expression key, an INCLUDE payload, a DESC unique key), catalog
@@ -1013,6 +1013,80 @@ async fn constraint_facet_lifecycle() {
             ("validate the adopted foreign key", 6),
         ],
         support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn identity_and_primary_key_replacement_lifecycle() {
+    // Exercise the two column facets `ColumnSnapshot` equality carries that no other
+    // lifecycle case reaches: an IDENTITY column, and the removal of that facet as
+    // part of the primary-key replacement that retires it. A plain column default is
+    // deliberately not asserted here - equality does not compare one.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "identity_and_primary_key_replacement_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"id_lifecycle","columns":[
+          {"name":"legacy_id","type":"int","nullable":false,
+           "identity":{"always":false}},
+          {"name":"public_id","type":"text","nullable":false}
+        ],"primaryKey":["legacy_id"]},
+        {"op":"addConstraint","table":"id_lifecycle","constraint":{
+          "name":"id_lifecycle_public_id_key",
+          "kind":{"kind":"unique","columns":["public_id"]}
+        }},
+        {"op":"alterPrimaryKey","table":"id_lifecycle","action":{
+          "kind":"replace",
+          "expectedColumns":["legacy_id"],
+          "columns":["public_id"],
+          "dropIdentityFrom":["legacy_id"]
+        }}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "identity and primary key replacement lifecycle",
+        source,
+        &[
+            ("create table with an identity column", 1),
+            ("add the candidate unique key", 2),
+            ("replace the primary key and retire the identity", 3),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn partitioned_parent_index_only_lifecycle() {
+    // Authoring `only: true` used to be a guaranteed false red: introspection reports
+    // `only: false` for every index, and equality compared the field. The module doc
+    // predicted that and nothing pinned it. This case authors the shape against the
+    // live server, so the exclusion that fixed it cannot be reverted silently.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "partitioned_parent_index_only_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"only_parent","columns":[
+          {"name":"bucket","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":false}
+        ],"partitionBy":{"kind":"range","columns":["bucket"],"collapse":false}},
+        {"op":"createIndex","table":"only_parent","name":"only_parent_payload_idx",
+         "columns":[{"kind":"column","name":"payload"}],"only":true}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "partitioned parent index only lifecycle",
+        source,
+        &[
+            ("create partitioned parent", 1),
+            ("create index on only the parent", 2),
+        ],
+        lifecycle_policy,
     )
     .await;
 }
