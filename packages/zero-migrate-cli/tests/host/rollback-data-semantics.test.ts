@@ -230,3 +230,110 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
     await admin.end().catch(() => {});
   }
 });
+
+test("only a migration that lowers to ONE journaled step can be rolled back", async (ctx) => {
+  // The limit that decides whether `rollback` is usable at all on a real project,
+  // and the one `docs/operations.md` did not state until it was measured. A single
+  // authored operation is not enough: `create({ indexes: [...] })` is one statement
+  // to the author and more than one journaled step to the engine, so it is
+  // irreversible. That is the shape the README's own example uses.
+  //
+  // The arms run against a live server because the refusal is raised while
+  // reconciling the journal, not while lowering, so nothing offline reaches it.
+  const admin = await connectLivePg(ctx);
+  if (!admin) return;
+
+  const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
+
+  const shapes: Array<[string, () => void, boolean]> = [
+    [
+      "one createTable",
+      () => {
+        table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+      },
+      true,
+    ],
+    [
+      "createTable + createIndex",
+      () => {
+        table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+        table("x").index("x_id_idx").add({ on: [{ column: "id" }] });
+      },
+      false,
+    ],
+    [
+      "one createTable declaring an index",
+      () => {
+        table("x").create({
+          columns: { id: t.int().notNull(), a: t.int() },
+          primaryKey: ["id"],
+          indexes: [{ name: "x_a_idx", on: [{ column: "a" }] }],
+        });
+      },
+      false,
+    ],
+  ];
+
+  for (const [label, up, reversible] of shapes) {
+    const projectSchema = uniqueNamespace("rbsteps");
+    const meta = `${projectSchema}_migrations`;
+    const migration = authored("m", up);
+    try {
+      await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
+      await apply({
+        migration,
+        priorMigrations: [],
+        priorNameFallbacks: [],
+        ownerApp: OWNER_APP,
+        projectSchema,
+        driver,
+        registry: {},
+        policy: [noInjectPolicy(projectSchema)],
+        approved: true,
+        appliedBy: "rollback-steps",
+        nameFallback: migration.name,
+      });
+
+      const unwind = () =>
+        rollback({
+          migrations: [migration],
+          nameFallbacks: [migration.name],
+          ownerApp: OWNER_APP,
+          projectSchema,
+          driver,
+          registry: {},
+          policy: [noInjectPolicy(projectSchema)],
+          target: { kind: "all" },
+          approved: true,
+          backupAcknowledged: true,
+          appliedBy: "rollback-steps",
+        });
+
+      if (reversible) {
+        const outcome = await unwind();
+        assert.equal(outcome.rolledBack.length, 1, `${label}: expected a clean unwind`);
+        const { rows } = await admin.query(
+          `SELECT 1 FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = 'x'`,
+          [projectSchema],
+        );
+        assert.equal(rows.length, 0, `${label}: the table is gone`);
+      } else {
+        await assert.rejects(
+          unwind(),
+          /cannot be reversed from its authored envelope/,
+          `${label}: a multi-step plan must be refused`,
+        );
+      }
+    } finally {
+      await admin
+        .query(
+          `DROP SCHEMA IF EXISTS ${pgIdent(projectSchema)} CASCADE;
+           DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+        )
+        .catch(() => {});
+    }
+  }
+  await admin.end().catch(() => {});
+});
