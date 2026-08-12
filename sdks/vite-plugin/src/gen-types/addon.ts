@@ -180,12 +180,26 @@ export function loadMigrateAddon(): MigrateAddon {
 /**
  * Locate the standalone repo's prebuilt `*.node` binary. napi-rs names it
  * `zero-migrate-node.<platform>-<arch>[-<abi>].node`. Returns the first such file
- * found, or `null` when none is found (published install, where the bare require
- * already succeeded).
+ * found, or `null` when none is found.
+ *
+ * THE "PUBLISHED INSTALL" ARM DESCRIBED BELOW DOES NOT EXIST YET, and this
+ * comment used to assert it as the reason `null` is safe ("published install,
+ * where the bare require already succeeded"). Measured 2026-08-12:
+ * `zero-migrate-node` is NOT published and is not in `publish_packages` in
+ * `deploy/scripts/publish-sdks.sh`, which REFUSES to publish
+ * `@zeroship/vite-plugin` for exactly that reason -
+ *   "2 dependency(ies) on workspace packages that are not published:
+ *    @zeroship/vite-plugin [dependencies] zero-migrate-node@workspace:*"
+ * So in a real registry install the bare `require` cannot succeed and this
+ * fallback cannot find a binary either; the creator gets `addonLoadError`. The
+ * monorepo arm below is the ONLY arm that works today. Tracked as the SDK
+ * distribution blocker; do not read this loader as evidence that the published
+ * path is covered.
  *
  * One candidate dir is scanned: the RESOLVED addon package dir
  * (`require.resolve("zero-migrate-node/…")`). In a published install that is
- * where the binary ships, next to `index.js`; in this monorepo the
+ * where the binary WOULD ship, next to `index.js` (unverified - see above); in
+ * this monorepo the
  * `workspace:*` dep makes it a symlink straight to
  * `third_party/zero-migrate/crates/zero-migrate-node`, where a dev `napi build`
  * leaves the freshly-built `.node` in place. Verified 2026-08-10: it resolves to
