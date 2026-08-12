@@ -790,10 +790,23 @@ chmod 600 "$GP_SIGNING_KEY"
 # changes nothing observable. It only widens what step 2c's existing error-count
 # diff can see: a tick that fails on a missing privilege logs at ERROR, and that
 # is what the diff counts.
-# NOT YET PROVEN BY A RUN: that a revoked grant actually surfaces in that diff.
-# The mechanism is read, not executed. Prove it the way #322 did -- revoke the
-# real grant and watch the count move -- before treating this as coverage
-# rather than reach.
+#
+# THE WIDENING IS PROVEN, by the #322 mutation run against a scratch database on
+# 2026-08-12. Same command line both arms, control connected as
+# zeroship_control, ONE variable:
+#   A  grants intact                                 -> 0 audit ERROR lines in 8s
+#   B  REVOKE DELETE ON zeroship.app_audit FROM ...  -> 8 audit ERROR lines in 8s
+#      "control audit_retention tick failed",
+#      "error":"database: audit retention sweep (app_audit): db error"
+# Eight errors in eight seconds also re-confirms the 1-second cadence
+# independently of the startup line. So a missing grant on THIS cron now reaches
+# step 2c's diff, where before the cron could not tick inside the window at all.
+#
+# STILL TRUE, and the reason this is reach rather than blanket coverage: it moves
+# step 2c from 3 crons of 15 to 4. The other eleven still cannot tick in the
+# window and have no cadence knob (only spend_recompute does, via
+# SPEND_RECOMPUTE_INTERVAL). Covering those needs the per-tick differential
+# in #327, not another flag.
 
 # `--workers` is NOT optional decoration, and its absence was invisible for as
 # long as this harness existed. crates/control/src/main.rs:81 declares it with
