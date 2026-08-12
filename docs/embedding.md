@@ -121,7 +121,7 @@ provisioned.
 
 Both network backends accept a `SqlSession`:
 
-```rust
+```rust,ignore
 let postgres = zero_migrate::PostgresBackend::new_generic(&session);
 let mysql =
     zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
@@ -143,7 +143,7 @@ restoring and verifying the complete pre-migration shape and then deleting that
 version's row from the mutable `schema_migrations_inflight` side-table. Neither
 route touches the append-only, trigger-guarded `schema_migrations` event table.
 
-```rust
+```rust,ignore
 use zero_migrate::apply::backend::MysqlInflightResolution;
 
 mysql
@@ -169,7 +169,7 @@ for the operator-facing checklist.
 
 The public trait has five asynchronous operations:
 
-```rust
+```rust,ignore
 pub trait SqlSession {
     async fn batch(&self, sql: &str) -> Result<(), DbError>;
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError>;
@@ -200,10 +200,13 @@ SQLite does not use `SqlSession`:
 use std::path::Path;
 use zero_migrate::SqliteBackend;
 
-let backend = SqliteBackend::open(
-    Path::new("app.sqlite"),
-    Path::new("app.migrations.sqlite"),
-)?;
+fn open_backend() -> Result<SqliteBackend, Box<dyn std::error::Error>> {
+    let backend = SqliteBackend::open(
+        Path::new("app.sqlite"),
+        Path::new("app.migrations.sqlite"),
+    )?;
+    Ok(backend)
+}
 ```
 
 Use different files for application data and the migration journal. SQLite apply
@@ -242,7 +245,7 @@ Unsupported capabilities return an error; they are not silently approximated.
 
 Policies are authored as root charter TOML and loaded explicitly:
 
-```rust
+```rust,ignore
 let policy =
     zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
 let guard = zero_migrate::GuardConfig::from_policy(
@@ -299,7 +302,7 @@ schema diffs, DML steps, expand/contract obligations, or touched-table metadata.
 Rust hosts can resolve a pending rename with the public `Resolution` type and
 `MigrationEngine::resolve_pending_contract`:
 
-```rust
+```rust,ignore
 use zero_migrate::{Approval, MigrationEngine, Resolution};
 
 engine

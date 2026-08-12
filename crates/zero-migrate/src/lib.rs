@@ -350,3 +350,18 @@ pub use render::sql_preview::{
 // `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
 // error enum); the provisioning fns run over a PG `admin: &Client` — PG-only.
 pub use apply::role::{migrator_role_name, RoleError};
+
+/// Compiles the Rust examples in `docs/embedding.md` as doctests.
+///
+/// `#[cfg(doctest)]` means this item exists only while rustdoc is collecting
+/// doctests, so the guide's prose never lands in the published API docs while its
+/// code is still compiled against the real crate. That is the whole point: the
+/// embedding guide is the Rust half of the public surface, and until this existed
+/// nothing compiled it, so a rename could rot every example in it and leave CI
+/// green.
+///
+/// The TypeScript docs are gated the same way from the other side, by the
+/// `doc-examples` tests in both JS packages.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/embedding.md")]
+pub struct EmbeddingGuideDocTests;

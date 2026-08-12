@@ -612,9 +612,9 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
 ///
 /// The second message REPLACES the engine's rather than appending to it. It used to
 /// append, which produced "migration mig_… is applied but absent from the supplied
-/// set … That version is <name>" - a sentence that denies the migration was supplied
-/// and then names it from the supplied set two clauses later. An operator reading the
-/// first half goes looking for a migration file that is not missing.
+/// set … That version is `<name>`" - a sentence that denies the migration was
+/// supplied and then names it from the supplied set two clauses later. An operator
+/// reading the first half goes looking for a migration file that is not missing.
 fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSet) -> String {
     let zero_migrate::RollbackError::MissingFromSet { version } = error else {
         return error.to_string();
