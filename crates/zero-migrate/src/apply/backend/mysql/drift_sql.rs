@@ -625,18 +625,33 @@ pub(crate) async fn snapshot_schema<D: SqlSession>(
             .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
-    // Four of the five non-table maps are empty because the object kind does not exist
-    // on this dialect, and one is empty because nothing reads it here yet. The
-    // `..Default::default()` spelling makes those look identical, so the difference is
+    // Six of the seven non-table maps are empty, for three different reasons. The
+    // `..Default::default()` spelling makes them look identical, so the difference is
     // written out rather than left to be rediscovered.
     //
-    // NOT APPLICABLE - `model::op_support` refuses the authoring ops outright, so a
-    // MySQL catalog can hold none of these: `sequences` ("standalone sequence objects
-    // are PostgreSQL-only in the current engine"), `schemas` ("schema vendor primitives
-    // are PostgreSQL-only"), `extensions` ("extension vendor primitives are
-    // PostgreSQL-only"), and `partitions` ("partition lifecycle operations are
-    // PostgreSQL-only"). Populating them would be inventing readers for objects the
-    // engine will not author.
+    // REFUSED - `model::dialect_table` records these as `Unsupported` on MySQL, so
+    // `op_support::unsupported_reason` fires and no MySQL catalog can hold one:
+    // `sequences` ("standalone sequence objects are PostgreSQL-only in the current
+    // engine"), `schemas` ("schema vendor primitives are PostgreSQL-only"),
+    // `extensions` ("extension vendor primitives are PostgreSQL-only"), and `roles`.
+    // Populating them would be inventing readers for objects the engine will not author.
+    //
+    // AUTHORED BUT NOT A CATALOG OBJECT - `named_types`. `createEnum` and `createDomain`
+    // are `Portable` on MySQL, so the engine does author them, but MySQL realizes an enum
+    // as an inline column type rather than a schema object. The fold agrees: it gates the
+    // snapshot insert on `Capability::MaterializedEnumType` (`render/fold.rs`), which only
+    // PostgreSQL has, so a folded MySQL snapshot carries no named type either and the two
+    // sides match.
+    //
+    // AUTHORED, COLLAPSED, AND THE FOLD DOES NOT AGREE - `partitions`. This one is not
+    // refused: `createPartition` is `TransparentDegradable` on MySQL, and lowering
+    // collapses the child into its parent behind a mirror guard rather than creating a
+    // relation (`render/lower.rs`, "createPartition needs a collapse-affirmed parent on
+    // SQLite/MySQL"). So an empty map is the right physical answer here. But the fold
+    // inserts the child unconditionally, with none of the capability gate it applies to
+    // named types, so a folded expected snapshot claims a relation this one cannot report
+    // and the dialect-blind differ calls it missing. That gap is real and is tracked
+    // separately; the map staying empty is not the half that is wrong.
     //
     // Views. `materialized` is false rather than defaulted: MySQL has none, and
     // `model::op_support` makes the materialized variants PostgreSQL-only, so no MySQL
