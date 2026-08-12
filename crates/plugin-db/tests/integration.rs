@@ -2240,8 +2240,29 @@ async fn b2_adding_fk_to_existing_data_validates() {
 // Tests that need `wal_level=logical` skip themselves when the
 // running Postgres is `replica`. The runbook
 // (`docs/runbooks/local-k3s-crun-krun.md` adjacent) documents how to
-// reconfigure the dev container; CI's `pg-test` image is started with
-// `-c wal_level=logical` once the rollout lands.
+// reconfigure the dev container.
+//
+// DO NOT READ THE SKIP AS "CI COVERS THIS". Measured 2026-08-12: NO CI
+// job runs this binary at all. `PG_TEST_URL` is set by no workflow,
+// `--test integration` is invoked by no workflow, and there is no
+// `pg-test` image anywhere in the tree. The `rust` job deliberately
+// omits it (ci.yml, "they belong with the other live-database gates
+// rather than here"), but the live-DB gate runs
+// `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
+// and this crate declares NO `live-db-tests` feature, so the deferral
+// names a destination that does not accept it. The binary falls
+// between the two and runs only when a human exports PG_TEST_URL.
+//
+// AND THE SKIP IS INVISIBLE TO A SUMMING GATE. Measured on two
+// throwaway servers differing only in wal_level, the twelve tests
+// below print the IDENTICAL result line either way -- `11 passed;
+// 0 failed; 1 ignored` -- because a skip counts as a pass. On
+// `replica` all eleven skipped; on `logical` all eleven executed.
+// The only discriminators are the ZEROSHIP-TEST-SKIPPED markers
+// (which `tests/lib/skip_census.sh` knows how to count, and which
+// nothing runs over this binary) and the wall time, 3.3s vs 11.3s.
+// So wiring this into CI without a skip census would buy a green
+// that proves nothing.
 // ===========================================================================
 
 /// True if the running cluster is configured for logical decoding.
