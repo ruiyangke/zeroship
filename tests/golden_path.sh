@@ -1706,6 +1706,86 @@ else
   fi
 fi
 
+# --- 7b. The dev tier speaks WebSocket, and nothing else in this repo checks it -
+#
+# WHY THIS STEP EXISTS. `crates/gateway/src/router/dispatch.rs` says single-tenant
+# `zeroship serve` is what speaks WebSocket, and it is right - but that was a
+# COMMENT, not a measurement, until 2026-08-12. The wiring function behind it,
+# `handle_websocket_upgrade` in crates/runtime/src/core/serve.rs, is called from
+# exactly two places, both production; no test in any crate invokes it. The
+# handshake ALGORITHM is covered (handshake.rs, 8 unit tests) and the serve loop
+# is covered (serve.rs, 26), but the two had never been driven together over a
+# real connection.
+#
+# THE ACCEPT VALUE IS THE ASSERTION, not the 101. Any server can answer 101. The
+# RFC 6455 example key `dGhlIHNhbXBsZSBub25jZQ==` has ONE correct accept value,
+# `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`, and it is derived here rather than pasted, so
+# this step cannot drift from the RFC without openssl also being wrong.
+#
+# DEV TIER ONLY, and that is the finding rather than a gap in this step. The same
+# six-line app answers 500 on the deployed worker -- crates/worker/src/handler.rs
+# asserts exactly that in `dispatch_meters_unsupported_upgrade_error_body` (and
+# its settled twin), which I ran and mutation-checked on 2026-08-12: flipping the
+# expected status reports `left: 500 right: 200`. So the tiers DIVERGE, the
+# divergence is deliberate, and `docs/reference/rpc.md` withholds `subscription`
+# from the public client surface precisely because of it. Asserting the deployed
+# 500 here would need a second build+deploy for one status code; the worker suite
+# already pins it, and this step names where.
+step 7b "Dev tier: a creator's WebSocketPair app completes an RFC 6455 handshake"
+WS_PORT=3391
+WS_TMP="$(mktemp -d)"
+WS_APP="$WS_TMP/wsapp.js"
+cat > "$WS_APP" <<'WSJS'
+export default {
+  fetch() {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+};
+WSJS
+"$BIN/zeroship" serve "$WS_APP" --port "$WS_PORT" > "$WS_TMP/serve.log" 2>&1 &
+WS_PID=$!
+for _ in $(seq 1 30); do
+  curl -s -o /dev/null -m 1 "http://127.0.0.1:$WS_PORT/" && break
+  sleep 0.4
+done
+# `timeout N cat`, never `head -c N`: cat streams what it reads, so the bytes
+# already received survive the kill. `head -c N` blocks for N bytes and is
+# SIGKILLed holding them, which reports a working server as silent -- measured,
+# twice, on 2026-08-12 before this step was written.
+ws_probe() { # ws_probe <extra_headers_or_empty> -> echoes the raw response head
+  exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" || { echo "CONNECT-FAILED"; return; }
+  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\n%s\r\n' "$WS_PORT" "$1" >&3
+  timeout 8 cat <&3 | head -6
+  exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+}
+WS_PLAIN=$(ws_probe $'Connection: close\r\n')
+WS_UP=$(ws_probe $'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n')
+WS_WANT=$(printf '%s%s' "dGhlIHNhbXBsZSBub25jZQ==" "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" \
+  | openssl dgst -sha1 -binary | openssl base64)
+kill "$WS_PID" 2>/dev/null || true
+wait "$WS_PID" 2>/dev/null || true
+
+# The control. One variable between the arms: the four upgrade headers. Without
+# them this app cannot answer 101, and a 101 here would mean the step is reading
+# something other than the handshake.
+case "$WS_PLAIN" in
+  *"400"*) pass "dev: a non-upgrade request to a socket app is refused (400), not upgraded" ;;
+  *) fail "dev: non-upgrade control did not answer 400 -- got: $(printf '%s' "$WS_PLAIN" | head -1)" ;;
+esac
+case "$WS_UP" in
+  *"101 Switching Protocols"*) pass "dev: the upgrade answers 101 Switching Protocols" ;;
+  *) fail "dev: the RFC 6455 upgrade did NOT answer 101 -- got: $(printf '%s' "$WS_UP" | head -1)
+      zeroship serve speaks WebSocket per dispatch.rs; if this is empty the
+      reader was killed before it flushed, not the server staying silent." ;;
+esac
+case "$WS_UP" in
+  *"$WS_WANT"*) pass "dev: Sec-WebSocket-Accept matches the value derived from the key ($WS_WANT)" ;;
+  *) fail "dev: accept header does not match the derived $WS_WANT -- the 101 is not a real RFC 6455 handshake" ;;
+esac
+
 # --- 8. The same failure on the DEPLOYED tier, measured rather than assumed ---
 #
 # Step 6 diffs dev vs deployed on the HAPPY path. This is the same diff on the
@@ -4025,7 +4105,15 @@ gp_close_step
 # IF A LATER RUN REPORTS 107 rather than 108, do not just lower this back --
 # find which assertion stopped running. The whole point of the exact floor is
 # that the difference is visible.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-108}"
+#
+# 108 -> 111, and this one is a DELTA again, not a measurement: step 7b adds
+# exactly three arms (non-upgrade control, 101, derived accept). I ran that step
+# standalone at 3 passed / 0 failed and mutation-proved both halves -- app
+# returns 200 instead of a socket: 0/3; wrong key with the expected accept still
+# derived from the original: 2/1, only the accept arm red. What I have NOT done
+# is re-run the whole harness, so 111 is 108 + 3 by arithmetic. The next full run
+# settles it, and if it disagrees the run wins.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-111}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
