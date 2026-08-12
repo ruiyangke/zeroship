@@ -322,7 +322,7 @@ STEXT="storage-edge-payload-$(date +%s)"
 PUT="$(dispatch "$ST_APP" "gallery.put" "{\"key\":\"$SKEY\",\"text\":\"$STEXT\",\"contentType\":\"text/plain\"}")"
 PUTB="$(echo "$PUT" | head -1)"; PUTC="$(echo "$PUT" | tail -1)"
 if [ "$PUTC" = "200" ] && echo "$PUTB" | grep -q '"json"'; then
-  PUTSZ="$(echo "$PUTB" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).json.size)}catch(e){console.log("")}})')"
+  PUTSZ="$(echo "$PUTB" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).json.size)+"\n")}catch(e){console.log("")}})')"
   pass "env.storage put: gallery.put stored $PUTSZ bytes at '$SKEY'"
 
   # get — assert the text round-trips
@@ -344,9 +344,9 @@ if [ "$PUTC" = "200" ] && echo "$PUTB" | grep -q '"json"'; then
 
   # delete — then a get should report found:false
   DEL="$(dispatch "$ST_APP" "gallery.delete" "{\"key\":\"$SKEY\"}" | head -1)"
-  DELED="$(echo "$DEL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).json.deleted)}catch(e){console.log("")}})')"
+  DELED="$(echo "$DEL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).json.deleted)+"\n")}catch(e){console.log("")}})')"
   GET2="$(dispatch "$ST_APP" "gallery.get" "{\"key\":\"$SKEY\"}" | head -1)"
-  GONE="$(echo "$GET2" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).json.found)}catch(e){console.log("")}})')"
+  GONE="$(echo "$GET2" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).json.found)+"\n")}catch(e){console.log("")}})')"
   if [ "$DELED" = "true" ] && [ "$GONE" = "false" ]; then
     pass "env.storage delete: gallery.delete removed it (subsequent get found:false)"
   else
