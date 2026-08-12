@@ -63,8 +63,12 @@ test("the bug page names people rather than printing their ids", async ({
   // against the whole string "Reporter: Alice Dev". A text match that misses
   // reports "element(s) not found", which says nothing about what the page
   // actually rendered; this way the failure quotes the id it found instead.
-  const reporter = page.locator("span").filter({ hasText: /^Reporter:/ });
-  await expect(reporter, "the reporter is a person").toHaveText(`Reporter: ${name}`);
+  // The read-only facts are a description list now, so the reporter is a
+  // <dd> beside a "Reporter" <dt> rather than a "Reporter: name" span.
+  const reporter = page
+    .locator("div", { has: page.getByText("Reporter", { exact: true }) })
+    .last();
+  await expect(reporter, "the reporter is a person").toContainText(name);
   const assignee = page.locator(".field-block", { hasText: "Assignee" }).first();
   await expect(assignee, "the assignee is a person").toContainText(name);
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Card, Stack } from "@zeroship/ui";
 import { getBug, getProduct, listProducts } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
 import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
@@ -106,7 +107,11 @@ export function BugDetailPage({ id }: { id: string }) {
             />
             <CommentsPanel bugId={id} />
           </div>
-          <div className="bug-detail-side">
+          {/* One place decides panel chrome. These were eight components each
+              styled by whatever class name happened to match, so Keywords and
+              Flags rendered inside a bordered box and Votes, Security and See
+              also did not -- grouping that looked deliberate and was not. */}
+          <Stack className="bug-detail-side" gap={3}>
             <VotesPanel
               bugId={id}
               voteCount={detail.bug.voteCount}
@@ -128,7 +133,7 @@ export function BugDetailPage({ id }: { id: string }) {
             <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
             <CcPanel bugId={id} />
             <AttachmentsPanel bugId={id} />
-          </div>
+          </Stack>
         </div>
       )}
     </div>

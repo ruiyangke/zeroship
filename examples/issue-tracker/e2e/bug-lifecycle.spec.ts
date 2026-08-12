@@ -86,12 +86,21 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // mode -- which reads as "not found" and sends you looking for a filing bug
   // that isn't there.
   await expect(page).toHaveURL(/#\/bugs\/bug_/);
-  await expect(page.getByRole("heading", { level: 2, name: summary })).toBeVisible();
+  // The page heading, level 1. The detail panel used to repeat the summary as
+  // an h2 directly above an input holding the same text; this asserted on that
+  // duplicate, so removing it broke a spec that was pinning the defect.
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(summary);
 
   // Severity and priority must both have survived the round trip as the values
   // chosen, and must still be distinct fields.
-  await expect(page.getByText("major", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("P1", { exact: true }).first()).toBeVisible();
+  // The SELECT value, not a badge. The panel used to render a severity badge
+  // directly above a select holding the same value; the badge is gone, so
+  // asserting on loose text "major" was asserting on the duplicate.
+  await expect(page.getByLabel("Severity")).toHaveValue("major");
+  // Same as severity: the priority badge is gone, and loose text "P1" now
+  // matches a hidden <option> inside the select -- "received: hidden" rather
+  // than "not found", which is the tell.
+  await expect(page.getByLabel("Priority")).toHaveValue("P1");
 
   // The bug is findable from the list by its summary.
   await page.goto("/#/bugs");

@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { Card, DescriptionList } from "@zeroship/ui";
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
-import { PriorityBadge, SeverityBadge } from "../Badges";
+
 import { errorMessage, toPromise } from "../rpc";
 import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -19,7 +20,10 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
   return (
     <div className="field-row">
       <label>
-        Severity <SeverityBadge severity={bug.severity} />
+        {/* The badge is gone. It sat directly above a select showing the same
+            value, so the page stated severity twice and neither told you which
+            one to use. */}
+        Severity
         <select
           value={bug.severity}
           disabled={busy !== null}
@@ -44,7 +48,7 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
         </select>
       </label>
       <label>
-        Priority <PriorityBadge priority={bug.priority} />
+        Priority
         <select
           value={bug.priority}
           disabled={busy !== null}
@@ -280,24 +284,37 @@ export function FieldsPanel({
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
   return (
-    <section className="fields-panel">
-      <h2>{bug.summary}</h2>
+    <Card className="fields-panel">
+      {/* No heading here. The page head already states the summary, and this
+          panel repeated it as an h2 immediately above an input containing the
+          same text -- the same string three times in the top 200 pixels. */}
       <GeneralField bug={bug} field="summary" label="Summary" value={bug.summary} onUpdated={onUpdated} />
 
       <StatusControl bug={bug} onUpdated={onUpdated} />
       <SeverityPriority bug={bug} onUpdated={onUpdated} />
       <AssigneeControl bug={bug} people={people} onUpdated={onUpdated} />
 
-      <div className="field-row readonly">
-        <span>
-          Product: <b>{product.name}</b>
-        </span>
-        <span>
-          Component: <b>{component.name}</b>
-        </span>
-        <span>Reporter: {personName(bug.reporterId, people)}</span>
-        <span>QA contact: {personName(bug.qaContactId, people)}</span>
-      </div>
+      {/* The facts you read rather than change, as a description list. They
+          were four spans in a row with hand-rolled "Label: value" strings and
+          inconsistent emphasis -- two bold values, two not. */}
+      <DescriptionList>
+        <DescriptionList.Item>
+          <DescriptionList.Term>Product</DescriptionList.Term>
+          <DescriptionList.Detail>{product.name}</DescriptionList.Detail>
+        </DescriptionList.Item>
+        <DescriptionList.Item>
+          <DescriptionList.Term>Component</DescriptionList.Term>
+          <DescriptionList.Detail>{component.name}</DescriptionList.Detail>
+        </DescriptionList.Item>
+        <DescriptionList.Item>
+          <DescriptionList.Term>Reporter</DescriptionList.Term>
+          <DescriptionList.Detail>{personName(bug.reporterId, people)}</DescriptionList.Detail>
+        </DescriptionList.Item>
+        <DescriptionList.Item>
+          <DescriptionList.Term>QA contact</DescriptionList.Term>
+          <DescriptionList.Detail>{personName(bug.qaContactId, people)}</DescriptionList.Detail>
+        </DescriptionList.Item>
+      </DescriptionList>
 
       <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
 
@@ -355,6 +372,6 @@ export function FieldsPanel({
         <GeneralField bug={bug} field="platform" label="Platform" value={bug.platform} onUpdated={onUpdated} />
       </div>
       <GeneralField bug={bug} field="url" label="URL" value={bug.url ?? ""} onUpdated={onUpdated} />
-    </section>
+    </Card>
   );
 }

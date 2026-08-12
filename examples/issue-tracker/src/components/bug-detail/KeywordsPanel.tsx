@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Tag } from "@zeroship/ui";
 import { attachKeyword, createKeyword, detachKeyword, listKeywords } from "../../api";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
@@ -60,10 +61,18 @@ export function KeywordsPanel({
     <section className="keywords-panel">
       <h3>Keywords</h3>
       <div className="keyword-tags">
+        {/* These two empty states say DIFFERENT things -- none attached to
+            this bug, versus none defined anywhere -- and stacked as "none"
+            above "No keywords defined yet." they read as one statement
+            contradicting itself. Both now name their own subject. */}
         {[...attached].length === 0 ? (
-          <span className="dim">none</span>
+          <span className="dim">No keywords on this bug.</span>
         ) : (
-          [...attached].map((name) => <span key={name} className="chip">{name}</span>)
+          [...attached].map((name) => (
+            <Tag key={name} size="sm">
+              {name}
+            </Tag>
+          ))
         )}
       </div>
       <AsyncSection
@@ -71,7 +80,7 @@ export function KeywordsPanel({
         onRetry={reloadKeywords}
         loadingLabel="Loading keywords..."
         isEmpty={(data) => data.length === 0}
-        emptyTitle="No keywords defined yet."
+        emptyTitle="No keywords have been defined for this tracker yet."
       >
         {(keywords) => (
           <div className="keyword-picker">

@@ -256,7 +256,11 @@ tbody tr:hover { background: var(--surface-2); }
 .field-row.readonly { font-size: 0.85rem; color: var(--ink-2); gap: 1.4rem; }
 .field-block { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.5rem 0; }
 .field-block-head { display: flex; align-items: center; gap: 0.5rem; }
-.field-label { font-size: 0.75rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+/* Sentence case, not uppercase. Only SOME field labels went through this rule
+   -- the ones built with .field-label -- so the same panel read "SUMMARY" and
+   "ASSIGNEE" next to "Status", "Severity" and "Version". Two casings in one
+   column look like two kinds of thing. */
+.field-label { font-size: 0.8rem; color: var(--ink-faint); font-weight: 500; }
 .status-control { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.8rem; margin: 0.7rem 0; background: var(--surface-2); }
 .status-control-row { display: flex; gap: 1rem; }
 .status-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
@@ -445,4 +449,18 @@ tbody tr:hover { background: var(--surface-2); }
 .page > h1,
 .page [data-slot="page-header"] {
   margin-block-end: 0.25rem;
+}
+
+/* Every side panel gets the same chrome, applied once to the rail rather than
+   eight times to eight components. Before this, Keywords and Flags happened to
+   match a bordered rule and Votes, Security and See-also did not, so the page
+   implied a grouping that did not exist. */
+.bug-detail-side > section {
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  border-radius: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: var(--surface, #fff);
+}
+.bug-detail-side > section > h3:first-child {
+  margin-block-start: 0;
 }
