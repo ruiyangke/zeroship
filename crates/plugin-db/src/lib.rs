@@ -276,6 +276,9 @@ pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
 /// The database plugin — registers `zeroship.db.*` methods.
 pub struct DbPlugin {
     url: String,
+    /// Stable across every isolate in one worker process and distinct across
+    /// worker containers. Used to derive the process's per-app CDC slot.
+    worker_id: String,
     /// Process-wide usage meter (metering-as-infrastructure). Stamped into
     /// the per-isolate context on `register`; the exec boundary emits
     /// `db_reads` / `db_writes` / `db_rows_written` through it on success.
@@ -298,8 +301,13 @@ impl DbPlugin {
     pub fn new(
         url: impl Into<String>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
+        worker_id: impl Into<String>,
     ) -> Self {
-        Self { url: url.into(), meter }
+        Self {
+            url: url.into(),
+            worker_id: worker_id.into(),
+            meter,
+        }
     }
 }
 
@@ -342,6 +350,7 @@ impl NativePlugin for DbPlugin {
             if c.set_db_url(&self.url) {
                 c.clear_pool();
             }
+            c.set_cdc_worker_id(&self.worker_id);
             // Stamp the process-wide meter so the exec boundary can emit a
             // per-app usage metric on each successful op.
             c.set_meter(self.meter.clone());
@@ -727,7 +736,7 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
 /// ```ignore
 /// // Inside a compio runtime:
 /// let runtime = Runtime::builder()
-///     .plugin(DbPlugin::new(url, None))
+///     .plugin(DbPlugin::new(url, None, "worker-instance-id"))
 ///     .build();
 /// zeroship_plugin_db::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*

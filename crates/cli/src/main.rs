@@ -151,6 +151,7 @@ fn cmd_serve(args: &[String]) {
             plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
                 url,
                 Some(Arc::clone(&dev_meter)),
+                format!("serve-{}", uuid::Uuid::new_v4()),
             )));
             eprintln!("[zeroship] db plugin registered (DATABASE_URL set)");
         }

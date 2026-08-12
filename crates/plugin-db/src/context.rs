@@ -124,6 +124,12 @@ pub struct IsolateDbContext {
     /// pool creation.
     db_url: Option<String>,
 
+    /// Stable identity shared by every isolate in this worker process.
+    /// Logical-replication slots are per `(app, worker process)`, so all
+    /// isolates must stamp the same value while different containers stamp
+    /// different values.
+    cdc_worker_id: Option<String>,
+
     /// Registered models — keyed by "app_id:collection". Prevents
     /// redundant DDL on subsequent cold starts within the same deploy.
     registered_models: HashSet<String>,
@@ -341,6 +347,7 @@ impl IsolateDbContext {
         Self {
             pool: None,
             db_url: None,
+            cdc_worker_id: None,
             registered_models: HashSet::new(),
             tx_conns: HashMap::new(),
             tx_claims: HashSet::new(),
@@ -469,6 +476,16 @@ impl IsolateDbContext {
             self.db_url = Some(url.to_string());
         }
         different
+    }
+
+    /// Read the worker-process identity used in CDC slot names.
+    pub(crate) fn cdc_worker_id(&self) -> Option<String> {
+        self.cdc_worker_id.clone()
+    }
+
+    /// Stamp the worker-process identity during plug-in registration.
+    pub(crate) fn set_cdc_worker_id(&mut self, worker_id: &str) {
+        self.cdc_worker_id = Some(worker_id.to_string());
     }
 
     // ----- REGISTERED_MODELS -----------------------------------------

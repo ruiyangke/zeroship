@@ -851,6 +851,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_url: None,
+                    cdc_worker_id: "sync-test-worker".to_string(),
                     kv_url: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
