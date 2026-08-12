@@ -8256,8 +8256,16 @@ fn pg_comment_qname(kind: &'static str, schema: &str, name: &str) -> Result<Stri
     ))
 }
 
+/// `eff_schema` ALREADY accounts for the target's own qualifier: `Op::schema()` for a
+/// comment returns `target.schema()`, and `IrAuthor::effective_schema` canonicalizes a
+/// case-variant of the project schema before handing it here.
+///
+/// So do not re-read `target.schema()`. It is the author's casing, and the render seam
+/// quotes byte-verbatim while `SchemaScope::permits` matches case-insensitively - a
+/// target qualified `APP` under project `app` was blessed as `app` by the confinement
+/// gate and rendered `"APP"`, which PostgreSQL treats as a different schema entirely.
 fn render_comment_target(target: &CommentTarget, eff_schema: &str) -> Result<String, IrLowerError> {
-    let schema = target.schema().unwrap_or(eff_schema);
+    let schema = eff_schema;
     Ok(match target {
         CommentTarget::Table { name, .. } => {
             format!("TABLE {}", pg_comment_qname("table", schema, name)?)
