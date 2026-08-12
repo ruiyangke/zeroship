@@ -587,6 +587,36 @@ MV_NEWV="$(echo "$MV_RESULT" | jget 'json.versionId')"
 [ -n "$MV_NEWV" ] && [ "$MV_NEWV" != "$MV_SV" ] \
   && pass "the version is remapped to the target product's own row" \
   || fail "the bug kept the source product's version id" "was=$MV_SV now=$MV_NEWV"
+
+# The user directory returned the RAW row to any authenticated caller: email,
+# isAdmin, isDisabled, and prefs -- a free-form bag holding whatever that user
+# stored. reports.byAssignee already projected {id, handle, name}, so these two
+# were the outliers.
+ALICE_ID="$(call users.me | jget 'json.id')"
+bob users.get "{\"id\":\"$ALICE_ID\"}" | grep -q "alice@localhost" \
+  && fail "users.get discloses another user's email" \
+  || pass "users.get withholds another user's email"
+
+# Control: the endpoint still ANSWERS -- the name is there, so the absence of
+# the email is a projection and not a denial.
+bob users.get "{\"id\":\"$ALICE_ID\"}" | grep -q "Alice Dev" \
+  && pass "control: users.get still returns the display name" \
+  || fail "users.get returned nothing, so the check above proves nothing"
+
+# The people picker must still FIND someone by email without RETURNING it:
+# matching on a value is not the same as disclosing it.
+BOB_SEARCH="$(bob users.list '{"text":"alice@localhost"}')"
+echo "$BOB_SEARCH" | grep -q "Alice Dev" \
+  && pass "users.list still matches on email so a picker can find people" \
+  || fail "users.list can no longer find a user by email"
+echo "$BOB_SEARCH" | grep -q "alice@localhost" \
+  && fail "users.list echoes the email it matched on" \
+  || pass "users.list matches on email without returning it"
+
+# Self is unprojected: users.me is how you read your own record.
+call users.me | grep -q "alice@localhost" \
+  && pass "users.me still returns the caller's own email" \
+  || fail "users.me stopped returning the caller's own email"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.

@@ -3281,17 +3281,44 @@ export const listUsers = query(
           }
         : {}),
     };
-    return must(
+    const rows = must(
       await db.users.find(filter).sort({ name: 1 }).limit(clampLimit(limit, 100)),
     );
+    // Same projection as users.get. The `text` filter still MATCHES on email --
+    // finding a colleague by address is the point of a people picker -- but the
+    // address is not returned, so the endpoint cannot be used to enumerate
+    // them. Matching on a value without disclosing it is the distinction.
+    return caller?.isAdmin ? rows : rows.map(publicUserView);
   },
   { id: "users.list" },
 );
 
+/**
+ * The directory view of another person.
+ *
+ * `users.get` and `users.list` returned the raw row to any authenticated
+ * caller: email, isAdmin, isDisabled, and `prefs` -- a free-form bag holding
+ * whatever that user stored. Email is PII and the rest is nobody else's
+ * business, so a non-admin sees only what a bug page needs to render an
+ * assignee. `reports.byAssignee` already projected exactly this shape, so the
+ * two directory reads were the outliers.
+ *
+ * Admins keep the full row: administering accounts needs to see them. The
+ * caller's OWN record still comes from `users.me`, which is unprojected.
+ */
+type PublicUserView = Pick<UserRow, "id" | "handle" | "name" | "timezone">;
+
+function publicUserView(row: UserRow): PublicUserView {
+  return { id: row.id, handle: row.handle, name: row.name, timezone: row.timezone };
+}
+
 export const getUser = query(
   async ({ id }: { id: string }) => {
-    requireIdentity();
-    return getRequired(db.users, id, "User");
+    const identity = requireIdentity();
+    const actor = await appUserForIdentity(identity);
+    const row = await getRequired(db.users, id, "User");
+    if (actor?.isAdmin || actor?.id === row.id) return row;
+    return publicUserView(row);
   },
   { id: "users.get" },
 );
