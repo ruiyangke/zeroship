@@ -192,7 +192,8 @@ Listen and identity: `CONTROL_PORT` `CONTROL_BIND` `PORT` `APP_BASE_DOMAIN`
 Secrets: `MASTER_KEY` `LEGACY_MASTER_KEYS` `SIGNING_KEY_FILE`
 
 Billing and metering: `METER_PROVIDER` `INVOICER_PROVIDER` `TAX_PROVIDER`
-`PROVIDER_CONFIG` `ALLOW_UNSUPPORTED_BILLING` `SPEND_RECOMPUTE_GROUP_ID`
+`PROVIDER_CONFIG` `ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING`
+`SPEND_RECOMPUTE_GROUP_ID`
 `SPEND_RECOMPUTE_INTERVAL` `BILLING_FORWARDER_GROUP_ID` `STREAM_TRANSPORT`
 `STREAM_CONFIG` `CONTROL_USAGE_OUTBOX_WAL_PATH`
 
@@ -265,11 +266,12 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | `SIGNING_KEY_FILE` | control, migrated |
 | `AUTH_PLATFORM_ISSUER`, `AUTH_PLATFORM_JWKS_URL` | control, migrated |
 | `ZEROSHIP_ORIGIN_SCHEME` | control, gateway |
-| `ZEROSHIP_CONFIG` | auth, control, gateway, worker |
+| `ZEROSHIP_CONFIG`, `ZEROSHIP_NO_CONFIG` | auth, control, gateway, migrated, worker |
 | `ZEROSHIP_TRUST_PROXY` | control, gateway |
 | `ZEROSHIP_AUTH_PROVIDER`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` | auth, control |
 | `HOSTNAME` | control, gateway, worker |
-| `RUST_LOG`, `ZEROSHIP_LOG_FORMAT` | core (observability init) |
+| `ZEROSHIP_OBSERVABILITY_LOG_FILTER`, `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | auth, control, gateway, migrated, worker |
+| `RUST_LOG`, `ZEROSHIP_LOG_FORMAT` | the creator CLI and the single-tenant runtime only; the five server binaries no longer read either |
 
 ---
 

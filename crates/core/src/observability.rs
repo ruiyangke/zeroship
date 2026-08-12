@@ -1,18 +1,22 @@
-//! Workspace-wide tracing subscriber init. Format pluggable via
-//! `ZEROSHIP_LOG_FORMAT={pretty|compact|json|logfmt|bunyan}`.
+//! Tracing subscriber init and the [`LogFormat`] value type.
 //!
-//! Default: `pretty` when stderr is a TTY, `json` otherwise. The
-//! `RUST_LOG` env var (standard `tracing-subscriber::EnvFilter`
-//! syntax) overrides the per-binary `default_filter` argument.
+//! The observability SETTINGS are not here. The five server binaries declare
+//! `observability.log_filter` and `observability.log_format` as ordinary
+//! generated `Operational<T>` fields in their own config modules, so each has a
+//! flag (`--observability-log-*`), a reserved environment name
+//! (`ZEROSHIP_OBSERVABILITY_LOG_*`) and an `[observability]` overlay key from
+//! ONE declaration. `config::bootstrap` resolves them and calls
+//! [`init_tracing_with`].
 //!
-//! Every workspace binary calls [`init_tracing`] early in `main`,
-//! once. Calling it more than once in the same process is a no-op
-//! after the first call (the global subscriber is locked in by
-//! `tracing_subscriber::registry().init()`).
+//! [`init_tracing`] is the remaining ungoverned entry point: the creator CLI and
+//! the single-tenant runtime still read `RUST_LOG` / `ZEROSHIP_LOG_FORMAT`
+//! directly through it. Those raw reads are a later step's problem, and no
+//! server binary reaches them.
 //!
-//! The function also installs `tracing_log::LogTracer` so any
-//! `log::*` calls (e.g. inside `compio-postgres`) bridge through
-//! `tracing` transparently.
+//! Calling either init more than once in a process is a no-op after the first
+//! (the global subscriber is locked in by `tracing_subscriber::registry().init()`).
+//! Both install `tracing_log::LogTracer` so `log::*` calls (e.g. inside
+//! `compio-postgres`) bridge through `tracing`.
 
 use std::fmt;
 use std::io::IsTerminal;

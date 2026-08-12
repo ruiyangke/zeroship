@@ -56,7 +56,7 @@ trusted_oauth_clients = []
 frame_ancestor_origins = []
 
 [observability]
-# Tracing filter passed to Rust tracing subscribers, equivalent to RUST_LOG.
+# Tracing filter passed to Rust tracing subscribers (EnvFilter syntax).
 # Optional; absent => compiled default.
 # Precedence: CLI flag > env > this file > default.
 log_filter = "info,zeroship_=debug"

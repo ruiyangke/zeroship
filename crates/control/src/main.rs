@@ -1,7 +1,6 @@
 //! zeroship-control — control plane binary. Thin wrapper over
 //! `zeroship_control` (the library crate).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -12,7 +11,7 @@ use zeroship_core::auth_provider::{
 };
 use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, resolve_origin_scheme, resolve_overlay_string,
-    validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue, OriginScheme,
+    validate_master_key_material, CheckConfigReport, CheckValue, OriginScheme,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,

@@ -941,7 +941,7 @@ observability, and OIDC/OAuth protocol primitives.
 | Config - secret strength validation | green | internal | `crates/core/src/config/secrets.rs` | - | `crates/core/src/config/secrets.rs` | At least 32 bytes; enforced in every environment. |
 | Config — loopback URL check | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | Literal-only; no DNS. |
 | Config — bootstrap_or_exit | 🟢 | internal | `crates/core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
-| Observability — tracing subscriber init | 🟢 | ZEROSHIP_LOG_FORMAT / --log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
+| Observability — tracing subscriber init | 🟢 | ZEROSHIP_OBSERVABILITY_LOG_FORMAT / --observability-log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
 | OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/core/src/oidc_verify.rs` (inline `mod tests`) | 5-min TTL; stale-on-error; RS/ES algos. |
 | OIDC — BCL logout_token verifier | 🟢 | internal (auth BCL) | `crates/core/src/logout_token.rs` | — | — | events claim; nonce-absent. |
 | DPoP — RFC 9449 proof verifier | ⚫ | none | — | — | — | Deleted with the gateway DPoP arm (P5e); the closed-world OP omits DPoP. |

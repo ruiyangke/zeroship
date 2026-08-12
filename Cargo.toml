@@ -162,7 +162,7 @@ cargo_metadata = "0.23.1"
 
 # Logging / tracing — pluggable subscriber init lives in
 # `crates/core/src/observability.rs`. Format pluggable via
-# ZEROSHIP_LOG_FORMAT={pretty|compact|json|logfmt|bunyan}.
+# the generated observability.log_format setting (auto|pretty|compact|json|logfmt|bunyan).
 tracing = "0.1"
 # `ansi` is required for the pretty + compact text formatters; the
 # subscriber strips ANSI codes automatically when stderr is not a TTY,
