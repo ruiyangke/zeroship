@@ -947,6 +947,57 @@ scope = "all"
         assert!(err.is_creator_fault());
     }
 
+    /// A draft asking `scope = "all"` for a key the ceiling grants ONLY at one exact
+    /// literal must refuse with `UncoveredRegionNotRepresentable`, not the generic
+    /// escalation error.
+    ///
+    /// This is the residual I said in ZEROSHIP-2026-08-12-249 could not be tested until
+    /// the pin moved, on the belief that the variant was new in zero-migrate's
+    /// 8c254fa8. They corrected that (ZERO-MIGRATE-2026-08-12-003): the variant is
+    /// ORIGINAL behaviour, constructed at `boundary.rs:174` and `:204` in our vendored
+    /// pin, and what 8c254fa8 added was a SECOND cause for it. They explicitly had NOT
+    /// run it at cb1bcb59 and asked me to, since I am already on that commit. This test
+    /// is that run.
+    ///
+    /// WHY THIS INPUT AND NOT THE OTHER TWO ESCALATION TESTS ABOVE: those use `sql.raw`
+    /// and `schema.cross_schema`, which the confined ceiling does not grant AT ALL, so
+    /// there is no covering rule to subtract and they take a different arm.
+    /// `schema.create_table` IS granted, but `bind_confined_charter_to_schema` rewrites
+    /// its scope to one exact literal - so `All` minus that literal is the subtraction
+    /// with no representation, which is the arm this variant guards.
+    ///
+    /// It asserts the VARIANT, not merely that composition failed, because the whole
+    /// point of the exchange was that the two refusals carry different information.
+    #[test]
+    fn draft_all_scope_on_a_literal_bound_key_refuses_as_not_representable() {
+        let cfg = config();
+        let app_id = Uuid::new_v4();
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+"#,
+            })
+            .expect("all-scoped draft parses before admission");
+
+        let err = cfg
+            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .expect_err("scope=all against a literal-bound rule must be refused");
+        assert!(
+            matches!(
+                err,
+                ManagedPolicyError::Compose(ComposeError::UncoveredRegionNotRepresentable { .. })
+            ),
+            "expected UncoveredRegionNotRepresentable, got: {err:?}"
+        );
+        assert!(err.is_creator_fault());
+    }
+
     /// A draft whose scope is a GLOB whose literal prefix lands INSIDE the granted
     /// region. Every other escalation test here uses `scope = "all"`, which the
     /// admission check catches wherever it samples; this one is built so a sampled
