@@ -164,7 +164,18 @@ fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 13 14 12"
+#
+# `7e` AND `12w` WERE THE NEXT TWO, and they say the same thing about the
+# mechanism rather than about the two authors. Measured 2026-08-12 on a full
+# four-service run: both had landed (fd1e35b81 and 73789a6c7), both ran, both
+# produced outcomes - 4 and 5 - and NEITHER was in this list, so guard 3 named
+# them and neither appeared in the summary. Adding a step and updating this list
+# are two separate edits in two separate parts of the file, and nothing but this
+# guard connects them; that is why the list keeps falling behind by exactly the
+# steps most recently added. The floor did not move for either of them, because
+# their outcomes were always in PASS - the list governs the per-step accounting,
+# not the total.
+GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 7e 8 9 9b 10 11 12w 13 14 12"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -4310,7 +4321,7 @@ echo "            and its 'only step 11 collation reds are left' reading was tru
 echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
 echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
 echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
-echo "            is 108/15, so the mutated arm should read 114/9 -- DERIVED by"
+echo "            is 117/15, so the mutated arm should read 123/9 -- DERIVED by"
 echo "            subtraction, NOT measured; nobody has run the mutated arm since"
 echo "            the suite grew. If you run it, replace this with the real pair."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
