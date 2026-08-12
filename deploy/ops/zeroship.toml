@@ -65,9 +65,11 @@ log_format = "json"
 # resolved from AUTH_DB_URL) so it can diverge from the worker/control/gateway
 # `--db` slot if ever needed.
 #
-# DEV ONLY: these resolve to the weak dev secrets supplied by deploy/compose/docker-compose.yml
-# (every service runs --dev-insecure). The point is that the values flow through
-# this file's reference indirection, not that they are strong.
+# LOCAL COMPOSE: `zeroship dev init` writes strong, stable values to the
+# gitignored deploy/compose/.env file. Compose supplies those values to every
+# consumer through these references. Services still run with --dev-insecure
+# until the later guard-by-guard migration removes that flag; this provisioning
+# step changes the inputs, not the flag.
 [secrets]
 control_key  = "urn:zeroship:env:ZEROSHIP_CONTROL_KEY"
 master_key   = "urn:zeroship:env:ZEROSHIP_MASTER_KEY"

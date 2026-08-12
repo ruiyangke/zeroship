@@ -107,33 +107,68 @@ relative paths, so these directory names are load-bearing):
 
 ### Secrets
 
-Six files, generated **on the host** and never in the repo. Formats are from
-`auth-deploy.md`:
+Provision the secrets and scalar overlay once on the host. When `zeroship` is
+installed directly, run:
 
 ```bash
-S=/opt/zeroship-deploy/secrets
-mkdir -p $S && chmod 700 $S
-openssl genpkey -algorithm ed25519 -out $S/auth-signing.pem
-openssl genpkey -algorithm ed25519 -out $S/gateway-signing.pem
-openssl rand -base64 48 > $S/broker-secret
-openssl rand -base64 48 > $S/refresh-hash-key
-openssl rand -base64 48 > $S/refresh-idem-key
-chmod 600 $S/*
+zeroship dev init \
+  --secrets-dir=/opt/zeroship-deploy/secrets \
+  --env-file=/opt/zeroship-deploy/compose/.env
 ```
+
+The compose invocation below automatically loads that `.env` beside its
+compose file. If you choose different custom paths, pass Compose
+`--env-file=/path/to/.env` and set `ZEROSHIP_SECRETS_DIR=/path/to/secrets` in
+that file (or export it) so the bind mount follows the generator.
+
+If the matching CLI exists only in the deployment image, authenticate to the
+registry, pull that image, and run the same command from it:
+
+```bash
+IMAGE=ghcr.io/<owner>/zeroship-platform:<sha>
+docker pull "$IMAGE"
+docker run --rm \
+  -v /opt/zeroship-deploy:/opt/zeroship-deploy \
+  --entrypoint zeroship "$IMAGE" dev init \
+  --secrets-dir=/opt/zeroship-deploy/secrets \
+  --env-file=/opt/zeroship-deploy/compose/.env
+```
+
+The explicit paths are necessary because the CLI's repository-local defaults
+are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
+exactly seven files:
+
+`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+
+It also appends the generated scalar values described below to `.env`. The
+directory is mode 0700 and the files are mode 0600 on Unix. Rerunning is safe:
+existing valid material is kept byte-for-byte, missing entries are created, and
+invalid or conflicting material causes an error instead of an implicit rotation.
 
 `broker-secret` is deliberately ONE file read by both gateway
 (`GATEWAY_BROKER_SECRET_FILE`) and auth (`AUTH_BROKER_SECRET_FILE`). Same bytes
 is the requirement, not a coincidence.
 
-`pairwise-salt` is the seventh and is NOT independent: auth reads it from a file
-while control and gateway read `PAIRWISE_SALT` from env, and all three derive the
-same per-app `pws_`. Write the file from the env value so they cannot drift:
+`pairwise-salt` is not independent: auth reads the file while control and
+gateway read `PAIRWISE_SALT` from `.env`, and all three derive the same per-app
+`pws_`. The generator writes exactly the env value to the file with NO trailing
+newline and refuses a byte mismatch on later runs. A per-service generator or a
+plain `echo` would silently break this identity invariant.
+
+Do not export a different `PAIRWISE_SALT` in the shell that launches Compose.
+Host environment values take precedence over the compose `.env` file and can
+therefore override control/gateway without changing the file auth reads.
+
+The refresh verifier file is also structured. Its first line has this form:
 
 ```bash
-printf '%s' "$(grep -E '^PAIRWISE_SALT=' /opt/zeroship-deploy/compose/.env | cut -d= -f2-)" \
-  > $S/pairwise-salt
-chmod 600 $S/pairwise-salt
+printf '1:%s\n' "$(openssl rand -hex 48)" > refresh-hash-key
 ```
+
+Each nonempty `refresh-hash-key` line is
+`version:hex-or-base64url-key`, with at least 32 decoded bytes. An unadorned
+`openssl rand -base64 48` output is not a valid keyring line.
 
 ### Domain
 
@@ -177,12 +212,15 @@ STASH_SIGNING_KEY=<openssl rand -hex 32>
 PAIRWISE_SALT=<openssl rand -hex 32>
 ```
 
-`chmod 600 .env`.
+`zeroship dev init` already added these generated values to the same file:
 
-**Do NOT set `ZEROSHIP_CONTROL_KEY` here.** It is hardcoded to `platform-key` in
-control, gateway and worker, and `${VAR}`-indirected only in auth. Setting it
-moves auth alone and desyncs it from the other three. Changing it for real means
-parameterizing all four in the compose file first.
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
+`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+
+Do not replace them with shared examples or per-service values. In particular,
+one `ZEROSHIP_CONTROL_KEY` now supplies control, gateway, worker, migrated, and
+auth together. `chmod 600 .env`; the generator applies that mode on Unix too.
 
 ### Control plane access
 
@@ -192,8 +230,10 @@ control still runs with `--dev-insecure` and the stack still uses the hardcoded
 `platform-key`. Enabling it now would put relaxed control-plane auth and a known
 credential on the public edge.
 
-Until both prerequisites are removed, add a **server-only**, loopback-only
-publication for the SSH fallback:
+On an internet-facing host that is not acceptable as-is. The generated control
+key removes the shipped weak literal, but it does not make a directly published
+control plane an appropriate public entry point. Bind it to loopback with a
+**server-only** override, so the upstream gate keeps telling the truth:
 
 ```yaml
 # /opt/zeroship-deploy/compose/docker-compose.override.yml
@@ -362,14 +402,15 @@ pull, so use a read-only token there, not the `write:packages` one used to push.
 
 ## Security posture
 
-The compose file is labelled DEV ONLY at the top and means it. Before treating
-any of this as production:
+The compose file still carries local-development behavior beyond secret
+provisioning. Before treating any of this as production:
 
 - `--dev-insecure` on control, gateway and auth relaxes admin and internal auth.
-- `ZEROSHIP_CONTROL_KEY` / `ZEROSHIP_MASTER_KEY` are hardcoded weak values.
+- `zeroship dev init` supplies strong, stable local inputs, but this step does
+  not remove the remaining `--dev-insecure` behavior.
 - Caddy speaks plain HTTP; TLS lives entirely in Cloudflare, so the origin is
   only as private as its IP. Anything that reaches the host directly on `:80`
   skips TLS.
 
-Loopback-binding control keeps the weak credentials off the internet. It does
-not make them strong.
+Generated secrets solve secret provisioning and restart stability. They do not
+replace network isolation or the later removal of `--dev-insecure`.

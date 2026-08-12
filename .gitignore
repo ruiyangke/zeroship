@@ -16,6 +16,9 @@ perf-compio.data
 .superpowers/
 deploy/verdaccio/storage/
 
+# Generated platform secrets for the local compose stack. Never track them.
+deploy/compose/secrets/
+
 # Local dev state: `zeroship serve` writes the default redb KV file
 # (`./.zeroship/kv.redb` + lock) and the storage root (`.zeroship/storage`)
 # here. Never tracked.

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Every secret deploy/compose supplies must satisfy the MINIMUM LENGTH THE
-# PRODUCT ITSELF ENFORCES.
+# Every literal secret deploy/compose supplies must satisfy the MINIMUM LENGTH
+# THE PRODUCT ITSELF ENFORCES. Generated secrets must use the exact required
+# `zeroship dev init` interpolation instead of carrying a built-in default.
 #
 # THE DEFECT THIS EXISTS FOR, measured 2026-08-11 by bringing the stack up on a
 # fresh database (scenario 18). Three of five services could not start, and two
-# of the three failures were the same root cause: the compose file ships
-# placeholder secrets shorter than the minimum the binaries refuse below.
+# of the three failures were the same root cause: the compose file shipped
+# placeholder secrets shorter than the minimum the binaries refused below.
 #
 #   worker:   worker: refusing to start with unsafe WORKER_KEY
 #             WORKER_KEY is too short (10 bytes); minimum 32 bytes
@@ -25,21 +26,19 @@
 #
 # WHAT BOUNDING FIRST BOUGHT, recorded because it is the reason this gate covers
 # more than the one failure that fired: WORKER_KEY (10 bytes) is what actually
-# crashed. STASH_SIGNING_KEY ships at 27 bytes and is checked by the same code,
-# so fixing only WORKER_KEY would have moved the failure to the gateway on the
-# next bring-up rather than clearing it. PAIRWISE_SALT ships at 38 and passes.
+# crashed. STASH_SIGNING_KEY shipped at 27 bytes and was checked by the same
+# code, so fixing only WORKER_KEY would have moved the failure to the gateway on
+# the next bring-up rather than clearing it.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
-#   - ENTROPY. Length is not strength; a 32-byte run of "a" passes here and is
-#     worthless. This gate only enforces what the product enforces.
-#   - secrets with NO minimum in the product. CONTROL_KEY (12 bytes) and
-#     MASTER_KEY (10 bytes) are also short and are NOT length-checked anywhere,
-#     so they pass today. That is a real observation, not a covered case.
-#   - WHICH SERVICE gets which secret. control declares it needs WORKER_KEY via
-#     deploy/ops/zeroship.toml and the compose file sets it on gateway and worker
-#     only; that mapping is a judgement this file cannot derive, and the
-#     bring-up is what catches it.
-#   - that any of this is safe to ship publicly. These are dev defaults.
+#   - ENTROPY of a literal. Length is not strength; generated values are covered
+#     by the CLI generator tests, while this gate verifies their required wiring.
+#   - secrets with NO minimum in the product. Their generator sizes are covered
+#     by the CLI generator tests, not by this derived minimum-length set.
+#   - WHICH SERVICE gets which secret. That mapping is asserted by the CLI
+#     provisioning tests and ultimately exercised by a stack bring-up.
+#   - that any literal is safe to ship publicly. Generated values are local
+#     provisioning output and are not defaults in this file.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,9 +71,10 @@ fi
 
 for rule in "${RULES[@]}"; do
   name="${rule%% *}"; min="${rule##* }"
-  # Compose supplies these either literally (`NAME: value`) or with a shell
-  # default (`NAME: ${NAME:-value}`); take the default in the latter case, since
-  # that is what an operator who sets nothing actually gets.
+  # Compose supplies these either literally or as required variables generated
+  # by `zeroship dev init`. An interpolation is configuration syntax, never
+  # secret material: accept only the exact required forms and reject any other
+  # interpolation instead of accidentally measuring its source text as a key.
   mapfile -t VALUES < <(
     grep -hoE "^ +(ZEROSHIP_)?${name}: .*$" "$CF" |
     sed -E "s/^ +(ZEROSHIP_)?${name}: //; s/^\\\$\{[A-Z_]+:-(.*)\}$/\1/" |
@@ -85,6 +85,16 @@ for rule in "${RULES[@]}"; do
     continue
   fi
   for v in "${VALUES[@]}"; do
+    required_plain="\${${name}:?run zeroship dev init}"
+    required_prefixed="\${ZEROSHIP_${name}:?run zeroship dev init}"
+    if [[ "$v" == '${'*'}' ]]; then
+      if [ "$v" = "$required_plain" ] || [ "$v" = "$required_prefixed" ]; then
+        pass "$name is required from zeroship dev init (no built-in weak default)"
+      else
+        fail "$name uses unexpected interpolation '$v'; require zeroship dev init explicitly"
+      fi
+      continue
+    fi
     len=$(printf '%s' "$v" | wc -c)
     if [ "$len" -ge "$min" ]; then
       pass "$name = ${len} bytes (minimum $min)"
@@ -98,7 +108,7 @@ echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED.
-# MEASURED 2026-08-11: 3 enforced secrets, each supplied once by compose.
+# MEASURED 2026-08-12: 3 enforced secret names, deduplicated across consumers.
 MIN_RAN="${COMPOSE_SECRETS_MIN_RAN:-3}"
 RAN=$((PASS + FAIL))
 rc=0

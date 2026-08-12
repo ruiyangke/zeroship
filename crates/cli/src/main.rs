@@ -1,8 +1,9 @@
-//! zeroship CLI — serve, deploy, login, secret, var.
+//! zeroship CLI - serve, deploy, login, secret, var, dev.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   zeroship deploy  <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]
+//!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
+mod dev;
 mod parent_death;
 mod secrets;
 
@@ -40,6 +42,7 @@ fn main() {
         "login" => exit_on_error("login", auth::cmd_login(&args)),
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
+        "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
         _ => print_usage(),
@@ -689,6 +692,8 @@ fn print_usage() {
     eprintln!("                   Show the signed-in account.");
     eprintln!("  zeroship logout");
     eprintln!("                   Revoke and delete local CLI credentials.");
+    eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
+    eprintln!("                   Provision stable, strong local platform secrets.");
     eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=PAT]");
     eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
     eprintln!("                   process.env (where any npm dependency can read it) only");
