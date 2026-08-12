@@ -69,7 +69,24 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # one below it: these binaries have a fixed test count, so any shortfall means a
 # target stopped running rather than a test getting faster. Raise it
 # deliberately when tests are added; do not lower it to match a red run.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-111}"
+# MOVED 111 -> 110 on 2026-08-12, and NOT to match a red run. The accounting,
+# one line per test, all three verified against `git show` of the prior commit:
+#   -1  p8a2_auto_spawn_is_idempotent_via_registry was VACUOUS. It cleared the
+#       registry, asserted not-registered, and ended `let _ = app;` without ever
+#       registering anything. Restoring it would raise this number and test
+#       nothing, which is the failure this floor exists to prevent.
+#   -1  p8a2_auto_spawn_via_callback_short_circuits proved WAL delivery reached a
+#       broker subscription in ONE isolate. `distributed_live` now proves the
+#       same delivery ACROSS isolates, which is strictly stronger.
+#   -1  p8a2_supervised_consumer_exits_on_slot_invalidated drove `WalConsumer` +
+#       `run_supervised` directly. Both became `pub(crate)`, so no out-of-crate
+#       test can construct them. The property it guarded is now fail-loud
+#       startup (cdc_lifecycle: a startup failure rejects the stream instead of
+#       leaving it healthy-looking and static) and is STILL UNTESTED - the one
+#       real debt from that change.
+#   +1  distributed_live, now listed above.
+# Net -2 removed +1 added against the previous 111.
+PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-110}"
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
@@ -81,19 +98,26 @@ PLUGIN_DB_SKIP_ALLOWLIST="${PLUGIN_DB_SKIP_ALLOWLIST:-postgis}"
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
-# BOTH live-Postgres targets. `integration` and `native_transaction` are the two
+# ALL live-Postgres targets. `integration` and `native_transaction` are the two
 # siblings ci.yml names together as belonging "with the other live-database
 # gates"; running only the first would leave the second in exactly the limbo
-# this script exists to end.
+# this script exists to end. `distributed_live` joined them on 2026-08-12 for
+# the same reason: it dials the same server, needs the same wal_level=logical,
+# and was reachable only by hand until it was listed here.
 #
 # `--test-threads=1` is required, not tidiness: these tests share one database
 # and create identically-named schemas, which is the same hazard #78 fixed for
 # compio-postgres.
 suite_rc=0
 : > "$SUITE_LOG"
-for target in integration native_transaction; do
+# `live-db-tests` NOT `test-helpers`: it is a superset
+# (live-db-tests = ["test-helpers"]), and `distributed_live` declares
+# `required-features = ["live-db-tests"]`. Passing the narrower feature makes
+# cargo REFUSE that target with "requires the features", which contributes zero
+# tests - caught here only because the floor noticed the shortfall.
+for target in integration native_transaction distributed_live; do
   echo "--- cargo test --test ${target} ---" | tee -a "$SUITE_LOG"
-  cargo test -p zeroship-plugin-db --features test-helpers --test "$target" \
+  cargo test -p zeroship-plugin-db --features live-db-tests --test "$target" \
     -- --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
   [ "${PIPESTATUS[0]}" -ne 0 ] && suite_rc=1
 done

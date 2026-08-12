@@ -2265,9 +2265,10 @@ async fn b2_adding_fk_to_existing_data_validates() {
 // omits it (ci.yml, "they belong with the other live-database gates
 // rather than here"), but the live-DB gate runs
 // `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
-// and this crate declares NO `live-db-tests` feature, so the deferral
-// names a destination that does not accept it. The binary falls
-// between the two and runs only when a human exports PG_TEST_URL.
+// and this crate declared NO `live-db-tests` feature, so the deferral
+// named a destination that could not accept it. FIXED 2026-08-12: the
+// crate now declares `live-db-tests = ["test-helpers"]`, and
+// tests/run_plugin_db_live_suite.sh runs this target with it.
 //
 // AND THE SKIP IS INVISIBLE TO A SUMMING GATE. Measured on two
 // throwaway servers differing only in wal_level, the twelve tests
