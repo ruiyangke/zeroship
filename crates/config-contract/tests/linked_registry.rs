@@ -9,11 +9,12 @@
 use clap::CommandFactory;
 use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::fixtures::{
-    FixtureControlConfig, FixtureControlConfigSources, FixtureWorkerConfig,
-    FixtureWorkerConfigSources,
+    FixtureControlConfig, FixtureControlConfigConsumer, FixtureControlConfigSources,
+    FixtureWorkerConfig, FixtureWorkerConfigSources,
 };
 use zeroship_core::config::{
-    ConfigSpec, GeneratedConfig, ReadSite, Sensitivity, SourceKind, CONFIG_READ_SITES,
+    CanonicalName, ConfigSpec, EnvKey, GeneratedConfig, ReadSite, Sensitivity, SourceKind,
+    CONFIG_READ_SITES,
 };
 
 const FIXTURE_BINARIES: [&str; 2] = ["zeroship-fixture-control", "zeroship-fixture-worker"];
@@ -44,6 +45,10 @@ fn tuples(sites: &[ReadSite]) -> Vec<(String, String, SourceKind)> {
         })
         .collect::<Vec<_>>();
     rows.sort();
+    // Set semantics, matching contract.rs. Two readers of one identity in one
+    // binary is legitimate: this test crate adds a second reader of
+    // `control.port` as the positive control below.
+    rows.dedup();
     rows
 }
 
@@ -71,14 +76,16 @@ fn read_sites_declared_in_another_crate_are_linked_and_enumerable() {
     found_binaries.dedup();
     assert_eq!(found_binaries, FIXTURE_BINARIES);
 
+    let declaring = sites
+        .iter()
+        .filter(|site| site.location().0.ends_with("fixtures.rs"))
+        .count();
+    assert!(
+        declaring > 0,
+        "no read site was attributed to the declaring file"
+    );
     for site in &sites {
-        let (file, line, _) = site.location();
-        assert!(
-            file.ends_with("fixtures.rs"),
-            "read site {} was attributed to {file}, not the declaring file",
-            site.canonical().as_str()
-        );
-        assert!(line > 0);
+        assert!(site.location().1 > 0, "read site has no source line");
     }
 }
 
@@ -163,6 +170,21 @@ fn compiled_clap_metadata_equals_the_declared_projections() {
         "a platform-global identity has no leading scope segment to strip"
     );
     assert_eq!(control_key.get_env(), None);
+}
+
+const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =
+    EnvKey::from_static(CanonicalName::from_static("control.port"));
+
+#[test]
+fn the_matching_consumer_token_compiles_and_reads() {
+    // Positive control for tests/ui/wrong_consumer.rs. Same macro, same const
+    // key, same shape; the ONLY difference is that the consumer marker matches
+    // the key's. That partner is what separates "the type check works" from
+    // "the fixture failed for some unrelated reason".
+    // Does not cover: the value itself. This asserts the call type-checks and
+    // reports absence, not any particular environment content.
+    let read = zeroship_core::read_config_env!(CONTROL_PORT, FixtureControlConfigConsumer);
+    assert!(read.is_ok());
 }
 
 #[test]

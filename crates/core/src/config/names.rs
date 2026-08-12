@@ -456,6 +456,12 @@ where
 }
 
 /// Read a typed key and independently register its exact read site.
+///
+/// `$key` must be a CONSTANT expression: the identity is copied into a linked
+/// `static`, so a runtime binding is rejected by the compiler. Generated
+/// resolvers pass `EnvKey::from_static(..)` directly; hand-written accessors
+/// must name a `const` key. `$consumer` is a value of the exact consumer marker
+/// type, which makes a wrong-binary read a type mismatch.
 #[macro_export]
 macro_rules! read_config_env {
     ($key:expr, $consumer:expr $(,)?) => {{

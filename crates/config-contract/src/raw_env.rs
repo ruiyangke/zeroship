@@ -12,6 +12,15 @@ use thiserror::Error;
 
 const RAW_METHODS: &[&str] = &["var", "var_os", "vars", "vars_os"];
 
+/// The typed accessor that `read_config_env!` wraps.
+///
+/// Calling it directly reads the environment WITHOUT emitting a `ReadSite`, so
+/// it is the one way to hold a typed key and still stay invisible to the
+/// registry. Banning it is what makes "every read is enumerable" true rather
+/// than merely conventional. The accessor's own defining module is exempt; that
+/// exemption is applied by the caller, not by this scanner.
+const REGISTRATION_BYPASS: &str = "read_typed_env";
+
 /// One cfg-independent raw environment access found in Rust source.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RawEnvViolation {
@@ -27,6 +36,12 @@ pub enum RawEnvViolation {
     /// A zeroship-owned name was captured at compile time.
     #[error("undeclared compile-time environment read: {0}")]
     CompileTime(String),
+    /// The typed accessor was called without the registering macro.
+    #[error("typed environment read bypasses ReadSite registration: {0}")]
+    UnregisteredRead(String),
+    /// The scan covered no source at all, so a clean result proves nothing.
+    #[error("raw environment scan examined zero source files")]
+    EmptyScan,
 }
 
 #[derive(Default)]
@@ -109,6 +124,10 @@ impl<'ast> Visit<'ast> for Reads<'_> {
             self.violations
                 .push(RawEnvViolation::Read(segments.join("::")));
         }
+        if segments.last().is_some_and(|last| last == REGISTRATION_BYPASS) {
+            self.violations
+                .push(RawEnvViolation::UnregisteredRead(segments.join("::")));
+        }
         visit::visit_expr_path(self, path);
     }
 
@@ -172,6 +191,49 @@ pub fn check_rust_source(source: &str) -> Result<(), Vec<RawEnvViolation>> {
     violations.dedup();
     if violations.is_empty() {
         Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+/// Scan a whole set of named sources, refusing to report a clean empty run.
+///
+/// [`check_rust_source`] answers "is THIS file clean?", which is silently true
+/// for a file set that a broken enumeration left empty. The gate that later
+/// walks `git ls-files` must call this instead, so a glob that stops matching
+/// fails loudly rather than reporting zero violations.
+///
+/// # Errors
+///
+/// Returns [`RawEnvViolation::EmptyScan`] for an empty set, otherwise every
+/// violation found, each prefixed with its source name.
+pub fn check_sources(sources: &[(String, String)]) -> Result<usize, Vec<RawEnvViolation>> {
+    if sources.is_empty() {
+        return Err(vec![RawEnvViolation::EmptyScan]);
+    }
+    let mut violations = Vec::new();
+    for (name, source) in sources {
+        if let Err(found) = check_rust_source(source) {
+            violations.extend(found.into_iter().map(|violation| match violation {
+                RawEnvViolation::Parse(detail) => {
+                    RawEnvViolation::Parse(format!("{name}: {detail}"))
+                }
+                RawEnvViolation::Import(detail) => {
+                    RawEnvViolation::Import(format!("{name}: {detail}"))
+                }
+                RawEnvViolation::Read(detail) => RawEnvViolation::Read(format!("{name}: {detail}")),
+                RawEnvViolation::CompileTime(detail) => {
+                    RawEnvViolation::CompileTime(format!("{name}: {detail}"))
+                }
+                RawEnvViolation::UnregisteredRead(detail) => {
+                    RawEnvViolation::UnregisteredRead(format!("{name}: {detail}"))
+                }
+                RawEnvViolation::EmptyScan => RawEnvViolation::EmptyScan,
+            }));
+        }
+    }
+    if violations.is_empty() {
+        Ok(sources.len())
     } else {
         Err(violations)
     }
