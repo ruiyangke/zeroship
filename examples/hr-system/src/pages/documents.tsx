@@ -210,7 +210,7 @@ export default function DocumentsPage() {
                   <div className="flex-1">
                     <div className="text-sm font-medium">{p.title}</div>
                     <div className="text-xs text-muted-foreground">
-                      v{p.version} &bull; {p.category}
+                      v{p.policyVersion} &bull; {p.category}
                       {p.effective_date && ` &bull; Effective ${new Date(p.effective_date).toLocaleDateString()}`}
                     </div>
                   </div>

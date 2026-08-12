@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "migrate": "zeroship-dev-migrate",
     "build": "vite build",
     "preview": "vite preview"
   },
