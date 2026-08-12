@@ -97,4 +97,7 @@ export {
   addWatcher,
   removeWatcher,
   listWatchers,
+  addSeeAlso,
+  removeSeeAlso,
+  listSeeAlso,
 } from "./index";

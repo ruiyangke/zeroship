@@ -471,6 +471,26 @@ AFTER_WARM="$(bob notifications.unreadCount | jget 'json.count')"
 [ "$AFTER_WARM" -gt "$WARM" ] 2>/dev/null \
   && pass "the unread count is fresh after a notification even with a warm cache ($WARM -> $AFTER_WARM)" \
   || fail "stale unread count: the KV cache was not refreshed by the fanout" "warm=$WARM after=$AFTER_WARM"
+
+echo "see also"
+# The bugSeeAlso table had zero server references: schema described the
+# feature, nothing implemented it.
+SA="$(call seeAlso.add "{\"bugId\":\"$BUG\",\"url\":\"https://bugzilla.mozilla.org/show_bug.cgi?id=1\"}" | jget 'json.id')"
+[ -n "$SA" ] && [ "$SA" != "<missing>" ] && pass "seeAlso.add stores an external link" || fail "seeAlso.add" "got: $SA"
+call seeAlso.list "{\"bugId\":\"$BUG\"}" | grep -q "bugzilla.mozilla.org" \
+  && pass "seeAlso.list returns the link" || fail "seeAlso.list did not return the link"
+
+# This value is rendered as an href, so a javascript: URL is script execution
+# rather than a link. Rejected at the API, not left to the client to sanitise.
+[ "$(code seeAlso.add "{\"bugId\":\"$BUG\",\"url\":\"javascript:alert(1)\"}")" = "400" ] \
+  && pass "a javascript: url is refused" || fail "a javascript: url was accepted as a See Also link"
+[ "$(code seeAlso.add "{\"bugId\":\"$BUG\",\"url\":\"not-a-url\"}")" = "400" ] \
+  && pass "a relative url is refused" || fail "a non-absolute url was accepted"
+
+# Duplicate add is idempotent rather than a second row.
+call seeAlso.add "{\"bugId\":\"$BUG\",\"url\":\"https://bugzilla.mozilla.org/show_bug.cgi?id=1\"}" >/dev/null
+[ "$(call seeAlso.list "{\"bugId\":\"$BUG\"}" | grep -o 'bugzilla.mozilla.org' | wc -l)" = "1" ] \
+  && pass "adding the same link twice does not duplicate it" || fail "duplicate See Also rows"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \

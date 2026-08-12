@@ -160,6 +160,7 @@ type KeywordRow = SystemRow & {
 type BugKeywordRow = SystemRow & { bugId: string; keywordId: string };
 type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
 type CcRow = SystemRow & { bugId: string; userId: string };
+type SeeAlsoRow = SystemRow & { bugId: string; url: string };
 type WatcherRow = SystemRow & { watcherId: string; watchedId: string };
 type VoteRow = SystemRow & { bugId: string; userId: string; count: number };
 type ProductGroupRow = SystemRow & { productId: string; groupId: string };
@@ -265,6 +266,7 @@ type TxDb = {
   bugDependencies: TxCollection<DependencyRow>;
   bugCc: TxCollection<CcRow>;
   votes: TxCollection<VoteRow>;
+  bugSeeAlso: TxCollection<SeeAlsoRow>;
   bugGroups: TxCollection<BugGroupRow>;
   flags: TxCollection<FlagRow>;
   activities: TxCollection<ActivityRow>;
@@ -296,6 +298,7 @@ type AppDb = {
   bugCc: Collection<CcRow>;
   votes: Collection<VoteRow>;
   watchers: Collection<WatcherRow>;
+  bugSeeAlso: Collection<SeeAlsoRow>;
   flagTypes: Collection<FlagTypeRow>;
   flags: Collection<FlagRow>;
   activities: Collection<ActivityRow>;
@@ -3902,4 +3905,75 @@ export const listWatchers = query(
     return rows.map((row) => ({ ...row, watched: byId.get(row.watchedId) ?? null }));
   },
   { id: "watchers.list" },
+);
+
+// ---------------------------------------------------------------------------
+// See Also
+//
+// Bugzilla's cross-tracker links: a bug in another system that is the same
+// issue, or related to it. The table existed with zero server references, so
+// the schema described the feature and nothing implemented it.
+//
+// Stored as a plain URL rather than a parsed reference: the whole point is
+// pointing at trackers this app knows nothing about.
+// ---------------------------------------------------------------------------
+
+export const addSeeAlso = mutation(
+  async ({ bugId, url }: { bugId: string; url: string }) => {
+    const actor = await requireActor();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    await assertBugAccessible(bug, actor);
+
+    const clean = requireNonEmpty(url, "url");
+    // Scheme-checked rather than accepted verbatim: this value is rendered as
+    // a link, and `javascript:` in an href is script execution, not a link.
+    let parsed: URL;
+    try {
+      parsed = new URL(clean);
+    } catch {
+      invalid("url must be absolute");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      invalid("url must be http or https");
+    }
+
+    const existing = must(await db.bugSeeAlso.get({ bugId, url: clean }));
+    if (existing) return existing;
+    return must(
+      await db.transaction(async (tx) => {
+        const row = await tx.bugSeeAlso.insert({ bugId, url: clean });
+        await recordRelatedChange(tx.activities, bugId, actor.id, "see_also", null, clean);
+        return row;
+      }),
+    );
+  },
+  { id: "seeAlso.add" },
+);
+
+export const removeSeeAlso = mutation(
+  async ({ id }: { id: string }) => {
+    const actor = await requireActor();
+    const row = must(await db.bugSeeAlso.get(requireId(id, "id")));
+    if (!row) notFound("See Also link");
+    const bug = await getRequired(db.bugs, row.bugId, "Bug");
+    await assertBugAccessible(bug, actor);
+    return must(
+      await db.transaction(async (tx) => {
+        await tx.bugSeeAlso.delete(row.id);
+        await recordRelatedChange(tx.activities, row.bugId, actor.id, "see_also", row.url, null);
+        return { removed: true };
+      }),
+    );
+  },
+  { id: "seeAlso.remove" },
+);
+
+export const listSeeAlso = query(
+  async ({ bugId }: { bugId: string }) => {
+    const identity = requireIdentity();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    await assertBugVisible(bug, identity);
+    return readAll(db.bugSeeAlso, { bugId });
+  },
+  { id: "seeAlso.list" },
 );
