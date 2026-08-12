@@ -190,3 +190,126 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
     await admin.end().catch(() => {});
   }
 });
+
+// The same rule on a COMPOSITE cursor.
+//
+// `returned_cursor` is generated once per cursor component with the same shape, so
+// the missing alias collided on EVERY component of a multi-column cursor, not just
+// on a single-column one. A composite cursor also exercises machinery the
+// single-column arms never reach: a multi-term `ORDER BY _bf_key_0 DESC,
+// _bf_key_1 DESC`, and the lexicographic tuple comparison that resumes from a
+// tuple rather than a scalar.
+//
+// The inversion is placed in each position in turn - second component, first
+// component, then both - because a fix that aliased only the leading key would
+// pass a test that only ever inverted the leading one.
+test("a composite cursor visits every row exactly once under the same inversions", async (ctx) => {
+  const admin = await connectLivePg(ctx);
+  if (!admin) return;
+
+  const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
+
+  const CASES: ReadonlyArray<readonly [string, ReadonlyArray<readonly [number, number]>, number]> = [
+    ["second component inverted", [[1, 9], [1, 10]], 2],
+    ["first component inverted", [[9, 1], [10, 1]], 2],
+    ["both inverted", [[9, 9], [9, 10], [10, 9], [10, 10]], 2],
+    ["both inverted, one batch", [[9, 9], [9, 10], [10, 9], [10, 10]], 4],
+    // Controls: no text/numeric disagreement in either position.
+    ["control, no inversion", [[1, 1], [1, 2]], 2],
+    ["control, twenties", [[19, 19], [19, 20], [20, 19], [20, 20]], 2],
+  ];
+
+  try {
+    for (const [label, pairs, batchSize] of CASES) {
+      const projectSchema = uniqueNamespace("bf_order_composite");
+      const meta = `${projectSchema}_migrations`;
+
+      const seed = {
+        name: "seed",
+        default: {
+          up() {
+            table("nums").create({
+              columns: {
+                tenant: t.int().notNull(),
+                id: t.int().notNull(),
+                val: t.int().notNull(),
+              },
+              primaryKey: ["tenant", "id"],
+            });
+            table("nums").insert({
+              rows: pairs.map(([tenant, id]) => ({ tenant, id, val: 0 })),
+            });
+          },
+        },
+      } as MigrationModule & { name: string };
+
+      const bump = {
+        name: "bump",
+        default: {
+          up() {
+            table("nums").backfill({
+              set: { val: (col) => col("val").add(1) },
+              where: (col) => col("id").gt(0),
+              cursorColumns: ["tenant", "id"],
+              cursorStability: { mode: "externalInvariant", name: "nums_key_immutable" },
+              batchSize,
+              name: "bump_all",
+            });
+          },
+        },
+      } as MigrationModule & { name: string };
+
+      const applyOne = (
+        migration: MigrationModule & { name: string },
+        priors: (MigrationModule & { name: string })[],
+      ) =>
+        apply({
+          migration,
+          priorMigrations: priors,
+          priorNameFallbacks: priors.map((p) => p.name),
+          ownerApp: OWNER_APP,
+          projectSchema,
+          driver,
+          registry: priors.length ? { nums: OWNER_APP } : {},
+          policy: [charter(projectSchema)],
+          approved: true,
+          appliedBy: "backfill-cursor-ordering",
+          nameFallback: migration.name,
+        });
+
+      try {
+        await admin.query(`CREATE SCHEMA "${projectSchema}"`);
+        await applyOne(seed, []);
+        await applyOne(bump, [seed]);
+
+        const { rows } = await admin.query(
+          `SELECT tenant, id, val FROM "${projectSchema}".nums ORDER BY tenant, id`,
+        );
+        assert.deepEqual(
+          rows.filter((row) => row.val !== 1).map((row) => `(${row.tenant},${row.id}) x${row.val}`),
+          [],
+          `${label}: every row must be visited exactly once`,
+        );
+        assert.equal(rows.length, pairs.length, `${label}: the cohort must be intact`);
+
+        const { rows: progress } = await admin.query(
+          `SELECT rows_done FROM "${meta}".schema_backfills`,
+        );
+        assert.equal(
+          Number(progress[0]?.rows_done),
+          pairs.length,
+          `${label}: rows_done must equal the cohort size`,
+        );
+      } finally {
+        await admin
+          .query(
+            `DROP SCHEMA IF EXISTS "${projectSchema}" CASCADE;
+             DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
+          )
+          .catch(() => {});
+      }
+    }
+  } finally {
+    await admin.end().catch(() => {});
+  }
+});
