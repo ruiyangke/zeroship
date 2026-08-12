@@ -50,9 +50,12 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
  * The leading ellipsis is deliberate. The detail page shows the id in full, so
  * a silently shortened form that looks whole would not match it.
  *
- * Six base62 characters is ~36 bits. That is not a uniqueness guarantee at
- * scale -- collisions become likely in the low hundreds of thousands of bugs --
- * which is why the anchor still carries the full id.
+ * Six base62 characters is 62^6, or 35.7 bits. That is not a uniqueness
+ * guarantee, and the number worth knowing is the onset rather than the median:
+ * by the birthday bound some pair collides with 1% probability at ~34,000 bugs
+ * and 50% at ~281,000. Thirty-four thousand is an ordinary size for a tracker,
+ * so treat this as "short enough to read, unique enough to scan" and not as an
+ * identifier. The anchor carries the full id for that reason.
  */
 export function shortId(id: string): string {
   const parts = id.split("_");
