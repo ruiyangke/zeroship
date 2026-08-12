@@ -1,8 +1,32 @@
 # Minimal self-hosted Lago for the credential-free forwarder->Lago billing e2e
 # (tests/e2e_lago_billing.sh). API + worker + Postgres + Redis; no frontend.
-# Dedicated ports so it never collides with the platform compose or the e2e
-# harnesses. The org + API key are bootstrapped at runtime via GraphQL by the
-# e2e (fresh self-hosted Lago has no key until an organization is registered).
+# Dedicated ports AND a dedicated compose project so it never collides with the
+# platform compose or the e2e harnesses. The org + API key are bootstrapped at
+# runtime via GraphQL by the e2e (fresh self-hosted Lago has no key until an
+# organization is registered).
+#
+# `name:` IS LOAD-BEARING, and its absence was a live hazard. Without it compose
+# derives the project from this file's PARENT DIRECTORY - `deploy/compose` ->
+# project `compose` - which is the SAME project as the platform stack in
+# docker-compose.yml beside it. The three Lago harnesses each end with
+# `docker compose -f lago.yml down -v`, so that cleanup was scoped to the
+# platform's project, not to Lago's.
+#
+# MEASURED 2026-08-12 with `down -v --dry-run` while the platform stack was up:
+#     Network compose_default  Removing
+#     Network compose_default  Resource is still in use
+# It reached for the LIVE stack's network and was refused only because the
+# network was busy. The header above used to promise "dedicated ports so it
+# never collides", which is true of ports and was silently untrue of the
+# project - the reassuring half of the sentence is what stopped anyone looking.
+#
+# openmeter.yml beside this file already did the right thing
+# (`name: zeroship-openmeter`); this is the same fix. Harnesses address services
+# through `docker compose -f lago.yml ps -q <service>`, never by container name,
+# so pinning the project is transparent to them (checked: zero hardcoded
+# project-prefixed names in the three Lago harnesses).
+name: zeroship-lago
+
 services:
   lago-db:
     image: postgres:14-alpine
