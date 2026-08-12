@@ -80,8 +80,14 @@ export function BugResultsTable({
 }: {
   bugs: readonly Bug[];
   columns: readonly BugColumnKey[];
-  productsById?: Record<string, string>;
-  usersById?: Record<string, string>;
+  // Required, not optional. These were optional, and three of the four call
+  // sites simply left them out -- the table then rendered `prod_034607nk...`
+  // and `user_0345pl8p...` in the product and assignee columns with nothing
+  // failing. An omitted lookup is indistinguishable from an unresolved one at
+  // runtime, so the compiler is the only thing that can tell them apart.
+  // `useBugLookups()` supplies both.
+  productsById: Record<string, string>;
+  usersById: Record<string, string>;
   allowInlineStatus?: boolean;
   onStatusChanged?: (bug: Bug) => void;
 }) {

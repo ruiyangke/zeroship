@@ -1,12 +1,13 @@
-import { useMemo, useState } from "react";
-import { listProducts, listUsers, searchBugs } from "../api";
+import { useState } from "react";
+import { listProducts, searchBugs } from "../api";
 import {
   ALL_BUG_COLUMNS,
   BugResultsTable,
   type BugColumnKey,
 } from "../components/BugResultsTable";
 import { AsyncSection } from "../components/StateViews";
-import { toPromise, useAsync } from "../components/rpc";
+import { useAsync } from "../components/rpc";
+import { useBugLookups } from "../components/useBugLookups";
 import type { Bug } from "../components/types";
 import { BUG_STATUSES, type BugStatus } from "../lib/workflow";
 import { BUG_PRIORITIES, BUG_SEVERITIES } from "../lib/quicksearch";
@@ -56,7 +57,6 @@ export function BugListPage() {
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const productsQ = useAsync(() => listProducts({}), []);
-  const usersQ = useAsync(() => toPromise(listUsers({ limit: 200 })).catch(() => []), []);
 
   const { state, reload } = useAsync(
     () =>
@@ -74,21 +74,7 @@ export function BugListPage() {
     [text, status, severity, priority, productId, sortBy, sortDirection, offset],
   );
 
-  const productsById = useMemo(() => {
-    const map: Record<string, string> = {};
-    if (productsQ.state.status === "ready") {
-      for (const p of productsQ.state.data) map[p.id] = p.name;
-    }
-    return map;
-  }, [productsQ.state]);
-
-  const usersById = useMemo(() => {
-    const map: Record<string, string> = {};
-    if (usersQ.state.status === "ready") {
-      for (const u of usersQ.state.data) map[u.id] = u.handle;
-    }
-    return map;
-  }, [usersQ.state]);
+  const { productsById, usersById } = useBugLookups();
 
   const toggleColumn = (key: BugColumnKey) => {
     setColumns((prev) => {
