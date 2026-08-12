@@ -23,6 +23,23 @@ mod common;
 
 const TEST_WEBHOOK_SECRET: &str = "whsec_control_test_unconditional";
 
+/// A body that `serde_json` CANNOT parse. Used by the empty-secret ordering pair
+/// so that "the parser ran" is observable: if the handler ever reaches
+/// `serde_json::from_slice`, the answer becomes 400 `invalid json` instead of the
+/// secret/signature error under test.
+const MALFORMED_WEBHOOK_BODY: &str = "{ this is not json";
+
+/// A structurally well-formed `stripe-signature` whose `v1` cannot match any
+/// secret, with a CURRENT timestamp so the failure is the HMAC comparison rather
+/// than the 300s tolerance window.
+fn bad_signature_header() -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time after Unix epoch")
+        .as_secs() as i64;
+    format!("t={t},v1=00000000000000000000000000000000000000000000000000000000deadbeef")
+}
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -2343,19 +2360,114 @@ fn verify_empty_secret_is_err() {
 
 /// #7 (HTTP path, empty secret -> 500): the webhook endpoint with no configured
 /// signing secret rejects with 500, fails closed, and does not process the event.
+///
+/// The status alone would also be produced by an unrelated 500 (a DB error, a
+/// panic mapped to 500), so this pins the ERROR MESSAGE and pins that the event
+/// was never claimed in the dedup ledger - i.e. the rejection happened before
+/// any database work.
 #[compio::test]
 async fn webhook_empty_secret_is_always_500() {
     let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "").await;
     let app = init_control!(fx);
-    let body = json!({"id":"evt_emptysecret","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
-    // Status only: a retained `WebResponse` keeps the app state - and its
-    // Postgres client - alive past the teardown at the end of this test.
-    let status = post_webhook!(app, &body, Some("t=1,v1=abc")).status();
+    let conn = side_conn(&db_url).await;
+    // Unique event id: `ledger_count` must be scoped to THIS delivery, since
+    // sibling tests in the same binary write their own ledger rows.
+    let event_id = format!("evt_emptysecret_{}", Uuid::new_v4().simple());
+    let body = json!({"id":event_id,"type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
+    let r = post_webhook!(app, &body, Some("t=1,v1=abc"));
     assert_eq!(
-        status,
+        r.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
         "empty webhook secret always fails closed (500) and never processes"
+    );
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).expect("json error body");
+    assert_eq!(
+        b["error"], "webhook secret not configured",
+        "the 500 names the missing secret, not some unrelated internal error"
+    );
+    assert_eq!(
+        ledger_count(&conn, &event_id).await,
+        0,
+        "the rejected event is never claimed - no database work ran"
+    );
+
+    drop(conn);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A body that is NOT valid JSON, delivered while the secret is EMPTY, still
+/// gets the not-configured error - never the parse error. That ordering IS the
+/// security property: the misconfiguration check must run before the request
+/// body is interpreted, so no attacker-controlled bytes are parsed by a
+/// deployment that cannot authenticate the sender.
+///
+/// RED if the empty-secret early return is deleted (the malformed body then
+/// reaches `serde_json::from_slice` and answers 400 `invalid json`), and RED if
+/// the check is merely MOVED to after parsing (same 400).
+///
+/// Pairs with `webhook_configured_secret_bad_signature_reports_signature_error`,
+/// which changes ONE variable - a non-empty secret - and must get a DIFFERENT
+/// error. Without that partner a green here cannot separate "the empty-secret
+/// check fired" from "this endpoint 500s on everything".
+#[compio::test]
+async fn webhook_empty_secret_rejects_before_parsing_the_body() {
+    let db_url = db_url();
+    let fx = Fixture::new_with_secret(&db_url, "emptysecret-preparse", "").await;
+    let app = init_control!(fx);
+    // Not JSON at all: unparseable, so reaching the parser is observable.
+    let sig = bad_signature_header();
+    let r = post_webhook!(app, MALFORMED_WEBHOOK_BODY, Some(sig.as_str()));
+    assert_eq!(
+        r.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an empty secret rejects with 500 even when the body is malformed"
+    );
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).expect("json error body");
+    assert_eq!(
+        b["error"], "webhook secret not configured",
+        "the empty-secret check must run BEFORE the body is parsed (got a parse \
+         error instead, so verification now happens after parsing)"
+    );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The one-variable control for `webhook_empty_secret_rejects_before_parsing_the_body`:
+/// SAME malformed body, SAME bad signature header, only the configured secret
+/// differs (non-empty). It must report the SIGNATURE failure, not the
+/// not-configured failure - which is what makes the empty-secret 500 in the
+/// partner test attributable to the empty secret rather than to a handler that
+/// rejects everything the same way.
+///
+/// Note both arms reject BEFORE parsing, so neither returns `invalid json`.
+#[compio::test]
+async fn webhook_configured_secret_bad_signature_reports_signature_error() {
+    let db_url = db_url();
+    let fx =
+        Fixture::new_with_secret(&db_url, "configured-badsig", "whsec_test_preparse_control").await;
+    let app = init_control!(fx);
+    let sig = bad_signature_header();
+    let r = post_webhook!(app, MALFORMED_WEBHOOK_BODY, Some(sig.as_str()));
+    assert_eq!(
+        r.status(),
+        StatusCode::BAD_REQUEST,
+        "a CONFIGURED secret with a bad signature is a 400, not the 500 the \
+         unconfigured case gets"
+    );
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).expect("json error body");
+    let err = b["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        err.starts_with("webhook verification failed"),
+        "a configured secret must fail on the SIGNATURE, got {err:?}"
+    );
+    assert_ne!(
+        b["error"], "webhook secret not configured",
+        "a configured secret must never report itself as not configured"
     );
 
     drop(app);
