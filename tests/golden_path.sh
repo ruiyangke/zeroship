@@ -3008,7 +3008,15 @@ SQL
       that comment is about a BODY and this probe uses the query string, so
       which layer rejected THIS request is unverified.
       THE DIAGNOSTIC ARM IS THE THROW BELOW, where the isolate demonstrably ran.
-      Root cause for that one is handler.rs:459 (#334)."
+      Its MECHANISM IS UNIDENTIFIED (#334) and this line used to name
+      handler.rs:459 as the root cause. That attribution was never supported and
+      has now outlived three hypotheses killed by measurement: (1) the worker's
+      Some(Err(e)) arm -- threading the logs through it left this red exactly as
+      red, and SettledResult::Rpc's Fetch arm is unreachable!() for fetch/RPC
+      anyway; (2) key-0 orphaning at init.rs:2523's unwrap_or(0) -- refuted, a
+      throwing request's line is captured under a real req_id; (3) capture
+      failure -- refuted by the same probe. What IS established: the loss is
+      downstream of capture. Do not restore a named cause here without a run."
   fi
 
   # --- THE ERROR CLASS THAT IS THE CREATOR'S OWN BUG ------------------------
