@@ -1,50 +1,56 @@
-// There is no flags.list(bugId) RPC (see SPEC's RPC surface: only
-// flags.set / flags.clear / flags.listRequests). Current values shown here
-// are reconstructed from the activity log (exact for non-multiplicable flag
-// types, approximate for multiplicable ones -- see ../activity.ts). Because
-// the server never hands back a flag id except at the moment flags.set
-// resolves, "Clear" is only wired up for flags this panel itself just set --
-// there is no way to look up the id of a flag set in an earlier session.
-import { useState } from "react";
-import { clearFlag, setFlag } from "../../api";
-import { deriveLastValue } from "../activity";
+// Flags are READ from the server via flags.list, not reconstructed.
+//
+// This panel used to derive each flag's current value by replaying the bug's
+// activity log. That was exact only for non-multiplicable flag types -- several
+// live flags of one type collapse to whichever was written last -- and it left
+// "Clear" unusable, because clearing needs a flag id and the id was only ever
+// returned by flags.set. A flag set in an earlier session could never be
+// cleared at all. flags.list now returns the real rows, ids included, so both
+// problems are gone and the caveat that used to sit at the bottom of this panel
+// is deleted rather than reworded.
+import { useCallback, useEffect, useState } from "react";
+
+import { clearFlag, listFlags, setFlag } from "../../api";
 import { errorMessage } from "../rpc";
-import type { Activity, FlagType } from "../types";
+import type { FlagType } from "../types";
 import { UserPicker } from "../UserPicker";
 
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];
 
+type LiveFlag = Awaited<ReturnType<typeof listFlags>>["onBug"][number];
+
 function FlagRow({
   bugId,
   flagType,
-  activities,
+  live,
   onChanged,
 }: {
   bugId: string;
   flagType: FlagType;
-  activities: readonly Activity[];
+  live: readonly LiveFlag[];
   onChanged: () => void;
 }) {
-  const current = deriveLastValue(activities, `flag.${flagType.name}`);
   const [status, setStatus] = useState<FlagStatus>("+");
   const [requesteeId, setRequesteeId] = useState<string | null>(null);
   const [pickingRequestee, setPickingRequestee] = useState(false);
-  const [knownFlagId, setKnownFlagId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Every live flag of this type, not just the last one. A multiplicable type
+  // legitimately has several at once, and collapsing them was the old bug.
+  const mine = live.filter((entry) => entry.flag.flagTypeId === flagType.id);
 
   const apply = async () => {
     setBusy(true);
     setError(null);
     try {
-      const flag = await setFlag({
+      await setFlag({
         flagTypeId: flagType.id,
         bugId,
         status,
         requesteeId: requesteeId ?? undefined,
       });
-      setKnownFlagId(flag.id);
       onChanged();
     } catch (err) {
       setError(errorMessage(err));
@@ -53,13 +59,11 @@ function FlagRow({
     }
   };
 
-  const clear = async () => {
-    if (!knownFlagId) return;
+  const clear = async (id: string) => {
     setBusy(true);
     setError(null);
     try {
-      await clearFlag({ id: knownFlagId });
-      setKnownFlagId(null);
+      await clearFlag({ id });
       onChanged();
     } catch (err) {
       setError(errorMessage(err));
@@ -71,9 +75,29 @@ function FlagRow({
   return (
     <li className="flag-row">
       <span className="flag-name">{flagType.name}</span>
-      <span className={`badge flag-current-${(current ?? "unset").toLowerCase().replace(/[^a-z]/g, "x")}`}>
-        {current ?? "not set"}
-      </span>
+      {mine.length === 0 ? (
+        <span className="badge flag-current-unset">not set</span>
+      ) : (
+        mine.map((entry) => (
+          <span key={entry.flag.id} className="flag-current">
+            <span className={`badge flag-current-${entry.flag.status === "+" ? "plus" : entry.flag.status === "-" ? "minus" : "question"}`}>
+              {entry.flag.status}
+            </span>
+            {entry.requestee ? <span className="dim"> to {entry.requestee.name}</span> : null}
+            {/* Clearing works for ANY live flag now, not only one this panel
+                set, because the id comes from the server rather than from a
+                setFlag response held in component state. */}
+            <button
+              type="button"
+              className="btn ghost small"
+              disabled={busy}
+              onClick={() => void clear(entry.flag.id)}
+            >
+              Clear
+            </button>
+          </span>
+        ))
+      )}
       <select value={status} onChange={(e) => setStatus(e.target.value as FlagStatus)}>
         {FLAG_STATUSES.filter((s) => s !== "?" || flagType.isRequestable).map((s) => (
           <option key={s} value={s}>
@@ -86,7 +110,11 @@ function FlagRow({
           {requesteeId ? (
             <span className="dim">requestee: {requesteeId}</span>
           ) : (
-            <button type="button" className="btn ghost small" onClick={() => setPickingRequestee((v) => !v)}>
+            <button
+              type="button"
+              className="btn ghost small"
+              onClick={() => setPickingRequestee((v) => !v)}
+            >
               set requestee
             </button>
           )}
@@ -94,9 +122,6 @@ function FlagRow({
       ) : null}
       <button type="button" className="btn ghost small" disabled={busy} onClick={() => void apply()}>
         Set
-      </button>
-      <button type="button" className="btn ghost small" disabled={busy || !knownFlagId} onClick={() => void clear()}>
-        Clear
       </button>
       {pickingRequestee ? (
         <UserPicker
@@ -114,14 +139,36 @@ function FlagRow({
 export function FlagsPanel({
   bugId,
   flagTypes,
-  activities,
   onChanged,
 }: {
   bugId: string;
   flagTypes: readonly FlagType[] | null;
-  activities: readonly Activity[];
   onChanged: () => void;
 }) {
+  const [live, setLive] = useState<readonly LiveFlag[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    try {
+      const result = await listFlags({ bugId });
+      setLive(result.onBug);
+      setLoadError(null);
+    } catch (err) {
+      // Surfaced rather than swallowed: an unreadable flag list rendering as
+      // "not set" would claim, wrongly, that the bug carries no flags.
+      setLoadError(errorMessage(err));
+    }
+  }, [bugId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const refresh = () => {
+    void reload();
+    onChanged();
+  };
+
   const bugFlagTypes = flagTypes?.filter((t) => t.targetType === "bug") ?? [];
   return (
     <section className="flags-panel">
@@ -133,14 +180,17 @@ export function FlagsPanel({
       ) : (
         <ul className="flag-list">
           {bugFlagTypes.map((flagType) => (
-            <FlagRow key={flagType.id} bugId={bugId} flagType={flagType} activities={activities} onChanged={onChanged} />
+            <FlagRow
+              key={flagType.id}
+              bugId={bugId}
+              flagType={flagType}
+              live={live}
+              onChanged={refresh}
+            />
           ))}
         </ul>
       )}
-      <p className="state-hint small">
-        Values above are reconstructed from activity history (there is no direct flags list
-        for a bug). Clearing only works for a flag this panel set in the current session.
-      </p>
+      {loadError ? <p className="field-error">Could not load flags: {loadError}</p> : null}
     </section>
   );
 }

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { currentUser, getAttachment, getBug, listFlagRequests, searchBugs } from "../api";
+import { currentUser, getAttachment, getBug, listFlagRequests, listMyCc, searchBugs } from "../api";
 import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable";
 import { AsyncSection } from "../components/StateViews";
 import { toPromise, useAsync } from "../components/rpc";
@@ -94,6 +94,7 @@ export function DashboardPage() {
     [meId],
   );
   const flagRequestsQ = useAsync(() => listFlagRequests({}), []);
+  const ccQ = useAsync(() => listMyCc({}), []);
 
   const setByMe = useMemo(
     () => (flagRequestsQ.state.status === "ready" ? flagRequestsQ.state.data.setByMe : []),
@@ -133,15 +134,12 @@ export function DashboardPage() {
         <FlagRequestList entries={setByMe} emptyLabel="You have not requested any flags." />
       </section>
 
-      <section className="dashboard-section">
-        <h2>
-          Bugs I'm CC'd on <span className="dim">(0)</span>
-        </h2>
-        <p className="state-hint small">
-          Not available: the RPC surface has no reverse index from a user to the bugs they are
-          CC'd on (cc.list only looks up CC entries per bug, not per user).
-        </p>
-      </section>
+      {/* Was a hardcoded "(0)" with a note saying no reverse index existed.
+          The index did exist (bugCc.userId); what was missing was a procedure
+          reading it, which cc.listMine now is. */}
+      <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd bugs...">
+        {(bugs) => <BugSection title="Bugs I'm CC'd on" bugs={bugs} />}
+      </AsyncSection>
     </div>
   );
 }

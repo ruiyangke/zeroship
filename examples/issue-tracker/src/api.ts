@@ -41,9 +41,11 @@ export {
   setFlag,
   clearFlag,
   listFlagRequests,
+  listFlags,
   addCc,
   removeCc,
   listCc,
+  listMyCc,
   // Products and administration
   listProducts,
   getProduct,

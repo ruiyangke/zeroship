@@ -99,10 +99,11 @@ export function BugDetailPage({ id }: { id: string }) {
           </div>
           <div className="bug-detail-side">
             <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
+            {/* No `activities` prop: the panel reads real flags from
+                flags.list instead of replaying the bug's history. */}
             <FlagsPanel
               bugId={id}
               flagTypes={productDetail?.flagTypes ?? null}
-              activities={detail.activities}
               onChanged={reload}
             />
             <DependenciesPanel bugId={id} />

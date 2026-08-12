@@ -119,3 +119,46 @@ test("an anonymous visitor is told to sign in rather than shown an empty list", 
 
   await anon.close();
 });
+
+test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => {
+  // Guards cc.listMine and its client wiring together. The schema was already
+  // indexed for this direction (bugCc.userId) but no procedure read it, and
+  // the dashboard rendered a hardcoded "(0)" with a note claiming the lookup
+  // was impossible. Both halves have to work for this to pass.
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const me = await rpc("users.me", {});
+  const product = await rpc("products.create", { name: `CC ${RUN}`, description: "cc spec" });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "2.0" });
+
+  const summary = `Watched bug ${RUN}`;
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary,
+    description: "cc me",
+  });
+
+  // Before the CC exists the dashboard must NOT already show it -- otherwise a
+  // section that lists everything would pass this test without cc.listMine
+  // working at all.
+  await page.goto("/#/dashboard");
+  const ccSection = page.locator("section.dashboard-section", { hasText: "Bugs I'm CC'd on" });
+  await expect(ccSection).toBeVisible();
+  await expect(ccSection.getByText(summary)).toHaveCount(0);
+
+  await rpc("cc.add", { bugId: bug.id, userId: me.id });
+
+  await page.reload();
+  await expect(ccSection.getByText(summary)).toBeVisible();
+});
