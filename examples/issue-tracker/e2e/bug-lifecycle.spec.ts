@@ -60,15 +60,17 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // The component list is populated by a fetch that only fires once a product
   // is chosen, so selecting the product must change what the next select
   // offers. Waiting for the option is the assertion.
-  await page.getByLabel("1. Product").selectOption({ label: `E2E ${RUN}` });
-  const componentSelect = page.getByLabel("2. Component");
-  await expect(componentSelect.getByRole("option", { name: "Parser" })).toBeAttached();
-  await componentSelect.selectOption({ label: "Parser" });
+  await chooseOption(page, page, "1. Product", `E2E ${RUN}`);
+  // The cascade is still the assertion: chooseOption fails if the component
+  // select has no "Parser" option, which is what selecting the product is
+  // supposed to produce. It cannot be checked with toBeAttached any more --
+  // the options only exist in the DOM while the popup is open.
+  await chooseOption(page, page, "2. Component", "Parser");
 
   // Version is required because bugs.versionId is NOT NULL. Selecting it here
   // is not incidental setup: leaving the form's default in place is exactly
   // what produced an unfileable bug and a 500.
-  await page.getByLabel("Version").selectOption({ label: "1.0" });
+  await chooseOption(page, page, "Version", "1.0");
 
   await page.getByLabel("Summary").fill(summary);
   await page.getByLabel("Description").fill("echo -n loses the last newline");
@@ -76,8 +78,8 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // Severity and priority are separate controls in Bugzilla and must stay
   // separate here: set them to values that differ so a control that writes
   // both would be caught.
-  await page.getByLabel("Severity").selectOption("major");
-  await page.getByLabel("Priority").selectOption("P1");
+  await chooseOption(page, page, "Severity", "major");
+  await chooseOption(page, page, "Priority", "P1");
 
   await page.getByRole("button", { name: "File bug" }).click();
 
@@ -97,11 +99,14 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // The SELECT value, not a badge. The panel used to render a severity badge
   // directly above a select holding the same value; the badge is gone, so
   // asserting on loose text "major" was asserting on the duplicate.
-  await expect(page.getByLabel("Severity")).toHaveValue("major");
+  // The combobox reports its selection as TEXT, not a value attribute --
+  // toHaveValue is a native-select assertion and silently has nothing to read
+  // on a combobox.
+  await expect(page.getByRole("combobox", { name: "Severity" })).toHaveText(/major/);
   // Same as severity: the priority badge is gone, and loose text "P1" now
   // matches a hidden <option> inside the select -- "received: hidden" rather
   // than "not found", which is the tell.
-  await expect(page.getByLabel("Priority")).toHaveValue("P1");
+  await expect(page.getByRole("combobox", { name: "Priority" })).toHaveText(/P1/);
 
   // The bug is findable from the list by its summary.
   await page.goto("/#/bugs");

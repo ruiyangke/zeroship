@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Select } from "@zeroship/ui";
 import { createBug, currentUser, getProduct, listProducts } from "../api";
 import { AsyncSection } from "../components/StateViews";
 import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
@@ -93,14 +94,18 @@ export function NewBugPage() {
           >
             <label>
               1. Product
-              <select value={productId} onChange={(e) => void pickProduct(e.target.value)} required>
-                <option value="">Select a product</option>
+              <Select
+                value={productId}
+                onValueChange={(next) => void pickProduct(next ?? "")}
+                placeholder="Select a product"
+                aria-label="1. Product"
+              >
                 {products.map((p) => (
-                  <option key={p.id} value={p.id}>
+                  <Select.Item key={p.id} value={p.id}>
                     {p.name}
-                  </option>
+                  </Select.Item>
                 ))}
-              </select>
+              </Select>
             </label>
             {productDetailError ? <p className="field-error">{productDetailError}</p> : null}
 
@@ -108,14 +113,18 @@ export function NewBugPage() {
               <>
                 <label>
                   2. Component
-                  <select value={componentId} onChange={(e) => setComponentId(e.target.value)} required>
-                    <option value="">Select a component</option>
-                    {productDetail.components.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
+                  <Select
+                value={componentId}
+                onValueChange={(next) => setComponentId(next ?? "")}
+                placeholder="Select a component"
+                aria-label="2. Component"
+              >
+                {productDetail.components.map((c) => (
+                  <Select.Item key={c.id} value={c.id}>
+                    {c.name}
+                  </Select.Item>
+                ))}
+              </Select>
                 </label>
 
                 <fieldset disabled={!componentId}>
@@ -140,51 +149,63 @@ export function NewBugPage() {
                           so an "unspecified" choice here composed a bug that
                           could not be stored and failed at submit. Milestone
                           below is genuinely nullable and keeps its blank. */}
-                      <select
-                        value={versionId}
-                        onChange={(e) => setVersionId(e.target.value)}
-                        required
-                      >
-                        <option value="">Select a version</option>
+                      <Select
+                value={versionId}
+                onValueChange={(next) => setVersionId(next ?? "")}
+                placeholder="Select a version"
+                aria-label="Version"
+              >
                         {productDetail.versions.map((v) => (
-                          <option key={v.id} value={v.id}>
+                          <Select.Item key={v.id} value={v.id}>
                             {v.name}
-                          </option>
+                          </Select.Item>
                         ))}
-                      </select>
+                      </Select>
                     </label>
                     <label>
                       Milestone
-                      <select value={milestoneId} onChange={(e) => setMilestoneId(e.target.value)}>
-                        <option value="">unspecified</option>
+                      <Select
+                        value={milestoneId}
+                        onValueChange={(next) => setMilestoneId(next ?? "")}
+                        placeholder="unspecified"
+                aria-label="Milestone"
+                      >
                         {productDetail.milestones.map((m) => (
-                          <option key={m.id} value={m.id}>
+                          <Select.Item key={m.id} value={m.id}>
                             {m.name}
-                          </option>
+                          </Select.Item>
                         ))}
-                      </select>
+                      </Select>
                     </label>
                   </div>
                   <div className="field-row">
                     <label>
                       Severity
-                      <select value={severity} onChange={(e) => setSeverity(e.target.value as BugSeverity)}>
+                      <Select
+                        value={severity}
+                        onValueChange={(next) => setSeverity(next as BugSeverity)}
+                        aria-label="Severity"
+                      >
                         {BUG_SEVERITIES.map((s) => (
-                          <option key={s} value={s}>
+                          <Select.Item key={s} value={s}>
                             {s}
-                          </option>
+                          </Select.Item>
                         ))}
-                      </select>
+                      </Select>
                     </label>
                     <label>
                       Priority
-                      <select value={priority} onChange={(e) => setPriority(e.target.value as BugPriority)}>
+                      <Select
+                        value={priority}
+                        onValueChange={(next) => setPriority(next as BugPriority)}
+                        aria-label="Priority"
+                      >
                         {BUG_PRIORITIES.map((p) => (
-                          <option key={p} value={p}>
+                          <Select.Item key={p} value={p}>
                             {p}
-                          </option>
+                          </Select.Item>
                         ))}
-                      </select>
+                      </Select>
                     </label>
                   </div>
                   <div className="field-row">

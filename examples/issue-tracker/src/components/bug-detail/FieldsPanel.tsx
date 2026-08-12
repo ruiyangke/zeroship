@@ -24,11 +24,12 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
             value, so the page stated severity twice and neither told you which
             one to use. */}
         Severity
-        <select
+        <Select
           value={bug.severity}
           disabled={busy !== null}
-          onChange={async (e) => {
-            const severity = e.target.value as BugSeverity;
+          aria-label="Severity"
+          onValueChange={async (next) => {
+            const severity = next as BugSeverity;
             setBusy("severity");
             setError(null);
             try {
@@ -41,19 +42,20 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
           }}
         >
           {BUG_SEVERITIES.map((s) => (
-            <option key={s} value={s}>
+            <Select.Item key={s} value={s}>
               {s}
-            </option>
+            </Select.Item>
           ))}
-        </select>
+        </Select>
       </label>
       <label>
         Priority
-        <select
+        <Select
           value={bug.priority}
           disabled={busy !== null}
-          onChange={async (e) => {
-            const priority = e.target.value as BugPriority;
+          aria-label="Priority"
+          onValueChange={async (next) => {
+            const priority = next as BugPriority;
             setBusy("priority");
             setError(null);
             try {
@@ -66,11 +68,11 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
           }}
         >
           {BUG_PRIORITIES.map((p) => (
-            <option key={p} value={p}>
+            <Select.Item key={p} value={p}>
               {p}
-            </option>
+            </Select.Item>
           ))}
-        </select>
+        </Select>
       </label>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
