@@ -602,6 +602,106 @@ mod tests {
         ManagedPolicyConfig::default_confined(KEY, 42).expect("test policy config")
     }
 
+    /// A config whose "probe" tier carries an arbitrary ceiling TOML, so a test can
+    /// compose against a charter shape our own `policies/*.toml` do not use. The
+    /// ceiling is built with `from_toml`, so `bind_app_schema` is false and the
+    /// template validation in `bind_confined_charter_to_schema` does not apply.
+    fn config_with_probe_ceiling(toml: &str) -> ManagedPolicyConfig {
+        let ceiling = ManagedCeiling::from_toml("probe", Some("probe".into()), 1, toml)
+            .expect("probe ceiling parses");
+        let catalog = ProfileCatalog::default_confined(42)
+            .expect("test profile catalog")
+            .with_tier_ceiling("probe", ceiling);
+        ManagedPolicyConfig::new(KEY, catalog).expect("probe policy config")
+    }
+
+    /// WITHIN ONE LAYER, A `value = false` RULE DOES NOT CARVE ANYTHING OUT, and
+    /// `exclude` does. Both arms are here on purpose: the second is the one-variable
+    /// control that proves the first is measuring the carve-out and not something else.
+    ///
+    /// Reported by zero-migrate (ZERO-MIGRATE-2026-08-12-002) while answering a
+    /// different question, and re-run here against OUR pin (`cb1bcb59`) and OUR
+    /// compose path rather than taken on their report. A grant resolves to the JOIN of
+    /// every covering rule in the same document, so `false` never lowers a `true`; only
+    /// a LOWER LAYER can mask. `exclude` removes the region from the rule's scope, which
+    /// is the mechanism that actually restricts inside one document.
+    ///
+    /// WHY THIS TEST EXISTS even though nothing is broken today: our three ceilings
+    /// (`policies/{confined,confined-guard,platform}.policy.toml`) contain NO
+    /// `value = false` grant - checked, all three, 2026-08-12 - so the trap is latent,
+    /// not live. It is worth pinning because our charters are single-layer by
+    /// construction, which makes a `false` rule the natural thing to reach for when
+    /// someone wants to except one table, and it would land looking like a restriction
+    /// while enforcing nothing.
+    ///
+    /// WHAT THIS TEST DOES NOT COVER: multi-layer charters, where `false` DOES mask.
+    /// We author none, so that arm is unreachable here and is not asserted.
+    #[test]
+    fn within_one_layer_a_false_grant_does_not_carve_out_but_exclude_does() {
+        let app_id = Uuid::new_v4();
+        let schema = app_id.to_string();
+        let draft_toml = format!(
+            r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = ["{schema}.secret"] }}
+"#
+        );
+
+        // ARM A: the carve-out written as a second rule at `value = false`.
+        let false_carve_out = format!(
+            r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = ["{schema}"] }}
+
+[[grant]]
+key = "schema.create_table"
+value = false
+scope = {{ include = ["{schema}.secret"] }}
+"#
+        );
+        let cfg = config_with_probe_ceiling(&false_carve_out);
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: &draft_toml,
+            })
+            .expect("draft parses");
+        assert!(
+            cfg.compose_effective_for_app(&app_id, Some("probe"), Some(&draft)).is_ok(),
+            "a `value = false` rule in the SAME layer is expected to be inert; if this \
+             now REFUSES, the engine gained within-layer masking and the warning in \
+             this test (and any charter relying on it) needs rewriting"
+        );
+
+        // ARM B, one variable: the same carve-out expressed as `exclude`.
+        let exclude_carve_out = format!(
+            r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
+"#
+        );
+        let cfg = config_with_probe_ceiling(&exclude_carve_out);
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: &draft_toml,
+            })
+            .expect("draft parses");
+        let err = cfg
+            .compose_effective_for_app(&app_id, Some("probe"), Some(&draft))
+            .expect_err("`exclude` DOES restrict, so the excluded table must be refused");
+        assert!(matches!(err, ManagedPolicyError::Compose(_)));
+    }
+
     #[test]
     fn managed_policy_config_requires_at_least_32_byte_mac_key() {
         let catalog = ProfileCatalog::default_confined(1).expect("test profile catalog");
