@@ -325,6 +325,15 @@ jobs:
       # minimum, so worker and control refused to start. Text-only.
       - name: compose secrets meet the enforced minimum
         run: tests/compose_secret_strength_gate.sh
+      # deploy/scripts/{deploy-remote,deploy-app}.sh had no test of any kind.
+      # The compose-variable extraction in deploy-remote.sh produced two false
+      # results while it was written - it counted `$${VAR}` escapes and refs in
+      # comments, and its rename guard first passed on the very breakage it
+      # exists for, then failed on a healthy host. Both were caught by hand.
+      # Drives the pure functions against fixture compose files; runs no ssh, no
+      # docker, no network. 30 assertions, floor 29.
+      - name: deploy scripts extraction, rename pairing and arguments
+        run: tests/deploy_scripts_gate.sh
       # A COUPLING TRIPWIRE, not a style rule. Measured 2026-08-12 by running
       # tests/e2e_gateway_workflow_advance_authz.sh: the worker's 403 without
       # --workflow-advance-unsigned is BOTH why durable workflows cannot run in

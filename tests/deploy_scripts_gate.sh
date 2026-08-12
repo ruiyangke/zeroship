@@ -279,10 +279,18 @@ run_case() { # $1 label, $2 expected-exit ('nonzero' or a number), $3 expected s
   out="$("$@" 2>&1)"; rc=$?
   local rc_ok=0
   if [ "$want_rc" = "nonzero" ]; then [ "$rc" -ne 0 ] && rc_ok=1; else [ "$rc" = "$want_rc" ] && rc_ok=1; fi
-  if [ "$rc_ok" = 1 ] && [[ "$out" == *"$want_txt"* ]]; then
+  local txt_ok=0
+  [[ "$out" == *"$want_txt"* ]] && txt_ok=1
+  # Report WHICH half failed. "exit N and text missing" reads as two problems
+  # when it is usually one, and the wrong one gets investigated.
+  if [ "$rc_ok" = 1 ] && [ "$txt_ok" = 1 ]; then
     pass "$label"
+  elif [ "$rc_ok" != 1 ] && [ "$txt_ok" = 1 ]; then
+    fail "$label: exit was $rc, wanted $want_rc (the message was right)"
+  elif [ "$rc_ok" = 1 ]; then
+    fail "$label: exit $rc was right but the output never said '$want_txt'"
   else
-    fail "$label (exit $rc, wanted $want_rc; output did not contain '$want_txt')"
+    fail "$label: exit was $rc, wanted $want_rc, and the output never said '$want_txt'"
   fi
 }
 
