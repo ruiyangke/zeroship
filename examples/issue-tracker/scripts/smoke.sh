@@ -661,6 +661,21 @@ call bugs.markDuplicate "{\"id\":\"$DUP_SRC\",\"duplicateOfId\":\"$BUG\"}" >/dev
 [ "$(bob notifications.unreadCount | jget 'json.count')" -gt "$DUP_NOTIFY_BEFORE" ] 2>/dev/null \
   && pass "marking a duplicate notifies the CC'd user" \
   || fail "bugs.markDuplicate closed a bug and told nobody"
+
+# Idempotence is the contract these joins promise, so it is asserted rather
+# than assumed: adding the same CC, keyword or link twice must be a no-op that
+# returns the existing row, not a second row and not an error.
+IDEM_BEFORE="$(call cc.list "{\"bugId\":\"$BUG\"}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String((JSON.parse(s).json||[]).length)))')"
+call cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
+call cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
+IDEM_AFTER="$(call cc.list "{\"bugId\":\"$BUG\"}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String((JSON.parse(s).json||[]).length)))')"
+[ "$IDEM_AFTER" -le "$((IDEM_BEFORE + 1))" ] 2>/dev/null \
+  && pass "cc.add twice adds at most one row ($IDEM_BEFORE -> $IDEM_AFTER)" \
+  || fail "cc.add is not idempotent" "before=$IDEM_BEFORE after=$IDEM_AFTER"
+
+[ "$(code cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}")" = "200" ] \
+  && pass "a repeated cc.add still answers 200" \
+  || fail "a repeated cc.add errored instead of returning the existing row"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.

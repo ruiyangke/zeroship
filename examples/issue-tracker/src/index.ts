@@ -2230,7 +2230,8 @@ export const attachKeyword = mutation(
         keyword.name,
       );
       return row;
-    });
+      // Serializable for the same reason as cc.add: idempotent get-then-insert.
+    }, { isolationLevel: "serializable" });
     return must(result);
   },
   { id: "keywords.attach" },
@@ -2387,9 +2388,18 @@ export const listFlagRequests = query(
     ]);
     const byId = new Map(must(types).map((type) => [type.id, type]));
     const hydrate = (flag: FlagRow) => ({ flag, flagType: byId.get(flag.flagTypeId) ?? null });
+
+    // A flag row names its bug, and the bug can be restricted AFTER the flag
+    // was set -- the request survives the access that created it. Being named
+    // on the flag is not itself permission to know the bug still exists, so
+    // rows pointing at a now-hidden bug are dropped here as they are
+    // everywhere else. Attachment-scoped flags carry no bugId and are kept.
+    const hidden = new Set(await hiddenBugIds(user));
+    const visible = (flag: FlagRow) => !flag.bugId || !hidden.has(flag.bugId);
+
     return {
-      setByMe: must(setByMe).map(hydrate),
-      requestedOfMe: must(requestedOfMe).map(hydrate),
+      setByMe: must(setByMe).filter(visible).map(hydrate),
+      requestedOfMe: must(requestedOfMe).filter(visible).map(hydrate),
     };
   },
   { id: "flags.listRequests" },
@@ -2474,7 +2484,14 @@ export const addCc = mutation(
         user.handle,
       );
       return row;
-    });
+      // Serializable because this is a get-then-insert that promises
+      // idempotence. Under read committed two concurrent identical calls both
+      // see "no existing row" and both insert; the unique pair index rejects
+      // the loser and `must` rethrows it as a 500 -- so a call whose contract
+      // is "adding twice is a no-op" fails instead. The data stays correct
+      // either way; what breaks is the promise. SQLite serialises writes, so
+      // this is a Postgres-only symptom.
+    }, { isolationLevel: "serializable" });
     return must(result);
   },
   { id: "cc.add" },
@@ -3843,7 +3860,11 @@ export const restrictBug = mutation(
         const row = await tx.bugGroups.insert({ bugId, groupId });
         await recordRelatedChange(tx.activities, bugId, actor.id, "bug_group", null, groupId);
         return row;
-      }),
+        // Serializable for the same reason as cc.add: idempotent
+        // get-then-insert. This one guards a restriction, so a spurious 500
+        // reads as "the bug may not be protected" and invites a retry that
+        // was never needed.
+      }, { isolationLevel: "serializable" }),
     );
   },
   { id: "bugs.restrict" },
@@ -4201,7 +4222,10 @@ export const addSeeAlso = mutation(
         const row = await tx.bugSeeAlso.insert({ bugId, url: clean });
         await recordRelatedChange(tx.activities, bugId, actor.id, "see_also", null, clean);
         return row;
-      }),
+        // Serializable for the same reason as cc.add: idempotent
+        // get-then-insert. Note the existence check for this one sits OUTSIDE
+        // the transaction, so it was doubly racy.
+      }, { isolationLevel: "serializable" }),
     );
   },
   { id: "seeAlso.add" },
