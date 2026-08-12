@@ -498,6 +498,20 @@ pub enum ApplyError {
         /// The LIVE value.
         actual: String,
     },
+    /// A migration carried an existence-guard probe for a schema outside the
+    /// effective policy scope. Refused before the privileged catalog snapshot,
+    /// so a directly constructed probe cannot turn the executor into a
+    /// cross-schema reader.
+    #[error(
+        "existence-guard probe on migration {version} names schema {probe_schema:?}, \
+         which the effective policy schema scope does not permit"
+    )]
+    ExistenceGuardSchemaOutOfScope {
+        /// The guarded migration's version.
+        version: String,
+        /// The schema the forged or stale probe attempted to snapshot.
+        probe_schema: String,
+    },
     /// An engine-supplied identifier (project schema / migrator role / meta schema)
     /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
     /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`]; the
@@ -512,6 +526,25 @@ pub enum ApplyError {
     /// [`crate::apply::timeout`].
     #[error(transparent)]
     IndefiniteTimeout(#[from] crate::apply::timeout::IndefiniteTimeoutError),
+}
+
+/// Authorize an existence-guard catalog read against the effective policy scope.
+pub(crate) fn authorize_existence_guard_schema(
+    cfg: &ExecutorConfig,
+    migration: &Migration,
+    probe_schema: &str,
+) -> Result<(), ApplyError> {
+    if cfg
+        .guard_config()
+        .schema_scope()
+        .is_some_and(|scope| scope.permits(probe_schema))
+    {
+        return Ok(());
+    }
+    Err(ApplyError::ExistenceGuardSchemaOutOfScope {
+        version: migration.version.as_str().to_string(),
+        probe_schema: probe_schema.to_string(),
+    })
 }
 
 #[cfg(pg_seam)]

@@ -26,7 +26,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::ObjectType;
 
 use crate::apply::backend::{PgSessionSnapshot, ProjectLockHolder};
-use crate::apply::executor::{ApplyError, RollbackError};
+use crate::apply::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
 use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
 use crate::conn::ExecutorConfig;
@@ -667,6 +667,9 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // rendered SQL still EXECUTES inside the txn below, exactly as before.
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
+    if let Some(probe) = &m.existence_guard {
+        authorize_existence_guard_schema(cfg, m, probe.schema())?;
+    }
 
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
     // so we take a short-lived mutable borrow via a raw pointer-free path:
@@ -703,7 +706,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     //                     silent skip over a divergence).
     let mut skip_up = false;
     if let Some(probe) = &m.existence_guard {
-        let live = match crate::apply::drift::snapshot_schema(conn, probe.schema()).await {
+        let live = match crate::apply::drift::snapshot_schema_for(conn, probe.schema()).await {
             Ok(s) => s,
             Err(e) => {
                 let _ = conn.batch("ROLLBACK").await;
@@ -1038,8 +1041,9 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // apply path, so the two-phase path honors the same probe before it writes an
     // inflight marker or runs the bare `up`.
     if let Some(probe) = &m.existence_guard {
+        authorize_existence_guard_schema(cfg, m, probe.schema())?;
         let probe_started = Instant::now();
-        let live = match crate::apply::drift::snapshot_schema(conn, probe.schema()).await {
+        let live = match crate::apply::drift::snapshot_schema_for(conn, probe.schema()).await {
             Ok(s) => s,
             Err(e) => {
                 return Err(match e {

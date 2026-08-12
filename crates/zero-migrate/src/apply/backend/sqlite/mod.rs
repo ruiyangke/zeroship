@@ -62,7 +62,9 @@ use std::time::{Duration, Instant};
 use crate::apply::backend::MigrationBackend;
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::{ChecksumDriftReport, DriftError};
-use crate::apply::executor::{ApplyError, PreconditionVerdict, RollbackError};
+use crate::apply::executor::{
+    authorize_existence_guard_schema, ApplyError, PreconditionVerdict, RollbackError,
+};
 use crate::apply::journal::{AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
@@ -253,7 +255,7 @@ impl SqliteBackend {
     /// # Errors
     /// [`DriftError`] on a `sqlite_master` / PRAGMA read failure.
     pub async fn snapshot_schema_sqlite(&self) -> Result<SchemaSnapshot, DriftError> {
-        drift_sql::snapshot_schema(&self.actor).await
+        drift_sql::snapshot_schema_for(&self.actor, "main").await
     }
 
     /// Serialize the LIVE `main` schema as a deterministic CREATE-statement script
@@ -565,7 +567,7 @@ impl MigrationBackend for SqliteBackend {
 
     async fn apply_one(
         &self,
-        _cfg: &ExecutorConfig,
+        cfg: &ExecutorConfig,
         m: &Migration,
         applied_by: &str,
         _had_inflight: bool,
@@ -602,9 +604,18 @@ impl MigrationBackend for SqliteBackend {
         // - FailDrift → typed `ExistenceGuardDrift` (parity with the PG arm) —
         // never a silent skip over a divergence.
         if let Some(probe) = &m.existence_guard {
-            let live = self.snapshot_schema_sqlite().await.map_err(|e| {
-                ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
-            })?;
+            authorize_existence_guard_schema(cfg, m, probe.schema())?;
+            // The probe's schema is authorized above but is NOT what SQLite snapshots.
+            // SQLite's schema argument names an ATTACHED DATABASE - it reaches the
+            // catalog as `PRAGMA <db>.table_info(...)` and `<db>.sqlite_master` - while
+            // the probe carries the engine's logical project schema, which SQLite has no
+            // equivalent of. Passing the probe's value here asks for a database that was
+            // never attached and fails with `no such table: <project>.sqlite_master`.
+            let live = drift_sql::snapshot_schema_for(&self.actor, "main")
+                .await
+                .map_err(|e| {
+                    ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
+                })?;
             match crate::render::existence_probe::decide(probe, &live, SqlDialect::Sqlite) {
                 crate::render::existence_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
@@ -779,7 +790,7 @@ impl MigrationBackend for SqliteBackend {
         // introspect the LIVE `main` (app file) schema via sqlite_master +
         // PRAGMAs into the same `SchemaSnapshot` shape the PG path returns, under
         // engine mode. Recovers inline mask/encryption sentinels.
-        drift_sql::snapshot_schema(&self.actor).await
+        drift_sql::snapshot_schema_for(&self.actor, "main").await
     }
 
     // -- preconditions ------------------------------------------------------

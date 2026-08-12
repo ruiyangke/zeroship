@@ -156,13 +156,19 @@ fn is_fts5_shadow_table(name: &str, raw_names: &[String]) -> bool {
 ///
 /// # Errors
 /// [`DriftError::Backend`] on a `sqlite_master` / PRAGMA read failure.
-pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnapshot, DriftError> {
+pub(crate) async fn snapshot_schema_for(
+    actor: &MigrationActor,
+    schema: &str,
+) -> Result<SchemaSnapshot, DriftError> {
     // Engine mode: the introspection reads sqlite_master + issues PRAGMAs, both of
     // which CreatorUp denies. Read-only (no DDL, no writes).
     actor
         .set_mode(Mode::EngineJournal)
         .await
         .map_err(drift_err)?;
+    let schema_ident =
+        crate::render::dml::quote_ident_checked_for_dialect(schema, SqlDialect::Sqlite)
+            .map_err(|error| DriftError::Snapshot(error.to_string()))?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
@@ -176,11 +182,11 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
     // engine's own introspection must avoid it. The `is_internal` Rust-side guard
     // below filters `sqlite_*` instead (same effect, no LIKE function call).
     let table_rows = actor
-        .query(
-            "SELECT name, sql FROM main.sqlite_master \
+        .query(&format!(
+            "SELECT name, sql FROM {schema_ident}.sqlite_master \
              WHERE type = 'table' \
-             ORDER BY name",
-        )
+             ORDER BY name"
+        ))
         .await
         .map_err(drift_err)?;
 
@@ -269,11 +275,11 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
     }
 
     let view_rows = actor
-        .query(
-            "SELECT name, sql FROM main.sqlite_master \
+        .query(&format!(
+            "SELECT name, sql FROM {schema_ident}.sqlite_master \
              WHERE type = 'view' \
-             ORDER BY name",
-        )
+             ORDER BY name"
+        ))
         .await
         .map_err(drift_err)?;
     for r in &view_rows {
@@ -308,9 +314,9 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
     let table_names: Vec<String> = tables.keys().cloned().collect();
     for table in table_names {
         let stored = create_sql.get(&table).map_or("", String::as_str);
-        introspect_columns(actor, &table, stored, &mut tables).await?;
-        introspect_indexes_and_unique(actor, &table, &mut tables).await?;
-        introspect_foreign_keys(actor, &table, stored, &mut tables).await?;
+        introspect_columns(actor, &schema_ident, &table, stored, &mut tables).await?;
+        introspect_indexes_and_unique(actor, &schema_ident, &table, &mut tables).await?;
+        introspect_foreign_keys(actor, &schema_ident, &table, stored, &mut tables).await?;
     }
 
     // **FTS** — attach each recognised FTS5 vtable as an `IndexSnapshot` on its
@@ -346,19 +352,20 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
 /// `zero-migrate:mask:` / `zero-migrate:enc:` sentinel for the column from the stored CREATE text.
 async fn introspect_columns(
     actor: &MigrationActor,
+    schema_ident: &str,
     table: &str,
     stored_create_sql: &str,
     tables: &mut BTreeMap<String, TableSnapshot>,
 ) -> Result<(), DriftError> {
     let rows = actor
-        .query(&format!("PRAGMA main.table_info({})", lit(table)))
+        .query(&format!("PRAGMA {schema_ident}.table_info({})", lit(table)))
         .await
         .map_err(drift_err)?;
     // A sole exact `INTEGER PRIMARY KEY` is a rowid alias unless SQLite also
     // materialized a real primary-key index. The latter distinguishes both
     // WITHOUT ROWID tables and the historical inline `PRIMARY KEY DESC` form.
     let primary_key_has_separate_index = actor
-        .query(&format!("PRAGMA main.index_list({})", lit(table)))
+        .query(&format!("PRAGMA {schema_ident}.index_list({})", lit(table)))
         .await
         .map_err(drift_err)?
         .iter()
@@ -517,11 +524,12 @@ async fn introspect_columns(
 /// constraint bucket.
 async fn introspect_indexes_and_unique(
     actor: &MigrationActor,
+    schema_ident: &str,
     table: &str,
     tables: &mut BTreeMap<String, TableSnapshot>,
 ) -> Result<(), DriftError> {
     let idx_rows = actor
-        .query(&format!("PRAGMA main.index_list({})", lit(table)))
+        .query(&format!("PRAGMA {schema_ident}.index_list({})", lit(table)))
         .await
         .map_err(drift_err)?;
 
@@ -542,7 +550,7 @@ async fn introspect_indexes_and_unique(
         let origin = r.get(3).and_then(Clone::clone).unwrap_or_default();
         // Key columns of this index, in order.
         let info = actor
-            .query(&format!("PRAGMA main.index_info({})", lit(&name)))
+            .query(&format!("PRAGMA {schema_ident}.index_info({})", lit(&name)))
             .await
             .map_err(drift_err)?;
         let mut columns: Vec<String> = Vec::new();
@@ -554,7 +562,8 @@ async fn introspect_indexes_and_unique(
         }
         let sql_rows = actor
             .query(&format!(
-                "SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = {}",
+                "SELECT sql FROM {schema_ident}.sqlite_master \
+                 WHERE type = 'index' AND name = {}",
                 lit(&name)
             ))
             .await
@@ -855,12 +864,16 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 /// match. Multiple rows with the same `id` are the columns of one composite FK.
 async fn introspect_foreign_keys(
     actor: &MigrationActor,
+    schema_ident: &str,
     table: &str,
     stored_create_sql: &str,
     tables: &mut BTreeMap<String, TableSnapshot>,
 ) -> Result<(), DriftError> {
     let rows = actor
-        .query(&format!("PRAGMA main.foreign_key_list({})", lit(table)))
+        .query(&format!(
+            "PRAGMA {schema_ident}.foreign_key_list({})",
+            lit(table)
+        ))
         .await
         .map_err(drift_err)?;
 

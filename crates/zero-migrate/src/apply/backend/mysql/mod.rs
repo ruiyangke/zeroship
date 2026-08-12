@@ -851,7 +851,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 
     async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-        drift_sql::snapshot_schema(self.conn, cfg).await
+        drift_sql::snapshot_schema_for(self.conn, &cfg.project_schema).await
     }
 
     async fn evaluate_preconditions(

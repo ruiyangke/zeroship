@@ -259,7 +259,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-        crate::apply::drift::snapshot_schema(self.conn, &cfg.project_schema).await
+        crate::apply::drift::snapshot_schema_for(self.conn, &cfg.project_schema).await
     }
 
     async fn evaluate_preconditions(
@@ -780,6 +780,7 @@ mod recording_session_genericity {
     use crate::driver::{Bind, DbError, Row, Value};
     use crate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
     use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
+    use crate::model::probe::{GuardDir, GuardProbe};
     use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
     use crate::render::step::PlanStep;
     use std::cell::RefCell;
@@ -1073,6 +1074,108 @@ mod recording_session_genericity {
                 None,
             )
             .await
+    }
+
+    fn migration_with_guard_schema(schema: &str) -> Migration {
+        let flags = MigrationFlags::default();
+        let up = "CREATE TABLE guard_target (id bigint)";
+        let checksum = Checksum::of(&ChecksumInput {
+            up,
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version: MigrationId::generate(),
+            name: "guarded table".into(),
+            up: up.into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: Some(GuardProbe::Table {
+                schema: schema.into(),
+                table: "guard_target".into(),
+                direction: GuardDir::IfNotExists,
+                expect_columns: Vec::new(),
+            }),
+        }
+    }
+
+    #[compio::test]
+    async fn existence_guard_probe_outside_effective_scope_is_refused_before_snapshot() {
+        let rec = RecordingSession::new();
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let migration = migration_with_guard_schema("forbidden");
+        let expected_version = migration.version.as_str().to_string();
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await;
+
+        match result {
+            Err(ApplyError::ExistenceGuardSchemaOutOfScope {
+                version,
+                probe_schema,
+            }) => {
+                assert_eq!(version, expected_version);
+                assert_eq!(probe_schema, "forbidden");
+            }
+            other => panic!(
+                "expected ExistenceGuardSchemaOutOfScope for the forged probe, got: {other:?}"
+            ),
+        }
+    }
+
+    #[compio::test]
+    async fn existence_guard_probe_in_allowlist_snapshots_its_non_project_schema() {
+        let rec = RecordingSession::new();
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        let effective = crate::test_fixtures::operator_with_data_security(
+            &["proj_x", "reporting"],
+            &[],
+            false,
+            crate::model::policy::DestructiveOps::Allow,
+        );
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
+        let migration = migration_with_guard_schema("reporting");
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await;
+
+        assert!(!result.expect("the allowlisted probe must apply"));
+        let log = rec.log.borrow();
+        assert!(
+            log.iter()
+                .any(|entry| entry.starts_with("query: SELECT child.relname")),
+            "the permitted probe must read the catalog: {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|entry| entry == &format!("batch: {}", migration.up)),
+            "the empty permitted snapshot must let the guarded create run: {log:?}"
+        );
+        let binds = rec.binds.borrow();
+        assert!(
+            binds.iter().any(|values| {
+                matches!(values.as_slice(), [Bind::Text(schema)] if schema == "reporting")
+            }),
+            "the catalog snapshot must bind the probe schema: {binds:?}"
+        );
+        assert!(
+            !binds.iter().any(|values| {
+                matches!(values.as_slice(), [Bind::Text(schema)] if schema == "proj_x")
+            }),
+            "the probe snapshot must not fall back to the project schema: {binds:?}"
+        );
     }
 
     #[compio::test]

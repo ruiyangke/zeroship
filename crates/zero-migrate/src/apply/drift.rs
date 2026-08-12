@@ -622,7 +622,15 @@ fn parse_index_storage_params_pg(
 #[cfg(pg_seam)]
 pub async fn snapshot_schema<D: SqlSession>(
     conn: &D,
-    project_schema: &str,
+    schema: &str,
+) -> Result<SchemaSnapshot, DriftError> {
+    snapshot_schema_for(conn, schema).await
+}
+
+#[cfg(pg_seam)]
+pub(crate) async fn snapshot_schema_for<D: SqlSession>(
+    conn: &D,
+    schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
@@ -646,7 +654,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              WHERE n.nspname = $1 AND pn.nspname = $1 AND child.relispartition = true \
                AND child.relkind IN ('r', 'p') \
              ORDER BY child.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &partition_rows {
@@ -670,7 +678,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relispartition = false \
              ORDER BY c.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &table_rows {
@@ -706,7 +714,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              WHERE n.nspname = $1 \
              GROUP BY c.relname, p.partstrat \
              ORDER BY c.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &partitioned_table_rows {
@@ -745,7 +753,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') \
              ORDER BY c.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &view_rows {
@@ -776,7 +784,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              JOIN pg_namespace n ON n.oid = t.typnamespace \
              WHERE n.nspname = $1 AND t.typtype IN ('e', 'd') \
              ORDER BY t.typname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &type_rows {
@@ -865,7 +873,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              ) default_sequence ON true \
              WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.table_name, c.column_name",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &col_rows {
@@ -1107,7 +1115,7 @@ pub async fn snapshot_schema<D: SqlSession>(
                  WHERE con.conindid = x.indexrelid AND con.contype = 'x' \
                ) \
              ORDER BY c.relname, ic.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &idx_rows {
@@ -1266,7 +1274,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
              WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c', 'x') \
              ORDER BY c.relname, con.conname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     for r in &constraint_rows {
@@ -1410,7 +1418,7 @@ pub async fn snapshot_schema<D: SqlSession>(
                    AND d.deptype = 'i' \
                ) \
              ORDER BY c.relname",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     let mut sequences = std::collections::BTreeMap::new();
@@ -1456,7 +1464,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              FROM pg_namespace n \
              JOIN pg_roles owner ON owner.oid = n.nspowner \
              WHERE n.nspname = $1",
-            &[project_schema.into()],
+            &[schema.into()],
         )
         .await?;
     let mut schemas = BTreeMap::new();

@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use crate::apply::drift::DriftError;
-use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::model::ir::{IdentityCol, IndexSortOrder};
 use crate::model::snapshot::{
@@ -123,11 +122,10 @@ fn mysql_text_storage(
 /// Read base tables, columns, and ordered index keys from
 /// `information_schema`. Every query scopes itself to the configured application
 /// database with a bind; the migration metadata database is never included.
-pub(crate) async fn snapshot_schema<D: SqlSession>(
+pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     conn: &D,
-    cfg: &ExecutorConfig,
+    schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
-    let schema = cfg.project_schema.as_str();
     let version_rows = conn
         .query("SELECT VERSION() AS server_version", &[])
         .await?;
