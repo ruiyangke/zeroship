@@ -1174,3 +1174,46 @@ fn extends_without_catalog_is_unknown_base() {
         "expected unknown base, got {err:?}"
     );
 }
+
+#[test]
+fn extends_cannot_assemble_a_contradiction_neither_document_holds() {
+    // The inject-versus-validate contradiction gate is what stops a charter from
+    // injecting a column it also forbids. `extends` merges a base's rules into this
+    // document, so the pair can arrive split across the two files: the base forbids
+    // `tenant_id`, this document injects it, and neither file contains both rules.
+    //
+    // Nothing downstream catches the split. The merge produces ONE document, so it is
+    // one layer, and the two composition gates that read `forbidden_columns` -
+    // `CharterInjectValidateContradiction` and `DraftValidateContradictsCharterInject`
+    // - both compare a charter against a separate draft layer.
+    let base = r#"policy_version = 1
+[[validate]]
+scope = { include = ["app_*"] }
+predicate = { kind = "forbidden_columns", names = ["tenant_id"] }
+"#;
+    let cat = catalog(&[("base", base)]);
+
+    // Each document is internally consistent: neither carries both rules.
+    assert!(
+        PolicyDoc::parse_toml(base, &registry(), LoadContext::TrustedCatalogEntry).is_ok(),
+        "premise: the base alone forbids a column it does not inject"
+    );
+
+    let err = PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "tenant_id", type = "text", nullable = false } ]
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, LoadError::SelfContradictoryInjectValidate { .. }),
+        "a merged document that injects a column its base forbids must be refused, \
+         got {err:?}"
+    );
+}

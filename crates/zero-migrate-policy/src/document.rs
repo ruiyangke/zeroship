@@ -528,9 +528,6 @@ impl PolicyDoc {
             });
         }
 
-        // Cross-rule single-doc legality: self-contradictory inject vs validate.
-        check_self_contradiction(&rules)?;
-
         let mut this = PolicyDoc {
             policy_version: wire.policy_version,
             default_scope,
@@ -574,6 +571,15 @@ impl PolicyDoc {
             // doc omits its own.
             this = overlay_docs(base, this);
         }
+
+        // Cross-rule single-doc legality: self-contradictory inject vs validate, over
+        // the MERGED rule set. `extends` lets the two halves arrive in different files -
+        // a base that forbids a column, a document that injects it - and each file alone
+        // is consistent. Checking before the merge accepted the pair, and nothing
+        // downstream refuses it: a merged document is one layer, while both composition
+        // gates that read `forbidden_columns` compare a charter against a separate
+        // draft.
+        check_self_contradiction(&this.rules)?;
 
         // Dead-rule detection (warn, not error) — computed AFTER extends merge.
         this.warnings = this
