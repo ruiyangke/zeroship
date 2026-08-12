@@ -327,6 +327,15 @@ pub struct LiveSchema {
         crate::model::snapshot::FunctionKey,
         crate::model::snapshot::FunctionSnapshot,
     >,
+    /// Policies already present in the folded live schema, keyed by resolved
+    /// schema, table, and name.
+    ///
+    /// Catalog snapshots leave this empty. A `dropPolicy` can recover an inverse
+    /// only from an authored definition retained by the history fold.
+    pub policies: std::collections::BTreeMap<
+        crate::model::snapshot::PolicyKey,
+        crate::model::snapshot::PolicySnapshot,
+    >,
     /// Triggers already present in the folded live schema, keyed by resolved
     /// schema, table, and name.
     ///
@@ -382,6 +391,7 @@ impl LiveSchema {
             sequences: live.sequences,
             extensions: live.extensions,
             functions: live.functions,
+            policies: live.policies,
             triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
@@ -405,6 +415,7 @@ impl LiveSchema {
             sequences: std::collections::BTreeMap::new(),
             extensions: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeMap::new(),
+            policies: std::collections::BTreeMap::new(),
             triggers: std::collections::BTreeMap::new(),
             schemas: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
@@ -492,6 +503,7 @@ impl LiveSchema {
             sequences: desired.snapshot.sequences,
             extensions: desired.snapshot.extensions,
             functions: desired.snapshot.functions,
+            policies: desired.snapshot.policies,
             triggers: desired.snapshot.triggers,
             schemas: desired.snapshot.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
@@ -577,6 +589,7 @@ impl LiveSchema {
             sequences: live.sequences,
             extensions: live.extensions,
             functions: live.functions,
+            policies: live.policies,
             triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
@@ -8162,8 +8175,37 @@ fn vendor_inverse_from_history(
             }
             Some(statement.up)
         }
-        // A CASCADING schema drop is never reversed, and that is the one refusal
-        // this family needs beyond the two above. `DROP SCHEMA ... CASCADE`
+        Op::DropPolicy {
+            name,
+            table,
+            schema,
+            if_exists,
+        } if !if_exists.unwrap_or(false) => {
+            let key =
+                crate::model::snapshot::PolicyKey::new(name, table, schema.as_deref(), eff_schema);
+            let snapshot = live_schema.policies.get(&key)?;
+            let create = Op::CreatePolicy {
+                name: key.name.clone(),
+                table: key.table.clone(),
+                // Qualify the recorded placement even when the authored CREATE
+                // omitted its schema. Rollback must not depend on the current
+                // effective schema.
+                schema: Some(key.schema.clone()),
+                for_cmd: snapshot.for_cmd,
+                to: snapshot.to.clone(),
+                using: snapshot.using.clone(),
+                with_check: snapshot.with_check.clone(),
+            };
+            let mut statements = crate::render::vendor::render_vendor_op(&create, &key.schema)
+                .ok()?
+                .into_iter();
+            let statement = statements.next()?;
+            if statements.next().is_some() {
+                return None;
+            }
+            Some(statement.up)
+        }
+        // A CASCADING schema drop is never reversed. `DROP SCHEMA ... CASCADE`
         // destroys every table, view and sequence inside; `CREATE SCHEMA` would
         // then SUCCEED and hand back an empty namespace, so the rollback would
         // journal a clean success over data that is permanently gone. Measured on

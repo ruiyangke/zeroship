@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use crate::model::expr::Expr;
 use crate::model::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
-    IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, SafeI64, SafeU64,
-    SequenceOwnedBy, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
+    IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64,
+    SafeU64, SequenceOwnedBy, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming,
+    ValueFormat,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
@@ -1506,6 +1507,48 @@ pub struct FunctionSnapshot {
     pub body: String,
 }
 
+/// Offline identity key for one authored PostgreSQL policy.
+///
+/// PostgreSQL scopes a policy name to its table, so schema, table, and name all
+/// participate. Retaining only schema and name would let same-named policies on
+/// different tables overwrite one another and make rollback restore the wrong
+/// definition on the wrong table.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyKey {
+    /// Resolved schema containing the policy's table.
+    pub schema: String,
+    /// Table the policy belongs to.
+    pub table: String,
+    /// Policy name.
+    pub name: String,
+}
+
+impl PolicyKey {
+    pub(crate) fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            table: table.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
+/// The authored definition needed to restore a dropped PostgreSQL policy.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicySnapshot {
+    /// Authored command scope.
+    pub for_cmd: PolicyCmd,
+    /// Authored optional role list; absence retains PostgreSQL's PUBLIC default.
+    pub to: Option<Vec<String>>,
+    /// Authored row-visibility predicate.
+    pub using: Expr,
+    /// Authored optional row-check predicate.
+    pub with_check: Option<Expr>,
+}
+
 /// Offline identity key for one authored trigger.
 ///
 /// PostgreSQL scopes a trigger name to its table, so schema, table, and name all
@@ -1588,6 +1631,11 @@ pub struct SchemaSnapshot {
     /// This rollback-only history is absent from catalog snapshots and excluded
     /// from structural equality.
     pub functions: BTreeMap<FunctionKey, FunctionSnapshot>,
+    /// Authored PostgreSQL policies, keyed by resolved schema, table, and name.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality.
+    pub policies: BTreeMap<PolicyKey, PolicySnapshot>,
     /// Authored triggers, keyed by resolved schema, table, and name.
     ///
     /// This rollback-only history is absent from catalog snapshots and excluded

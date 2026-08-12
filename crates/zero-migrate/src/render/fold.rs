@@ -41,10 +41,10 @@
 //! it. What follows from that is a comparison contract, stated on
 //! [`diff_snapshots`](crate::apply::drift::diff_snapshots), not a change here.
 //!
-//! Partitions are the only structurally compared class where this bites. Function
-//! and trigger definitions are also history-only, but `SchemaSnapshot` excludes
-//! that rollback metadata from equality and drift just as `ViewSnapshot` excludes
-//! its authored query. Named types are the near miss that shows the shape:
+//! Partitions are the only structurally compared class where this bites. Function,
+//! policy, and trigger definitions are also history-only, but `SchemaSnapshot`
+//! excludes that rollback metadata from equality and drift just as `ViewSnapshot`
+//! excludes its authored query. Named types are the near miss that shows the shape:
 //! `createEnum` and `createDomain` are portable on MySQL, so the engine authors
 //! them there, but the insert below is gated on
 //! `Capability::MaterializedEnumType`, false off PostgreSQL, so both sides carry
@@ -65,8 +65,8 @@
 //!
 //! # Schema qualifier / existence guard are fold-irrelevant
 //!
-//! An op's `schema` qualifier normally governs only where the DDL renders. Function
-//! and trigger rollback histories are the exceptions: their keys resolve an
+//! An op's `schema` qualifier normally governs only where the DDL renders. Function,
+//! policy, and trigger rollback histories are the exceptions: their keys resolve an
 //! omitted schema to `project_schema` so definitions in different schemas cannot
 //! collide. An `existence_guard` still governs only apply-time presence and does
 //! not change the final folded logical shape. FK definitions also embed
@@ -83,9 +83,9 @@ use crate::model::ir::{
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, FunctionSnapshot,
-    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
+    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey,
+    PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
+    SequenceSnapshot, TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 #[cfg(test)]
@@ -1077,6 +1077,7 @@ pub fn fold_ops_onto(
     let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = base.schemas.clone();
     let mut extensions: BTreeMap<String, ExtensionSnapshot> = base.extensions.clone();
     let mut functions: BTreeMap<FunctionKey, FunctionSnapshot> = base.functions.clone();
+    let mut policies: BTreeMap<PolicyKey, PolicySnapshot> = base.policies.clone();
     let mut triggers: BTreeMap<TriggerKey, TriggerSnapshot> = base.triggers.clone();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
@@ -2578,6 +2579,35 @@ pub fn fold_ops_onto(
                     });
                 }
             }
+            Op::CreatePolicy {
+                name,
+                table,
+                schema,
+                for_cmd,
+                to,
+                using,
+                with_check,
+            } => {
+                let key = PolicyKey::new(name, table, schema.as_deref(), project_schema);
+                policies.insert(
+                    key,
+                    PolicySnapshot {
+                        for_cmd: *for_cmd,
+                        to: to.clone(),
+                        using: using.clone(),
+                        with_check: with_check.clone(),
+                    },
+                );
+            }
+            Op::DropPolicy {
+                name,
+                table,
+                schema,
+                ..
+            } => {
+                let key = PolicyKey::new(name, table, schema.as_deref(), project_schema);
+                policies.remove(&key);
+            }
             Op::CreateTrigger {
                 name,
                 table,
@@ -2610,15 +2640,13 @@ pub fn fold_ops_onto(
                 triggers.remove(&key);
             }
             // Remaining vendor ops either change unmodeled facets (role settings,
-            // grants/RLS/policies) or are raw statements, so they do not
+            // grants/RLS) or are raw statements, so they do not
             // contribute to this structural snapshot.
             Op::AlterRole { .. }
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
             | Op::SetRls { .. }
-            | Op::CreatePolicy { .. }
-            | Op::DropPolicy { .. }
             | Op::PgRaw { .. } => {}
             Op::Dialectal { .. } => {}
         }
@@ -2640,6 +2668,7 @@ pub fn fold_ops_onto(
         schemas,
         extensions,
         functions,
+        policies,
         triggers,
     })
 }

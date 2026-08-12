@@ -1540,6 +1540,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         schemas,
         extensions,
         functions: BTreeMap::new(),
+        policies: BTreeMap::new(),
         triggers: BTreeMap::new(),
         partitions,
     })

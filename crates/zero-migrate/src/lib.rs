@@ -264,8 +264,8 @@ pub use model::migration::{
 pub use model::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey,
     FunctionSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot, IndexSnapshot,
-    MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey, PolicySnapshot,
+    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
