@@ -298,6 +298,33 @@ with `SystemMaxUse=200M`) and clearing apt caches (`apt-get clean`,
 
 ## Deploy
 
+Use the script. It does build, push, config sync, secret provisioning, render
+and roll in one command, and it refuses in the cases that bit whoever did this
+by hand:
+
+```bash
+deploy/scripts/deploy-remote.sh --host root@<host> \
+  --registry ghcr.io/<owner>/zeroship-platform
+
+deploy/scripts/deploy-remote.sh --host root@<host> --registry ... --dry-run
+deploy/scripts/deploy-remote.sh --host root@<host> --rollback
+```
+
+It backs up `.env`, `docker-compose.yml` and the `Caddyfile` before touching
+them, generates only the secrets the host is MISSING (an existing value is
+never rotated, because rotating invalidates issued tokens), and refuses to
+proceed when a variable the host sets looks like the old name of one the new
+compose wants. That last case is why the script exists: `ZEROSHIP_SCHEME` was
+renamed to `ZEROSHIP_ORIGIN_SCHEME`, the new name defaults to `http`, and
+taking the default silently rewrites every public URL and the OIDC issuer to
+`http://` -- compose renders, the stack boots, and the only symptom is a login
+loop with a clean log.
+
+`--image <ref>` pins an existing tag instead of building, for redeploying a
+known-good image or rolling back to a prior one.
+
+The manual sequence, for when you need to do a step by hand:
+
 ```bash
 ssh root@<host>
 printf '%s' "$GHCR_PAT" | docker login ghcr.io -u <owner> --password-stdin   # once
@@ -305,6 +332,30 @@ cd /opt/zeroship-deploy/compose
 docker compose pull
 docker compose up -d
 ```
+
+Every service must come up together. `ZEROSHIP_CONTROL_KEY` is shared, so a
+partial or rolling restart leaves two halves that cannot authenticate to each
+other.
+
+## Deploying a creator app
+
+`zeroship deploy` needs the control plane, which is bound to loopback with no
+Caddy route -- so from a dev machine it is unreachable, by design. Do not
+publish it to fix that. Forward a port over the SSH you already have:
+
+```bash
+deploy/scripts/deploy-app.sh --host root@<host> --app <app-id> \
+  --dir examples/db-todos --probe https://<app>.<domain>
+```
+
+The forward is torn down by PID from a trap. If you write your own, note that
+`ControlMaster auto` in `~/.ssh/config` makes a backgrounded `ssh -L` hand the
+forward to the mux master and exit immediately: the pid you captured is already
+dead, your kill is a no-op, and the port outlives the script by `ControlPersist`
+owned by a `[mux]` process. Pass `-o ControlMaster=no -o ControlPath=none`.
+
+The token comes from `ZEROSHIP_TOKEN` or `--token-file`, never an argument --
+arguments are visible in the process list to every user on the machine.
 
 `migrate` runs first as a gated one-shot; control, gateway, worker and auth all
 wait on `service_completed_successfully`. If migrate fails, they stay `Created`
