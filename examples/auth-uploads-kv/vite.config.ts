@@ -24,7 +24,7 @@ export default defineConfig({
       devAuth: {
         users: [
           {
-            id: "pws_alice0000000000000000",
+            id: "pws_alice000000000000000",
             email: "alice@localhost",
             name: "Alice",
             password: "alice",
@@ -36,7 +36,7 @@ export default defineConfig({
             password: "bob",
           },
         ],
-        defaultUserId: "pws_alice0000000000000000",
+        defaultUserId: "pws_alice000000000000000",
       },
     }),
   ],
