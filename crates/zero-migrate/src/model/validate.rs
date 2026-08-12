@@ -6629,7 +6629,9 @@ fn validate_column_facets(
                  caseSensitive:false is only valid on a text column",
                 col.name
             ),
-            "drop the caseSensitive facet, or declare the column as t.text({ caseSensitive: false })"
+            "drop the caseSensitive facet, or declare the column as t.text({ caseSensitive: \
+             false }) - which renders public.citext on PostgreSQL and needs the citext extension \
+             created first"
                 .to_string(),
         ));
     }
