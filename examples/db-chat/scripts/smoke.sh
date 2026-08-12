@@ -37,9 +37,9 @@ GENERAL=$(rpc createChannel "{\"slug\":\"general-${SUFFIX}\",\"name\":\"General\
 RANDOM_CH=$(rpc createChannel "{\"slug\":\"random-${SUFFIX}\",\"name\":\"Random\"}")
 AUTHOR_RES=$(rpc createUser "{\"handle\":\"user_${SUFFIX}\",\"name\":\"Alice\"}")
 
-GENERAL_ID=$(echo "$GENERAL" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
-RANDOM_ID=$(echo "$RANDOM_CH" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
-AUTHOR_ID=$(echo "$AUTHOR_RES" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+GENERAL_ID=$(echo "$GENERAL" | grep -oE '"id":"[^"]+"' | head -1 | cut -d: -f2 | tr -d '"' || echo "")
+RANDOM_ID=$(echo "$RANDOM_CH" | grep -oE '"id":"[^"]+"' | head -1 | cut -d: -f2 | tr -d '"' || echo "")
+AUTHOR_ID=$(echo "$AUTHOR_RES" | grep -oE '"id":"[^"]+"' | head -1 | cut -d: -f2 | tr -d '"' || echo "")
 
 if [ -z "$GENERAL_ID" ] || [ -z "$RANDOM_ID" ] || [ -z "$AUTHOR_ID" ]; then
   echo "  ✗ setup failed — general=$GENERAL random=$RANDOM_CH author=$AUTHOR_RES"
@@ -53,7 +53,7 @@ echo "  seeded general=$GENERAL_ID random=$RANDOM_ID author=$AUTHOR_ID"
 
 echo "[check 1] sendMessage — mutation"
 
-M1=$(rpc sendMessage "{\"channelId\":${GENERAL_ID},\"authorId\":${AUTHOR_ID},\"body\":\"hello general\"}")
+M1=$(rpc sendMessage "{\"channelId\":\"${GENERAL_ID}\",\"authorId\":\"${AUTHOR_ID}\",\"body\":\"hello general\"}")
 check "sendMessage returned an id" contains "$M1" '"id":'
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ check "sendMessage returned an id" contains "$M1" '"id":'
 
 echo "[check 2] listMessages — query wrapper, returns rows"
 
-LIST_GENERAL=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+LIST_GENERAL=$(rpc listMessages "{\"channelId\":\"${GENERAL_ID}\"}")
 check "listMessages returned an array shape" contains "$LIST_GENERAL" '\['
 
 # ---------------------------------------------------------------------------
@@ -71,10 +71,10 @@ check "listMessages returned an array shape" contains "$LIST_GENERAL" '\['
 
 echo "[check 3] channel isolation"
 
-rpc sendMessage "{\"channelId\":${RANDOM_ID},\"authorId\":${AUTHOR_ID},\"body\":\"hello random\"}" >/dev/null
+rpc sendMessage "{\"channelId\":\"${RANDOM_ID}\",\"authorId\":\"${AUTHOR_ID}\",\"body\":\"hello random\"}" >/dev/null
 
 # Re-list general — should NOT contain "hello random"
-LIST_AFTER=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+LIST_AFTER=$(rpc listMessages "{\"channelId\":\"${GENERAL_ID}\"}")
 check "general channel still doesn't see random's messages" \
   bash -c "! echo '$LIST_AFTER' | grep -q 'hello random'"
 
@@ -84,7 +84,7 @@ check "general channel still doesn't see random's messages" \
 
 echo "[check 4] FK enforcement — orphan channel rejected"
 
-BAD=$(rpc sendMessage "{\"channelId\":99999,\"authorId\":${AUTHOR_ID},\"body\":\"orphan\"}")
+BAD=$(rpc sendMessage "{\"channelId\":\"chan_thisiddoesnotexist\",\"authorId\":\"${AUTHOR_ID}\",\"body\":\"orphan\"}")
 check "orphan channel insert produced an error" \
   bash -c "echo '$BAD' | grep -qiE 'error|violation|foreign'"
 
@@ -94,12 +94,12 @@ check "orphan channel insert produced an error" \
 
 echo "[check 5] flagMessage updates row and listMessages filters it out"
 
-M_ID=$(echo "$M1" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+M_ID=$(echo "$M1" | grep -oE '"id":"[^"]+"' | head -1 | cut -d: -f2 | tr -d '"' || echo "")
 if [ -n "$M_ID" ]; then
-  rpc flagMessage "{\"id\":${M_ID}}" >/dev/null
-  LIST_AFTER_FLAG=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+  rpc flagMessage "{\"id\":\"${M_ID}\"}" >/dev/null
+  LIST_AFTER_FLAG=$(rpc listMessages "{\"channelId\":\"${GENERAL_ID}\"}")
   check "flagged message no longer in listMessages" \
-    bash -c "! echo '$LIST_AFTER_FLAG' | grep -q '\"id\":${M_ID},'"
+    bash -c "! echo '$LIST_AFTER_FLAG' | grep -q '\"id\":\"${M_ID}\",'"
 else
   check "obtained M1 id for flag test" bash -c "false"
 fi
@@ -112,7 +112,7 @@ echo "[check 6] action — runQuery (read) + runMutation (write) round-trip"
 
 # Spin up a tiny one-shot moderation stub. Returns {"unsafe":true} so
 # the action takes the flag-via-runMutation branch.
-MOD_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();})')
+MOD_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port)+"\n");s.close();})')
 node -e "
 const http = require('http');
 const srv = http.createServer((req, res) => {
@@ -125,18 +125,18 @@ srv.listen(${MOD_PORT}, '127.0.0.1');
 MOD_PID=$!
 sleep 1
 
-NEW_MSG=$(rpc sendMessage "{\"channelId\":${GENERAL_ID},\"authorId\":${AUTHOR_ID},\"body\":\"will be flagged\"}")
-NEW_ID=$(echo "$NEW_MSG" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+NEW_MSG=$(rpc sendMessage "{\"channelId\":\"${GENERAL_ID}\",\"authorId\":\"${AUTHOR_ID}\",\"body\":\"will be flagged\"}")
+NEW_ID=$(echo "$NEW_MSG" | grep -oE '"id":"[^"]+"' | head -1 | cut -d: -f2 | tr -d '"' || echo "")
 
-MODERATE_RES=$(rpc moderateMessage "{\"id\":${NEW_ID:-1},\"moderationUrl\":\"http://127.0.0.1:${MOD_PORT}/\"}")
+MODERATE_RES=$(rpc moderateMessage "{\"id\":\"${NEW_ID}\",\"moderationUrl\":\"http://127.0.0.1:${MOD_PORT}/\"}")
 kill $MOD_PID 2>/dev/null || true
 
 check "moderateMessage took the unsafe-branch (action → runQuery + fetch + runMutation)" \
   bash -c "echo '$MODERATE_RES' | grep -q '\"flagged\":true'"
 
-LIST_AFTER_MOD=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+LIST_AFTER_MOD=$(rpc listMessages "{\"channelId\":\"${GENERAL_ID}\"}")
 check "flagged message via runMutation is filtered from listMessages" \
-  bash -c "! echo '$LIST_AFTER_MOD' | grep -q '\"id\":${NEW_ID},'"
+  bash -c "! echo '$LIST_AFTER_MOD' | grep -q '\"id\":\"${NEW_ID}\"'"
 
 # ---------------------------------------------------------------------------
 # Result
