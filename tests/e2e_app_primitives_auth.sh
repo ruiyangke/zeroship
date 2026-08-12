@@ -415,7 +415,15 @@ fi
 LB="$(dispatch "$APP" "auth.notes.list" '{}' "$USER_B")"
 LBB="$(echo "$LB" | head -1)"; LBC="$(echo "$LB" | tail -1)"
 LB_USER="$(echo "$LBB" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).json.user)}catch(e){console.log("")}})')"
-LB_COUNT="$(echo "$LBB" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).json.notes.length)}catch(e){console.log("")}})')"
+# NUMERIC field, so it MUST go out through process.stdout.write(String(...)):
+# console.log runs a non-string through util.inspect, and with colour enabled
+# (FORCE_COLOR set, as Claude Code and many CI wrappers do) a number comes back
+# as "\e[33m0\e[39m", which never equals "0". The user field above is a string
+# and prints clean, which is why only this one comparison broke. Same defect and
+# same fix as cee243ec4; this site was missed there because nothing ran this
+# harness. What this does NOT protect: any future extractor added here that
+# reaches for console.log again - the shape is not enforced by anything.
+LB_COUNT="$(echo "$LBB" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).json.notes.length)+"\n")}catch(e){console.log("")}})')"
 if [ "$LBC" = "200" ] && [ "$LB_USER" = "pws_bob00000000000000b" ] && ! echo "$LBB" | grep -q "$NONCE" && [ "$LB_COUNT" = "0" ]; then
   pass "ISOLATION: userB's auth.notes.list is empty + lacks userA's note (identity-scoped, no leakage)"
 else
