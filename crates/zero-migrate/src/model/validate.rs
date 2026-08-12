@@ -7018,6 +7018,20 @@ pub fn validate_op_resolved(
                 }
                 if let Some(pred) = filter {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
+                    // A backfill pages in batches, so a volatile filter selects a
+                    // DIFFERENT cohort each batch and the operation has no fixed
+                    // meaning. The offline arm has always refused this; this arm did
+                    // not, and was covered only because the offline validator runs
+                    // first on the apply path. Measured: `where seen < now()` IS
+                    // refused today - so this closes a shape, not a reachable defect,
+                    // and keeps the guarantee off the ordering between two validators.
+                    validate_immutable_expr_context(
+                        pred,
+                        "backfill filter",
+                        target_dialect,
+                        op_index,
+                        ts,
+                    )?;
                     validate_no_aggregate_expr_context(
                         pred,
                         "backfill filter",
