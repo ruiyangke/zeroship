@@ -58,6 +58,14 @@ export default defineApp({
     "rpc:cc.remove": { auth: "user" },
     "rpc:cc.list": { auth: "user" },
     "rpc:cc.listMine": { auth: "user" },
+    "rpc:groups.create": { auth: "user" },
+    "rpc:groups.list": { auth: "user" },
+    "rpc:groups.addMember": { auth: "user" },
+    "rpc:groups.removeMember": { auth: "user" },
+    "rpc:products.restrict": { auth: "user" },
+    "rpc:products.unrestrict": { auth: "user" },
+    "rpc:bugs.restrict": { auth: "user" },
+    "rpc:bugs.unrestrict": { auth: "user" },
 
     // Products and administration
     "rpc:products.list": { auth: "anon", publiclyAccessible: true },

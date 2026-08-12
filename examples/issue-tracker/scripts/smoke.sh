@@ -23,10 +23,14 @@
 # gateway's own JWT validation, rate limiting and route dispatch are NOT
 # exercised here. It also runs against SQLite, so anything Postgres-specific
 # (collation, isolation, partial indexes) is out of scope; see
-# docs/reference/sqlite-divergences.md. And it asserts on one creator identity,
-# so nothing here says whether product visibility or private-comment filtering
-# actually hides rows from a DIFFERENT user -- that needs a second identity and
-# is not covered.
+# docs/reference/sqlite-divergences.md.
+#
+# It DOES run two identities, so bug-level restriction is verified as an actual
+# denial rather than assumed from reading the code -- with a control proving the
+# second user could read the bug before it was restricted. What is still NOT
+# covered by a second identity: PRIVATE COMMENTS (comments.list filters them,
+# and no test drives that path as another user) and PRODUCT-level restriction
+# via productGroups, which now has RPCs but no assertion here.
 set -uo pipefail
 
 URL="${ZEROSHIP_URL:-http://localhost:3007}"
@@ -58,15 +62,24 @@ if [ -z "$SECRET" ]; then
   echo "say nothing about the app. Refusing to run a test that cannot pass." >&2
   exit 2
 fi
-COOKIE="$(node -e '
+# Parameterised by identity so the visibility section can run a SECOND user.
+# One identity can only ever show that access is granted; showing that it is
+# denied to somebody needs somebody else.
+mint_cookie() {
+  node -e '
 const { createHmac } = require("crypto");
+const [secret, id, email, name] = process.argv.slice(1);
 const user = JSON.stringify({
-  id: "pws_devalice0000000000", email: "alice@localhost", name: "Alice Dev",
-  avatar: null, email_verified: true, scopes: ["openid", "profile", "email"],
+  id, email, name, avatar: null, email_verified: true,
+  scopes: ["openid", "profile", "email"],
 });
 const p = Buffer.from(user).toString("base64url");
-process.stdout.write(`__zeroship_dev_session=${p}.${createHmac("sha256", process.argv[1]).update(p).digest("hex")}`);
-' "$SECRET")"
+process.stdout.write(`__zeroship_dev_session=${p}.${createHmac("sha256", secret).update(p).digest("hex")}`);
+' "$SECRET" "$1" "$2" "$3"
+}
+
+COOKIE="$(mint_cookie "pws_devalice0000000000" "alice@localhost" "Alice Dev")"
+BOB_COOKIE="$(mint_cookie "pws_devbob00000000000" "bob@localhost" "Bob Dev")"
 
 # The empty-args default is spelled with a variable rather than inline in the
 # parameter expansion: `${2:-\{\}}` expands to a LITERAL \{\}, which sends
@@ -167,6 +180,53 @@ case "$HIST" in
   *) fail "status transition missing from history" "status rows: $HIST" ;;
 esac
 
+
+echo "bug-level security groups"
+# The whole point of bugGroups: a confidential bug inside a product everyone can
+# otherwise read. Until this section existed, bugGroups was a table nothing read
+# and assertBugVisible checked only the product, so a "restricted" bug was
+# readable by anyone who could see its product.
+bob()  { curl -sS -m 25 -X POST -H 'content-type: application/json' -H "Cookie: $BOB_COOKIE" "$RPC/$1" -d "{\"json\":$(_body "${2-}")}"; }
+bobc() { curl -sS -m 25 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "Cookie: $BOB_COOKIE" "$RPC/$1" -d "{\"json\":$(_body "${2-}")}"; }
+
+SECRET_BUG="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Secret $STAMP\",\"description\":\"confidential\"}" | jget 'json.id')"
+
+# Bob is provisioned by his first authenticated call, and is NOT the first
+# account, so he must not be an admin -- an admin bypasses every restriction
+# below and would make the denial assertions vacuous.
+BOB_ADMIN="$(bob users.me | jget 'json.isAdmin')"
+[ "$BOB_ADMIN" = "false" ] && pass "the second account is not an admin" \
+  || fail "second account is admin=$BOB_ADMIN; restriction assertions below would be vacuous"
+
+# THE CONTROL. Without this, "Bob cannot see it" proves nothing -- he might
+# never have been able to.
+[ "$(bobc bugs.get "{\"id\":\"$SECRET_BUG\"}")" = "200" ] \
+  && pass "control: Bob CAN read the bug before it is restricted" \
+  || fail "control failed: Bob could not read the bug even unrestricted"
+
+GROUP="$(call groups.create "{\"name\":\"security-$STAMP\",\"description\":\"confidential bugs\"}" | jget 'json.id')"
+case "$GROUP" in
+  grou*|grp_*|*_*) pass "groups.create (the first account bootstraps as admin)" ;;
+  *) fail "groups.create" "got: $GROUP -- if this is a 403 the admin bootstrap regressed" ;;
+esac
+
+RESTRICT_CODE="$(code bugs.restrict "{\"bugId\":\"$SECRET_BUG\",\"groupId\":\"$GROUP\"}")"
+[ "$RESTRICT_CODE" = "200" ] && pass "bugs.restrict" || fail "bugs.restrict" "http=$RESTRICT_CODE"
+
+# The one variable that changed is the restriction.
+[ "$(bobc bugs.get "{\"id\":\"$SECRET_BUG\"}")" = "403" ] \
+  && pass "Bob is refused the restricted bug (403)" \
+  || fail "Bob can still read a restricted bug" "http=$(bobc bugs.get "{\"id\":\"$SECRET_BUG\"}")"
+
+# Enforcing only on the detail route would still leak summary, status and
+# assignee through the list -- most of what a confidential bug is hiding.
+BOB_SEES="$(bob bugs.search "{\"text\":\"Secret $STAMP\"}" | grep -c "$SECRET_BUG" || true)"
+[ "$BOB_SEES" = "0" ] && pass "the restricted bug is absent from Bob's search results" \
+  || fail "the restricted bug leaks through bugs.search for Bob"
+
+# Alice must still see it, or the restriction is just breakage.
+[ "$(code bugs.get "{\"id\":\"$SECRET_BUG\"}")" = "200" ] \
+  && pass "Alice still reads the bug she restricted" || fail "Alice lost access to her own restricted bug"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \

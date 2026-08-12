@@ -157,6 +157,12 @@ type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
 type CcRow = SystemRow & { bugId: string; userId: string };
 type ProductGroupRow = SystemRow & { productId: string; groupId: string };
 type GroupMemberRow = SystemRow & { groupId: string; userId: string };
+type GroupRow = SystemRow & {
+  name: string;
+  description?: string | null;
+  isBugGroup: boolean;
+};
+type BugGroupRow = SystemRow & { bugId: string; groupId: string };
 
 type FlagTypeRow = SystemRow & {
   name: string;
@@ -251,6 +257,7 @@ type TxDb = {
   bugKeywords: TxCollection<BugKeywordRow>;
   bugDependencies: TxCollection<DependencyRow>;
   bugCc: TxCollection<CcRow>;
+  bugGroups: TxCollection<BugGroupRow>;
   flags: TxCollection<FlagRow>;
   activities: TxCollection<ActivityRow>;
   savedSearches: TxCollection<SavedSearchRow>;
@@ -263,9 +270,16 @@ type AppDb = {
   components: Collection<ComponentRow>;
   versions: Collection<VersionRow>;
   milestones: Collection<MilestoneRow>;
+  groups: Collection<GroupRow>;
   productGroups: Collection<ProductGroupRow>;
   groupMembers: Collection<GroupMemberRow>;
+  bugGroups: Collection<BugGroupRow>;
   bugs: Collection<BugRow>;
+  // NOT LISTED, and therefore unreachable from this file even though the
+  // migration creates them: `bugSeeAlso`, `votes`, `watchers`. Their absence
+  // here is why no procedure touches them -- SPEC.md describes voting and
+  // watching, and neither is implemented. Adding the collection type is the
+  // first step, not the feature.
   comments: Collection<CommentRow>;
   attachments: Collection<AttachmentRow>;
   keywords: Collection<KeywordRow>;
@@ -510,12 +524,24 @@ async function requireActor(): Promise<UserRow> {
     return existing;
   }
 
+  // The first account to exist is the admin, the way Bugzilla's installer
+  // creates one at setup time. Without a bootstrap NOTHING can set isAdmin --
+  // there is no RPC that grants it -- so `groups.create`, `products.restrict`
+  // and every other admin path would be permanently unreachable and the access
+  // model would be unconfigurable rather than merely strict.
+  //
+  // Racy by construction on a truly empty database (two simultaneous first
+  // requests could both read zero). That is acceptable here and NOT a silent
+  // hazard: the loser of the unique-email race is handled below, and the worst
+  // case is two admins on a brand-new tracker, not an unguarded one.
+  const isFirstAccount = (must(await db.users.count({})) ?? 0) === 0;
+
   const inserted = await db.users.insert({
     email: identityEmail(identity),
     handle: profileHandle(identity),
     name: identity.name || identityEmail(identity),
     timezone: "UTC",
-    isAdmin: false,
+    isAdmin: isFirstAccount,
     isDisabled: false,
   });
   if (!inserted.error) return inserted.data;
@@ -591,8 +617,52 @@ async function visibleProductIds(
   );
 }
 
+// Bug-level security groups: Bugzilla's bug_group_map, the mechanism behind a
+// confidential security bug inside an otherwise public product. Product-level
+// visibility alone cannot express "this ONE bug is restricted".
+//
+// This existed as a table and nothing read it. `assertBugVisible` checked only
+// the product, so every bugGroups row was decorative and a "restricted" bug was
+// readable by anyone who could see its product.
+async function canViewBug(bug: BugRow, user: UserRow | null): Promise<boolean> {
+  if (!(await canViewProduct(bug.productId, user))) return false;
+  const restrictions = await readAll(db.bugGroups, { bugId: bug.id });
+  if (restrictions.length === 0) return true;
+  if (user?.isAdmin) return true;
+  if (!user) return false;
+  const memberships = await readAll(db.groupMembers, { userId: user.id });
+  const groups = new Set(memberships.map((row) => row.groupId));
+  return restrictions.some((row) => groups.has(row.groupId));
+}
+
 async function assertBugVisible(bug: BugRow, identity: PlatformUser | null): Promise<void> {
-  await assertCanViewProduct(bug.productId, await appUserForIdentity(identity));
+  if (!(await canViewBug(bug, await appUserForIdentity(identity)))) forbidden();
+}
+
+/**
+ * Bugs the user must not see because of a bug-level restriction.
+ *
+ * Returned as an exclusion list for the QUERY rather than applied by filtering
+ * the result rows: post-filtering a page silently shrinks it, so a viewer with
+ * a restricted bug in range gets a short page and the offsets stop meaning what
+ * the caller thinks. `$nin` keeps limit/offset honest.
+ */
+async function hiddenBugIds(user: UserRow | null): Promise<string[]> {
+  const restrictions = await readAll(db.bugGroups);
+  if (restrictions.length === 0) return [];
+  if (user?.isAdmin) return [];
+
+  const groups = user
+    ? new Set((await readAll(db.groupMembers, { userId: user.id })).map((row) => row.groupId))
+    : new Set<string>();
+
+  const byBug = new Map<string, string[]>();
+  for (const row of restrictions) {
+    byBug.set(row.bugId, [...(byBug.get(row.bugId) ?? []), row.groupId]);
+  }
+  return [...byBug.entries()]
+    .filter(([, required]) => !required.some((groupId) => groups.has(groupId)))
+    .map(([bugId]) => bugId);
 }
 
 async function validateProductChildren(
@@ -1048,6 +1118,14 @@ async function searchBugsInternal(
     });
   }
   if (extraFilter) clauses.push(extraFilter);
+
+  // Bug-level restrictions are applied to every search, not only to bugs.get.
+  // Enforcing on the detail route alone would keep a restricted bug's summary,
+  // status and assignee listed on the bug list and in reports -- which is most
+  // of what a confidential bug is trying not to leak.
+  const hidden = await hiddenBugIds(await appUserForIdentity(identity));
+  if (hidden.length > 0) clauses.push({ id: { $nin: hidden } });
+
   const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
   const sortBy = input.sortBy ?? "updated_at";
   const direction = input.sortDirection ?? -1;
@@ -3364,4 +3442,139 @@ export const reportTimeToResolve = query(
     };
   },
   { id: "reports.timeToResolve" },
+);
+
+// ---------------------------------------------------------------------------
+// Groups and access restrictions
+//
+// These exist because the enforcement code did not: `productGroups` and
+// `bugGroups` were both readable by the visibility helpers and writable by
+// nothing, so no restriction could ever be created and every visibility branch
+// was dead. A permission check that cannot be switched on is not a permission
+// check -- it reads like protection in the source and denies nobody at runtime.
+// ---------------------------------------------------------------------------
+
+async function requireAdmin(): Promise<UserRow> {
+  const actor = await requireActor();
+  if (!actor.isAdmin) forbidden("Only a platform admin can administer groups");
+  return actor;
+}
+
+export const createGroup = mutation(
+  async ({ name, description }: { name: string; description?: string | null }) => {
+    await requireAdmin();
+    const cleanName = requireNonEmpty(name, "name");
+    if (must(await db.groups.get({ name: cleanName }))) conflict("group name already exists");
+    return must(
+      await db.groups.insert({
+        name: cleanName,
+        ...(description ? { description } : {}),
+        isBugGroup: true,
+      }),
+    );
+  },
+  { id: "groups.create" },
+);
+
+export const listGroups = query(
+  async ({}: EmptyInput) => {
+    await requireAdmin();
+    return readAll(db.groups, {});
+  },
+  { id: "groups.list" },
+);
+
+export const addGroupMember = mutation(
+  async ({ groupId, userId }: { groupId: string; userId: string }) => {
+    await requireAdmin();
+    await getRequired(db.groups, groupId, "Group");
+    await getRequired(db.users, userId, "User");
+    const existing = must(await db.groupMembers.get({ groupId, userId }));
+    if (existing) return existing;
+    return must(await db.groupMembers.insert({ groupId, userId }));
+  },
+  { id: "groups.addMember" },
+);
+
+export const removeGroupMember = mutation(
+  async ({ groupId, userId }: { groupId: string; userId: string }) => {
+    await requireAdmin();
+    const existing = must(await db.groupMembers.get({ groupId, userId }));
+    if (!existing) notFound("Group membership");
+    must(await db.groupMembers.delete(existing.id));
+    return { removed: true };
+  },
+  { id: "groups.removeMember" },
+);
+
+export const restrictProduct = mutation(
+  async ({ productId, groupId }: { productId: string; groupId: string }) => {
+    await requireAdmin();
+    await getRequired(db.products, productId, "Product");
+    await getRequired(db.groups, groupId, "Group");
+    const existing = must(await db.productGroups.get({ productId, groupId }));
+    if (existing) return existing;
+    return must(await db.productGroups.insert({ productId, groupId }));
+  },
+  { id: "products.restrict" },
+);
+
+export const unrestrictProduct = mutation(
+  async ({ productId, groupId }: { productId: string; groupId: string }) => {
+    await requireAdmin();
+    const existing = must(await db.productGroups.get({ productId, groupId }));
+    if (!existing) notFound("Product restriction");
+    must(await db.productGroups.delete(existing.id));
+    return { removed: true };
+  },
+  { id: "products.unrestrict" },
+);
+
+export const restrictBug = mutation(
+  async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
+    const actor = await requireActor();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    if (!(await canViewBug(bug, actor))) forbidden();
+    await getRequired(db.groups, groupId, "Group");
+
+    // Bugzilla requires you to be IN a group to put a bug into it, and the
+    // reason is not bureaucratic: without this an ordinary user could restrict
+    // a bug to a group they are not in and lock themselves -- and everyone
+    // else outside it -- out of a bug they could previously read.
+    if (!actor.isAdmin) {
+      const membership = must(await db.groupMembers.get({ groupId, userId: actor.id }));
+      if (!membership) forbidden("You must belong to a group to restrict a bug to it");
+    }
+
+    // The restriction row and its history entry go in together: a restriction
+    // with no audit trail is exactly the change someone later needs to explain.
+    return must(
+      await db.transaction(async (tx) => {
+        const existing = await tx.bugGroups.get({ bugId, groupId });
+        if (existing) return existing;
+        const row = await tx.bugGroups.insert({ bugId, groupId });
+        await recordRelatedChange(tx.activities, bugId, actor.id, "bug_group", null, groupId);
+        return row;
+      }),
+    );
+  },
+  { id: "bugs.restrict" },
+);
+
+export const unrestrictBug = mutation(
+  async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
+    const actor = await requireActor();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    if (!(await canViewBug(bug, actor))) forbidden();
+    return must(
+      await db.transaction(async (tx) => {
+        const existing = await tx.bugGroups.get({ bugId, groupId });
+        if (!existing) notFound("Bug restriction");
+        await tx.bugGroups.delete(existing.id);
+        await recordRelatedChange(tx.activities, bugId, actor.id, "bug_group", groupId, null);
+        return { removed: true };
+      }),
+    );
+  },
+  { id: "bugs.unrestrict" },
 );
