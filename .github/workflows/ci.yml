@@ -279,6 +279,17 @@ jobs:
         run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
+      # A `//` comment in dispatch.rs said the transparent WebSocket proxy was
+      # wired in a `proxy::` helper. That name existed in exactly one place in
+      # the repo: the comment claiming it. It sat 760 lines from the function
+      # that returns 501 and says the proxy does not exist, so the file
+      # contradicted itself and the false half read first.
+      #
+      # Nothing could see it. A `//` comment is not a doc comment, so neither
+      # rustdoc's intra-doc gate (tests/run_doc_gate.sh above) nor the citation
+      # gates look at it. Text-only, runs no gateway.
+      - name: websocket subscription stub agrees with what describes it
+        run: tests/ws_subscription_stub_gate.sh
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
       # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
       # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md
