@@ -470,6 +470,36 @@ gw_revoke=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_gateway holds SELECT+INSERT+UPDATE on token_revocations (revoke_family upserts)" \
   || fail "zeroship_gateway token_revocations privileges read $gw_revoke of 3: revoke_family cannot succeed, so signout never revokes the family (#356)"
 
+# THIRD instance of the same class, found by sweeping for it rather than by
+# stumbling on it: role/table pairs with INSERT but NOT UPDATE, cross-referenced
+# against statements that use ON CONFLICT DO UPDATE.
+#
+# crates/control/src/app_oauth_client.rs:591 (production; that file's
+# #[cfg(test)] starts at 646) upserts the per-app OAuth client extension row
+# with ON CONFLICT (app_id) DO UPDATE, and control held INSERT but not UPDATE.
+# Unlike #356 this one FAILS LOUDLY - the error is propagated with
+# `.map_err(db_error)?` inside the provisioning transaction, so provisioning a
+# per-app OAuth client could not complete at all under least privilege.
+#
+# MEASURED 2026-08-12 as zeroship_control, each arm in its OWN transaction so
+# neither could mask the other:
+#   INSERT ... VALUES (gen_random_uuid(), ...)
+#     -> ERROR: violates foreign key constraint app_oauth_clients_app_id_fkey
+#   INSERT ... VALUES (...) ON CONFLICT (app_id) DO UPDATE SET ...
+#     -> ERROR: permission denied for table app_oauth_clients
+# The FK error is what makes the control arm discriminating: reaching CONSTRAINT
+# evaluation proves the INSERT privilege check passed, which the ON CONFLICT arm
+# never reaches. My first attempt at this probe died on `invalid input syntax
+# for type uuid` and proved nothing - a failed setup, not a result.
+#
+# WHAT THIS DOES NOT CATCH: privilege, not behaviour. A provisioning path that
+# stopped upserting would still pass.
+ctl_oauth=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('INSERT'),('UPDATE')) p(v) where n.nspname='zeroship' and c.relname='app_oauth_clients' and has_table_privilege('zeroship_control',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$ctl_oauth" = "3" ] \
+  && pass "zeroship_control holds SELECT+INSERT+UPDATE on app_oauth_clients (its provisioning upserts)" \
+  || fail "zeroship_control app_oauth_clients privileges read $ctl_oauth of 3: per-app OAuth client provisioning cannot complete (#357)"
+
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
