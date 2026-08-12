@@ -1756,10 +1756,21 @@ done
 # already received survive the kill. `head -c N` blocks for N bytes and is
 # SIGKILLed holding them, which reports a working server as silent -- measured,
 # twice, on 2026-08-12 before this step was written.
+#
+# WHY THE TIMEOUT IS THE WHOLE COST. After a 101 the server holds the socket
+# open, so `cat` never sees EOF and ALWAYS runs the full timeout -- the probe
+# costs exactly N seconds whether it succeeds or fails. Measured 2026-08-12 on
+# this machine, same server, same request, three timeouts:
+#     1s -> 140 bytes, correct frame, elapsed 1005ms
+#     2s -> 140 bytes, correct frame, elapsed 2004ms
+#     3s -> 140 bytes, correct frame, elapsed 3005ms
+# Elapsed tracks the timeout exactly and the payload never changes, so the data
+# is there well inside 1s and the rest is padding. 2 is 1 with a doubling for a
+# loaded CI box -- that margin is a JUDGEMENT, not a measurement of CI.
 ws_probe() { # ws_probe <extra_headers_or_empty> -> echoes the raw response head
   exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" || { echo "CONNECT-FAILED"; return; }
   printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\n%s\r\n' "$WS_PORT" "$1" >&3
-  timeout 8 cat <&3 | head -6
+  timeout 2 cat <&3 | head -6
   exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
 }
 WS_PLAIN=$(ws_probe $'Connection: close\r\n')
@@ -1786,7 +1797,7 @@ WS_FRAME_RAW="$WS_TMP/frame.bin"
 exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" 2>/dev/null && {
   printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n' "$WS_PORT" >&3
   printf '\x81\x84\x00\x00\x00\x00ping' >&3
-  timeout 8 cat <&3 > "$WS_FRAME_RAW"
+  timeout 2 cat <&3 > "$WS_FRAME_RAW"
   exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
 }
 WS_FRAME_HEX=$(tail -c 11 "$WS_FRAME_RAW" 2>/dev/null | od -An -tx1 | tr -d ' \n')
