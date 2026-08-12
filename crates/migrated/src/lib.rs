@@ -7,6 +7,7 @@
 pub mod api;
 pub mod apply;
 pub mod auth;
+pub mod config;
 pub mod migration_store;
 pub mod policy;
 pub mod policy_store;

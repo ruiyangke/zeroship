@@ -11,10 +11,11 @@ use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_nonempty, resolve_origin_scheme,
-    resolve_trusted_origins, validate_stash_key, CheckConfigReport, CheckFormat, CheckValue,
+    resolve_trusted_origins, validate_stash_key, CheckConfigReport, CheckValue,
     OriginScheme, TrustedOrigin,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_gateway::config::{GateControls, GateControlsSources};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
     router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
@@ -182,26 +183,10 @@ struct GateCli {
     )]
     trust_proxy: Option<bool>,
 
-    /// Optional shared config overlay path.
-    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
-    config_path: Option<PathBuf>,
-
-    /// Disable auto-discovery of the well-known config overlay
-    /// (`/etc/zeroship/zeroship.toml`); use compiled defaults instead.
-    #[arg(long = "no-config")]
-    no_config: bool,
-
-    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
-    #[arg(long = "check-config")]
-    check_config: bool,
-
-    /// Output format for `--check-config`: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
-    check_config_format: String,
-
-    /// Observability CLI/env overrides.
+    /// Bootstrap, command and observability controls, generated from one
+    /// declaration in `zeroship_gateway::config`.
     #[command(flatten)]
-    obs: zeroship_core::observability::ObservabilityFlags,
+    controls: GateControlsSources,
 }
 
 /// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
@@ -277,13 +262,12 @@ fn load_gateway_broker_secret_file(path: &str) -> oidc_rp::BrokerSecret {
 
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
-    let boot = bootstrap_or_exit(
-        cli.config_path.as_deref(),
-        !cli.no_config,
-        &cli.obs,
-        "info,zeroship_gateway=debug",
+    let (controls, boot) = bootstrap_or_exit::<GateControls>(
+        cli.controls,
+        zeroship_gateway::config::DEFAULT_LOG_FILTER,
         "gateway",
     );
+    let check_config = *controls.check_config.get();
     let file = &boot.overlay.config;
     // `[secrets]` file-tier overlay — bound ONCE before any secret resolution.
     // The gateway never partially moves `boot.overlay.config`, so a reference
@@ -317,7 +301,7 @@ fn main() -> std::io::Result<()> {
         "CONTROL_KEY / --control-key",
         &cli.control_key,
         file_secrets.control_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
@@ -328,7 +312,7 @@ fn main() -> std::io::Result<()> {
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
         file_secrets.worker_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let blob_store_root = cli.blob_store;
     // Classify the `--blob-store` value: `s3://…` → remote S3, bare path →
@@ -353,13 +337,13 @@ fn main() -> std::io::Result<()> {
         "DATABASE_URL / --db",
         &cli.db,
         file_secrets.database_url.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let stash_signing_key = zeroship_core::config::obtain_secret(
         "STASH_SIGNING_KEY / --stash-signing-key",
         &cli.stash_signing_key,
         file_secrets.stash_signing_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     // Dedicated pairwise-salt secret. A `--pairwise-salt-file` path wins over
     // the inline `--pairwise-salt`/`PAIRWISE_SALT` value (and over the config
@@ -368,7 +352,7 @@ fn main() -> std::io::Result<()> {
         &cli.pairwise_salt_file,
         &cli.pairwise_salt,
         file_secrets.pairwise_salt.as_deref(),
-        cli.check_config,
+        check_config,
     );
     // File-PATH field (names a file to read), NOT a secret value — left
     // unresolved; the signing key is loaded from this path below.
@@ -389,7 +373,7 @@ fn main() -> std::io::Result<()> {
     // `--check-config` the local is still the raw reference string (we only
     // format-validated it above); a reference's text is not the secret, so
     // running a strength check on it would wrongly fail — skip it then.
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
         if let Err(message) = validate_stash_key(&stash_signing_key) {
             tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
             std::process::exit(1);
@@ -401,7 +385,7 @@ fn main() -> std::io::Result<()> {
     // raw secret reference (its text is not the secret). A missing or weak salt
     // aborts boot: the per-app `pws_` anchor must be a strong, stable,
     // operator-set secret.
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
         if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
             tracing::error!(error = %message, "gateway: refusing to start with unsafe pairwise salt");
             std::process::exit(1);
@@ -492,10 +476,8 @@ fn main() -> std::io::Result<()> {
         Arc::new(verifier)
     });
 
-    if cli.check_config {
-        let log_format = boot
-            .log_format
-            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+    if check_config {
+        let log_format = boot.log_format.to_string();
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
         report.field("bind", CheckValue::Plain(bind_host.clone()));
@@ -546,12 +528,7 @@ fn main() -> std::io::Result<()> {
             "pairwise_salt_configured",
             CheckValue::Secret(!pairwise_salt.is_empty()),
         );
-        let fmt = if cli.check_config_format == "json" {
-            CheckFormat::Json
-        } else {
-            CheckFormat::Text
-        };
-        report.emit(fmt);
+        report.emit(*controls.check_config_format.get());
         return Ok(());
     }
 
@@ -1060,7 +1037,7 @@ mod tests {
     // (b) The exact boolean the stash-key strength guard is gated on. In
     // check-config, a REFERENCE skips the strength guard (the local is the
     // raw ref string, not the material) while a LITERAL still runs it.
-    // Mirrors `!cli.check_config || !is_secret_ref(&stash_signing_key)`.
+    // Mirrors `!check_config || !is_secret_ref(&stash_signing_key)`.
     #[test]
     fn check_config_ref_skips_strength_guard_literal_still_runs() {
         let check_config = true;

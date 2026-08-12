@@ -96,8 +96,8 @@ enum SupplyClass {
 }
 
 impl SupplyClass {
-    /// A control's clap carrier never carries an environment name for the
-    /// command class, and a secret never carries one at all.
+    /// A command control has no environment tier and a secret never puts one on
+    /// its clap carrier; the remaining classes may, subject to `env = false`.
     const fn has_clap_env(self) -> bool {
         matches!(self, Self::Operational | Self::Bootstrap)
     }
@@ -127,6 +127,7 @@ struct FieldConfig {
     /// For [`CarrierShape::Optional`], the `U` inside the declared `Option<U>`.
     carrier_type: Type,
     canonical: LitStr,
+    env_enabled: bool,
     default: Option<Expr>,
     retained_attrs: Vec<Attribute>,
     cfg_attrs: Vec<Attribute>,
@@ -135,6 +136,8 @@ struct FieldConfig {
 struct ConfigAttribute {
     name: LitStr,
     default: Option<Expr>,
+    /// `env = false` on a bootstrap control; see [`SupplyClass::Bootstrap`].
+    env: Option<syn::LitBool>,
 }
 
 impl Parse for ConfigAttribute {
@@ -142,12 +145,13 @@ impl Parse for ConfigAttribute {
         let entries = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
         let mut name = None;
         let mut default = None;
+        let mut env = None;
 
         for entry in entries {
             let Meta::NameValue(name_value) = entry else {
                 return Err(syn::Error::new_spanned(
                     entry,
-                    "expected `name = \"...\"` or `default = EXPR`",
+                    "expected `name = \"...\"`, `default = EXPR` or `env = false`",
                 ));
             };
             let Some(key) = name_value.path.get_ident() else {
@@ -183,10 +187,33 @@ impl Parse for ConfigAttribute {
                         ));
                     }
                 }
+                "env" => {
+                    let Expr::Lit(expr_lit) = name_value.value else {
+                        return Err(syn::Error::new_spanned(
+                            key,
+                            "`env` must be the literal `false`",
+                        ));
+                    };
+                    let syn::Lit::Bool(value) = expr_lit.lit else {
+                        return Err(syn::Error::new_spanned(
+                            expr_lit,
+                            "`env` must be the literal `false`",
+                        ));
+                    };
+                    if value.value() {
+                        return Err(syn::Error::new_spanned(
+                            value,
+                            "`env = true` is the default; only `env = false` is meaningful",
+                        ));
+                    }
+                    if env.replace(value).is_some() {
+                        return Err(syn::Error::new_spanned(key, "duplicate `env` argument"));
+                    }
+                }
                 _ => {
                     return Err(syn::Error::new_spanned(
                         key,
-                        "unknown config argument; expected `name` or `default`",
+                        "unknown config argument; expected `name`, `default` or `env`",
                     ));
                 }
             }
@@ -197,6 +224,7 @@ impl Parse for ConfigAttribute {
                 syn::Error::new(proc_macro2::Span::call_site(), "missing `name = \"...\"`")
             })?,
             default,
+            env,
         })
     }
 }
@@ -251,6 +279,16 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                 "Secret<T> fields cannot declare a compiled secret default",
             ));
         }
+        if let Some(env) = &config.env {
+            if class != SupplyClass::Bootstrap {
+                return Err(syn::Error::new_spanned(
+                    env,
+                    "only BootstrapControl<T> may disable its environment source; an \
+                     operational or secret setting needs one, and a command control \
+                     never has one",
+                ));
+            }
+        }
         let (shape, carrier_type) = carrier_shape(class, &inner_type);
         if shape != CarrierShape::Valued && config.default.is_some() {
             return Err(syn::Error::new_spanned(
@@ -261,7 +299,14 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         }
 
         field.attrs.remove(config_index);
+        // Every remaining attribute travels to the clap CARRIER. `#[arg(..)]`
+        // and `#[command(..)]` are then dropped from the resolved struct: it is
+        // not a clap type, and leaving them there is an unknown-attribute error
+        // rather than a no-op.
         let retained_attrs = field.attrs.clone();
+        field
+            .attrs
+            .retain(|attr| !(attr.path().is_ident("arg") || attr.path().is_ident("command")));
         let cfg_attrs = retained_attrs
             .iter()
             .filter(|attribute| attribute.path().is_ident("cfg"))
@@ -275,6 +320,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             inner_type,
             carrier_type,
             canonical: config.name,
+            env_enabled: config.env.is_none(),
             default: config.default,
             retained_attrs,
             cfg_attrs,
@@ -366,9 +412,7 @@ fn emit(
         // The environment name is attached to the clap carrier for every class
         // that has one, so `clap` itself performs the CLI-over-env merge and no
         // generated code re-implements that precedence.
-        let env = config
-            .class
-            .has_clap_env()
+        let env = (config.class.has_clap_env() && config.env_enabled)
             .then(|| env_projection(&canonical))
             .map(|env| quote!(, env = #env))
             .unwrap_or_default();
@@ -416,17 +460,21 @@ fn emit(
         // `ConfigSpec::secret` takes no default parameter at all, so a compiled
         // secret default is not merely rejected by the attribute above but
         // unspellable in the emitted call.
-        let (constructor, trailing) = match config.class {
-            SupplyClass::Operational => (quote!(operational), quote!(#default,)),
-            SupplyClass::Secret => (quote!(secret), quote!()),
-            SupplyClass::Bootstrap => (quote!(bootstrap), quote!(#default,)),
-            SupplyClass::Command => (quote!(command), quote!(#default,)),
+        let env_enabled = config.env_enabled;
+        let (constructor, leading, trailing) = match config.class {
+            SupplyClass::Operational => (quote!(operational), quote!(), quote!(#default,)),
+            SupplyClass::Secret => (quote!(secret), quote!(), quote!()),
+            SupplyClass::Bootstrap => {
+                (quote!(bootstrap), quote!(#env_enabled,), quote!(#default,))
+            }
+            SupplyClass::Command => (quote!(command), quote!(), quote!(#default,)),
         };
         quote! {
             #(#cfg_attrs)*
             ::zeroship_core::config::ConfigSpec::#constructor(
                 ::zeroship_core::config::CanonicalName::from_static(#canonical),
                 &[::zeroship_core::config::Consumer::new(#binary, #scope)],
+                #leading
                 #field,
                 #field,
                 ::core::stringify!(#inner),
@@ -460,8 +508,10 @@ fn emit(
                     kinds.push(("ENV", quote!(Env)));
                 }
                 SupplyClass::Secret => kinds.push(("TOML", quote!(Toml))),
-                SupplyClass::Bootstrap => kinds.push(("ENV", quote!(Env))),
-                SupplyClass::Command => {}
+                SupplyClass::Bootstrap if config.env_enabled => {
+                    kinds.push(("ENV", quote!(Env)));
+                }
+                SupplyClass::Bootstrap | SupplyClass::Command => {}
             }
             kinds.into_iter().map(move |(kind_name, kind)| {
                 let static_ident = format_ident!(
@@ -553,7 +603,11 @@ fn emit(
     Ok(quote! {
         #resolved
 
-        #[derive(::zeroship_core::__private::clap::Parser)]
+        // `Debug` is safe on the CARRIER: an operational carrier holds a value
+        // that is operational by classification, and a secret carrier holds a
+        // file PATH, never the material in it. The resolved struct is where
+        // `Secret<T>`'s redaction applies.
+        #[derive(::core::clone::Clone, ::core::fmt::Debug, ::zeroship_core::__private::clap::Parser)]
         #resolved_visibility struct #sources_ident {
             #(#source_fields,)*
         }
@@ -869,6 +923,67 @@ mod tests {
         assert!(compact.contains("resolve_control("));
         assert!(compact.contains("CommandControl::new"));
         assert!(compact.contains("BootstrapControl::new"));
+    }
+
+    #[test]
+    fn a_safety_control_can_refuse_the_environment_entirely() {
+        // The transform table's "env when enabled". A protection that a stray
+        // exported variable can switch off is not a protection.
+        let output = formatted(
+            expand(
+                quote!(binary = "zeroship-worker", scope = "worker"),
+                quote! {
+                    struct Controls {
+                        #[config(name = "worker.workflow_advance_unsigned", env = false)]
+                        workflow_advance_unsigned: BootstrapControl<bool>,
+                        #[config(name = "no_config")]
+                        no_config: BootstrapControl<bool>,
+                    }
+                },
+            )
+            .expect("env-free safety control expands"),
+        );
+        assert!(
+            !output.contains("ZEROSHIP_WORKER_WORKFLOW_ADVANCE_UNSIGNED"),
+            "the disabled environment name must appear nowhere:\n{output}"
+        );
+        assert!(
+            !output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_WORKFLOW_ADVANCE_UNSIGNED_ENV"),
+            "a disabled source must not register a read site"
+        );
+        // The one-variable control: the sibling field differs only by not
+        // saying `env = false`, and it keeps both.
+        assert!(output.contains("env = \"ZEROSHIP_NO_CONFIG\""));
+        assert!(output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_NO_CONFIG_ENV"));
+        assert!(output.contains("ConfigSpec::bootstrap"));
+    }
+
+    #[test]
+    fn only_a_bootstrap_control_may_disable_its_environment() {
+        for field in [
+            quote! {
+                #[config(name = "control.port", env = false, default = 1)]
+                port: Operational<u16>
+            },
+            quote! {
+                #[config(name = "control.database_url", env = false)]
+                database_url: Secret<String>
+            },
+            quote! {
+                #[config(name = "check_config", env = false)]
+                check_config: CommandControl<bool>
+            },
+        ] {
+            let error = expand(
+                quote!(binary = "zeroship-control", scope = "control"),
+                quote! { struct Bad { #field, } },
+            )
+            .expect_err("env = false outside a bootstrap control must not expand");
+            assert!(
+                error.to_string().contains("only BootstrapControl<T>"),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

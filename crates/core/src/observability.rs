@@ -18,14 +18,22 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::str::FromStr;
 
+use serde::{Deserialize, Deserializer};
 use tracing_subscriber::{fmt as tracing_fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::config::file::{ConfigError, ObsSection};
-
-/// Tracing output format. Parsed by clap (CLI/env) and by
-/// [`resolve_observability`] (file overlay); both reject unknown values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Tracing output format, the resolved type of `observability.log_format`.
+///
+/// The same value type is parsed from the flag, the environment and the TOML
+/// overlay, so a spelling clap accepts and a spelling the overlay accepts
+/// cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogFormat {
+    /// Choose by terminal: `pretty` on a TTY, `json` otherwise.
+    ///
+    /// A real variant rather than `Option::None`, so "unset" has one spelling
+    /// across the flag, the environment, the overlay and the compiled default.
+    #[default]
+    Auto,
     /// Developer-friendly multi-line layout.
     Pretty,
     /// Single-line compact layout.
@@ -41,6 +49,7 @@ pub enum LogFormat {
 impl fmt::Display for LogFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Auto => "auto",
             Self::Pretty => "pretty",
             Self::Compact => "compact",
             Self::Json => "json",
@@ -55,34 +64,33 @@ impl FromStr for LogFormat {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
             "pretty" => Ok(Self::Pretty),
             "compact" => Ok(Self::Compact),
             "json" => Ok(Self::Json),
             "logfmt" => Ok(Self::Logfmt),
             "bunyan" => Ok(Self::Bunyan),
             other => Err(format!(
-                "invalid log format {other:?}; expected one of pretty, compact, json, logfmt, bunyan"
+                "invalid log format {other:?}; expected one of auto, pretty, compact, json, logfmt, bunyan"
             )),
         }
     }
 }
 
-/// CLI/environment observability overrides shared by server binaries.
-#[derive(Debug, Clone, Default, clap::Args)]
-pub struct ObservabilityFlags {
-    /// `RUST_LOG` / `EnvFilter` directive.
-    #[arg(long = "log-filter", env = "RUST_LOG")]
-    pub log_filter: Option<String>,
-    /// Tracing output format (clap rejects invalid values at parse time).
-    #[arg(long = "log-format", env = "ZEROSHIP_LOG_FORMAT")]
-    pub log_format: Option<LogFormat>,
+impl<'de> Deserialize<'de> for LogFormat {
+    /// Deserialize through [`FromStr`] so the overlay accepts exactly the
+    /// spellings the flag does, case-insensitively, and rejects the rest.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_str(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Resolve a tracing filter candidate, silently falling back to the default on parse error.
 ///
 /// Silent by design: the invalid-filter fallback is surfaced as a STRUCTURED
 /// `tracing::warn!` by [`crate::config::bootstrap`] *after* the subscriber is
-/// initialized, so the warning honors the configured `--log-format` (e.g. JSON)
+/// initialized, so the warning honors the configured log format (e.g. JSON)
 /// instead of being a pre-tracing `eprintln!` a log pipeline would miss (O3).
 #[must_use]
 pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> String {
@@ -95,41 +103,6 @@ pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> St
     } else {
         default_filter.to_string()
     }
-}
-
-/// Resolve observability settings with flag/env values overriding the file.
-///
-/// The `log_filter` keeps validate-or-default semantics. The `log_format` from
-/// the file overlay is parsed into a [`LogFormat`] and **errors** on an invalid
-/// value (S6), so `--check-config` and boot agree.
-///
-/// # Errors
-///
-/// Returns [`ConfigError::InvalidLogFormat`] when the file overlay carries an
-/// unrecognised `log_format`.
-pub fn resolve_observability(
-    flags: &ObservabilityFlags,
-    file: &ObsSection,
-    default_filter: &str,
-) -> Result<(String, Option<LogFormat>), ConfigError> {
-    let filter = resolve_log_filter(
-        flags.log_filter.clone().or_else(|| file.log_filter.clone()),
-        default_filter,
-    );
-
-    let format = match flags.log_format {
-        Some(fmt) => Some(fmt),
-        None => match &file.log_format {
-            Some(raw) => Some(LogFormat::from_str(raw).map_err(|_| {
-                ConfigError::InvalidLogFormat {
-                    value: raw.clone(),
-                }
-            })?),
-            None => None,
-        },
-    };
-
-    Ok((filter, format))
 }
 
 /// Initialise the workspace-wide tracing subscriber.
@@ -147,37 +120,43 @@ pub fn init_tracing(default_filter: &str) {
     let filter = resolve_log_filter(std::env::var("RUST_LOG").ok(), default_filter);
     let format = std::env::var("ZEROSHIP_LOG_FORMAT")
         .ok()
-        .and_then(|raw| LogFormat::from_str(&raw).ok());
+        .and_then(|raw| LogFormat::from_str(&raw).ok())
+        .unwrap_or(LogFormat::Auto);
 
     init_tracing_with(&filter, format);
 }
 
-/// Initialise tracing with an already-resolved filter and optional format.
+/// Initialise tracing with an already-resolved filter and format.
 ///
-/// Passing `None` for `format` preserves the standard auto-detection:
-/// TTY stderr uses `pretty`, and non-TTY stderr uses `json`.
+/// [`LogFormat::Auto`] performs the standard detection: TTY stderr uses
+/// `pretty`, and non-TTY stderr uses `json`.
 ///
 /// # Panics
 ///
 /// Never in practice: the sole `expect` is on the hard-coded `"error"`
 /// fallback directive, which is always a valid `EnvFilter`.
-pub fn init_tracing_with(filter: &str, format: Option<LogFormat>) {
+pub fn init_tracing_with(filter: &str, format: LogFormat) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|err| {
         eprintln!("invalid tracing filter {filter:?}: {err}; falling back to \"error\"");
         EnvFilter::try_new("error").expect("hard-coded tracing filter is valid")
     });
 
-    let format = format.unwrap_or_else(|| {
-        if std::io::stderr().is_terminal() {
-            LogFormat::Pretty
-        } else {
-            LogFormat::Json
-        }
-    });
+    let format = match format {
+        LogFormat::Auto if std::io::stderr().is_terminal() => LogFormat::Pretty,
+        LogFormat::Auto => LogFormat::Json,
+        selected => selected,
+    };
 
     let registry = tracing_subscriber::registry().with(env_filter);
 
     match format {
+        // Unreachable: `Auto` was resolved above. Kept explicit so adding a
+        // variant is a compile error rather than a silent fall-through.
+        LogFormat::Auto | LogFormat::Pretty => {
+            registry
+                .with(tracing_fmt::layer().pretty().with_thread_ids(false))
+                .init();
+        }
         LogFormat::Json => {
             registry
                 .with(
@@ -206,11 +185,6 @@ pub fn init_tracing_with(filter: &str, format: Option<LogFormat>) {
         LogFormat::Compact => {
             registry.with(tracing_fmt::layer().compact()).init();
         }
-        LogFormat::Pretty => {
-            registry
-                .with(tracing_fmt::layer().pretty().with_thread_ids(false))
-                .init();
-        }
     }
 
     // Bridge any third-party `log::*` calls through to tracing.
@@ -231,8 +205,8 @@ fn binary_name() -> String {
 mod tests {
     use std::str::FromStr;
 
-    use super::{resolve_log_filter, resolve_observability, LogFormat, ObservabilityFlags};
-    use crate::config::file::{ConfigError, ObsSection};
+    use super::{resolve_log_filter, LogFormat};
+    use crate::config::{resolve_operational, CanonicalName};
 
     #[test]
     fn log_format_from_str_known_and_unknown() {
@@ -241,7 +215,45 @@ mod tests {
         assert_eq!(LogFormat::from_str("JSON"), Ok(LogFormat::Json));
         assert_eq!(LogFormat::from_str("Pretty"), Ok(LogFormat::Pretty));
         assert_eq!(LogFormat::from_str("logfmt"), Ok(LogFormat::Logfmt));
+        assert_eq!(LogFormat::from_str("auto"), Ok(LogFormat::Auto));
         assert!(LogFormat::from_str("nope").is_err());
+    }
+
+    #[test]
+    fn the_overlay_accepts_exactly_the_spellings_the_flag_does() {
+        // One value type across flag, env and TOML: the Deserialize impl routes
+        // through FromStr, so the two surfaces cannot drift.
+        for (raw, expected) in [
+            ("json", LogFormat::Json),
+            ("JSON", LogFormat::Json),
+            ("auto", LogFormat::Auto),
+        ] {
+            let parsed: LogFormat =
+                toml::from_str::<toml::Value>(&format!("v = {raw:?}"))
+                    .expect("fixture TOML")["v"]
+                    .clone()
+                    .try_into()
+                    .expect("overlay value parses");
+            assert_eq!(parsed, expected);
+        }
+
+        let rejected = toml::from_str::<toml::Value>("v = \"jsom\"")
+            .expect("fixture TOML")["v"]
+            .clone()
+            .try_into::<LogFormat>();
+        assert!(
+            rejected.is_err(),
+            "an unrecognised overlay log_format must be fatal, not a silent degrade"
+        );
+
+        // Does not cover a non-string TOML value; that fails in the same
+        // try_into for a different reason and is not what this pins.
+    }
+
+    #[test]
+    fn auto_is_the_compiled_default() {
+        assert_eq!(LogFormat::default(), LogFormat::Auto);
+        assert_eq!(LogFormat::Auto.to_string(), "auto");
     }
 
     #[test]
@@ -254,80 +266,96 @@ mod tests {
     }
 
     #[test]
-    fn resolve_observability_prefers_flag_then_file_then_default_filter() {
-        let file = ObsSection {
-            log_filter: Some("info,zeroship_file=debug".to_string()),
-            log_format: None,
-        };
+    fn observability_precedence_is_carrier_then_overlay_then_compiled_default() {
+        // The former resolve_observability(flags, file, default) three-tier
+        // merge, restated against the machinery that replaced it. clap has
+        // already merged the flag and the environment into `carrier`, so this
+        // covers carrier > overlay > default and not flag > env.
+        let overlay: toml::Value = toml::from_str(
+            "[observability]\nlog_filter = \"info,zeroship_file=debug\"\nlog_format = \"json\"\n",
+        )
+        .expect("fixture overlay");
+        let filter_name = CanonicalName::from_static("observability.log_filter");
+        let format_name = CanonicalName::from_static("observability.log_format");
+        let fallback = || Some("info,zeroship_default=debug".to_owned());
 
-        let flags = ObservabilityFlags {
-            log_filter: Some("warn,zeroship_flag=trace".to_string()),
-            log_format: None,
-        };
-        let (filter, _) =
-            resolve_observability(&flags, &file, "info,zeroship_default=debug").expect("ok");
-        assert_eq!(filter, "warn,zeroship_flag=trace");
+        assert_eq!(
+            resolve_operational(
+                filter_name,
+                Some("warn,zeroship_flag=trace".to_owned()),
+                Some(&overlay),
+                fallback,
+            )
+            .expect("carrier wins")
+            .into_inner(),
+            "warn,zeroship_flag=trace"
+        );
+        assert_eq!(
+            resolve_operational(filter_name, None, Some(&overlay), fallback)
+                .expect("overlay applies")
+                .into_inner(),
+            "info,zeroship_file=debug"
+        );
+        assert_eq!(
+            resolve_operational(filter_name, None, None, fallback)
+                .expect("compiled default applies")
+                .into_inner(),
+            "info,zeroship_default=debug"
+        );
 
-        let flags = ObservabilityFlags::default();
-        let (filter, _) =
-            resolve_observability(&flags, &file, "info,zeroship_default=debug").expect("ok");
-        assert_eq!(filter, "info,zeroship_file=debug");
+        assert_eq!(
+            resolve_operational(
+                format_name,
+                Some(LogFormat::Compact),
+                Some(&overlay),
+                || Some(LogFormat::Auto),
+            )
+            .expect("carrier wins")
+            .into_inner(),
+            LogFormat::Compact
+        );
+        assert_eq!(
+            resolve_operational(format_name, None, Some(&overlay), || Some(LogFormat::Auto))
+                .expect("overlay applies")
+                .into_inner(),
+            LogFormat::Json
+        );
+        assert_eq!(
+            resolve_operational(format_name, None, None, || Some(LogFormat::Auto))
+                .expect("compiled default applies")
+                .into_inner(),
+            LogFormat::Auto
+        );
+    }
 
-        let file = ObsSection::default();
-        let (filter, _) =
-            resolve_observability(&flags, &file, "info,zeroship_default=debug").expect("ok");
-        assert_eq!(filter, "info,zeroship_default=debug");
+    // S6: an invalid overlay log_format is fatal, not a silent degrade.
+    #[test]
+    fn an_invalid_overlay_log_format_is_fatal() {
+        let overlay: toml::Value =
+            toml::from_str("[observability]\nlog_format = \"jsom\"\n").expect("fixture overlay");
+        let error = resolve_operational(
+            CanonicalName::from_static("observability.log_format"),
+            None,
+            Some(&overlay),
+            || Some(LogFormat::Auto),
+        )
+        .expect_err("an unrecognised format must not fall back to Auto");
+        assert!(error.to_string().contains("observability.log_format"));
+
+        // The paired positive control is the "json" arm of the precedence test
+        // above: same path, same overlay shape, one character different.
     }
 
     #[test]
-    fn resolve_observability_prefers_flag_then_file_then_none_format() {
-        let file = ObsSection {
-            log_filter: None,
-            log_format: Some("json".to_string()),
-        };
-
-        let flags = ObservabilityFlags {
-            log_filter: None,
-            log_format: Some(LogFormat::Compact),
-        };
-        let (_, format) = resolve_observability(&flags, &file, "info").expect("ok");
-        assert_eq!(format, Some(LogFormat::Compact));
-
-        let flags = ObservabilityFlags::default();
-        let (_, format) = resolve_observability(&flags, &file, "info").expect("ok");
-        assert_eq!(format, Some(LogFormat::Json));
-
-        let file = ObsSection::default();
-        let (_, format) = resolve_observability(&flags, &file, "info").expect("ok");
-        assert!(format.is_none());
-    }
-
-    // S6: an invalid file-provided log_format is fatal, not a silent degrade.
-    #[test]
-    fn resolve_observability_errors_on_invalid_file_format() {
-        let file = ObsSection {
-            log_filter: None,
-            log_format: Some("jsom".to_string()),
-        };
-        let flags = ObservabilityFlags::default();
-
-        let err = resolve_observability(&flags, &file, "info").expect_err("invalid format");
-        assert!(matches!(err, ConfigError::InvalidLogFormat { value } if value == "jsom"));
-    }
-
-    #[test]
-    fn resolve_observability_falls_back_to_default_for_malformed_filter() {
-        let file = ObsSection {
-            log_filter: Some("info,zeroship_file=debug".to_string()),
-            log_format: None,
-        };
-        let flags = ObservabilityFlags {
-            log_filter: Some("zeroship_core=definitely-not-a-level".to_string()),
-            log_format: None,
-        };
-
-        let (filter, _) =
-            resolve_observability(&flags, &file, "info,zeroship_default=debug").expect("ok");
-        assert_eq!(filter, "info,zeroship_default=debug");
+    fn an_invalid_filter_still_falls_back_to_the_compiled_default() {
+        // Unlike log_format, a syntactically bad filter degrades rather than
+        // refusing to boot; bootstrap then warns through the live subscriber.
+        assert_eq!(
+            resolve_log_filter(
+                Some("zeroship_core=definitely-not-a-level".to_owned()),
+                "info,zeroship_default=debug",
+            ),
+            "info,zeroship_default=debug"
+        );
     }
 }

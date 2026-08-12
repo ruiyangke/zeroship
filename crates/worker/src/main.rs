@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
+use zeroship_worker::config::{WorkerControls, WorkerControlsSources};
 use zeroship_core::config::{
-    bootstrap_or_exit, CheckConfigReport, CheckFormat, CheckValue,
+    bootstrap_or_exit, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -112,17 +113,6 @@ struct WorkerCli {
     #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
     storage_url: String,
 
-    /// Enable the unsigned durable-workflow replay ingress, which performs NO
-    /// signature or nonce verification. Hidden because signed advance is the
-    /// production transport; this exercises the real replay path.
-    ///
-    /// The handler itself always ships - this flag is what refuses it at
-    /// runtime, so the default here IS the production protection. Deliberately
-    /// no `env = ...`: a stray environment variable must not be able to turn
-    /// signature verification off.
-    #[arg(long = "workflow-advance-unsigned", hide = true, default_value_t = false)]
-    workflow_advance_unsigned: bool,
-
     /// Maximum persisted bytes for one workflow step output blob.
     #[arg(
         long = "max-step-blob-bytes",
@@ -139,26 +129,10 @@ struct WorkerCli {
     #[arg(long = "socket", env = "WORKER_SOCKET", default_value = "")]
     socket: String,
 
-    /// Optional shared config overlay path.
-    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
-    config_path: Option<PathBuf>,
-
-    /// Disable auto-discovery of the well-known overlay path; use compiled
-    /// defaults even if `/etc/zeroship/zeroship.toml` exists (O5).
-    #[arg(long = "no-config")]
-    no_config: bool,
-
-    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
-    #[arg(long = "check-config")]
-    check_config: bool,
-
-    /// Output format for `--check-config`: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
-    check_config_format: String,
-
-    /// Observability CLI/env overrides.
+    /// Bootstrap, command and observability controls, generated from one
+    /// declaration in `zeroship_worker::config`.
     #[command(flatten)]
-    obs: zeroship_core::observability::ObservabilityFlags,
+    controls: WorkerControlsSources,
 }
 
 // Hand-written Debug that redacts the raw-secret fields (`control_key`,
@@ -184,15 +158,10 @@ impl std::fmt::Debug for WorkerCli {
             // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
             .field("storage_url", &self.storage_url)
-            .field("workflow_advance_unsigned", &self.workflow_advance_unsigned)
             .field("max_step_blob_bytes", &self.max_step_blob_bytes)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
-            .field("config_path", &self.config_path)
-            .field("no_config", &self.no_config)
-            .field("check_config", &self.check_config)
-            .field("check_config_format", &self.check_config_format)
-            .field("obs", &self.obs)
+            .field("controls", &self.controls)
             .finish()
     }
 }
@@ -290,13 +259,13 @@ pub struct WorkerConfig {
 
 fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
-    let boot = bootstrap_or_exit(
-        cli.config_path.as_deref(),
-        !cli.no_config,
-        &cli.obs,
+    let (controls, boot) = bootstrap_or_exit::<WorkerControls>(
+        cli.controls,
         "info,zeroship_worker=debug,zeroship_runtime=info",
         "worker",
     );
+    let check_config = *controls.check_config.get();
+    let workflow_advance_unsigned = *controls.workflow_advance_unsigned.get();
 
     // `[secrets]` overlay tier: reference-only values that back-fill any secret
     // the CLI/env leaves empty (CLI/env still wins). Clone the section once,
@@ -315,7 +284,7 @@ fn main() -> std::io::Result<()> {
         "CONTROL_KEY / --control-key",
         &cli.control_key,
         file_secrets.control_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let max_isolates = cli.max_isolates;
     let max_pinned_isolates_per_app = cli.max_pinned_isolates_per_app;
@@ -330,13 +299,13 @@ fn main() -> std::io::Result<()> {
         "DATABASE_URL / --db",
         &cli.db,
         file_secrets.database_url.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let worker_key = zeroship_core::config::obtain_secret(
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
         file_secrets.worker_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let shutdown_timeout = cli.shutdown_timeout;
     let blob_store_root = cli.blob_store;
@@ -358,7 +327,7 @@ fn main() -> std::io::Result<()> {
         "ZEROSHIP_KV_URL / --kv-url",
         &cli.kv_url,
         file_secrets.kv_url.as_deref(),
-        cli.check_config,
+        check_config,
     );
     // `env.storage` backend. Empty ⇒ namespace absent. A bare path/`file://`
     // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
@@ -397,7 +366,7 @@ fn main() -> std::io::Result<()> {
     //
     // The unsigned route has its own deliberately narrow loopback-only guard. It is
     // unrelated to the deleted process-wide security-relaxation mode.
-    if !unsigned_advance_bind_allowed(&bind_host, cli.workflow_advance_unsigned) {
+    if !unsigned_advance_bind_allowed(&bind_host, workflow_advance_unsigned) {
         tracing::error!(
             bind = %bind_host,
             "refusing to bind non-loopback with --workflow-advance-unsigned — would expose \
@@ -406,7 +375,7 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
         // WORKER_KEY authenticates dispatch and the ZeroShip-User HMAC, so every
         // worker requires the same 32-byte floor regardless of bind address.
         // Skipped only for an unresolved secret REFERENCE
@@ -439,10 +408,8 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if cli.check_config {
-        let log_format = boot
-            .log_format
-            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+    if check_config {
+        let log_format = boot.log_format.to_string();
         let mut report = CheckConfigReport::new();
         report.field("bind", CheckValue::Plain(bind_host.clone()));
         report.field("port", CheckValue::Count(usize::from(port)));
@@ -513,12 +480,7 @@ fn main() -> std::io::Result<()> {
             ),
         );
 
-        let fmt = if cli.check_config_format == "json" {
-            CheckFormat::Json
-        } else {
-            CheckFormat::Text
-        };
-        report.emit(fmt);
+        report.emit(*controls.check_config_format.get());
         return Ok(());
     }
 
@@ -577,7 +539,7 @@ fn main() -> std::io::Result<()> {
         blob_store,
         workflow_blob_store,
         max_step_blob_bytes: cli.max_step_blob_bytes,
-        workflow_advance_unsigned: cli.workflow_advance_unsigned,
+        workflow_advance_unsigned,
     });
 
     let bind_addr = format!("{bind_host}:{port}");

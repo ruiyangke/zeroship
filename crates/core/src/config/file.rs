@@ -30,13 +30,9 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
-    /// An observability `log_format` value from the file overlay was not a
-    /// recognised format.
-    #[error("invalid log_format {value:?}; expected one of pretty, compact, json, logfmt, bunyan")]
-    InvalidLogFormat {
-        /// The offending value as written in the file.
-        value: String,
-    },
+    /// A generated declaration could not be resolved against its sources.
+    #[error(transparent)]
+    Resolve(#[from] super::names::ConfigResolveError),
 }
 
 /// Optional cross-binary domain configuration loaded from `deploy/ops/zeroship.toml`.
@@ -177,16 +173,20 @@ pub struct SecretSection {
 }
 
 /// Observability values that can be supplied by the shared file overlay.
+///
+/// These fields exist so `deny_unknown_fields` still accepts an
+/// `[observability]` table and rejects a typo inside it. The VALUES each binary
+/// uses come from the generated `observability.log_filter` /
+/// `observability.log_format` declarations, which walk the same overlay by
+/// canonical path; the key spellings here and there are therefore the same by
+/// construction, and both parse `log_format` into a [`LogFormat`].
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ObsSection {
-    /// `RUST_LOG` / `EnvFilter` directive.
-    #[serde(rename = "rust_log")]
+    /// `EnvFilter` directive.
     pub log_filter: Option<String>,
-    /// Tracing output format, as a raw string (TOML carries strings; it is
-    /// parsed into a `LogFormat` by `resolve_observability`, which errors on
-    /// invalid values).
-    pub log_format: Option<String>,
+    /// Tracing output format.
+    pub log_format: Option<crate::observability::LogFormat>,
 }
 
 impl FileConfig {
@@ -203,18 +203,37 @@ impl FileConfig {
     /// Returns [`ConfigError::Io`] when the file cannot be read, or
     /// [`ConfigError::Parse`] when the file is not valid TOML for this shape.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
+        Ok(Self::load_with_raw(path)?.0)
+    }
+
+    /// [`FileConfig::load`], also returning the untyped overlay tree.
+    ///
+    /// Generated declarations walk the raw tree by canonical path, while the
+    /// typed shape keeps `deny_unknown_fields` rejecting a misspelled key. Both
+    /// come from ONE parse so they cannot describe different bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Io`] when the file cannot be read, or
+    /// [`ConfigError::Parse`] when the file is not valid TOML for this shape.
+    pub fn load_with_raw(
+        path: Option<&Path>,
+    ) -> Result<(Self, Option<toml::Value>), ConfigError> {
         let Some(path) = path else {
-            return Ok(Self::default());
+            return Ok((Self::default(), None));
         };
 
-        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let parse = |source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        };
+        let raw: toml::Value = toml::from_str(&text).map_err(parse)?;
+        let typed = raw.clone().try_into().map_err(parse)?;
+        Ok((typed, Some(raw)))
     }
 }
 
@@ -311,7 +330,7 @@ control_url = "https://control.zeroship.ai"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
-rust_log = "info,zeroship_=debug"
+log_filter = "info,zeroship_=debug"
 log_format = "json"
 "#,
         );
@@ -359,7 +378,7 @@ log_format = "json"
             config.observability.log_filter.as_deref(),
             Some("info,zeroship_=debug")
         );
-        assert_eq!(config.observability.log_format.as_deref(), Some("json"));
+        assert_eq!(config.observability.log_format, Some(crate::observability::LogFormat::Json));
     }
 
     #[test]
@@ -398,7 +417,7 @@ auth_provider = "platform"
             "observability-only.toml",
             r#"
 [observability]
-rust_log = "debug"
+log_filter = "debug"
 "#,
         );
 

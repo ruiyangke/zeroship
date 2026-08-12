@@ -1,14 +1,69 @@
 //! Auth server configuration.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
-use zeroship_core::config::{resolve_overlay_string, AuthSection};
-
-use zeroship_core::observability::ObservabilityFlags;
+use zeroship_core::config::{
+    resolve_overlay_string, zeroship_config, AuthSection, BootstrapControl, CheckFormat,
+    CommandControl, ObservabilityControls, Operational, OverlaySelector,
+};
+use zeroship_core::observability::LogFormat;
 use zeroship_mailer::SmtpTls;
 
 const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
+
+/// Tracing directive applied when nothing supplies `observability.log_filter`.
+pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_auth=debug";
+
+/// The controls every auth-service launch resolves before anything else.
+#[zeroship_config(binary = "zeroship-auth", scope = "auth")]
+#[derive(Debug)]
+pub struct AuthControls {
+    /// Optional shared config overlay path.
+    #[config(name = "config")]
+    pub config: BootstrapControl<Option<PathBuf>>,
+
+    /// Disable well-known config auto-discovery (`/etc/zeroship/zeroship.toml`).
+    #[config(name = "no_config")]
+    pub no_config: BootstrapControl<bool>,
+
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret
+    /// config, then exit without starting the server.
+    #[config(name = "check_config")]
+    pub check_config: CommandControl<bool>,
+
+    /// Output format for `--check-config`.
+    #[config(name = "check_config_format", default = CheckFormat::Text)]
+    pub check_config_format: CommandControl<CheckFormat>,
+
+    /// `EnvFilter` directive for the tracing subscriber.
+    #[config(name = "observability.log_filter", default = DEFAULT_LOG_FILTER.to_owned())]
+    pub log_filter: Operational<String>,
+
+    /// Tracing output format; `auto` picks pretty on a TTY and json otherwise.
+    #[config(name = "observability.log_format", default = LogFormat::Auto)]
+    pub log_format: Operational<LogFormat>,
+}
+
+impl OverlaySelector for AuthControlsSources {
+    fn overlay_path(&self) -> Option<&Path> {
+        self.config.as_deref()
+    }
+
+    fn allow_discovery(&self) -> bool {
+        !self.no_config
+    }
+}
+
+impl ObservabilityControls for AuthControls {
+    fn log_filter(&self) -> &str {
+        self.log_filter.get()
+    }
+
+    fn log_format(&self) -> LogFormat {
+        *self.log_format.get()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum AuthProviderKind {
@@ -29,25 +84,10 @@ impl AuthProviderKind {
 #[derive(Clone, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthConfig {
-    /// Optional shared config overlay path.
-    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
-    pub config_path: Option<PathBuf>,
-
-    /// Disable well-known config auto-discovery (`/etc/zeroship/zeroship.toml`).
-    #[arg(long = "no-config")]
-    pub no_config: bool,
-
-    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
-    #[arg(long = "check-config")]
-    pub check_config: bool,
-
-    /// `--check-config` output format: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
-    pub check_config_format: String,
-
-    /// Observability CLI/env overrides.
+    /// Bootstrap, command and observability controls, generated from one
+    /// declaration above.
     #[command(flatten)]
-    pub obs: ObservabilityFlags,
+    pub controls: AuthControlsSources,
 
     /// Listen address. Defaults to loopback; compose passes `0.0.0.0:9092`.
     #[arg(long, env = "AUTH_ADDR", default_value = "127.0.0.1:9092")]
@@ -841,7 +881,8 @@ mod tests {
     }
 
     fn resolve_from_file(mut cfg: AuthConfig) -> AuthConfig {
-        let file = FileConfig::load(cfg.config_path.as_deref()).expect("load config file");
+        let file =
+            FileConfig::load(cfg.controls.config.as_deref()).expect("load config file");
         cfg.resolve(file.auth);
         cfg
     }
