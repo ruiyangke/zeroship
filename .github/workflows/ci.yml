@@ -1215,6 +1215,27 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_dev_reload_under_load.sh 2>&1 | tee "$RUNNER_TEMP/dvd-devreload.log"
+      # Two of the 27 ungated harnesses (task #340), wired because I RAN both
+      # green rather than because they looked safe. Cheapest first: neither
+      # needs a new build step, unlike the redeploy harness which needed the
+      # examples built.
+      #
+      # secret_expose_cli is standalone - no docker, no Postgres - and scored
+      # 35 passed / 0 failed on my run. NOTE for anyone reading its output: it
+      # PRINTS a line reading "27 passed / 8 failed, controls all still green".
+      # That is its mutation-control DOCUMENTATION, describing what mutating
+      # crates/cli/src/secrets.rs merge_expose would produce. It is not a
+      # result. I misread it as one because it is the last line of the log.
+      - name: Secret expose CLI (standalone, 35/0 at HEAD)
+        run: |
+          set -o pipefail
+          tests/e2e_secret_expose_cli.sh 2>&1 | tee "$RUNNER_TEMP/dvd-expose.log"
+      # uri starts its OWN ephemeral Postgres on :5446, so it needs docker
+      # (present in this job) but not the shared compose-postgres-1 container.
+      - name: Complex URI forwarding (own ephemeral Postgres)
+        run: |
+          set -o pipefail
+          tests/e2e_uri.sh 2>&1 | tee "$RUNNER_TEMP/dvd-uri.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
