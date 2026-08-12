@@ -568,8 +568,30 @@ async fn handle_connection(
                     value.eq_ignore_ascii_case("websocket")
                 );
 
+                // THE LEFTOVER, and why an upgrade is the only path that needs
+                // it. This loop reads by BUFFER, not by request: one read can
+                // carry the request head plus whatever the client pipelined
+                // behind it. For an ordinary request those extra bytes are the
+                // next HTTP request and the loop below re-parses them from
+                // `data`. For an upgrade the loop never runs again - the stream
+                // stops being HTTP - so anything still in `data` is bytes the
+                // socket will NEVER produce again.
+                //
+                // Measured 2026-08-12 before this was threaded through: a client
+                // whose first WebSocket frame shared a segment with the upgrade
+                // request lost it silently, and the server itself reported
+                // `leftover=10` on exactly the failing probes and `leftover=0`
+                // on exactly the passing ones, 16 of 16. Forced into one
+                // segment it was 16 of 16 lost.
+                let ws_pending: Vec<u8> = if is_upgrade {
+                    data.get(consumed + total_len..).unwrap_or(&[]).to_vec()
+                } else {
+                    Vec::new()
+                };
+
                 let wrote_ok = handle_request(
                     &mut stream, method, &full_url, &request_headers, body_bytes, &runtime, &app_env,
+                    ws_pending,
                 ).await;
                 if !wrote_ok { return; }
                 if is_upgrade { return; }
@@ -878,6 +900,11 @@ async fn handle_request(
     body: &[u8],
     runtime: &Runtime,
     app_env: &EnvSnapshot,
+    // Bytes already read past the end of this request. Only a WebSocket
+    // upgrade can consume them; every other path drops them, which is correct
+    // because the HTTP keep-alive loop re-parses them from its own connection
+    // buffer instead.
+    ws_pending: Vec<u8>,
 ) -> bool {
     // The app-facing env. In the standalone server there's no control plane
     // supplying per-app secrets/vars, so this is seeded from process-env
@@ -918,7 +945,7 @@ async fn handle_request(
             stream_chunked_body(stream, body_reader).await
         }
         FetchOutcome::WebSocketUpgrade { ws_id, headers } => {
-            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime, ws_pending).await
         }
         FetchOutcome::Pending { rx, cancel: cf } => {
             match recv_with_timeout(&rx, runtime.wall_timeout(), &cf, runtime).await {
@@ -934,7 +961,7 @@ async fn handle_request(
                     stream_chunked_body(stream, body_reader).await
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { ws_id, headers, .. })) => {
-                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime, ws_pending).await
                 }
                 Some(Err(e)) => {
                     let body = format!(
@@ -1006,7 +1033,7 @@ async fn write_ws_handshake(
 /// Returns (opcode, payload) or None on error/EOF.
 ///
 /// Client-to-server frames are always masked (RFC 6455 section 5.1).
-async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<u8>)> {
+async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R, pending: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
     // Read header (2 bytes), payload-len extension, mask, and payload
     // bytes via `read_exact` so partial reads don't corrupt the
     // framing. Compio returns fewer bytes than requested when:
@@ -1016,7 +1043,7 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
     // expected number of bytes. The previous design treated every
     // `n < expected` short read as EOF, which silently discarded the
     // rest of the frame *and* every frame pipelined behind it.
-    let header = read_exact(stream, 2).await?;
+    let header = read_exact(stream, pending, 2).await?;
     let _fin = (header[0] & 0x80) != 0;
     let opcode = header[0] & 0x0F;
     let masked = (header[1] & 0x80) != 0;
@@ -1024,10 +1051,10 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
 
     // Extended payload length
     if payload_len == 126 {
-        let ext = read_exact(stream, 2).await?;
+        let ext = read_exact(stream, pending, 2).await?;
         payload_len = u16::from_be_bytes([ext[0], ext[1]]) as u64;
     } else if payload_len == 127 {
-        let ext = read_exact(stream, 8).await?;
+        let ext = read_exact(stream, pending, 8).await?;
         payload_len = u64::from_be_bytes([
             ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7],
         ]);
@@ -1055,7 +1082,7 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
 
     // Masking key (4 bytes if masked)
     let mask_key = if masked {
-        let mk = read_exact(stream, 4).await?;
+        let mk = read_exact(stream, pending, 4).await?;
         Some([mk[0], mk[1], mk[2], mk[3]])
     } else {
         None
@@ -1064,7 +1091,7 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
     // Read payload
     let len = payload_len as usize;
     let mut payload = if len > 0 {
-        read_exact(stream, len).await?
+        read_exact(stream, pending, len).await?
     } else {
         Vec::new()
     };
@@ -1081,9 +1108,29 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
 
 /// Read exactly `n` bytes from `stream`, looping over partial reads.
 /// Returns None on EOF or error before `n` bytes have been read.
-async fn read_exact<R: AsyncRead + Unpin>(stream: &mut R, n: usize) -> Option<Vec<u8>> {
+/// `pending` holds bytes that were already read off the socket by someone else
+/// and belong to this frame stream. It is drained BEFORE touching the socket.
+///
+/// It exists because the HTTP layer reads by buffer, not by request: a client
+/// that pipelines its first WebSocket frame into the same segment as the
+/// upgrade request leaves those bytes sitting in the connection buffer, and
+/// the socket will never produce them again. See `handle_connection`, which is
+/// where the leftover is captured.
+async fn read_exact<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    pending: &mut Vec<u8>,
+    n: usize,
+) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; n];
     let mut offset = 0;
+
+    if !pending.is_empty() {
+        let take = pending.len().min(n);
+        buf[..take].copy_from_slice(&pending[..take]);
+        pending.drain(..take);
+        offset = take;
+    }
+
     while offset < n {
         let chunk = vec![0u8; n - offset];
         let BufResult(r, returned) = stream.read(chunk).await;
@@ -1141,6 +1188,7 @@ async fn handle_websocket_upgrade(
     response_headers: &[(String, String)],
     request_headers: &[(String, String)],
     runtime: &Runtime,
+    mut ws_pending: Vec<u8>,
 ) -> bool {
     // Find the Sec-WebSocket-Key from request headers
     let ws_key = request_headers
@@ -1217,7 +1265,7 @@ async fn handle_websocket_upgrade(
     // already in it (and shifts every subsequent frame's framing).
     #[cfg(feature = "runtime_native_websocket")]
     {
-        return native_ws_pump(stream, server_ws_id, kernel_rx, runtime).await;
+        return native_ws_pump(stream, server_ws_id, kernel_rx, runtime, ws_pending).await;
     }
 
     #[cfg(not(feature = "runtime_native_websocket"))]
@@ -1261,7 +1309,7 @@ async fn handle_websocket_upgrade(
             }
 
             let event = WsPollBoth::new(
-                read_ws_frame(stream),
+                read_ws_frame(stream, &mut ws_pending),
                 outgoing_ready.clone(),
                 pump_waker.clone(),
             )
@@ -1367,6 +1415,7 @@ async fn native_ws_pump(
     server_ws_id: u32,
     mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<crate::websocket_native::network::WsEvent>,
     runtime: &Runtime,
+    ws_pending: Vec<u8>,
 ) -> bool {
     use futures::channel::mpsc;
     use futures::stream::StreamExt;
@@ -1384,8 +1433,11 @@ async fn native_ws_pump(
     // more close-echoes to wait for.
     let reader = async move {
         let mut s = stream_shared; // `&TcpStream`, takes `&mut &TcpStream` for reads
+        // Seeded with whatever the HTTP layer had already read past the end of
+        // the upgrade request. Drained before the socket, then empty forever.
+        let mut pending = ws_pending;
         loop {
-            let frame = read_ws_frame(&mut s).await;
+            let frame = read_ws_frame(&mut s, &mut pending).await;
             match frame {
                 None => return true, // EOF
                 Some((0x1, payload)) | Some((0x2, payload)) => {
@@ -1935,7 +1987,7 @@ mod ws_frame_tests {
         let header = masked_header(0x2, declared);
         let mut r: &[u8] = &header;
 
-        let frame = block_on(read_ws_frame(&mut r));
+        let frame = block_on(read_ws_frame(&mut r, &mut Vec::new()));
         let (opcode, payload) = frame.expect("oversized frame should yield a Close, not EOF");
         assert_eq!(opcode, 0x8, "oversized frame must surface as a Close frame");
         assert_eq!(payload.len(), 2, "Close payload must carry just the 2-byte status code");
@@ -1952,7 +2004,7 @@ mod ws_frame_tests {
         let bytes = masked_frame(0x2, &payload);
         let mut r: &[u8] = &bytes;
 
-        let frame = block_on(read_ws_frame(&mut r));
+        let frame = block_on(read_ws_frame(&mut r, &mut Vec::new()));
         let (opcode, got) = frame.expect("at-cap frame should parse");
         assert_eq!(opcode, 0x2);
         assert_eq!(got, payload, "payload round-trips through unmasking");
@@ -1965,7 +2017,7 @@ mod ws_frame_tests {
         let bytes = masked_frame(0x1, b"hello");
         let mut r: &[u8] = &bytes;
 
-        let frame = block_on(read_ws_frame(&mut r));
+        let frame = block_on(read_ws_frame(&mut r, &mut Vec::new()));
         let (opcode, payload) = frame.expect("normal frame should parse");
         assert_eq!(opcode, 0x1);
         assert_eq!(payload, b"hello");
