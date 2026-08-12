@@ -18,6 +18,10 @@ reason = "Non-shipped configuration contract checker."
 zeroship-core = { workspace = true }
 clap = { workspace = true }
 cargo_metadata = { workspace = true }
+# `span-locations` is what gives the inventory a file:LINE column. Resolver 3
+# keeps proc-macro dependencies on their own feature graph, so enabling it for
+# this ordinary dependency does not slow every macro expansion in the tree.
+proc-macro2 = { workspace = true, features = ["span-locations"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 syn = { workspace = true }

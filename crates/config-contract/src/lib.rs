@@ -6,5 +6,6 @@
 
 pub mod contract;
 pub mod fixtures;
+pub mod inventory;
 pub mod metadata;
 pub mod raw_env;
