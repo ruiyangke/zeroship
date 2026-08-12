@@ -640,6 +640,24 @@ async function assertBugVisible(bug: BugRow, identity: PlatformUser | null): Pro
 }
 
 /**
+ * The write-path counterpart of `assertBugVisible`, for handlers that already
+ * hold the actor.
+ *
+ * Every mutation that touches a bug used to call `assertCanViewProduct` -- the
+ * PRODUCT check only -- so bug-level restriction guarded reads and nothing
+ * else. Measured 2026-08-12: a second user got 403 from `bugs.get` on a
+ * restricted bug and 200 from `comments.add` on the same bug, in the same
+ * session. Commenting, resolving, reassigning, CC'ing, marking attachments
+ * obsolete and deleting them were all reachable on a bug the caller could not
+ * open.
+ *
+ * If you can't read it, you can't write it.
+ */
+async function assertBugAccessible(bug: BugRow, actor: UserRow | null): Promise<void> {
+  if (!(await canViewBug(bug, actor))) forbidden();
+}
+
+/**
  * Bugs the user must not see because of a bug-level restriction.
  *
  * Returned as an exclusion list for the QUERY rather than applied by filtering
@@ -1211,7 +1229,7 @@ export const updateBug = mutation(
   async ({ id, changes }: { id: string; changes: GeneralBugPatch }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     const keys = Object.keys(changes);
     if (keys.length === 0) invalid("changes must contain at least one field");
     if (keys.some((key) => !(GENERAL_BUG_FIELDS as readonly string[]).includes(key))) {
@@ -1253,7 +1271,7 @@ export const changeBugStatus = mutation(
   }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     return updateBugWithHistory(
       id,
       actor.id,
@@ -1276,7 +1294,7 @@ export const resolveBug = mutation(
   async ({ id, resolution }: { id: string; resolution: Exclude<BugResolution, "DUPLICATE"> }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     return updateBugWithHistory(
       id,
       actor.id,
@@ -1303,7 +1321,7 @@ export const reopenBug = mutation(
   async ({ id }: { id: string }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     return updateBugWithHistory(
       id,
       actor.id,
@@ -1336,8 +1354,8 @@ export const markBugDuplicate = mutation(
       getRequired(db.bugs, sourceId, "Bug"),
       getRequired(db.bugs, targetId, "Duplicate target"),
     ]);
-    await assertCanViewProduct(source.productId, actor);
-    await assertCanViewProduct(target.productId, actor);
+    await assertBugAccessible(source, actor);
+    await assertBugAccessible(target, actor);
 
     const result = await db.transaction(
       async (tx) => {
@@ -1380,7 +1398,7 @@ export const reassignBug = mutation(
   async ({ id, assigneeId }: { id: string; assigneeId: string | null }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     if (assigneeId) await getRequired(db.users, assigneeId, "Assignee");
     return updateBugWithHistory(
       id,
@@ -1402,7 +1420,7 @@ export const setBugSeverity = mutation(
     const actor = await requireActor();
     if (!BUG_SEVERITIES.includes(severity)) invalid("invalid severity");
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     return updateBugWithHistory(id, actor.id, () => ({ severity }), ["severity"]);
   },
   { id: "bugs.setSeverity" },
@@ -1413,7 +1431,7 @@ export const setBugPriority = mutation(
     const actor = await requireActor();
     if (!BUG_PRIORITIES.includes(priority)) invalid("invalid priority");
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     return updateBugWithHistory(id, actor.id, () => ({ priority }), ["priority"]);
   },
   { id: "bugs.setPriority" },
@@ -1423,7 +1441,7 @@ export const moveBug = mutation(
   async ({ id, productId, componentId }: { id: string; productId: string; componentId: string }) => {
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
-    await assertCanViewProduct(current.productId, actor);
+    await assertBugAccessible(current, actor);
     const structure = await validateProductChildren(productId, componentId);
     await assertCanViewProduct(structure.product.id, actor);
     return updateBugWithHistory(
@@ -1464,7 +1482,7 @@ export const addComment = mutation(
   }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     if (!Number.isFinite(workTimeMinutes) || workTimeMinutes < 0) {
       invalid("workTimeMinutes must be non-negative");
     }
@@ -1528,7 +1546,7 @@ export const editComment = mutation(
     const actor = await requireActor();
     const comment = await getRequired(db.comments, id, "Comment");
     const bug = await getRequired(db.bugs, comment.bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     if (!actor.isAdmin && comment.authorId !== actor.id) {
       forbidden("Only the comment author or an administrator can edit it");
     }
@@ -1558,7 +1576,7 @@ export const setCommentPrivate = mutation(
     const actor = await requireActor();
     const comment = await getRequired(db.comments, id, "Comment");
     const bug = await getRequired(db.bugs, comment.bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     if (!actor.isAdmin && comment.authorId !== actor.id) {
       forbidden("Only the comment author or an administrator can change privacy");
     }
@@ -1604,7 +1622,7 @@ export const uploadAttachment = mutation(
   }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const cleanFilename = safeFilename(filename);
     const cleanType = requireNonEmpty(contentType, "contentType").slice(0, 200);
     const cleanBase64 = contentBase64.replace(/\s/gu, "");
@@ -1697,7 +1715,7 @@ export const setAttachmentObsolete = mutation(
     const actor = await requireActor();
     const attachment = await getRequired(db.attachments, id, "Attachment");
     const bug = await getRequired(db.bugs, attachment.bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const before = await getTxRequired(tx.attachments, id, "Attachment");
       const after = await tx.attachments.update(id, { isObsolete });
@@ -1722,7 +1740,7 @@ export const deleteAttachment = mutation(
     const actor = await requireActor();
     const attachment = await getRequired(db.attachments, id, "Attachment");
     const bug = await getRequired(db.bugs, attachment.bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
 
     const raw = await storage().get(ATTACHMENT_BUCKET, attachment.storageKey);
     await storage().delete(ATTACHMENT_BUCKET, attachment.storageKey);
@@ -1792,7 +1810,7 @@ export const addDependency = mutation(
       getRequired(db.bugs, sourceId, "Bug"),
       getRequired(db.bugs, targetId, "Dependency"),
     ]);
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     await assertCanViewProduct(dependency.productId, actor);
 
     const result = await db.transaction(
@@ -1829,7 +1847,7 @@ export const removeDependency = mutation(
   async ({ bugId, dependsOnId }: { bugId: string; dependsOnId: string }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugDependencies.get({ bugId, dependsOnId });
       if (!existing) notFound("Dependency");
@@ -1983,7 +2001,7 @@ export const attachKeyword = mutation(
       getRequired(db.bugs, bugId, "Bug"),
       getRequired(db.keywords, keywordId, "Keyword"),
     ]);
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugKeywords.get({ bugId, keywordId });
       if (existing) return existing;
@@ -2010,7 +2028,7 @@ export const detachKeyword = mutation(
       getRequired(db.bugs, bugId, "Bug"),
       getRequired(db.keywords, keywordId, "Keyword"),
     ]);
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugKeywords.get({ bugId, keywordId });
       if (!existing) notFound("Bug keyword");
@@ -2055,7 +2073,7 @@ export const setFlag = mutation(
       ? target.bugId
       : (await getRequired(db.attachments, target.attachmentId!, "Attachment")).bugId;
     const bug = await getRequired(db.bugs, targetBugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     if (flagType.productId && flagType.productId !== bug.productId) {
       invalid("flag type does not apply to the target product");
     }
@@ -2123,7 +2141,7 @@ export const clearFlag = mutation(
       getRequired(db.flagTypes, flag.flagTypeId, "Flag type"),
     ]);
     const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const deleted = await tx.flags.delete(id);
       if (!deleted) notFound("Flag");
@@ -2227,7 +2245,7 @@ export const addCc = mutation(
       getRequired(db.bugs, bugId, "Bug"),
       getRequired(db.users, userId, "User"),
     ]);
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugCc.get({ bugId, userId });
       if (existing) return existing;
@@ -2254,7 +2272,7 @@ export const removeCc = mutation(
       getRequired(db.bugs, bugId, "Bug"),
       getRequired(db.users, userId, "User"),
     ]);
-    await assertCanViewProduct(bug.productId, actor);
+    await assertBugAccessible(bug, actor);
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugCc.get({ bugId, userId });
       if (!existing) notFound("CC entry");

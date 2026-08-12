@@ -313,6 +313,29 @@ BOB_TOTAL_AFTER="$(bob reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.
   && pass "Alice's report total is unchanged by the restriction ($ALICE_TOTAL_AFTER)" \
   || fail "Alice lost the restricted bug from her own reports" \
           "before=$ALICE_TOTAL_BEFORE after=$ALICE_TOTAL_AFTER"
+
+# READ AND WRITE ARE THE SAME PERMISSION. Every bug mutation used to call the
+# product-level check only, so bug-level restriction guarded reads and nothing
+# else: measured before the fix, Bob got 403 from bugs.get on the restricted bug
+# and 200 from comments.add on that same bug in the same session. Commenting,
+# resolving, reassigning, CC'ing and touching attachments were all reachable on
+# a bug he could not open.
+#
+# Control first: Bob must be able to comment on an UNRESTRICTED bug, or the
+# refusals below would just mean Bob cannot comment at all.
+[ "$(bobc comments.add "{\"bugId\":\"$BUG\",\"body\":\"bob comments $STAMP\"}")" = "200" ] \
+  && pass "control: Bob can comment on an unrestricted bug" \
+  || fail "control failed: Bob cannot comment even on an open bug"
+
+for probe in "comments.add:{\"bugId\":\"$SECRET_BUG\",\"body\":\"x\"}" \
+             "bugs.resolve:{\"id\":\"$SECRET_BUG\",\"resolution\":\"FIXED\"}" \
+             "bugs.reassign:{\"id\":\"$SECRET_BUG\",\"assigneeId\":null}"; do
+  proc="${probe%%:*}"; body="${probe#*:}"
+  got="$(bobc "$proc" "$body")"
+  [ "$got" = "403" ] \
+    && pass "Bob cannot $proc on a bug he cannot read" \
+    || fail "Bob can $proc on a restricted bug" "http=$got (200 here is the read/write split regressing)"
+done
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
