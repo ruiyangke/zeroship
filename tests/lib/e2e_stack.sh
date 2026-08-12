@@ -35,10 +35,10 @@
 # Tunables (export BEFORE calling stack_up; sensible defaults pick a private
 # port band so multiple harnesses can run back-to-back without colliding):
 #   ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT
-#                                — listen ports
-#   PG_CONTAINER                 — docker container name
-#   ZEROSHIP_WORKER_THREADS      — worker --threads
-#   E2E_ROOT                     — repo root (auto-derived)
+#                                - listen ports
+#   PG_CONTAINER                 - docker container name
+#   ZEROSHIP_WORKER_THREADS      - worker --threads
+#   E2E_ROOT                     - repo root (auto-derived)
 #
 # Exports after stack_up: ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT
 #   ZEROSHIP_GATEWAY_PORT PG_CONTAINER WORK
