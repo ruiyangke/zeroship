@@ -55,6 +55,7 @@ impl Hash for PinnedWorkflowKey {
 thread_local! {
     static CACHE: RefCell<Option<AppCache>> = const { RefCell::new(None) };
     static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CDC_WORKER_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Redis connection URL for the multi-node KV backend. Held per-thread
     /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvPlugin`
     /// backed by `Redis` (shared across every worker node — see the
@@ -96,6 +97,7 @@ pub struct KernelConfig {
     pub control_url: String,
     pub control_key: String,
     pub db_url: Option<String>,
+    pub cdc_worker_id: String,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
     /// The process-wide usage meter shared with the per-process outbox task
@@ -117,6 +119,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     if let Some(url) = kernel.db_url {
         DB_URL.with(|u| *u.borrow_mut() = Some(url));
     }
+    CDC_WORKER_ID.with(|id| *id.borrow_mut() = Some(kernel.cdc_worker_id));
     if let Some(url) = kernel.kv_url {
         KV_URL.with(|u| *u.borrow_mut() = Some(url));
     }
@@ -168,7 +171,16 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     // counters keep flowing through `record_request` (below, unchanged).
     let meter = METER.with(|m| m.borrow().clone());
     if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url, meter.clone())));
+        let worker_id = CDC_WORKER_ID.with(|id| {
+            id.borrow()
+                .clone()
+                .expect("CDC worker id must be installed with the kernel")
+        });
+        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
+            url,
+            meter.clone(),
+            worker_id,
+        )));
     }
     if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
         plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
@@ -890,6 +902,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: "test-control-key".to_string(),
                     db_url: Some("postgres://localhost/zs_unused".to_string()),
+                    cdc_worker_id: "kernel-test-worker".to_string(),
                     kv_url: Some("redis://127.0.0.1:6379".to_string()),
                     storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
                         "/tmp/zs-cache-test-storage",
@@ -932,6 +945,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_url: None,
+                    cdc_worker_id: "kernel-test-worker".to_string(),
                     kv_url: None,
                     storage_backend: None,
                     // The meter is always provided (an `Arc<Meter>` is cheap;
@@ -1084,6 +1098,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_url: None,
+                        cdc_worker_id: "kernel-test-worker".to_string(),
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1137,6 +1152,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_url: None,
+                        cdc_worker_id: "kernel-test-worker".to_string(),
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1204,6 +1220,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_url: None,
+                        cdc_worker_id: "kernel-test-worker".to_string(),
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1252,6 +1269,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_url: None,
+                        cdc_worker_id: "kernel-test-worker".to_string(),
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),

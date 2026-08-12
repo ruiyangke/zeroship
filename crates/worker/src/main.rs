@@ -753,6 +753,7 @@ fn main() -> std::io::Result<()> {
                 control_url: config.control_url.clone(),
                 control_key: config.control_key.clone(),
                 db_url: config.db_url.clone(),
+                cdc_worker_id: meter_source.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.
