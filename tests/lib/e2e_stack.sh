@@ -34,12 +34,14 @@
 #
 # Tunables (export BEFORE calling stack_up; sensible defaults pick a private
 # port band so multiple harnesses can run back-to-back without colliding):
-#   CONTROL_PORT WORKER_PORT GATE_PORT PG_PORT   — listen ports
-#   PG_CONTAINER                                 — docker container name
-#   WORKER_THREADS                               — worker --worker-threads
-#   E2E_ROOT                                     — repo root (auto-derived)
+#   ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT
+#                                — listen ports
+#   PG_CONTAINER                 — docker container name
+#   ZEROSHIP_WORKER_THREADS      — worker --threads
+#   E2E_ROOT                     — repo root (auto-derived)
 #
-# Exports after stack_up: CONTROL_PORT WORKER_PORT GATE_PORT PG_CONTAINER WORK
+# Exports after stack_up: ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT
+#   ZEROSHIP_GATEWAY_PORT PG_CONTAINER WORK
 #   PIDFILE (newline-separated binary PIDs under $WORK), DBURL.
 # ============================================================================
 
@@ -54,12 +56,12 @@ E2E_JOSE_JS="$E2E_ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/weba
 source "$E2E_ROOT/tests/lib/runtime_secrets.sh"
 
 # --- defaults (private/non-colliding band; override before stack_up) --------
-: "${CONTROL_PORT:=9120}"
-: "${WORKER_PORT:=8098}"
-: "${GATE_PORT:=8012}"
+: "${ZEROSHIP_CONTROL_PORT:=9120}"
+: "${ZEROSHIP_WORKER_PORT:=8098}"
+: "${ZEROSHIP_GATEWAY_PORT:=8012}"
 : "${PG_PORT:=5454}"
 : "${PG_CONTAINER:=zs-e2e-stack-pg}"
-: "${WORKER_THREADS:=2}"
+: "${ZEROSHIP_WORKER_THREADS:=2}"
 
 # --- emit helpers: prefer caller-provided pass/fail, else plain echo --------
 _stk_ok()   { if declare -F pass >/dev/null 2>&1; then pass "$1"; else echo "  ✓ $1"; fi; }
@@ -237,41 +239,41 @@ stack_pg_up() {
 stack_up() {
   stack_preflight || return $?
   stack_workspace || return 1
-  export CONTROL_PORT WORKER_PORT GATE_PORT
+  export ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT
   stack_pg_up || return 1
 
   # --- free the ports -------------------------------------------------------
   local i p
-  for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+  for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
   # --- control --------------------------------------------------------------
-  "$E2E_BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+  "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
     && _stk_ok "control healthy" || { _stk_bad "control unhealthy"; tail -20 "$WORK/control.log"; return 1; }
 
   # --- worker ---------------------------------------------------------------
-  "$E2E_BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
-    --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+  "$E2E_BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
+    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
     && _stk_ok "worker healthy" || { _stk_bad "worker unhealthy"; tail -20 "$WORK/worker.log"; return 1; }
 
   # --- gateway --------------------------------------------------------------
-  "$E2E_BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-    --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+  "$E2E_BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+    --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
     --signing-key-file "$WORK/signing-key.pem" \
     --gateway-broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
     && _stk_ok "gateway healthy" || { _stk_bad "gateway unhealthy"; tail -20 "$WORK/gate.log"; return 1; }
 
   return 0
@@ -331,12 +333,12 @@ process.stdout.write(jwt);
 deploy_zship() {
   local slug="$1" zship="$2"
   local j id dep
-  j="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+  j="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
         -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
         -d "{\"name\":\"$slug\"}")"
   id="$(echo "$j" | _stk_jget '.id')"
   if [ -z "$id" ]; then echo "    create-app($slug) failed: $j" >&2; return 1; fi
-  dep="$("$E2E_BIN/zeroship" deploy "$zship" --app="$id" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+  dep="$("$E2E_BIN/zeroship" deploy "$zship" --app="$id" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
   if ! echo "$dep" | grep -q "deploy_hash"; then echo "    deploy($slug) failed: $dep" >&2; return 1; fi
   echo "$id"
   return 0

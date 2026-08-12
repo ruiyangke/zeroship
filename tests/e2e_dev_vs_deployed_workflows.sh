@@ -73,9 +73,9 @@ PG_DB="${PG_DB:-zeroship_devdeploy_wf}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct from golden_path.sh (9390/8390/8300) and the kv/storage/stream
 # harnesses so several can run at once.
-CONTROL_PORT="${CONTROL_PORT:-9395}"
-WORKER_PORT="${WORKER_PORT:-8395}"
-GATE_PORT="${GATE_PORT:-8305}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9395}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8395}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8305}"
 DEV_PORT="${DEV_PORT:-3051}"
 # VITE's OWN port, which is NOT the runtime port above. Left implicit until
 # 2026-08-11, and that cost a leaked process every run: cleanup frees DEV_PORT
@@ -291,7 +291,7 @@ for _ in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/nu
 docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
   && pass "ephemeral Redis ready on :$REDIS_PORT" || { fail "Redis never became ready"; exit 1; }
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
@@ -308,9 +308,9 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 # app actually takes.
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
-  --gateway-url "http://localhost:$GATE_PORT" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # --control-url + --control-key give the worker's env.workflows namespace its
 # HTTP backend; --kv-url gives env.kv one. Omitting either would look like an
@@ -328,18 +328,18 @@ sleep 4
 # tree are this file's sibling e2e and its worktree copy. So a production
 # deployment as shipped in deploy/compose cannot advance a workflow at all.
 # Recorded as a finding in docs/pilot/e2e-scenarios.md rather than worked around.
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
   --db "$DB_URL" --workflow-advance-unsigned \
   --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 \
   --db "$DB_URL" > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-for svc in "control:$CONTROL_PORT" "worker:$WORKER_PORT" "gateway:$GATE_PORT"; do
+for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
   curl -sf "http://localhost:${svc##*:}/health" >/dev/null \
     || { fail "${svc%%:*} did not come up"; tail -20 "$WORK/${svc%%:*}.log"; exit 1; }
 done
@@ -372,7 +372,7 @@ pass "workflows enabled for $APP_NAME (operator gate, not creator-settable)"
 sleep 5   # gateway route-sync poll
 
 OBSFILE="$WORK/deployed.obs"; : > "$OBSFILE"
-probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
 grep -q '"ok":true' "$WORK/deployed.txt" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -5 "$WORK/deployed.txt"; tail -5 "$WORK/worker.log"; }
 

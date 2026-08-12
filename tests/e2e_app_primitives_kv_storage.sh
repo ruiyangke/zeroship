@@ -47,9 +47,9 @@ source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset again to avoid colliding with e2e_app_primitives.sh)
-CONTROL_PORT=9098
-WORKER_PORT=8086
-GATE_PORT=8002
+ZEROSHIP_CONTROL_PORT=9098
+ZEROSHIP_WORKER_PORT=8086
+ZEROSHIP_GATEWAY_PORT=8002
 PG_PORT=5444
 REDIS_PORT=6394
 PG_CONTAINER="zs-e2e-kvst-pg"
@@ -94,7 +94,7 @@ dispatch() {
   local app="$1" id="$2" args="$3"
   local frame="$WORK/frame-$$.bin"
   zs_rpc_frame "$frame" "$id" "$args"
-  curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
+  curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
     -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/octet-stream' --data-binary @"$frame"
 }
@@ -171,28 +171,28 @@ KVURL="redis://127.0.0.1:$REDIS_PORT"
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: env.kv ← --kv-url (Redis), env.storage ← --storage-url (LocalFs path),
 # env.db comes from --db; direct /dispatch uses the generated worker bearer.
-"$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --kv-url "$KVURL" --storage-url "$WORK/storage" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv+storage configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv+storage configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
 # Broker master secret. cd54028e7 made the gateway refuse to start without one,
 # and this harness was never updated, so it has been unable to get past "gateway
@@ -200,14 +200,14 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker 
 openssl rand -base64 48 > "$WORK/gate-secret"
 chmod 600 "$WORK/gate-secret"
 
-"$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+"$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --gateway-broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -256,20 +256,20 @@ process.stdout.write(jwt);
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 4: create apps + deploy kv-dashboard + storage-gallery ==="
-KV_APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+KV_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"kv-dashboard-e2e"}')"
 KV_APP="$(echo "$KV_APP_JSON" | jget '.id')"
 [ -n "$KV_APP" ] && pass "created app kv-dashboard-e2e ($KV_APP)" || { fail "create kv app: $KV_APP_JSON"; exit 1; }
 
-ST_APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+ST_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"storage-gallery-e2e"}')"
 ST_APP="$(echo "$ST_APP_JSON" | jget '.id')"
 [ -n "$ST_APP" ] && pass "created app storage-gallery-e2e ($ST_APP)" || { fail "create storage app: $ST_APP_JSON"; exit 1; }
 
-KVDEP="$("$BIN/zeroship" deploy "$KV_ZSHIP" --app="$KV_APP" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+KVDEP="$("$BIN/zeroship" deploy "$KV_ZSHIP" --app="$KV_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$KVDEP" | grep -q "deploy_hash" && pass "deployed kv-dashboard .zship" || fail "kv deploy failed: $KVDEP"
 
-STDEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+STDEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$STDEP" | grep -q "deploy_hash" && pass "deployed storage-gallery .zship" || fail "storage deploy failed: $STDEP"
 sleep 5   # let route + version sync to gateway + worker
 

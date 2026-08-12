@@ -13,7 +13,7 @@
 #
 # The seam this is pointed at: `pnpm dev` always runs env.storage on LocalFs
 # (crates/cli/src/main.rs, `file://.zeroship/storage` unless
-# ZEROSHIP_STORAGE_URL says otherwise), while a deployed worker runs whatever
+# ZEROSHIP_WORKER_STORAGE_URL says otherwise), while a deployed worker runs whatever
 # --storage-url names, which in production is S3/R2. So the default here
 # deploys against a MinIO container, making the comparison LocalFs-vs-S3 rather
 # than LocalFs-vs-LocalFs. That is where this project's one historical storage
@@ -80,9 +80,9 @@ PG_DB="${PG_DB:-zeroship_storageleg}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # A band of its own: kv uses 9392/8392/8302/3011, streaming 9394/8394/8304/3061,
 # golden_path 9390/8390/8300 -- so all four can run at once.
-CONTROL_PORT="${CONTROL_PORT:-9396}"
-WORKER_PORT="${WORKER_PORT:-8396}"
-GATE_PORT="${GATE_PORT:-8306}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9396}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8396}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8306}"
 DEV_PORT="${DEV_PORT:-3081}"
 # VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
 # binds. vite was silently taking its :5173 global default, which nothing here
@@ -103,7 +103,7 @@ MUTATE="${MUTATE:-none}"
 # from the caller's shell would quietly become the deployed backend. Each side
 # gets its backend explicitly below; nothing here may come from the ambient
 # environment.
-unset ZEROSHIP_STORAGE_URL
+unset ZEROSHIP_WORKER_STORAGE_URL
 
 PASS=0; FAIL=0; PIDS=()
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
@@ -243,7 +243,7 @@ authed=$(grep -oE '"rpc:[^"]+":\{[^}]*"auth":' "$d/manifest.json" | wc -l)
 # the previous run and `reset` would be doing the comparison's work.
 #
 # Set on the vite process ONLY, never exported. The worker's --storage-url
-# clap arg also reads ZEROSHIP_STORAGE_URL, so an exported value silently
+# clap arg also reads ZEROSHIP_WORKER_STORAGE_URL, so an exported value silently
 # becomes the deployed backend's fallback: with it exported, MUTATE=no-storage-url
 # booted a worker that quietly picked up the DEV directory and the mutation
 # passed 11/0 -- a mutation that cannot fail proves nothing about the check it
@@ -252,7 +252,7 @@ mkdir -p "$WORK/dev-storage"
 for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
-( cd "$APP" && ZEROSHIP_STORAGE_URL="file://$WORK/dev-storage" \
+( cd "$APP" && ZEROSHIP_WORKER_STORAGE_URL="file://$WORK/dev-storage" \
     ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 # Readiness: a DEADLINE plus a diagnosis, not a fixed iteration count (#273).
 # The old form was `for _ in $(seq 1 20); do ... sleep 2; done` -- 40 s sized on
@@ -262,9 +262,9 @@ done
 # out. The app was fine; the message was not.
 #
 # SOURCED HERE, not at the top of the file, and that placement is load-bearing.
-# tests/lib/e2e_stack.sh opens with `: "${CONTROL_PORT:=9120}"` and four more of
+# tests/lib/e2e_stack.sh opens with `: "${ZEROSHIP_CONTROL_PORT:=9120}"` and four more of
 # the same shape. Those only assign when unset -- so sourcing it ABOVE this
-# harness's own `CONTROL_PORT="${CONTROL_PORT:-9396}"` block would let the
+# harness's own `ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9396}"` block would let the
 # library's ports win, silently moving this harness onto another suite's band.
 # By here every port this script owns is already set, so the `:=` defaults are
 # all no-ops.
@@ -309,7 +309,7 @@ else
   STORAGE_ARG="file://$WORK/deployed-storage"
 fi
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
@@ -318,7 +318,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without --storage-url the env.storage namespace is absent BY DESIGN
@@ -327,16 +327,16 @@ sleep 4
 # MUTATE=no-storage-url case below.
 STORAGE_FLAG=(--storage-url "$STORAGE_ARG")
 [ "$MUTATE" = "no-storage-url" ] && { STORAGE_FLAG=(); echo "  (MUTATION: deployed worker booted with NO --storage-url)"; }
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
   "${STORAGE_FLAG[@]}" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-for svc in "control:$CONTROL_PORT" "worker:$WORKER_PORT" "gateway:$GATE_PORT"; do
+for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
   curl -sf "http://localhost:${svc##*:}/health" >/dev/null \
     || { fail "${svc%%:*} did not come up"; tail -20 "$WORK/${svc%%:*}.log"; exit 1; }
 done
@@ -348,9 +348,9 @@ API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 sleep 6   # gateway route-sync poll
 
 curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $API_KEY" \
-  "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
   && pass "deployed app reachable" || fail "deployed app did not answer ping"
-probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
 grep -q '"textMatches":true' "$WORK/deployed.txt" && pass "deployed side answered the probe" \
   || { fail "deployed side did not round-trip text"; head -20 "$WORK/deployed.txt"; tail -10 "$WORK/worker.log"; }
 

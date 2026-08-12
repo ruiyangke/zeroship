@@ -40,9 +40,9 @@ STRICT="${STRICT:-0}"
 
 # --- ports (offset from e2e_app_primitives.sh so the two can run back-to-back)
 # Exported BEFORE sourcing the shared bring-up library so stack_up uses them.
-export CONTROL_PORT=9100
-export WORKER_PORT=8088
-export GATE_PORT=8002
+export ZEROSHIP_CONTROL_PORT=9100
+export ZEROSHIP_WORKER_PORT=8088
+export ZEROSHIP_GATEWAY_PORT=8002
 export PG_PORT=5444
 export PG_CONTAINER="zs-e2e-render-pg"
 
@@ -132,7 +132,7 @@ else
     HOST="ssg-docs-e2e.localhost"
 
     # GET / → 200, text/html, prerendered hero content present
-    R="$(curl -s -D - -o "$WORK/ssg_root.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/")"
+    R="$(curl -s -D - -o "$WORK/ssg_root.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"; CT="$(printf '%s' "$R" | grep -i '^content-type:' | head -1 | tr -d '\r')"
     if [ "$CODE" = "200" ] && echo "$CT" | grep -qi 'text/html' && grep -q 'prerendered HTML' "$WORK/ssg_root.body"; then
       pass "GET / → 200 text/html, prerendered content present ('$(grep -o 'A 3-page documentation site[^<]*' "$WORK/ssg_root.body" | head -c 50)…')"
@@ -141,7 +141,7 @@ else
     fi
 
     # GET /about → 200, text/html, the About prose present
-    R="$(curl -s -D - -o "$WORK/ssg_about.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/about")"
+    R="$(curl -s -D - -o "$WORK/ssg_about.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/about")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"; CT="$(printf '%s' "$R" | grep -i '^content-type:' | head -1 | tr -d '\r')"
     if [ "$CODE" = "200" ] && echo "$CT" | grep -qi 'text/html' && grep -q 'no JavaScript, no worker' "$WORK/ssg_about.body"; then
       pass "GET /about → 200 text/html, prerendered About content present"
@@ -150,7 +150,7 @@ else
     fi
 
     # GET /about/ (trailing slash, ISS-60) → expect the same /about page
-    R="$(curl -s -D - -o "$WORK/ssg_about_slash.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/about/")"
+    R="$(curl -s -D - -o "$WORK/ssg_about_slash.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/about/")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"
     if [ "$CODE" = "200" ] && grep -q 'no JavaScript, no worker' "$WORK/ssg_about_slash.body"; then
       pass "GET /about/ (trailing slash) → 200 with About content (ISS-60 trailing-slash normalised)"
@@ -174,7 +174,7 @@ else
     HOST="ssr-blog-e2e.localhost"
 
     # GET / → 200, text/html, SSR-rendered <h1>ssr-blog</h1> + post titles + hydration <script>
-    R="$(curl -s -D - -o "$WORK/ssr_root.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/")"
+    R="$(curl -s -D - -o "$WORK/ssr_root.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"; CT="$(printf '%s' "$R" | grep -i '^content-type:' | head -1 | tr -d '\r')"
     HAS_RENDERED=no; grep -q 'Why SSR is back in fashion' "$WORK/ssr_root.body" && HAS_RENDERED=yes
     HAS_HYDRATE=no; grep -q '__SSR_PROPS__' "$WORK/ssr_root.body" && grep -q '<script type="module"' "$WORK/ssr_root.body" && HAS_HYDRATE=yes
@@ -214,7 +214,7 @@ else
     HOST="csr-todo-e2e.localhost"
 
     # GET / → 200, text/html, SPA shell (#root mount + module script)
-    R="$(curl -s -D - -o "$WORK/csr_root.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/")"
+    R="$(curl -s -D - -o "$WORK/csr_root.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"; CT="$(printf '%s' "$R" | grep -i '^content-type:' | head -1 | tr -d '\r')"
     if [ "$CODE" = "200" ] && echo "$CT" | grep -qi 'text/html' && grep -q 'id="root"' "$WORK/csr_root.body" && grep -q '<script type="module"' "$WORK/csr_root.body"; then
       pass "GET / → 200 text/html SPA shell (#root mount + module <script>)"
@@ -224,7 +224,7 @@ else
 
     # static asset: GET /assets/<built JS> → 200 with right content-type + cache header
     if [ -n "$CSR_ASSET" ]; then
-      R="$(curl -s -D - -o "$WORK/csr_asset.body" -H "Host: $HOST" "http://localhost:$GATE_PORT$CSR_ASSET")"
+      R="$(curl -s -D - -o "$WORK/csr_asset.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT$CSR_ASSET")"
       CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"; CT="$(printf '%s' "$R" | grep -i '^content-type:' | head -1 | tr -d '\r')"
       CC="$(printf '%s' "$R" | grep -i '^cache-control:' | head -1 | tr -d '\r')"
       SZ="$(wc -c < "$WORK/csr_asset.body")"
@@ -238,7 +238,7 @@ else
     fi
 
     # SPA catch-all fallback: GET /some/spa/route → the index shell, not 404
-    R="$(curl -s -D - -o "$WORK/csr_spa.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/some/spa/route")"
+    R="$(curl -s -D - -o "$WORK/csr_spa.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/some/spa/route")"
     CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"
     if [ "$CODE" = "200" ] && grep -q 'id="root"' "$WORK/csr_spa.body"; then
       pass "SPA catch-all: GET /some/spa/route → 200 index shell (try \$path → /index.html fallback)"
@@ -266,7 +266,7 @@ fi
 CSR_APP_ID=""
 if [ -f "$CSR_ZSHIP" ]; then
   # look it up via the control API by name
-  CSR_APP_ID="$(curl -s -H "Authorization: Bearer $PAT" "http://localhost:$CONTROL_PORT/api/apps" 2>/dev/null \
+  CSR_APP_ID="$(curl -s -H "Authorization: Bearer $PAT" "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const arr=Array.isArray(o)?o:(o.apps||o.items||[]);const a=arr.find(x=>x.name==="csr-todo-e2e");console.log(a?a.id:"")}catch(e){console.log("")}})')"
 fi
 if [ -z "$CSR_APP_ID" ]; then
@@ -279,7 +279,7 @@ else
     "http://csr-todo-e2e.localhost/__zeroship/v1/searchTodos" \
     '{"json":{"query":"build"}}' \
     '[["content-type","application/json"],["accept","text/event-stream"]]'
-  curl -s -N -D "$WORK/stream.hdr" -X POST "http://localhost:$WORKER_PORT/dispatch/$CSR_APP_ID" \
+  curl -s -N -D "$WORK/stream.hdr" -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$CSR_APP_ID" \
     -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/octet-stream' \
     --data-binary @"$WORK/stream-frame.bin" > "$WORK/stream.body" 2>/dev/null
@@ -370,7 +370,7 @@ if [ ! -f "$OAI_ZSHIP" ]; then
 else
   # create app, set the OPENAI_API_KEY secret, THEN deploy (so the first
   # isolate load hydrates env with the key already present).
-  OAI_J="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+  OAI_J="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
             -d '{"name":"openai-demo-e2e"}')"
   OAI_ID="$(echo "$OAI_J" | jget '.id')"
@@ -378,20 +378,20 @@ else
     fail "openai-demo create-app failed: $OAI_J"
   else
     SEC_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-      "http://localhost:$CONTROL_PORT/api/apps/$OAI_ID/secrets" \
+      "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$OAI_ID/secrets" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
       -d "$(node -e 'process.stdout.write(JSON.stringify({key:"OPENAI_API_KEY",value:process.argv[1]}))' "$OAI_KEY")")"
     [ "$SEC_CODE" = "204" ] && pass "set OPENAI_API_KEY secret on openai-demo (HTTP $SEC_CODE)" \
       || known "set OPENAI_API_KEY secret returned HTTP $SEC_CODE (proceeding)"
 
-    DEP="$("$BIN/zeroship" deploy "$OAI_ZSHIP" --app="$OAI_ID" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+    DEP="$("$BIN/zeroship" deploy "$OAI_ZSHIP" --app="$OAI_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
     if echo "$DEP" | grep -q "deploy_hash"; then
       pass "deployed openai-demo ($OAI_ID)"
       sleep 4
       HOST="openai-demo-e2e.localhost"
 
       # SPA shell over the gateway (static)
-      R="$(curl -s -D - -o "$WORK/oai_root.body" -H "Host: $HOST" "http://localhost:$GATE_PORT/")"
+      R="$(curl -s -D - -o "$WORK/oai_root.body" -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
       CODE="$(printf '%s' "$R" | awk 'NR==1{print $2}')"
       [ "$CODE" = "200" ] && grep -q 'id="root"' "$WORK/oai_root.body" \
         && pass "openai-demo SPA shell → 200 (static serve)" \
@@ -401,7 +401,7 @@ else
       # must init in V8). Drive over worker /dispatch (rpc: is gateway-gated).
       zs_write_frame "$WORK/oai-frame.bin" POST \
         "http://openai-demo-e2e.localhost/__zeroship/v1/ping" '{"json":null}'
-      OAI_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$OAI_ID" \
+      OAI_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$OAI_ID" \
                    -H "Authorization: Bearer $WORKER_KEY" \
                    -H 'content-type: application/octet-stream' \
                    --data-binary @"$WORK/oai-frame.bin" 2>/dev/null)"

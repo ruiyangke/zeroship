@@ -74,9 +74,9 @@ ZSHIP="$APP/dist/app.zship"
 
 # A port band of its own: golden_path 9390/8390/8300, dev-vs-deployed env
 # 9397/8397/8307/5457, kv 9392/8392/8302, stream 9394/8394/8304.
-export CONTROL_PORT="${CONTROL_PORT:-9391}"
-export WORKER_PORT="${WORKER_PORT:-8391}"
-export GATE_PORT="${GATE_PORT:-8301}"
+export ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9391}"
+export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8391}"
+export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8301}"
 export PG_PORT="${PG_PORT:-5451}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-secret-expose-pg}"
 APP_SLUG="secret-expose-cli"
@@ -173,7 +173,7 @@ grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anon"' "$d/manifest.json" \
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
 mint_admin_pat || exit 1
 
-APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d "{\"name\":\"$APP_SLUG\"}")"
 APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
@@ -184,14 +184,14 @@ APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 # ---------------------------------------------------------------------------
 zs() {
   "$BIN/zeroship" "$@" \
-    --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$PAT"
+    --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT"
 }
 
 # THE VERIFY STEP. Not "the CLI exited 0", and not the CLI's own stdout: an
 # independent GET against the control plane, sorted, space-joined. If the PUT
 # did not persist the union, this is where it shows.
 server_expose() {
-  curl -s -m 10 "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/env/expose" \
+  curl -s -m 10 "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/env/expose" \
     -H "Authorization: Bearer $PAT" \
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
       try{const o=JSON.parse(s);if(!Array.isArray(o.expose))return process.stdout.write("<BAD-SHAPE:"+s+">");
@@ -251,7 +251,7 @@ expect_expose "$SEC_A $SEC_B" "a second \`unexpose $SEC_D\` is a no-op, not a wi
 
 # STORAGE CONTROL: all four secrets exist. Without this, "C is missing from
 # process.env" is indistinguishable from "C was never stored".
-secrets_body="$(curl -s -m 10 "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/secrets" \
+secrets_body="$(curl -s -m 10 "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/secrets" \
   -H "Authorization: Bearer $PAT")"
 missing=""
 for k in "$SEC_A" "$SEC_B" "$SEC_C" "$SEC_D"; do
@@ -272,14 +272,14 @@ zs var set "$VAR_CONTROL=$VAL_CONTROL" >/dev/null 2>&1
 echo ""
 echo "--- the deployed app's view of those secrets ---"
 dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" \
-        --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$dep" | grep -q "deploy_hash" && pass "deployed env-probe" \
   || { fail "deploy failed: $dep"; echo "  results: $PASS passed, $FAIL failed"; exit 1; }
 
 probe() {
   curl -s -o "$WORK/deployed.json" -w '%{http_code}' -m 20 -X POST \
     -H 'content-type: application/json' -H "Host: $HOST" \
-    "http://localhost:$GATE_PORT/__zeroship/v1/envp.report" -d '{"json":{}}'
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/envp.report" -d '{"json":{}}'
 }
 code=""
 for _ in $(seq 1 25); do

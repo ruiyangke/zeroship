@@ -36,9 +36,9 @@ PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_redeploy}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct from golden_path.sh and e2e_dev_vs_deployed_kv.sh.
-CONTROL_PORT="${CONTROL_PORT:-9393}"
-WORKER_PORT="${WORKER_PORT:-8393}"
-GATE_PORT="${GATE_PORT:-8303}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
 REDIS_PORT="${REDIS_PORT:-6397}"
 REDIS_CONTAINER="zs-redeploy-redis"
 export WORKER_KEY="${WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
@@ -74,7 +74,7 @@ for z in "$ZSHIP_A" "$ZSHIP_B"; do
   [ -f "$z" ] || { no "missing $z (run pnpm build in that example)"; exit 1; }
 done
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$REDIS_CONTAINER" -d -p "$REDIS_PORT:6379" redis:7-alpine >/dev/null
 for _ in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
@@ -88,27 +88,27 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # env.kv is absent without --kv-url by design, and kv-dashboard needs it.
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
   --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
   --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null && ok "stack healthy" \
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
 rpc() {
   curl -sS -m 15 -X POST -H 'content-type: application/json' -H "X-Api-Key: $KEY" \
-    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/$1" -d '{"json":{}}' 2>&1
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/$1" -d '{"json":{}}' 2>&1
 }
 # An unknown procedure is refused by the GATEWAY at routing off the manifest,
 # never reaching the dispatcher. Until 2026-08-11 the gateway said that in its
@@ -158,7 +158,7 @@ STOPFILE="$WORK/traffic.stop"; rm -f "$STOPFILE"
     _s=$(date +%s%3N)
     _c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST \
       -H 'content-type: application/json' -H "X-Api-Key: $KEY_A" \
-      "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/kv.visit" \
+      "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/kv.visit" \
       -d '{"json":{}}' 2>/dev/null)
     _rc=$?
     _e=$(date +%s%3N)

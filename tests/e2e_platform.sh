@@ -45,9 +45,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 
-CONTROL_PORT=9090
+ZEROSHIP_CONTROL_PORT=9090
 WORKER_PORTS=(8080 8081 8082)
-GATE_PORT=8000
+ZEROSHIP_GATEWAY_PORT=8000
 PG_PORT="${PG_PORT:-5456}"
 PG_CONTAINER="${PG_CONTAINER:-zs-e2e-platform-pg}"
 CONTROL_KEY="test-ck"
@@ -187,7 +187,7 @@ EOF
 # create_app <name> → echoes the app id, or returns 1 having reported why.
 create_app() {
     local name="$1"
-    if ! http_ok POST "http://localhost:$CONTROL_PORT/api/apps" \
+    if ! http_ok POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
         -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $PAT" \
         -d "{\"name\":\"$name\"}"; then
@@ -210,7 +210,7 @@ deploy_js() {
     if [ -n "$resources" ]; then build_zship "$tmpf" "$tmpz" "$resources"; else build_zship "$tmpf" "$tmpz"; fi
     set +e
     out="$("$BIN/zeroship" deploy "$tmpz" --app="$app_id" \
-        --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
     rc=$?
     set -e
     rm -f "$tmpf" "$tmpz"
@@ -229,7 +229,7 @@ echo ""
 # --- Setup ---
 echo "=== Setup ==="
 stack_preflight || { echo "  ✗ preflight failed"; exit 2; }
-for port in $CONTROL_PORT "${WORKER_PORTS[@]}" $GATE_PORT; do
+for port in $ZEROSHIP_CONTROL_PORT "${WORKER_PORTS[@]}" $ZEROSHIP_GATEWAY_PORT; do
     lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -241,16 +241,16 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 # tokens against the key it was started with. Without the flag every
 # `/api/apps` call answers 401 "platform token verification failed" — which
 # is exactly how this harness died before, silently, inside a `$(curl -sf)`.
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" --blob-store "$WORK/blobs" \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" --blob-store "$WORK/blobs" \
     --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
-    "$BIN/zeroship-worker" --port "$port" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+    "$BIN/zeroship-worker" --port "$port" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
         --control-key "$CONTROL_KEY" --db "$DBURL" --blob-store "$WORK/blobs" \
         --poll-interval 2 > "$WORK/worker-$port.log" 2>&1 &
     PIDS+=($!)
@@ -260,15 +260,15 @@ done
 
 # Start gateway. cd54028e7 made it refuse to start without a broker master
 # secret; $WORK/gate-secret comes from stack_workspace.
-"$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
-    --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 \
+"$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+    --control-key "$CONTROL_KEY" --worker-urls "$WORKER_URL_LIST" --poll-interval 2 \
     --db "$DBURL" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
     --signing-key-file "$WORK/signing-key.pem" \
     --gateway-broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-echo "  control=$CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$GATE_PORT pg=$PG_PORT"
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+echo "  control=$ZEROSHIP_CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$ZEROSHIP_GATEWAY_PORT pg=$PG_PORT"
 echo "  logs in $WORK"
 
 # ---------------------------------------------------------------------------
@@ -276,13 +276,13 @@ echo "  logs in $WORK"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Test 1: Health checks ==="
-if http_ok GET "http://localhost:$CONTROL_PORT/health"; then pass "control healthy"
+if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/health"; then pass "control healthy"
 else fail "control unhealthy"; tail -15 "$WORK/control.log" | sed 's/^/      /'; fi
 for port in "${WORKER_PORTS[@]}"; do
     if http_ok GET "http://localhost:$port/health"; then pass "worker:$port healthy"
     else fail "worker:$port unhealthy"; tail -15 "$WORK/worker-$port.log" | sed 's/^/      /'; fi
 done
-if http_ok GET "http://localhost:$GATE_PORT/health"; then pass "gateway healthy"
+if http_ok GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/health"; then pass "gateway healthy"
 else fail "gateway unhealthy"; tail -15 "$WORK/gate.log" | sed 's/^/      /'; fi
 
 # The whole suite needs an admin PAT. Without it nothing below can run, so
@@ -308,7 +308,7 @@ if [ -n "$APP_ID" ]; then
     fi
 
     sleep 3
-    if http_ok GET "http://localhost:$CONTROL_PORT/internal/versions" -H "Authorization: Bearer $CONTROL_KEY"; then
+    if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/internal/versions" -H "Authorization: Bearer $CONTROL_KEY"; then
         if printf '%s' "$HTTP_BODY" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1; then
             pass "version in internal API"
         else
@@ -318,7 +318,7 @@ if [ -n "$APP_ID" ]; then
         fail "/internal/versions unreachable"
     fi
 
-    if http_ok DELETE "http://localhost:$CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $PAT" \
+    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $PAT" \
         && printf '%s' "$HTTP_BODY" | grep -q "true"; then
         pass "delete app"
     else
@@ -356,7 +356,7 @@ ID_PASS=0
 for i in $(seq 1 10); do
     name="id-$(printf '%02d' "$i")"
     [ -n "${APP_IDS[$name]:-}" ] || continue
-    if http GET "http://localhost:$GATE_PORT/apps/$name/" && [ "$HTTP_STATUS" = "200" ] \
+    if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$name/" && [ "$HTTP_STATUS" = "200" ] \
         && [ "$HTTP_BODY" = "I am $name" ]; then
         ID_PASS=$((ID_PASS + 1))
     else
@@ -381,7 +381,7 @@ else
     sleep 5
     COUNTS=""
     for j in $(seq 1 10); do
-        if http GET "http://localhost:$GATE_PORT/apps/counter-app/?n=$j" && [ "$HTTP_STATUS" = "200" ]; then
+        if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/counter-app/?n=$j" && [ "$HTTP_STATUS" = "200" ]; then
             COUNTS="$COUNTS $(jget "$HTTP_BODY" '.count')"
         else
             COUNTS="$COUNTS x"
@@ -408,9 +408,9 @@ if [ -z "${APP_IDS[id-01]:-}" ] || [ -z "${APP_IDS[id-02]:-}" ]; then
     fail "isolation: id-01/id-02 were not created"
 else
     for j in $(seq 1 10); do
-        http GET "http://localhost:$GATE_PORT/apps/id-01/?n=$j" >/dev/null 2>&1 || true
+        http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/id-01/?n=$j" >/dev/null 2>&1 || true
     done
-    if http GET "http://localhost:$GATE_PORT/apps/id-02/" && [ "$HTTP_BODY" = "I am id-02" ]; then
+    if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/id-02/" && [ "$HTTP_BODY" = "I am id-02" ]; then
         pass "id-02 isolated from id-01"
     else
         fail "id-02 returned HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-120)'"
@@ -451,13 +451,13 @@ else
     sleep 5
     # 6a: anon URL resource is reachable — proves the app is live, so a 401
     #     on 6b cannot be "the app never deployed".
-    if http GET "http://localhost:$GATE_PORT/apps/authgate/" && [ "$HTTP_STATUS" = "200" ]; then
+    if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/" && [ "$HTTP_STATUS" = "200" ]; then
         pass "auth:anon resource served (HTTP 200)"
     else
         fail "auth:anon resource: HTTP $HTTP_STATUS $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
     fi
     # 6b: rpc resource declaring auth:user, no session.
-    if http POST "http://localhost:$GATE_PORT/apps/authgate/__zeroship/v1/secret" \
+    if http POST "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/__zeroship/v1/secret" \
         -H 'Content-Type: application/json' -d '{"json":{}}' \
         && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
         pass "rpc resource with auth:user rejected without a session (HTTP $HTTP_STATUS)"
@@ -465,7 +465,7 @@ else
         fail "rpc auth:user returned HTTP $HTTP_STATUS (expected 401/403): $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
     fi
     # 6c: the control. Identical in every respect except `auth: anon`.
-    if http POST "http://localhost:$GATE_PORT/apps/authgate/__zeroship/v1/open" \
+    if http POST "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/__zeroship/v1/open" \
         -H 'Content-Type: application/json' -d '{"json":{}}' \
         && [ "$HTTP_STATUS" = "200" ]; then
         pass "rpc resource with auth:anon passes the same gate (HTTP 200)"
@@ -475,7 +475,7 @@ else
 fi
 
 # 6c: unknown app → 404 at the gateway.
-if http GET "http://localhost:$GATE_PORT/apps/nonexistent-app/" && [ "$HTTP_STATUS" = "404" ]; then
+if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/nonexistent-app/" && [ "$HTTP_STATUS" = "404" ]; then
     pass "unknown app returns 404"
 else
     fail "unknown app returned HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
@@ -483,7 +483,7 @@ fi
 
 # 6d/6e: the control plane's platform-token gate — the credential that
 # actually guards app CRUD today.
-if http POST "http://localhost:$CONTROL_PORT/api/apps" \
+if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
     -H 'Content-Type: application/json' -d '{"name":"should-fail"}' \
     && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
     pass "app-create without a platform token rejected (HTTP $HTTP_STATUS)"
@@ -491,7 +491,7 @@ else
     fail "app-create with no auth returned HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
 fi
 
-if http POST "http://localhost:$CONTROL_PORT/api/apps" \
+if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
     -H 'Content-Type: application/json' -H 'Authorization: Bearer not-a-real-token' \
     -d '{"name":"should-fail"}' \
     && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
@@ -514,7 +514,7 @@ elif ! deploy_js "$COLD_ID" 'export default { fetch() { return new Response("col
 else
     sleep 4
     START=$(date +%s%N)
-    http GET "http://localhost:$GATE_PORT/apps/cold-start/" || true
+    http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/cold-start/" || true
     END=$(date +%s%N)
     COLD_MS=$(( (END - START) / 1000000 ))
     if [ "$HTTP_STATUS" = "200" ] && [ "$HTTP_BODY" = "cold-ok" ]; then
@@ -524,7 +524,7 @@ else
     fi
 
     START=$(date +%s%N)
-    http GET "http://localhost:$GATE_PORT/apps/cold-start/" || true
+    http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/cold-start/" || true
     END=$(date +%s%N)
     WARM_MS=$(( (END - START) / 1000000 ))
     if [ "$HTTP_STATUS" = "200" ] && [ "$HTTP_BODY" = "cold-ok" ]; then
@@ -547,7 +547,7 @@ elif ! deploy_js "$HOT_ID" 'export default { fetch() { return new Response("v1")
     fail "hot-deploy: v1 deploy failed"
 else
     sleep 4
-    if http GET "http://localhost:$GATE_PORT/apps/hot-deploy/" && [ "$HTTP_BODY" = "v1" ]; then
+    if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/hot-deploy/" && [ "$HTTP_BODY" = "v1" ]; then
         pass "v1 deployed"
     else
         fail "expected v1, got HTTP $HTTP_STATUS '$(printf '%s' "$HTTP_BODY" | cut -c1-160)'"
@@ -560,7 +560,7 @@ else
         v=""
         for _ in $(seq 1 10); do
             sleep 3
-            http GET "http://localhost:$GATE_PORT/apps/hot-deploy/" || true
+            http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/hot-deploy/" || true
             v="$HTTP_BODY"
             [ "$v" = "v2" ] && break
         done
@@ -591,7 +591,7 @@ if [ -n "$EDGE_APP_ID" ]; then
 
     # --- 9.1: wrong content-type returns 415 ---
     echo "  -- 9.1: wrong content-type"
-    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
         -H "Authorization: Bearer $PAT" -H 'Content-Type: application/octet-stream' \
         --data-binary "@$edge_zship" \
         && [ "$HTTP_STATUS" = "415" ] && printf '%s' "$HTTP_BODY" | grep -q "unsupported content type"; then
@@ -606,7 +606,7 @@ if [ -n "$EDGE_APP_ID" ]; then
     echo "  -- 9.2: body over 256 MiB cap"
     big_body=$(mktemp --suffix=.bin)
     dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
-    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
         -H "Authorization: Bearer $PAT" -H 'Content-Type: application/x-zship' \
         --data-binary "@$big_body" \
         && [ "$HTTP_STATUS" = "413" ] && printf '%s' "$HTTP_BODY" | grep -q "deploy too large"; then
@@ -618,7 +618,7 @@ if [ -n "$EDGE_APP_ID" ]; then
 
     # --- 9.3: wrong Authorization returns 401/403 ---
     echo "  -- 9.3: wrong auth on deploy"
-    if http POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
         -H "Authorization: Bearer wrong-key-12345" -H 'Content-Type: application/x-zship' \
         --data-binary "@$edge_zship" \
         && { [ "$HTTP_STATUS" = "401" ] || [ "$HTTP_STATUS" = "403" ]; }; then
@@ -628,7 +628,7 @@ if [ -n "$EDGE_APP_ID" ]; then
     fi
     rm -f "$edge_zship"
 
-    if http_ok DELETE "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $PAT" \
+    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $PAT" \
         && printf '%s' "$HTTP_BODY" | grep -q "true"; then
         pass "9.4: cleanup edge-case app"
     else

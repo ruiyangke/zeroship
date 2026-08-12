@@ -108,12 +108,12 @@ MINIO_SECRET="minioadmin"
 MINIO_BUCKET="zeroship-e2e-large"
 MINIO_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
 
-export CONTROL_PORT=9141
-export WORKER_PORT=8191
-export GATE_PORT=8031
+export ZEROSHIP_CONTROL_PORT=9141
+export ZEROSHIP_WORKER_PORT=8191
+export ZEROSHIP_GATEWAY_PORT=8031
 export PG_PORT=5471
 export PG_CONTAINER="zs-e2e-s3-large-pg"
-export WORKER_THREADS=2
+export ZEROSHIP_WORKER_THREADS=2
 
 RSS_SAMPLER_PID=""
 minio_cleanup() { docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true; }
@@ -197,37 +197,37 @@ fi
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control
 SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
 # worker — capture its PID explicitly for RSS sampling
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --storage-url "$STORAGE_S3" \
   --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
 echo $WORKER_PID >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (pid=$WORKER_PID, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (pid=$WORKER_PID, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
 # gateway
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$BLOB_S3" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$BLOB_S3" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -237,12 +237,12 @@ mint_admin_pat || { fail "PAT mint failed"; exit 1; }
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 4: deploy storage-gallery on the 'unlimited' plan ==="
-ST_APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+ST_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d '{"name":"storage-gallery-large","plan_id":"unlimited"}')"
 ST_APP="$(echo "$ST_APP_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).id)}catch(e){console.log("")}})')"
 if [ -z "$ST_APP" ]; then fail "create-app failed: $ST_APP_JSON"; exit 1; fi
-ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 if echo "$ST_DEP" | grep -q "deploy_hash"; then
   pass "deployed storage-gallery (plan=unlimited) → app $ST_APP"
 else
@@ -261,7 +261,7 @@ envelope() {
 dispatch_to() {
   local out="$1" proc="$2" body="$3"
   curl -s -o "$out" -w '%{http_code} %{time_total}' --max-time 1800 \
-    -X POST "http://localhost:$WORKER_PORT/dispatch/$ST_APP" \
+    -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$ST_APP" \
     -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/json' -d "$(envelope "$proc" "$body")"
 }

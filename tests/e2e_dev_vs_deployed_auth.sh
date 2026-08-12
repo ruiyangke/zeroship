@@ -101,9 +101,9 @@ ZSHIP="$APP/dist/app.zship"
 
 # A port band of its own: kv 9392/8392/8302/3011, storage 9396/8396/8306/3081,
 # streaming 9394/8394/8304/3061, golden_path 9390/8390/8300.
-export CONTROL_PORT="${CONTROL_PORT:-9398}"
-export WORKER_PORT="${WORKER_PORT:-8398}"
-export GATE_PORT="${GATE_PORT:-8308}"
+export ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9398}"
+export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8398}"
+export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8308}"
 export PG_PORT="${PG_PORT:-5458}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-auth-pg}"
 DEV_PORT="${DEV_PORT:-3091}"   # examples/auth-probe AUTH_PROBE_API_PORT default
@@ -554,7 +554,7 @@ ready=0
 for _ in $(seq 1 25); do
   c="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST -H 'content-type: application/json' \
       -H "Host: $HOST" -H "Origin: http://$HOST" -H "Cookie: __Host-zeroship_app_session=$CRED_deployed_alpha" \
-      "http://localhost:$GATE_PORT/__zeroship/v1/probe.userDeclared" -d '{"json":{}}')"
+      "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/probe.userDeclared" -d '{"json":{}}')"
   [ "$c" = "200" ] && { ready=1; break; }
   sleep 2
 done
@@ -562,7 +562,7 @@ done
   || { fail "gateway never accepted the session (last code=$c)"
        grep -iE 'session|cookie|kid|verif|sector|unauth|client_not' "$WORK/gate.log" 2>/dev/null | tail -15 | sed 's/^/    /'; }
 
-probe "http://localhost:$GATE_PORT" deployed > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT" deployed > "$WORK/deployed.txt" 2>&1
 grep -q 'probe.public' "$WORK/deployed.txt" && pass "deployed app answered the probe ($(wc -l < "$WORK/deployed.txt") rows)" \
   || { fail "deployed probe produced nothing"; tail -20 "$WORK/worker.log"; }
 

@@ -77,9 +77,9 @@ if [ "$FRESH_RC" = "2" ]; then
 fi
 
 # --- stack ------------------------------------------------------------------
-export CONTROL_PORT=${CONTROL_PORT:-9137}
-export WORKER_PORT=${WORKER_PORT:-8117}
-export GATE_PORT=${GATE_PORT:-8031}
+export ZEROSHIP_CONTROL_PORT=${ZEROSHIP_CONTROL_PORT:-9137}
+export ZEROSHIP_WORKER_PORT=${ZEROSHIP_WORKER_PORT:-8117}
+export ZEROSHIP_GATEWAY_PORT=${ZEROSHIP_GATEWAY_PORT:-8031}
 export PG_PORT=${PG_PORT:-5471}
 export PG_CONTAINER=${PG_CONTAINER:-zs-e2e-bslash-pg}
 # Debug logging on the gateway so the matched path is recoverable from gate.log
@@ -152,7 +152,7 @@ APP_ID="$(deploy_zship "$SLUG" "$ZSHIP")" || { echo "deploy failed"; exit 1; }
 note "deployed app $APP_ID as /apps/$SLUG"
 sleep 6   # route sync poll-interval is 2s; give the gateway room.
 
-BASE="http://localhost:$GATE_PORT/apps/$SLUG"
+BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SLUG"
 
 # --- request helpers --------------------------------------------------------
 # curl_status_body <extra curl args...> <url>  -> sets RSTATUS / RBODY
@@ -169,9 +169,9 @@ curl_req() {
 # helper reports it rather than substituting something curl finds acceptable.
 raw_req() {
   local path="$1" resp
-  exec 3<>"/dev/tcp/127.0.0.1/$GATE_PORT" || { RSTATUS="000"; RBODY="connect failed"; return 1; }
+  exec 3<>"/dev/tcp/127.0.0.1/$ZEROSHIP_GATEWAY_PORT" || { RSTATUS="000"; RBODY="connect failed"; return 1; }
   printf 'GET %s HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\n\r\n' \
-    "$path" "$GATE_PORT" >&3
+    "$path" "$ZEROSHIP_GATEWAY_PORT" >&3
   resp="$(timeout 30 cat <&3)"
   exec 3<&- 2>/dev/null
   exec 3>&- 2>/dev/null

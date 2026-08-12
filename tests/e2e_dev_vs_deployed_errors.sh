@@ -191,9 +191,9 @@ ZSHIP="$APP/dist/app.zship"
 
 # A port band of its own: auth 9398/8398/8308/5458, kv 9392/8392/8302/3011,
 # storage 9396/8396/8306/3081, streaming 9394/8394/8304/3061.
-export CONTROL_PORT="${CONTROL_PORT:-9399}"
-export WORKER_PORT="${WORKER_PORT:-8399}"
-export GATE_PORT="${GATE_PORT:-8309}"
+export ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9399}"
+export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8399}"
+export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8309}"
 export PG_PORT="${PG_PORT:-5459}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-err-pg}"
 DEV_PORT="${DEV_PORT:-3093}"   # examples/error-probe ERROR_PROBE_API_PORT default
@@ -547,7 +547,7 @@ pass "deployed error-probe ($APP_ID)"
 ready=0
 for _ in $(seq 1 25); do
   c="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST -H 'content-type: application/json' \
-      -H "Host: $HOST" "http://localhost:$GATE_PORT/__zeroship/v1/err.ok" -d '{"json":{}}')"
+      -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/err.ok" -d '{"json":{}}')"
   [ "$c" = "200" ] && { ready=1; break; }
   sleep 2
 done
@@ -555,12 +555,12 @@ done
   || { fail "gateway never routed to the app (last code=$c)"; tail -20 "$WORK/gate.log"; }
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
-probe "http://localhost:$GATE_PORT" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT" > "$WORK/deployed.txt" 2>&1
 grep -q 'err.plain' "$WORK/deployed.txt" && pass "deployed app answered the probe ($(wc -l < "$WORK/deployed.txt") rows)" \
   || { fail "deployed probe produced nothing"; tail -20 "$WORK/worker.log"; }
 
 DRAWFILE="$WORK/deployed.draw"; : > "$DRAWFILE"
-dprobe "http://localhost:$GATE_PORT" > "$WORK/deployed.dtxt" 2>&1
+dprobe "http://localhost:$ZEROSHIP_GATEWAY_PORT" > "$WORK/deployed.dtxt" 2>&1
 [ "$(wc -l < "$WORK/deployed.dtxt")" = "${#DCASES[@]}" ] \
   && pass "deployed app answered all ${#DCASES[@]} dispatcher cases" \
   || { fail "deployed dispatcher probe produced $(wc -l < "$WORK/deployed.dtxt") of ${#DCASES[@]} rows"; tail -20 "$WORK/worker.log"; }

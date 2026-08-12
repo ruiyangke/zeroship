@@ -55,10 +55,10 @@ fi
 for b in zeroship-control zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 
-CONTROL_PORT=9175; PG_PORT=5475; RP_PORT=19175
+ZEROSHIP_CONTROL_PORT=9175; PG_PORT=5475; RP_PORT=19175
 LAGO_PORT=3480; LAGO_KEY="lago_key-hooli-1234567890"; LAGO_URL="http://localhost:$LAGO_PORT"
 PGC=zs-e2e-dedup-pg; RPC=zs-e2e-dedup-redpanda
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-dedup-e2e"; FWD_GROUP="zs-fwd-dedup-e2e"
 WORK="$(mktemp -d -t zs-e2e-dedup-XXXXXX)"; mkdir -p "$WORK/blobs"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -87,7 +87,7 @@ cleanup(){
   fi
 }
 trap cleanup EXIT
-lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 echo ""; echo "=== Stage 1: infra (PG + redpanda + REAL Lago) + migrate + seed + control ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -164,7 +164,7 @@ SIGNING_KEY_FILE="$WORK/sk.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 LAGO_API_KEY="$LAGO_KEY" \
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \

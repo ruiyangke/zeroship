@@ -25,9 +25,9 @@ ROOT="$(cd "$BROWSER_DIR/../.." && pwd)"
 DESCRIPTOR="$BROWSER_DIR/.stack.json"
 
 # --- ports / container name (disjoint from the other two harnesses) ---------
-export CONTROL_PORT=9140
-export WORKER_PORT=8108
-export GATE_PORT=8022
+export ZEROSHIP_CONTROL_PORT=9140
+export ZEROSHIP_WORKER_PORT=8108
+export ZEROSHIP_GATEWAY_PORT=8022
 export PG_PORT=5464
 export PG_CONTAINER="zs-e2e-browser-pg"
 
@@ -85,9 +85,9 @@ sleep 5
 node -e '
 const fs = require("fs");
 const d = {
-  gatePort: Number(process.env.GATE_PORT),
-  controlPort: Number(process.env.CONTROL_PORT),
-  workerPort: Number(process.env.WORKER_PORT),
+  gatePort: Number(process.env.ZEROSHIP_GATEWAY_PORT),
+  controlPort: Number(process.env.ZEROSHIP_CONTROL_PORT),
+  workerPort: Number(process.env.ZEROSHIP_WORKER_PORT),
   work: process.env.WORK,
   pidfile: process.env.PIDFILE,
   pgContainer: process.env.PG_CONTAINER,
@@ -108,5 +108,5 @@ console.log(JSON.stringify(d.apps));
 ' "$CSR_ID" "$SSR_ID" "$SSG_ID"
 
 echo ""
-echo "  stack is UP — gateway on :$GATE_PORT (descriptor: $DESCRIPTOR)"
+echo "  stack is UP — gateway on :$ZEROSHIP_GATEWAY_PORT (descriptor: $DESCRIPTOR)"
 exit 0

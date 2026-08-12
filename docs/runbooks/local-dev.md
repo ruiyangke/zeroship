@@ -78,7 +78,7 @@ CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
 MASTER_KEY="$ZEROSHIP_MASTER_KEY" \
 WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 PAIRWISE_SALT="$PAIRWISE_SALT" \
-AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
+ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ./target/release/zeroship-control \
   --port 9090 \
   --db postgres://localhost:5432/zeroship \
@@ -99,8 +99,8 @@ CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
 WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 ./target/release/zeroship-worker \
   --port 8080 \
-  --worker-threads 4 \
-  --control http://localhost:9090 \
+  --threads 4 \
+  --control-url http://localhost:9090 \
   --blob-store ./bundles
 ```
 
@@ -114,11 +114,11 @@ STASH_SIGNING_KEY="$STASH_SIGNING_KEY" \
 PAIRWISE_SALT="$PAIRWISE_SALT" \
 ./target/release/zeroship-gate \
   --port 8000 \
-  --control http://localhost:9090 \
-  --workers http://localhost:8080 \
+  --control-url http://localhost:9090 \
+  --worker-urls http://localhost:8080 \
   --blob-store ./bundles \
   --auth-ui-url http://localhost:9092 \
-  --gateway-public-url http://localhost:8000 \
+  --public-url http://localhost:8000 \
   --signing-key-file deploy/compose/secrets/gateway-signing.pem \
   --gateway-broker-secret-file deploy/compose/secrets/broker-secret
 ```

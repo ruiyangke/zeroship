@@ -45,17 +45,17 @@ APP_EXAMPLE="$ROOT/examples/db-hitcounter"
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-CONTROL_PORT=9186
-WORKER_PORT=8086
-GATE_PORT=8076
-MIGRATED_PORT=9086
+ZEROSHIP_CONTROL_PORT=9186
+ZEROSHIP_WORKER_PORT=8086
+ZEROSHIP_GATEWAY_PORT=8076
+ZEROSHIP_MIGRATED_PORT=9086
 PG_PORT=5486
 RP_PORT=19186
 PGC=zs-e2e-dbapp-pg
 RPC=zs-e2e-dbapp-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-CONTROL_URL="http://localhost:$CONTROL_PORT"
-MIGRATED_URL="http://localhost:$MIGRATED_PORT"
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+MIGRATED_URL="http://localhost:$ZEROSHIP_MIGRATED_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"
 USAGE_TOPIC="zeroship-usage-dbapp-e2e"
 APP_HOST="db-hitcounter.localhost"
@@ -133,7 +133,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -254,7 +254,7 @@ SIGNING_KEY_FILE="$WORK/sk.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --stripe-base-url "http://127.0.0.1:1" --stripe-secret-key "sk_test_unused" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
@@ -263,24 +263,24 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -40 "$WORK/control.log"; exit 1; }
 
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 && pass "zeroship-migrated healthy" || { fail "migrated"; tail -40 "$WORK/migrated.log"; exit 1; }
 
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --config "$CFG_TOML" --control-url "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -40 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -40 "$WORK/worker.log"; exit 1; }
 
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
-  --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
   --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -40 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -40 "$WORK/gate.log"; exit 1; }
 
 echo ""
 echo "=== Stage 3: PAT + creator + app + deploy + migrated apply ==="
@@ -334,7 +334,7 @@ READY_RESP=""
 READY_TRIES=0
 for _ in $(seq 1 30); do
   READY_TRIES=$((READY_TRIES+1))
-  READY_RESP="$(gw "http://localhost:$GATE_PORT/hit/ready")"
+  READY_RESP="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/hit/ready")"
   WROTE="$(printf '%s' "$READY_RESP" | jget '.wrote')"
   READBACK="$(printf '%s' "$READY_RESP" | jget '.readBack')"
   if [ "$WROTE" = "true" ] && [ -n "$READBACK" ] && [ "$READBACK" -gt 0 ] 2>/dev/null; then
@@ -350,7 +350,7 @@ echo "    env.db response on readiness attempt $READY_TRIES of 30: $READY_RESP"
 OK=0
 LAST_RESP=""
 for i in $(seq 1 "$N_REQ"); do
-  LAST_RESP="$(gw "http://localhost:$GATE_PORT/hit/$i")"
+  LAST_RESP="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/hit/$i")"
   WROTE="$(printf '%s' "$LAST_RESP" | jget '.wrote')"
   READBACK="$(printf '%s' "$LAST_RESP" | jget '.readBack')"
   if [ "$WROTE" = "true" ] && [ -n "$READBACK" ] && [ "$READBACK" -gt 0 ] 2>/dev/null; then

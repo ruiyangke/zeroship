@@ -46,9 +46,9 @@ PG_CONTAINER="${PG_CONTAINER:-zs-wfadvz-pg}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
 PG_DB="${PG_DB:-zeroship_wfadvz_$(date +%s)_$$}"
-CONTROL_PORT="${CONTROL_PORT:-9150}"
-WORKER_PORT="${WORKER_PORT:-9151}"
-GATE_PORT="${GATE_PORT:-9152}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9150}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-9151}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-9152}"
 CADDY_PORT="${CADDY_PORT:-9153}"
 APP_NAME="wfadvz-$(date +%s)-$$"
 DBURL="postgres://$PG_USER:$PG_PASS@localhost:$PG_PORT/$PG_DB"
@@ -119,7 +119,7 @@ gw_post() {
   local host="$1" body="$2" hdr
   if [ "$host" = "__NONE__" ]; then hdr=(-H "Host;"); else hdr=(-H "Host: $host"); fi
   LAST_CODE="$(curl -s --max-time 40 -o "$WORK/resp.body" -w '%{http_code}' \
-    -X POST "http://127.0.0.1:$GATE_PORT/__zeroship/internal/workflow-advance" \
+    -X POST "http://127.0.0.1:$ZEROSHIP_GATEWAY_PORT/__zeroship/internal/workflow-advance" \
     "${hdr[@]}" -H 'content-type: application/json' --data "$body")"
   LAST_BODY="$(cat "$WORK/resp.body")"
 }
@@ -146,7 +146,7 @@ create_run() {
   out="$WORK/create.out"
   token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   code="$(curl -s --max-time 20 -o "$out" -w '%{http_code}' \
-    -X POST "http://127.0.0.1:$CONTROL_PORT/internal/workflows/ProbeWorkflow/runs" \
+    -X POST "http://127.0.0.1:$ZEROSHIP_CONTROL_PORT/internal/workflows/ProbeWorkflow/runs" \
     -H "authorization: Bearer $token" \
     -H "x-zeroship-app-id: $APP_ID" -H 'content-type: application/json' \
     --data '{"input":{}}')"
@@ -170,7 +170,7 @@ run_state() {
   out="$WORK/state.out"
   token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   curl -s --max-time 15 -o "$out" -w '' \
-    "http://127.0.0.1:$CONTROL_PORT/internal/workflows/runs/$rid" \
+    "http://127.0.0.1:$ZEROSHIP_CONTROL_PORT/internal/workflows/runs/$rid" \
     -H "authorization: Bearer $token" \
     -H "x-zeroship-app-id: $APP_ID" >/dev/null
   jq -r '.state // "<none>"' "$out" 2>/dev/null || echo "<parse-error>"
@@ -256,7 +256,7 @@ EOF
 pass "packed workflow.zship"
 
 echo "=== boot services ==="
-for port in "$CONTROL_PORT" "$WORKER_PORT" "$GATE_PORT"; do
+for port in "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_WORKER_PORT" "$ZEROSHIP_GATEWAY_PORT"; do
   lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 GBS="$WORK/gateway-broker-secret"
@@ -302,31 +302,31 @@ fi
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" \
-  --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
-  --gateway-url "http://localhost:$GATE_PORT" \
+  --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
+  --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control.log"
 
 start_worker() {
   local extra="$1"
   ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
-    --port "$WORKER_PORT" --worker-threads 1 \
-    --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+    --port "$ZEROSHIP_WORKER_PORT" --threads 1 \
+    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --poll-interval 1 --max-step-blob-bytes 2097152 \
  $extra > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
+  wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/health" "$WORK/worker.log"
 }
 start_worker "--workflow-advance-unsigned"
 
 "$BIN/zeroship-gate" \
-  --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+  --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
   --db "$DBURL" --poll-interval 1 > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate.log"
 
 echo "=== deploy + enable workflows ==="
 "$BIN/dev-provision" \
@@ -354,7 +354,7 @@ sleep 3
 # workflow but no default.fetch, so the HTTP code is irrelevant. What matters is
 # that the request reaches the worker (route present). Non-fatal by design.
 WARM_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY")"
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY")"
 note "warmup GET /apps/$APP_NAME/ -> HTTP $WARM_CODE (forces route+deploy sync)"
 # Confirm the gateway actually holds a route for this app before the exploit,
 # by checking that C2's negative control (unknown app) differs from a known app.
@@ -453,21 +453,21 @@ echo "############ PHASE 2 -- worker WITHOUT the flag (deploy/compose reality) #
 kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
 # control + gateway are down now too (kill_pids kills all). Rebring them.
 "$BIN/zeroship-control" \
-  --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
-  --gateway-url "http://localhost:$GATE_PORT" \
+  --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
+  --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control2.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control2.log"
 start_worker ""   # no --workflow-advance-unsigned
 "$BIN/zeroship-gate" \
-  --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+  --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
   --db "$DBURL" --poll-interval 1 > "$WORK/gate2.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate2.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate2.log"
 sleep 3
-curl -sf "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || true
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || true
 
 RID_P2="$(create_run)" || { fail "Phase2 create_run failed"; exit 1; }
 BODY_P2="{\"runId\":\"$RID_P2\",\"appId\":\"$APP_ID\"}"
@@ -489,7 +489,7 @@ echo "############ PHASE 3 -- can the exploit Host be delivered THROUGH Caddy? #
 # will route. Only the host-matching semantics matter; the port is substituted.
 if docker pull caddy:2-alpine >/dev/null 2>&1; then
   # --network host so the container's 127.0.0.1 is the host's, letting Caddy
-  # reach the loopback-bound gateway at 127.0.0.1:$GATE_PORT (the earlier
+  # reach the loopback-bound gateway at 127.0.0.1:$ZEROSHIP_GATEWAY_PORT (the earlier
   # host.docker.internal wiring hit 502 because the gateway binds loopback only).
   cat > "$WORK/Caddyfile" <<EOF
 {
@@ -497,7 +497,7 @@ if docker pull caddy:2-alpine >/dev/null 2>&1; then
 	admin off
 }
 http://*.zeroship.localhost:$CADDY_PORT {
-	reverse_proxy 127.0.0.1:$GATE_PORT
+	reverse_proxy 127.0.0.1:$ZEROSHIP_GATEWAY_PORT
 }
 EOF
   CADDY_CONTAINER="zs-wfadvz-caddy-$$"

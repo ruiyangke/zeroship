@@ -238,7 +238,7 @@ services:
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
       # Control validates platform-issued access tokens against this explicit
       # issuer. It is deployment topology, not a switch that relaxes checks.
-      AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
+      ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
       # Privileged provisioning DSN for deploy-time migrations ONLY: control
       # opens this to CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv zeroship_control role above CANNOT do (no CREATEROLE /
@@ -330,7 +330,7 @@ services:
   # PROVISION_DATABASE_URL was set on `control`, and the ONLY code that reads it
   # is crates/migrated/src/main.rs - a service that was not here.
   #
-  # LOOPBACK by default (MIGRATED_BIND): like gateway and auth, nothing outside
+  # LOOPBACK by default (ZEROSHIP_MIGRATED_BIND): like gateway and auth, nothing outside
   # the compose network should reach it. Creators drive it through control, and
   # the operator drives it over an SSH tunnel.
   migrated:
@@ -362,7 +362,7 @@ services:
       MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}
       # OAuth issuer topology, not a relaxed security posture. Containers reach
       # this public hostname through Caddy's compose-network alias.
-      AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
+      ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
     volumes:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -397,12 +397,12 @@ services:
         exec zeroship-gate \
           --port 8000 \
           --bind 0.0.0.0 \
-          --control http://control:9090 \
-          --workers "$$WORKERS" \
+          --control-url http://control:9090 \
+          --worker-urls "$$WORKERS" \
           --blob-store /data/bundles \
           --poll-interval 3 \
           --auth-ui-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
-          --gateway-public-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
+          --public-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
       # pairwise salt). The default host directory is explicitly gitignored.
@@ -483,11 +483,11 @@ services:
       - zeroship-worker
       - --port
       - "8080"
-      - --worker-threads
+      - --threads
       - "4"
       - --bind
       - 0.0.0.0
-      - --control
+      - --control-url
       - http://control:9090
       - --blob-store
       - /data/bundles

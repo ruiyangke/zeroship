@@ -138,8 +138,8 @@ jget()  { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{c
 # Stripe CLI wrapper — every call authed with the TEST key (no browser login).
 scli()  { "$STRIPE" "$@" --api-key "$SK"; }
 
-CONTROL_PORT=9182
-CONTROL_URL="http://localhost:$CONTROL_PORT"
+ZEROSHIP_CONTROL_PORT=9182
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WORK="$(mktemp -d -t zs-e2e-whlive-XXXXXX)"
 mkdir -p "$WORK/blobs"
 PIDFILE="$WORK/pids"; : > "$PIDFILE"
@@ -152,7 +152,7 @@ cleanup() {
     while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   # Belt-and-suspenders: kill any stray stripe-listen we spawned.
-  pkill -f "stripe listen .*$CONTROL_PORT" 2>/dev/null || true
+  pkill -f "stripe listen .*$ZEROSHIP_CONTROL_PORT" 2>/dev/null || true
   wait 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
   echo "  control + stripe-listen down; $WORK cleaned. (DB $DB left for inspection; the real"
@@ -161,7 +161,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # Wait until the `payment_intents/$1` resolves to status `succeeded` (the
 # off-session confirm is usually synchronous, but be robust).
@@ -228,7 +228,7 @@ SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &

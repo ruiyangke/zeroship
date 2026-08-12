@@ -53,10 +53,10 @@ command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-CONTROL_PORT=9174; WORKER_PORT=8074; GATE_PORT=8064; PG_PORT=5474; RP_PORT=19174
+ZEROSHIP_CONTROL_PORT=9174; ZEROSHIP_WORKER_PORT=8074; ZEROSHIP_GATEWAY_PORT=8064; PG_PORT=5474; RP_PORT=19174
 LAGO_PORT=3480; LAGO_KEY="lago_key-hooli-1234567890"; LAGO_URL="http://localhost:$LAGO_PORT"
 PGC=zs-e2e-mapp-pg; RPC=zs-e2e-mapp-redpanda
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-mapp-e2e"
 WORK="$(mktemp -d -t zs-e2e-mapp-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -77,7 +77,7 @@ cleanup(){
   fi
 }
 trap cleanup EXIT
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 echo ""; echo "=== Stage 1: infra (PG + redpanda + REAL Lago) + migrate + seed + stack ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -149,7 +149,7 @@ GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 LAGO_API_KEY="$LAGO_KEY" \
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \
@@ -158,18 +158,18 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (provider=lago, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --config "$CFG_TOML" --control-url "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
 
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
-  --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
   --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 
 echo ""; echo "=== Stage 2: admin PAT + 2 creators + 3 apps (A1,A2->C1 ; A3->C2) + deploy ==="
 POLICY_JSON='{"name":"e2e-mapp","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
@@ -243,10 +243,10 @@ BODY='{"hello":"mapp"}'
 drive(){ # $1=slug  $2=count  -> echoes ok count
   local slug="$1" n="$2" host="$1.localhost" ok=0 i
   local ready=0
-  for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/ready")" = "200" ] && { ready=1; break; }; sleep 1; done
+  for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/ready")" = "200" ] && { ready=1; break; }; sleep 1; done
   [ "$ready" = "1" ] || { fail "$slug never reachable"; tail -10 "$WORK/gate.log"; exit 1; }
-  for _ in 1 2 3; do curl -s -o /dev/null -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/warm" || true; done
-  for i in $(seq 1 "$n"); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/$i")" = "200" ] && { ok=$((ok+1)); break; }; sleep 0.2; done; done
+  for _ in 1 2 3; do curl -s -o /dev/null -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/warm" || true; done
+  for i in $(seq 1 "$n"); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")" = "200" ] && { ok=$((ok+1)); break; }; sleep 0.2; done; done
   echo "$ok"
 }
 N1=40; N2=60; N3=70

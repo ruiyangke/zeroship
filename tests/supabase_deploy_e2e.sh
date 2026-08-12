@@ -107,20 +107,20 @@ server.listen(0, "127.0.0.1", () => {
 '
 }
 
-CONTROL_PORT="${CONTROL_PORT:-$(pick_port)}"
-WORKER_PORT="${WORKER_PORT:-$(pick_port)}"
-GATE_PORT="${GATE_PORT:-$(pick_port)}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-$(pick_port)}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-$(pick_port)}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-$(pick_port)}"
 CONTROL_PG_PORT="${CONTROL_PG_PORT:-$(pick_port)}"
 GOTRUE_PORT="${GOTRUE_PORT:-$(pick_port)}"
 GOTRUE_PROXY_PORT="${GOTRUE_PROXY_PORT:-$(pick_port)}"
 AUTH_PORT="${AUTH_PORT:-$(pick_port)}"
 
-CONTROL_URL="http://localhost:$CONTROL_PORT"
-GATE_URL="http://localhost:$GATE_PORT"
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+GATE_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT"
 SUPABASE_URL="http://localhost:$GOTRUE_PROXY_PORT"
 GOTRUE_URL="$SUPABASE_URL/auth/v1"
 SUPABASE_ISSUER="$SUPABASE_URL/auth/v1"
-SUPABASE_JWKS_URL="$GOTRUE_URL/.well-known/jwks.json"
+ZEROSHIP_CONTROL_SUPABASE_JWKS_URL="$GOTRUE_URL/.well-known/jwks.json"
 CONTROL_DB_URL="postgres://postgres:zeroship@localhost:$CONTROL_PG_PORT/zeroship"
 
 json_get() {
@@ -233,7 +233,7 @@ NODE
 verify_gotrue_jwks() {
   [ "$SUPABASE_E2E_MODE" = "jwks" ] || return 0
   local jwks private_fields
-  jwks="$(curl -fsS "$SUPABASE_JWKS_URL")" || fail "GoTrue JWKS endpoint was not reachable at $SUPABASE_JWKS_URL"
+  jwks="$(curl -fsS "$ZEROSHIP_CONTROL_SUPABASE_JWKS_URL")" || fail "GoTrue JWKS endpoint was not reachable at $ZEROSHIP_CONTROL_SUPABASE_JWKS_URL"
   printf '%s\n' "$jwks" >"$WORK/gotrue-jwks.json"
   jq -e --arg kid "$SUPABASE_JWT_KID" '
     (.keys | length) == 1
@@ -491,7 +491,7 @@ SQL
   docker run --rm --network "$NETWORK" \
     -e GOTRUE_API_HOST=0.0.0.0 \
     -e GOTRUE_API_PORT=9999 \
-    -e GOTRUE_SITE_URL="http://localhost:$GATE_PORT" \
+    -e GOTRUE_SITE_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
     -e API_EXTERNAL_URL="$SUPABASE_ISSUER" \
     -e GOTRUE_DB_DRIVER=postgres \
     -e GOTRUE_DB_NAMESPACE=auth \
@@ -511,7 +511,7 @@ SQL
     -d -p "127.0.0.1:$GOTRUE_PORT:9999" \
     -e GOTRUE_API_HOST=0.0.0.0 \
     -e GOTRUE_API_PORT=9999 \
-    -e GOTRUE_SITE_URL="http://localhost:$GATE_PORT" \
+    -e GOTRUE_SITE_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
     -e API_EXTERNAL_URL="$SUPABASE_ISSUER" \
     -e GOTRUE_DB_DRIVER=postgres \
     -e GOTRUE_DB_NAMESPACE=auth \
@@ -536,12 +536,12 @@ start_zeroship_stack() {
   export WORKER_KEY
   local control_verify_args=(--supabase-jwt-issuer "$SUPABASE_ISSUER")
   if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
-    control_verify_args+=(--supabase-jwks-url "$SUPABASE_JWKS_URL")
+    control_verify_args+=(--supabase-jwks-url "$ZEROSHIP_CONTROL_SUPABASE_JWKS_URL")
   else
     control_verify_args+=(--supabase-jwt-secret "$JWT_SECRET")
   fi
 
-  "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$CONTROL_DB_URL" \
+  "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$CONTROL_DB_URL" \
     --provision-db "$CONTROL_DB_URL" \
     --blob-store "$WORK/blobs" \
     --control-key "$CONTROL_KEY" \
@@ -557,8 +557,8 @@ start_zeroship_stack() {
   PIDS+=("$!")
   wait_http "$CONTROL_URL/health" "control healthy with Supabase provider"
 
-  "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-    --control "$CONTROL_URL" \
+  "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+    --control-url "$CONTROL_URL" \
     --control-key "$CONTROL_KEY" \
     --worker-key "$WORKER_KEY" \
     --db "$CONTROL_DB_URL" \
@@ -566,13 +566,13 @@ start_zeroship_stack() {
     --poll-interval 2 \
     >"$WORK/worker.log" 2>&1 &
   PIDS+=("$!")
-  wait_http "http://localhost:$WORKER_PORT/health" "worker healthy"
+  wait_http "http://localhost:$ZEROSHIP_WORKER_PORT/health" "worker healthy"
 
-  "$BIN/zeroship-gate" --port "$GATE_PORT" \
-    --control "$CONTROL_URL" \
+  "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" \
+    --control-url "$CONTROL_URL" \
     --control-key "$CONTROL_KEY" \
     --worker-key "$WORKER_KEY" \
-    --workers "http://localhost:$WORKER_PORT" \
+    --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
     --db "$CONTROL_DB_URL" \
     --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" \
@@ -622,7 +622,7 @@ ensure_release_bins
 ensure_starter_zship
 [ "$SUPABASE_E2E_MODE" = "jwks" ] && echo "  mode: $SUPABASE_E2E_MODE"
 echo "  GoTrue image: $GOTRUE_IMAGE"
-echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT auth=$AUTH_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
+echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT auth=$AUTH_PORT control=$ZEROSHIP_CONTROL_PORT worker=$ZEROSHIP_WORKER_PORT gate=$ZEROSHIP_GATEWAY_PORT pg=$CONTROL_PG_PORT"
 
 step "Mint Supabase API keys"
 if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
@@ -636,7 +636,7 @@ echo "  anon key:         $(redact_jwt "$SUPABASE_ANON_KEY")"
 echo "  service_role key: $(redact_jwt "$SUPABASE_SERVICE_ROLE_KEY")"
 echo "  shared issuer:    $SUPABASE_ISSUER"
 if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
-  echo "  JWKS URL:         $SUPABASE_JWKS_URL"
+  echo "  JWKS URL:         $ZEROSHIP_CONTROL_SUPABASE_JWKS_URL"
   assert_jwt_mode_header "$SUPABASE_ANON_KEY" "anon apikey"
   assert_jwt_mode_header "$SUPABASE_SERVICE_ROLE_KEY" "service_role apikey"
 else

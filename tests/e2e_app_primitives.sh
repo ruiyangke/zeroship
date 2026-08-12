@@ -71,9 +71,9 @@ source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset from e2e_platform.sh to avoid colliding with a dev stack)
-CONTROL_PORT=9099
-WORKER_PORT=8087
-GATE_PORT=8001
+ZEROSHIP_CONTROL_PORT=9099
+ZEROSHIP_WORKER_PORT=8087
+ZEROSHIP_GATEWAY_PORT=8001
 PG_PORT=5443
 PG_CONTAINER="zs-e2e-pg"
 
@@ -170,27 +170,27 @@ echo "=== Stage 2: boot authenticated stack ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern); --db for env.db.
-"$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
 # Broker master secret. cd54028e7 made the gateway refuse to start without one,
 # and this harness was never updated, so it has been unable to get past "gateway
@@ -198,14 +198,14 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker 
 openssl rand -base64 48 > "$WORK/gate-secret"
 chmod 600 "$WORK/gate-secret"
 
-"$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+"$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --gateway-broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -258,12 +258,12 @@ process.stdout.write(jwt);
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 4: create app + deploy db-todos ==="
-APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"db-todos-e2e"}')"
 APP_ID="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP_ID" ] && pass "created app db-todos-e2e ($APP_ID)" || { fail "create app: $APP_JSON"; exit 1; }
 
-DEP="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+DEP="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "deploy failed: $DEP"
 sleep 4   # let route + version sync to gateway + worker
 
@@ -282,12 +282,12 @@ cat > "$STAGE/manifest.json" <<EOF
 {"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$H"}},"metadata":{"compiler":"e2e","built_at":"$(date -u +%FT%TZ)"}}
 EOF
 (cd "$STAGE" && tar --format=ustar -cf - manifest.json "blobs/$H") | zstd -q -f -o "$STAGE/app.zship"
-NS_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"noschema-e2e"}')"
+NS_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"noschema-e2e"}')"
 NS_ID="$(echo "$NS_JSON" | jget '.id')"
-"$BIN/zeroship" deploy "$STAGE/app.zship" --app="$NS_ID" --control="http://localhost:$CONTROL_PORT" --token="$PAT" >/dev/null 2>&1
+"$BIN/zeroship" deploy "$STAGE/app.zship" --app="$NS_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" >/dev/null 2>&1
 rm -rf "$STAGE"
 sleep 4
-NS_RESP="$(curl -s -w '\n%{http_code}' -H 'Host: noschema-e2e.localhost' "http://localhost:$GATE_PORT/")"
+NS_RESP="$(curl -s -w '\n%{http_code}' -H 'Host: noschema-e2e.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
 NS_CODE="$(echo "$NS_RESP" | tail -1)"
 NS_BODY="$(echo "$NS_RESP" | head -1)"
 if [ "$NS_CODE" = "200" ] && echo "$NS_BODY" | grep -q '"ok":true'; then
@@ -303,7 +303,7 @@ echo "=== Stage 5b: db-todos RPC through the GATEWAY (env.db over the edge) ==="
 # them to `User` ⇒ 401 without a real OIDC session. Document the gate.
 GW_RESP="$(curl -s -w '\n%{http_code}' -X POST \
   -H 'Host: db-todos-e2e.localhost' -H 'content-type: application/json' \
-  "http://localhost:$GATE_PORT/__zeroship/v1/users.public" -d '{"json":{}}')"
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/users.public" -d '{"json":{}}')"
 GW_CODE="$(echo "$GW_RESP" | tail -1)"
 GW_BODY="$(echo "$GW_RESP" | head -1)"
 if [ "$GW_CODE" = "200" ] && echo "$GW_BODY" | grep -q '"json"'; then
@@ -350,7 +350,7 @@ fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
 
 zs_frame "$WORK/frame-users.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
-WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
+WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
 WK_CODE="$(echo "$WK_RESP" | tail -1)"
 WK_BODY="$(echo "$WK_RESP" | head -1)"
 if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
@@ -360,11 +360,11 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
   if [ -n "$UID_VAL" ]; then
     zs_frame "$WORK/frame-create.bin" POST "http://x/__zeroship/v1/todos.create" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}}))' "$UID_VAL")"
-    C_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
+    C_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
     echo "$C_RESP" | grep -q '"json"' && pass "env.db mutation todos.create over worker" || fail "todos.create failed: $C_RESP"
     zs_frame "$WORK/frame-list.bin" POST "http://x/__zeroship/v1/todos.list" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1]}}))' "$UID_VAL")"
-    L_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
+    L_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else

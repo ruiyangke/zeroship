@@ -207,7 +207,7 @@ pub fn validate_control_url(url: &str) -> Result<(), String> {
         "http" => {}
         other => {
             return Err(format!(
-                "unsupported --control scheme {other:?}: the control transport \
+                "unsupported --control-url scheme {other:?}: the control transport \
                  is plaintext HTTP and would send the control key in the clear. \
                  Use http:// (and keep the hop on a trusted network), or \
                  terminate TLS in front of the gateway."
@@ -215,7 +215,7 @@ pub fn validate_control_url(url: &str) -> Result<(), String> {
         }
     }
     if parsed.host_str().is_none() {
-        return Err("no host in --control URL".to_string());
+        return Err("no host in --control-url URL".to_string());
     }
     Ok(())
 }

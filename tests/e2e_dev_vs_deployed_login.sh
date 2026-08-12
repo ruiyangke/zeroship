@@ -102,9 +102,9 @@ ZSHIP="$APP/dist/app.zship"
 # Postgres binds first, so that is the collision that surfaces; the control,
 # worker and gate ports were equally shared and would have collided next.
 # 9400/8400/8310/5460 greps zero across tests/. (auth owns 9398/8398/8308/5458.)
-export CONTROL_PORT="${CONTROL_PORT:-9400}"
-export WORKER_PORT="${WORKER_PORT:-8400}"
-export GATE_PORT="${GATE_PORT:-8310}"
+export ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9400}"
+export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8400}"
+export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8310}"
 export PG_PORT="${PG_PORT:-5460}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-login-pg}"
 AUTH_PORT="${AUTH_PORT:-9459}"
@@ -122,8 +122,8 @@ APP_SLUG="auth-probe-login"
 # builds from the Host header we send. A mismatch here surfaces as the OP
 # refusing the redirect_uri, which would read as a login defect and is a fixture
 # error -- the redirect_uri registration is asserted explicitly after deploy.
-APP_BASE_DOMAIN="localhost"
-HOST="$APP_SLUG.$APP_BASE_DOMAIN"
+ZEROSHIP_CONTROL_APP_BASE_DOMAIN="localhost"
+HOST="$APP_SLUG.$ZEROSHIP_CONTROL_APP_BASE_DOMAIN"
 
 # --- the credential each tier takes -----------------------------------------
 # SAME EMAIL, SAME PERSON, and DELIBERATELY DIFFERENT PASSWORDS -- because the
@@ -584,10 +584,10 @@ stack_preflight || { fail "stack preflight"; exit 1; }
 [ -x "$BIN/zeroship-auth" ] || { fail "missing $BIN/zeroship-auth"; exit 2; }
 stack_workspace || { fail "workspace"; exit 1; }
 cp "$DEV_WORK/dev.txt" "$WORK/dev.txt"
-export CONTROL_PORT WORKER_PORT GATE_PORT
+export ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT
 stack_pg_up || { fail "pg"; exit 1; }
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $AUTH_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $AUTH_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -621,28 +621,28 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
 # --- control ---------------------------------------------------------------
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --app-base-domain "$APP_BASE_DOMAIN" \
+  --app-base-domain "$ZEROSHIP_CONTROL_APP_BASE_DOMAIN" \
   --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # --- worker ----------------------------------------------------------------
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
 # --- gateway (the confidential RP) ------------------------------------------
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
   --gateway-broker-secret-file "$WORK/gate-secret" \
@@ -651,8 +651,8 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
   --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
   && pass "gateway healthy (auth-ui-url=$AUTH_URL)" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
 mint_admin_pat || exit 1
@@ -755,14 +755,14 @@ fi
 ready=0
 for _ in $(seq 1 30); do
   c="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Host: $HOST" \
-      "http://localhost:$GATE_PORT/__zeroship/auth/authorize?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=x&nonce=y")"
+      "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/auth/authorize?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=x&nonce=y")"
   [ "$c" = "302" ] && { ready=1; break; }
   sleep 2
 done
 [ "$ready" = "1" ] && pass "gateway /authorize 302s to the OP (route carries the oauth client)" \
   || { fail "gateway /authorize never 302'd (last code=$c)"; grep -iE 'client_not|sector|route' "$WORK/gate.log" | tail -10 | sed 's/^/    /'; }
 
-GATE_BASE="http://localhost:$GATE_PORT"
+GATE_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT"
 APP_ORIGIN="http://$HOST"
 
 # pkce_pair -> "<verifier> <challenge>"

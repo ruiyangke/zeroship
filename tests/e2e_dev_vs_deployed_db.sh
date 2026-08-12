@@ -97,10 +97,10 @@ WORK="$(mktemp -d -t zs-devdeploy-db-XXXXXX)"
 
 # Ports distinct from golden_path.sh (9390/8390/8300) and the kv leg
 # (9392/8392/8302/3011) so the suites can run concurrently.
-CONTROL_PORT="${CONTROL_PORT:-9393}"
-WORKER_PORT="${WORKER_PORT:-8393}"
-GATE_PORT="${GATE_PORT:-8303}"
-MIGRATED_PORT="${MIGRATED_PORT:-9493}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
+ZEROSHIP_MIGRATED_PORT="${ZEROSHIP_MIGRATED_PORT:-9493}"
 DEV_PORT="${DEV_PORT:-3021}"
 # VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
 # its :5173 global default, which nothing here declared, tracked or freed, so a
@@ -693,12 +693,12 @@ fi
   DATABASE_URL="$DEV_DBURL" \
   ZEROSHIP_KV_PATH="$DEVSTATE/kv.redb" \
   ZEROSHIP_WORKFLOW_SQLITE_PATH="$DEVSTATE/workflows.sqlite" \
-  ZEROSHIP_STORAGE_URL="file://$DEVSTATE/storage" \
+  ZEROSHIP_WORKER_STORAGE_URL="file://$DEVSTATE/storage" \
   ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 30 x 2s count
 # sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
-# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# opens with `: "${ZEROSHIP_CONTROL_PORT:=9120}"` and four more of that shape, which only
 # assign when unset, so sourcing it above this harness's own port block would
 # hand it the library's ports.
 #
@@ -734,7 +734,7 @@ render "$WORK/dev.raw" "$WORK/dev.txt"
 # --- 3. deployed side ------------------------------------------------------
 echo ""
 echo "--- 3. deployed (gateway -> worker -> PostgreSQL) ---"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -823,35 +823,35 @@ SIGNING_KEY_FILE="$WORK/sk.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$WORK/sk.pem" > "$WORK/control.log" 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control did not come up"; tail -30 "$WORK/control.log"; exit 1; }
-for _ in $(seq 1 30); do curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null 2>&1 \
   && pass "zeroship-migrated healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 # The worker needs --db: without it the env.db namespace is absent BY DESIGN
 # and every handler fails loudly, which would read as an app bug.
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
   --db "$DBURL" --blob-store "$WORK/bundles" --poll-interval 2 \
  > "$WORK/worker.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker did not come up"; tail -30 "$WORK/worker.log"; exit 1; }
 
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --blob-store "$WORK/bundles" --gateway-broker-secret-file "$WORK/gate-secret" \
   --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
 
 OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
@@ -891,7 +891,7 @@ console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
 [ -s "$WORK/apply-migrations.json" ] || { fail "recorded no migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST \
-  "http://localhost:$MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
+  "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   --data-binary @"$WORK/apply-migrations.json")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
@@ -905,19 +905,19 @@ fi
 sleep 6   # gateway route-sync poll
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
-probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
 grep -q '^seedA .*"id":"user_' "$WORK/deployed.raw" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -4 "$WORK/deployed.raw"; tail -20 "$WORK/worker.log"; }
 
 # --- 3b. deployed: the cross-REQUEST race -----------------------------------
-race "http://localhost:$GATE_PORT/apps/$APP_NAME" "$WORK/deployed.race" "X-Api-Key: $API_KEY"
+race "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "$WORK/deployed.race" "X-Api-Key: $API_KEY"
 grep -q '^runs=[1-9]' "$WORK/deployed.race" \
   && pass "deployed ran the concurrent-writer race ($(head -1 "$WORK/deployed.race"))" \
   || { fail "deployed race produced no runs"; head -5 "$WORK/deployed.race" | sed 's/^/    /'; }
 
 # --- 3c. deployed: the transaction-scope probes (destructive; see scope_probe) ---
 RAWFILE="$WORK/deployed.raw"
-scope_probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+scope_probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
 
 # Rendered AFTER the scope probes so their rows reach the section-5 diff.
 render "$WORK/deployed.raw" "$WORK/deployed.txt"

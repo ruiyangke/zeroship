@@ -87,12 +87,12 @@ MINIO_BUCKET="zeroship-e2e"
 MINIO_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
 
 # Stack ports (private band, distinct from the other e2e harnesses).
-export CONTROL_PORT=9131
-export WORKER_PORT=8091
-export GATE_PORT=8021
+export ZEROSHIP_CONTROL_PORT=9131
+export ZEROSHIP_WORKER_PORT=8091
+export ZEROSHIP_GATEWAY_PORT=8021
 export PG_PORT=5461
 export PG_CONTAINER="zs-e2e-s3-pg"
-export WORKER_THREADS=2
+export ZEROSHIP_WORKER_THREADS=2
 
 minio_cleanup() { docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true; }
 
@@ -190,36 +190,36 @@ fi
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control — writes deploy blobs + manifests to S3.
 SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
 # worker — reads deploy blobs from S3 AND binds env.storage to S3.
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --storage-url "$STORAGE_S3" \
   --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (blob-store=s3, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (blob-store=s3, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
 # gateway — reads deploy blobs from S3 (disk-cache refill streams from S3).
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$BLOB_S3" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$BLOB_S3" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -234,12 +234,12 @@ echo "=== Stage 4: deploy storage-gallery (its blobs now live in S3) ==="
 # exceeds the free tier's 50 ms CPU cap. A large-object app belongs on a paid
 # plan, so the test deploys it there (the free-tier cap working as designed is
 # itself proven by the smaller buffered objects in Stage 7).
-ST_APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+ST_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d '{"name":"storage-gallery-s3","plan_id":"unlimited"}')"
 ST_APP="$(echo "$ST_APP_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).id)}catch(e){console.log("")}})')"
 if [ -z "$ST_APP" ]; then fail "create-app failed: $ST_APP_JSON"; exit 1; fi
-ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 if echo "$ST_DEP" | grep -q "deploy_hash"; then
   pass "deployed storage-gallery (plan=unlimited) → app $ST_APP (deploy blobs written to MinIO)"
 else
@@ -263,7 +263,7 @@ echo "=== Stage 5: gateway → worker dispatch reading the bundle FROM S3 ==="
 # MinIO and serves the example's static index.html. A 200 with HTML proves the
 # full edge dispatched against S3-resident blobs (gateway disk-cache refill +
 # worker bundle fetch both pulled from S3).
-GW="$(curl -s -w '\n%{http_code}' -H 'Host: storage-gallery-s3.localhost' "http://localhost:$GATE_PORT/")"
+GW="$(curl -s -w '\n%{http_code}' -H 'Host: storage-gallery-s3.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
 GW_BODY="$(echo "$GW" | head -n -1)"; GW_CODE="$(echo "$GW" | tail -1)"
 if [ "$GW_CODE" = "200" ] && echo "$GW_BODY" | grep -qi "<!doctype html\|<html\|<div id"; then
   pass "gateway→worker served storage-gallery index from S3-resident bundle (HTTP 200, HTML)"
@@ -287,7 +287,7 @@ envelope() {
   node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/"+process.argv[1],headers:[["content-type","application/json"]],body:JSON.stringify({json:JSON.parse(process.argv[2])})}))' "$1" "$2"
 }
 dispatch() {
-  curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$ST_APP" \
+  curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$ST_APP" \
     -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/json' -d "$(envelope "$1" "$2")"
 }
