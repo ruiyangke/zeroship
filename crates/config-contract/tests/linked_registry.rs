@@ -172,6 +172,57 @@ fn compiled_clap_metadata_equals_the_declared_projections() {
     assert_eq!(control_key.get_env(), None);
 }
 
+#[test]
+fn the_two_transform_implementations_agree() {
+    // The projections exist TWICE: config-macros computes them to write the
+    // clap attributes, and zeroship-core computes them for ConfigSpec. The
+    // macro cannot call core (core depends on the macro), so the duplication is
+    // structural and only a comparison can stop the two drifting apart. The
+    // literals in the test above pin what the answer should be; this pins that
+    // both halves give the SAME answer.
+    // Does not cover: a change applied identically to both implementations.
+    // Nothing here can catch a transform that is wrong in the same way twice.
+    for (command, specs) in [
+        (FixtureControlConfigSources::command(), FixtureControlConfig::SPECS),
+        (FixtureWorkerConfigSources::command(), FixtureWorkerConfig::SPECS),
+    ] {
+        for spec in specs {
+            let consumer = spec.consumers()[0];
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == spec.arg_id())
+                .unwrap_or_else(|| panic!("no clap argument for {}", spec.arg_id()));
+
+            assert_eq!(
+                arg.get_long().map(str::to_owned),
+                spec.flag_name(consumer),
+                "clap long and ConfigSpec flag projection disagree for {}",
+                spec.canonical().as_str()
+            );
+
+            let clap_env = arg
+                .get_env()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(str::to_owned);
+            match spec.sensitivity() {
+                Sensitivity::Operational => assert_eq!(
+                    clap_env,
+                    spec.env_name(),
+                    "clap env and ConfigSpec env projection disagree for {}",
+                    spec.canonical().as_str()
+                ),
+                Sensitivity::Secret => assert_eq!(
+                    clap_env,
+                    None,
+                    "a secret carrier must expose no clap env, while its \
+                     ConfigSpec still names {:?}",
+                    spec.env_name()
+                ),
+            }
+        }
+    }
+}
+
 const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =
     EnvKey::from_static(CanonicalName::from_static("control.port"));
 
