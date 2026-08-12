@@ -3246,15 +3246,29 @@ function reportDays(value: number | undefined): number {
 }
 
 async function reportBugs(productId?: string): Promise<BugRow[]> {
-  const visible = await visibleProductIds(optionalIdentity());
+  const identity = optionalIdentity();
+  const visible = await visibleProductIds(identity);
   if (productId && !visible.has(productId)) return [];
   if (visible.size === 0) return [];
-  if (productId) return readAll(db.bugs, { productId });
-  return (
-    await Promise.all(
-      chunks([...visible]).map((ids) => readAll(db.bugs, { productId: { $in: ids } })),
-    )
-  ).flat();
+
+  const rows = productId
+    ? await readAll(db.bugs, { productId })
+    : (
+        await Promise.all(
+          chunks([...visible]).map((ids) => readAll(db.bugs, { productId: { $in: ids } })),
+        )
+      ).flat();
+
+  // Bug-level restrictions apply to AGGREGATES too. This filtered on product
+  // visibility only, so a bug restricted to a security group still landed in
+  // reports.summary, byComponent, byAssignee and trend -- leaking its
+  // existence, status, severity and assignee to everyone who could see the
+  // product. reports.* are anon-accessible, so that audience was "anyone".
+  //
+  // A count is not a lesser disclosure than a row: "this product has 3 open
+  // blockers" is most of what a confidential bug is trying not to say.
+  const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
+  return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(row.id));
 }
 
 async function activityEventsForBugs(

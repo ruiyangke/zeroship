@@ -36,9 +36,9 @@
 # restriction below and would make the whole section vacuous while still
 # printing green.
 #
-# What a second identity still does NOT cover here: attachment visibility, and
-# whether a restricted bug leaks through reports.* aggregates (the counts are
-# computed from a search that does filter, but no assertion pins that).
+# What a second identity still does NOT cover here: attachment visibility.
+# Report aggregates ARE covered -- a restricted bug used to be counted in
+# reports.summary for a user who could not read it, and that is now pinned.
 set -uo pipefail
 
 URL="${ZEROSHIP_URL:-http://localhost:3007}"
@@ -280,6 +280,39 @@ call products.restrict "{\"productId\":\"$PROD2\",\"groupId\":\"$GROUP\"}" >/dev
 bob products.list | grep -q "$PROD2" \
   && fail "the restricted product still appears in Bob's products.list" \
   || pass "the restricted product is absent from Bob's product list"
+
+# A count is a disclosure. reports.* filtered on product visibility only, so a
+# bug restricted to a security group was still counted in every aggregate --
+# and reports.* are anon-accessible, so the audience was everyone.
+BOB_TOTAL_BEFORE="$(bob reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.total')"
+SEC2="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Counted $STAMP\",\"description\":\"x\"}" | jget 'json.id')"
+BOB_TOTAL_MID="$(bob reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.total')"
+
+# Control: the new bug must move Bob's count while it is unrestricted, or the
+# drop after restricting proves nothing.
+[ "$BOB_TOTAL_MID" -gt "$BOB_TOTAL_BEFORE" ] 2>/dev/null \
+  && pass "control: an unrestricted bug raises Bob's report total ($BOB_TOTAL_BEFORE -> $BOB_TOTAL_MID)" \
+  || fail "control failed: report total did not move when a bug was added" "$BOB_TOTAL_BEFORE -> $BOB_TOTAL_MID"
+
+ALICE_TOTAL_BEFORE="$(call reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.total')"
+call bugs.restrict "{\"bugId\":\"$SEC2\",\"groupId\":\"$GROUP\"}" >/dev/null
+ALICE_TOTAL_AFTER="$(call reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.total')"
+BOB_TOTAL_AFTER="$(bob reports.summary "{\"productId\":\"$PROD\"}" | jget 'json.total')"
+[ "$BOB_TOTAL_AFTER" = "$BOB_TOTAL_BEFORE" ] \
+  && pass "restricting the bug removes it from Bob's report total again" \
+  || fail "a restricted bug is still counted in reports for a user who cannot read it" \
+          "before=$BOB_TOTAL_BEFORE after-restrict=$BOB_TOTAL_AFTER (expected them equal)"
+
+# Alice keeps counting it, or the fix is just breakage.
+#
+# Compared against ALICE's own before/after, not against Bob's number. Earlier
+# sections leave other restricted bugs in this product, so Alice's total is
+# legitimately higher than any of Bob's -- an earlier version of this assertion
+# equated the two and failed on correct behaviour.
+[ "$ALICE_TOTAL_BEFORE" = "$ALICE_TOTAL_AFTER" ] \
+  && pass "Alice's report total is unchanged by the restriction ($ALICE_TOTAL_AFTER)" \
+  || fail "Alice lost the restricted bug from her own reports" \
+          "before=$ALICE_TOTAL_BEFORE after=$ALICE_TOTAL_AFTER"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
