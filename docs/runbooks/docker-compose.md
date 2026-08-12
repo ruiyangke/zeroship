@@ -9,6 +9,9 @@ the file (or `export COMPOSE_FILE=deploy/compose/docker-compose.yml` once to dro
 the `-f` from every call):
 
 ```bash
+# Provision strong, stable local secrets once. Reruns keep existing values.
+zeroship dev init
+
 # Build everything ahead (so `up` never builds): the single shared image
 # (control/gateway/worker/auth/platform-migrate + the `zeroship` CLI) plus the external
 # images (postgres, caddy, verdaccio, redpanda).
@@ -29,6 +32,36 @@ gateway-fronted zeroship app seeded by control (see [Console / AI builder](#cons
 
 > First boot is heavy: the image does a full `pnpm build` + release `cargo build`
 > of the V8 runtime. Pre-building with `docker compose build` keeps later `up`s instant.
+
+### Local secret provisioning
+
+Run `zeroship dev init` from the repository root before the first compose
+command. It defaults to the gitignored `deploy/compose/secrets` directory and
+the sibling `deploy/compose/.env` file. The deployment runbook covers custom
+paths because Compose must receive both the custom env-file and mount path.
+
+The secret directory contains exactly seven files:
+
+`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+
+The env overlay contains eight generated scalar values:
+
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
+`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+
+The command is idempotent: it validates and retains existing material, creates
+only missing entries, and refuses invalid or conflicting values instead of
+rotating them. On Unix it applies 0700 to the secret directory and 0600 to the
+secret files and `.env`.
+
+Two shared-value rules are load-bearing. Gateway and auth read the same physical
+`broker-secret` file. The raw bytes of `pairwise-salt` equal `PAIRWISE_SALT` in
+`.env` with no trailing line ending; auth, control, and gateway must derive the
+same per-app `pws_`. The generator enforces both shapes. Do not export a
+different `PAIRWISE_SALT` in the shell that launches Compose; shell values take
+precedence over `.env` interpolation.
 
 ### Dev domain (via Caddy)
 
@@ -148,8 +181,9 @@ non-loopback because app/admin auth is relaxed - only do this on a trusted netwo
 The `auth` service runs `zeroship-auth`, the native OIDC OP and login UI. The
 gateway redirects unauthenticated end users to the Caddy-fronted host
 (`--auth-ui-url http://auth.zeroship.localhost`). It runs with `--dev-insecure`
-for local HTTP cookies and weak dev secrets, plus `--bootstrap` so the local
-service can publish signing metadata and initialize first-boot state.
+for the remaining local-only behaviors while loading strong generated secrets.
+The flag remains until later work removes its guards one by one; this
+provisioning step does not delete it.
 
 `AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
 is `http://auth.zeroship.localhost` and a TLS-terminating deployment can set the
@@ -266,13 +300,18 @@ defined ONCE instead of being repeated as per-service flags:
   reference resolves to distinct per-role DSNs. `auth` uses its own
   `AUTH_DB_URL` (the `auth_db_url` slot, flag `--db-url`).
 
-Precedence is CLI > env > file > default. For secrets, a
+For local compose, the referenced scalar secret values come from the gitignored
+`.env` written by `zeroship dev init`. In particular, one generated
+`ZEROSHIP_CONTROL_KEY` is interpolated into all five consumers together; there
+is no per-service fallback that can move auth alone.
+
+Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file - keep config-covered
 values OFF the command lines. Copy `deploy/ops/zeroship.example.toml` to
 `deploy/ops/zeroship.toml` when customizing an environment. The file itself stays
 secret-free: it carries only `urn:`/`arn:` references, never a plaintext secret
 (a literal in `[secrets]` is rejected at resolve). The actual secret VALUES live
-in the compose `environment:` blocks (dev) or a real secret store (prod).
+in the generated compose `.env` (local dev) or a real secret store (prod).
 
 Validate a web binary's resolved config by adding `--check-config` to the
 normal command. It runs the same startup guards, so include the same required
@@ -357,6 +396,6 @@ schema. See [Database migrations](db-migrations.md) for the layout,
 ## Related docs
 
 - [Database migrations](db-migrations.md) - platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
-- [Local dev setup](../runbooks/local-dev.md) - the same platform stack run as three bare `cargo`-built binaries instead of containers.
+- [Local dev setup](../runbooks/local-dev.md) - the same platform stack run as four bare `cargo`-built binaries instead of containers.
 - [Builder sandbox](../architecture/builder.md) - where the sandbox/preview backend lives now and how `control` reaches it.
 - [Distributed architecture](../architecture/distributed.md) - what the `control`/`gateway`/`worker` services are and how they coordinate.

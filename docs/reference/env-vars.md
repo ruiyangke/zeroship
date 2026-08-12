@@ -55,26 +55,48 @@ with `ZEROSHIP_CONFIG`.
 What an operator actually sets in `deploy/compose/.env`. Everything else in this
 document has a working default or belongs to a service the stack does not run.
 
+Before the first local compose run, provision the file and its sibling secret
+directory from the repository root:
+
+```bash
+zeroship dev init
+```
+
+The defaults are `deploy/compose/secrets` and `deploy/compose/.env`. To place
+them elsewhere, pass `--secrets-dir=PATH` and `--env-file=PATH`. The command is
+idempotent: existing valid values are retained, missing values are added, and a
+conflict fails without rotating either side.
+
 ### Required on a real host
 
 | Variable | Default | Why it must change |
 | --- | --- | --- |
 | `ZEROSHIP_IMAGE` | none | Which built image to run. Only referenced by the server-side compose override. |
-| `ZEROSHIP_SECRETS_DIR` | `./secrets` | Where the file-backed key material lives. |
+| `ZEROSHIP_SECRETS_DIR` | `./secrets` | Where the file-backed key material lives. Relative to the compose file, this is `deploy/compose/secrets`, the `zeroship dev init` default. |
 | `ZEROSHIP_DOMAIN` | `zeroship.localhost` | Drives `--app-base-domain`, the OIDC issuer, gateway/auth public URLs, Caddy's site blocks and its network aliases. |
 | `ZEROSHIP_ORIGIN_SCHEME` | `http` | The scheme PUBLIC urls advertise. Compose injects it into control and gateway and uses it to build gateway/auth public URLs. Behind a TLS-terminating proxy the origin serves http while public URLs say https. |
 
-### Secrets that are safe to override
+### Generated scalar secrets
 
-`${VAR}`-indirected in **every** service that reads them, so one value moves the
-whole stack consistently:
+`zeroship dev init` adds these to the gitignored `.env`. Each is generated from
+32 random bytes as lowercase hex. Rerunning keeps an existing valid value rather
+than rotating it:
 
-| Variable | Dev default |
+| Variable | Consumers or purpose |
 | --- | --- |
-| `ZEROSHIP_WORKER_KEY` | `dev-worker-key-not-for-production-use` |
-| `GATEWAY_OIDC_SECRET` | `dev-secret-rotate-me-too` |
-| `STASH_SIGNING_KEY` | `dev-stash-signing-key-not-for-production` |
-| `PAIRWISE_SALT` | `dev-pairwise-salt-never-rotate-in-prod` |
+| `ZEROSHIP_CONTROL_KEY` | Shared machine-to-machine key for control, gateway, worker, migrated, and auth. |
+| `ZEROSHIP_MASTER_KEY` | Control-plane secret-at-rest key and operator bearer. |
+| `ZEROSHIP_WORKER_KEY` | Shared gateway-to-worker dispatch and identity-signing key. |
+| `GATEWAY_OIDC_SECRET` | Legacy Compose slot with no current Rust reader; generated here so no weak literal ships. |
+| `STASH_SIGNING_KEY` | Gateway short-lived stash signing key. |
+| `PAIRWISE_SALT` | Permanent control/gateway pairwise-subject seed; must match the file described below. |
+| `AUTH_STASH_SIGNING_KEY` | Auth-origin stash-cookie signing key. |
+| `AUTH_TOTP_ENC_KEY` | Auth TOTP secret-at-rest key. |
+
+Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
+values rather than built-in weak defaults. One generated value therefore moves
+every consumer together. In particular, changing `ZEROSHIP_CONTROL_KEY` cannot
+move auth alone while leaving the other four services behind.
 
 ### Database DSNs
 
@@ -91,22 +113,15 @@ it on `control`, which has no code that reads it.
 
 Optional: `OPENAI_API_KEY` (defaults empty).
 
-### NOT overridable from .env
+### Operational literals not supplied by the generator
 
 These are literals in `deploy/compose/docker-compose.yml` and ignore `.env`:
 
 | Service(s) | Variable | Value |
 | --- | --- | --- |
-| control, gateway, worker, migrated | `ZEROSHIP_CONTROL_KEY` | `platform-key` |
-| control | `ZEROSHIP_MASTER_KEY` | `master-key` |
 | control | `SANDBOX_URL`, `SANDBOX_TOKEN` | `http://sandbox:9091`, a dev token |
 | control | `ZEROSHIP_CONTROL_URL` | `http://control:9090` |
 | postgres | `POSTGRES_PASSWORD`, `POSTGRES_DB` | `zeroship`, `zeroship` |
-
-**`ZEROSHIP_CONTROL_KEY` is a trap.** It is a literal in control, gateway,
-worker and migrated, but `${ZEROSHIP_CONTROL_KEY:-platform-key}` in **auth**.
-Setting it in `.env` moves auth alone and desyncs it from the other four.
-Changing that key for real means parameterizing all five in one edit.
 
 ### Not environment variables at all
 
@@ -119,10 +134,17 @@ will not boot without them:
 Two coupling rules the names do not reveal:
 
 - `broker-secret` is ONE file read by both gateway (`GATEWAY_BROKER_SECRET_FILE`)
-  and auth (`AUTH_BROKER_SECRET_FILE`). Same bytes is the requirement.
+  and auth (`AUTH_BROKER_SECRET_FILE`). They read the same physical file without
+  normalization; same bytes is the requirement.
 - The `pairwise-salt` FILE content must equal the `PAIRWISE_SALT` ENV value.
   Auth reads the file, control and gateway read the env, and all three derive
-  the same per-app `pws_`.
+  the same per-app `pws_`. The file contains exactly the env bytes with no
+  trailing newline. Do not override `PAIRWISE_SALT` in the host shell when
+  starting Compose; host values take precedence over `.env`.
+
+`refresh-hash-key` is a versioned keyring. Each nonempty line is
+`version:hex-or-base64url-key` and decodes to at least 32 bytes; the generator
+starts with `1:` followed by 48 random bytes encoded as hex.
 
 Generation recipes are in `docs/runbooks/auth-deploy.md`; the deploy walkthrough
 is in `docs/runbooks/deploy-server.md`.

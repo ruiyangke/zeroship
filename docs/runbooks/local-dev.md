@@ -18,7 +18,14 @@ pnpm install
 pnpm build
 cargo build --release
 mkdir -p bundles
+./target/release/zeroship dev init
 ```
+
+`zeroship dev init` creates the seven file-backed platform secrets in the
+gitignored `deploy/compose/secrets` directory and the eight generated scalar
+values in `deploy/compose/.env`. Rerunning validates and keeps existing values;
+it never rotates them implicitly. The commands below use those default paths;
+for another layout, source its env overlay and replace every file path below.
 
 For full-platform mode, create the control-plane database:
 
@@ -55,50 +62,92 @@ you intentionally want a different backend.
 
 ## Mode 2: full local platform
 
-Run these from the repo root in three terminals.
+Run these from the repo root in four terminals. In each terminal, export the
+generated overlay first. The generated values contain no shell metacharacters:
+
+```bash
+set -a
+. deploy/compose/.env
+set +a
+```
 
 Terminal 1:
 
 ```bash
+CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
+MASTER_KEY="$ZEROSHIP_MASTER_KEY" \
+WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
+PAIRWISE_SALT="$PAIRWISE_SALT" \
 ./target/release/zeroship-control \
   --port 9090 \
   --db postgres://localhost:5432/zeroship \
   --blob-store ./bundles \
-  --control-key dev-control \
-  --master-key dev-master \
+  --signing-key-file deploy/compose/secrets/control-signing.pem \
   --dev-insecure
 ```
 
 Terminal 2:
 
 ```bash
+CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
+WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 ./target/release/zeroship-worker \
   --port 8080 \
   --worker-threads 4 \
   --control http://localhost:9090 \
-  --control-key dev-control \
   --blob-store ./bundles
 ```
 
 Terminal 3:
 
 ```bash
+CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
+WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
+GATEWAY_OIDC_SECRET="$GATEWAY_OIDC_SECRET" \
+STASH_SIGNING_KEY="$STASH_SIGNING_KEY" \
+PAIRWISE_SALT="$PAIRWISE_SALT" \
 ./target/release/zeroship-gate \
   --port 8000 \
   --control http://localhost:9090 \
-  --control-key dev-control \
   --workers http://localhost:8080 \
   --blob-store ./bundles \
+  --auth-ui-url http://localhost:9092 \
+  --gateway-public-url http://localhost:8000 \
+  --signing-key-file deploy/compose/secrets/gateway-signing.pem \
+  --gateway-broker-secret-file deploy/compose/secrets/broker-secret \
+  --dev-insecure
+```
+
+Terminal 4:
+
+```bash
+CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
+AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \
+AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
+./target/release/zeroship-auth \
+  --addr 127.0.0.1:9092 \
+  --db-url postgres://localhost:5432/zeroship \
+  --public-url http://localhost:9092 \
+  --auth-signing-key-file deploy/compose/secrets/auth-signing.pem \
+  --auth-pairwise-salt-file deploy/compose/secrets/pairwise-salt \
+  --auth-broker-secret-file deploy/compose/secrets/broker-secret \
+  --refresh-hash-key-file deploy/compose/secrets/refresh-hash-key \
+  --refresh-idem-key-file deploy/compose/secrets/refresh-idem-key \
+  --mailer stdout \
+  --relay-forward-mailer stdout \
   --dev-insecure
 ```
 
 Notes:
 
-- `--dev-insecure` is intentional here: it relaxes the production secret-strength
-  and OIDC guards so the short dev keys above (`dev-control`, `dev-master`) boot.
-  Without it, control rejects the weak `--master-key` and gateway requires a
-  strong `GATEWAY_OIDC_SECRET` / stash key. Never pass `--dev-insecure` outside
-  local dev. There is no `--auth-secret` flag — the gateway no longer takes one.
+- The generated inputs are strong and stable across restarts. `--dev-insecure`
+  remains in these commands because its other behaviors are removed in later
+  work; this provisioning step does not delete or rename the flag. Never pass it
+  outside local dev. There is no `--auth-secret` flag.
+- Gateway and auth intentionally read the same physical `broker-secret` file.
+  Auth reads `pairwise-salt` from a file while control and gateway read the
+  byte-identical `PAIRWISE_SALT` value from the overlay. The file has no trailing
+  newline; changing either value would change every derived per-app `pws_`.
 - `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
   `--bind 0.0.0.0` together with `--worker-key` if another host must reach it.
 - `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
@@ -127,7 +176,7 @@ Create an app:
 
 ```bash
 curl -X POST http://localhost:9090/api/apps \
-  -H "Authorization: Bearer dev-master" \
+  -H "Authorization: Bearer $ZEROSHIP_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name":"db-todos","plan_id":"free"}'
 ```
@@ -152,8 +201,8 @@ Deploy it:
 
 The CLI resolves the bearer token from `--token=<PAT>`, the `ZEROSHIP_TOKEN`
 env var, or credentials saved by `zeroship login` — in that order. (The
-`curl` examples above use `Authorization: Bearer dev-master` because control's
-`--master-key` is itself a bearer principal; the deploy CLI does not read it.)
+`curl` example above uses the generated `ZEROSHIP_MASTER_KEY` because control's
+master key is itself a bearer principal; the deploy CLI does not read it.)
 
 Then open `http://localhost:8000/apps/db-todos/`.
 
@@ -185,7 +234,7 @@ The runner script is `./crates/runtime/benches/run_zerobench.sh`. Read that scri
 
 ## Related docs
 
-- [Multi-node / Docker Compose](../runbooks/docker-compose.md) — the same stack via `docker compose` instead of three terminals.
+- [Multi-node / Docker Compose](../runbooks/docker-compose.md) - the same stack via `docker compose` instead of four terminals.
 - [Architecture overview](../architecture/overview.md) — what each binary (`control`/`worker`/`gate`) does.
 - [Distributed architecture](../architecture/distributed.md) — how control, gateway, and worker talk over the `/internal/*` feeds you wired above.
 - [`.zship` artifact format](../reference/zship.md) — the deploy archive `pnpm build` emits and `zeroship deploy` uploads.

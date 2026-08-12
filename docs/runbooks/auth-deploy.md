@@ -81,27 +81,70 @@ Production should normally use the defaults.
 
 ## Secret Generation
 
-Generate the OP signing key once per environment:
+For the local compose stack, provision the complete platform secret set from the
+repository root:
 
 ```bash
-openssl genpkey -algorithm ed25519 -out auth-signing.pem
-chmod 0600 auth-signing.pem
+zeroship dev init
 ```
 
-Generate the other file-backed secrets from at least 32 random bytes each and
-store them in your secret manager:
+The defaults are the gitignored `deploy/compose/secrets` directory and its
+sibling `deploy/compose/.env`. Override both paths when provisioning another
+layout:
 
 ```bash
-openssl rand -base64 48 > auth-pairwise-salt
-openssl rand -base64 48 > auth-broker-secret
-openssl rand -base64 48 > refresh-hash-key
-openssl rand -base64 48 > refresh-idem-key
-chmod 0600 auth-pairwise-salt auth-broker-secret refresh-hash-key refresh-idem-key
+zeroship dev init \
+  --secrets-dir=/path/to/secrets \
+  --env-file=/path/to/.env
 ```
+
+The command creates exactly these seven files, with a mode of 0600 on Unix (and
+0700 on the directory):
+
+`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+
+It also adds eight 32-byte random hex values to the env overlay:
+
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
+`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+
+Generation is idempotent. A rerun validates and keeps every existing value,
+creates only missing entries, and refuses to replace invalid or mismatched
+material. It does not rotate secrets implicitly.
+
+For manual provisioning, use the same formats:
+
+```bash
+S=/path/to/secrets
+umask 077
+mkdir -p "$S" && chmod 0700 "$S"
+openssl genpkey -algorithm ed25519 -out "$S/auth-signing.pem"
+openssl genpkey -algorithm ed25519 -out "$S/gateway-signing.pem"
+openssl genpkey -algorithm ed25519 -out "$S/control-signing.pem"
+openssl rand -base64 48 > "$S/broker-secret"
+printf '1:%s\n' "$(openssl rand -hex 48)" > "$S/refresh-hash-key"
+openssl rand -base64 48 > "$S/refresh-idem-key"
+PAIRWISE_SALT="$(openssl rand -hex 32)"
+printf '%s' "$PAIRWISE_SALT" > "$S/pairwise-salt"
+chmod 0600 "$S"/*
+```
+
+`refresh-hash-key` is a keyring, not an unadorned random string. Each nonempty
+line is `version:hex-or-base64url-key`; the recipe starts version 1 with 48
+random bytes. The `pairwise-salt` file is different: its bytes must exactly
+equal the `PAIRWISE_SALT` env value used by control and gateway. `printf '%s'`
+is load-bearing because a trailing newline would change auth's derived `pws_`.
+
+`broker-secret` is one physical file read without normalization by both auth and
+gateway. Point `AUTH_BROKER_SECRET_FILE` and `GATEWAY_BROKER_SECRET_FILE` at that
+same file rather than generating one per service.
 
 `AUTH_STASH_SIGNING_KEY` and `AUTH_TOTP_ENC_KEY` may also come from files through
 your process manager's secret injection, but the binary accepts them as env/CLI
-values today.
+values today. Use at least 32 random bytes for each; the TOTP value must be hex
+or base64url encoded.
 
 ## First Boot
 
@@ -128,8 +171,8 @@ values today.
    AUTH_DB_URL=postgres://zeroship_auth:...@db:5432/zeroship \
    AUTH_PUBLIC_URL=https://auth.zeroship.ai \
    AUTH_SIGNING_KEY_FILE=/run/secrets/auth-signing.pem \
-   AUTH_PAIRWISE_SALT_FILE=/run/secrets/auth-pairwise-salt \
-   AUTH_BROKER_SECRET_FILE=/run/secrets/auth-broker-secret \
+   AUTH_PAIRWISE_SALT_FILE=/run/secrets/pairwise-salt \
+   AUTH_BROKER_SECRET_FILE=/run/secrets/broker-secret \
    REFRESH_HASH_KEY_FILE=/run/secrets/refresh-hash-key \
    REFRESH_IDEM_KEY_FILE=/run/secrets/refresh-idem-key \
    AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \

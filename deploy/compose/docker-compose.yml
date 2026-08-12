@@ -15,10 +15,10 @@
 # literal hostname back into this file: it becomes a hostname in every
 # deployment that copies it.
 #
-# WARNING:  DEV ONLY - NOT for production. Hardcodes weak secrets (platform-key,
-#     master-key, worker-key), and runs every service with --dev-insecure
-#     (admin / internal auth relaxed). All of this is gated behind
-#     --dev-insecure and a private box.
+# WARNING: DEV ONLY - NOT for production. Strong local secrets are generated
+# once by `zeroship dev init` and loaded from this directory's gitignored .env
+# and secrets/ files, but services still run with --dev-insecure until the later
+# guard-by-guard migration removes that flag.
 #
 # Usage:
 #   docker compose build && docker compose pull   # build/pull all images AHEAD
@@ -243,18 +243,18 @@ services:
       # CREATE-on-db, per V0025). The shipped `migrate` service likewise runs as
       # the postgres superuser. Without this, every migration-carrying deploy 503s.
       PROVISION_DATABASE_URL: ${PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
-      ZEROSHIP_CONTROL_KEY: platform-key
-      ZEROSHIP_MASTER_KEY: master-key
+      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      ZEROSHIP_MASTER_KEY: ${ZEROSHIP_MASTER_KEY:?run zeroship dev init}
       # control ALSO needs WORKER_KEY: deploy/ops/zeroship.toml:63 maps
       # `worker_key` to this env var, and crates/control/src/main.rs:878
       # refuses to start without it. It was set on gateway and worker only,
       # so control crash-looped with `secret reference env var
       # 'ZEROSHIP_WORKER_KEY' is not set`. MUST match the worker's value.
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST be
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
-      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
+      PAIRWISE_SALT: ${PAIRWISE_SALT:?run zeroship dev init}
       # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
       # These were read from THIS process env at install time by the console
       # seed, which wrote them onto the console app's env store. That seed was
@@ -345,7 +345,9 @@ services:
       # MUST be the same file control signs with, or a control-issued creator PAT
       # will not verify here and every apply is 401.
       SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
-      ZEROSHIP_CONTROL_KEY: platform-key
+      # Unlike the other four services, migrated reads CONTROL_KEY directly and
+      # does not resolve the ZEROSHIP_CONTROL_KEY reference from zeroship.toml.
+      CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
     volumes:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -389,7 +391,7 @@ services:
           --dev-insecure
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
-      # pairwise salt). Lives OUTSIDE the repo so it cannot be committed.
+      # pairwise salt). The default host directory is explicitly gitignored.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       # Same content-addressed blob store control writes to (asset proxy).
       - bundles:/data/bundles
@@ -403,22 +405,17 @@ services:
       ZEROSHIP_DATABASE_URL: ${GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
       # Public-edge topology consumed by the gateway's --origin-scheme setting.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
-      ZEROSHIP_CONTROL_KEY: platform-key
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
-      # OAuth2 client_secret for the `gateway` client. The gateway exchanges
-      # this on the per-app OIDC code-exchange (Phase 3 sec. 10.2).
-      GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
       # Counterpart to auth AUTH_BROKER_SECRET_FILE -- same file, same bytes.
       GATEWAY_SIGNING_KEY_FILE: /etc/zeroship/secrets/gateway-signing.pem
       GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret
       # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
-      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-signing-key-not-for-production}
+      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:?run zeroship dev init}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST equal the
       # control service's PAIRWISE_SALT - both derive the per-app `pws_`. Never
       # rotate without a per-app `pws_` migration.
-      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
+      PAIRWISE_SALT: ${PAIRWISE_SALT:?run zeroship dev init}
     # LOOPBACK, and this costs the documented path nothing. Caddy reaches the
     # gateway by SERVICE NAME over the compose network (`reverse_proxy
     # gateway:8000`, three site blocks in deploy/ops/Caddyfile), never through
@@ -495,8 +492,8 @@ services:
       # Worker DSN = privileged provisioning superuser (see NOTE above); distinct
       # from control/gateway roles under the same shared `database_url` reference.
       ZEROSHIP_DATABASE_URL: ${WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
-      ZEROSHIP_CONTROL_KEY: platform-key
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:-dev-worker-key-not-for-production-use}
+      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
@@ -616,7 +613,11 @@ services:
       # Every binary reading the overlay must therefore supply the var; auth set only
       # AUTH_DB_URL + AUTH_PUBLIC_URL and crash-looped on the unresolved reference.
       # Auth uses this ONLY to gate control -> auth internal OP mint calls.
-      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:-platform-key}
+      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      # Auth has independent stash-cookie and TOTP-at-rest keys. Both are
+      # generated once and retained across restarts by the dev overlay.
+      AUTH_STASH_SIGNING_KEY: ${AUTH_STASH_SIGNING_KEY:?run zeroship dev init}
+      AUTH_TOTP_ENC_KEY: ${AUTH_TOTP_ENC_KEY:?run zeroship dev init}
       # Required on real boot -- auth refuses to start without the OP signing
       # key. AUTH_BROKER_SECRET_FILE is the SAME file the gateway reads as
       # GATEWAY_BROKER_SECRET_FILE: the OP derives each brokered client secret
@@ -633,7 +634,7 @@ services:
       - "127.0.0.1:9092:9092"
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
-      # pairwise salt). Lives OUTSIDE the repo so it cannot be committed.
+      # pairwise salt). The default host directory is explicitly gitignored.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.

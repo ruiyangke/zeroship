@@ -4,3 +4,7 @@ crates/runtime/benches/ntex-bench/
 docs/
 tests/
 *.md
+
+# Local provisioning output must never enter the Docker build context.
+deploy/compose/.env
+deploy/compose/secrets/
