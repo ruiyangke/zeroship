@@ -66,7 +66,44 @@ function SummarySection({ productId }: { productId: string }) {
   );
 }
 
-function ByComponentSection({ productId }: { productId: string }) {
+type ComponentRow = { component?: { id: string; name: string; productId: string } | null };
+
+/**
+ * Name a component row so it can be told apart from the others on screen.
+ *
+ * Component names are only unique WITHIN a product -- "Core" and "Parser" are
+ * what every product calls its first two -- so an unqualified name turns the
+ * report into a column of identical labels. Measured against the dev database:
+ * 54 rows, every one of them reading "Core" or "Parser", each with its own
+ * count. The numbers were right and the table was unreadable.
+ *
+ * The product is added only when the name is actually ambiguous in THIS
+ * result set. Qualifying unconditionally would push "Bugzilla / Core" into
+ * every row of a single-product report, where the product is already fixed by
+ * the filter above and repeating it is noise.
+ */
+function componentLabel(
+  component: ComponentRow["component"],
+  rows: readonly ComponentRow[],
+  productNames: Record<string, string>,
+): string {
+  if (!component) return "(deleted component)";
+  const sameName = rows.filter((r) => r.component?.name === component.name);
+  if (sameName.length < 2) return component.name;
+  // Falls back to the id rather than dropping the qualifier: a product the
+  // caller cannot see is still a distinct product, and an unqualified row
+  // would collide with the one above it again.
+  const product = productNames[component.productId] ?? component.productId;
+  return `${product} / ${component.name}`;
+}
+
+function ByComponentSection({
+  productId,
+  productNames,
+}: {
+  productId: string;
+  productNames: Record<string, string>;
+}) {
   const { state, reload } = useAsync(
     () => reportByComponent({ productId: productId || undefined }),
     [productId],
@@ -92,7 +129,7 @@ function ByComponentSection({ productId }: { productId: string }) {
             <tbody>
               {rows.map((row, i) => (
                 <tr key={row.component?.id ?? i}>
-                  <td>{row.component?.name ?? "(deleted component)"}</td>
+                  <td>{componentLabel(row.component, rows, productNames)}</td>
                   <td>{row.count}</td>
                 </tr>
               ))}
@@ -234,6 +271,10 @@ export function ReportsPage() {
   const [productId, setProductId] = useState("");
   const [days, setDays] = useState(30);
   const productsQ = useAsync(() => listProducts({}), []);
+  const productNames =
+    productsQ.state.status === "ready"
+      ? Object.fromEntries(productsQ.state.data.map((p) => [p.id, p.name]))
+      : {};
 
   return (
     <div className="page reports-page">
@@ -260,7 +301,7 @@ export function ReportsPage() {
         </label>
       </div>
       <SummarySection productId={productId} />
-      <ByComponentSection productId={productId} />
+      <ByComponentSection productId={productId} productNames={productNames} />
       <ByAssigneeSection productId={productId} />
       <TrendSection productId={productId} days={days} />
       <TimeToResolveSection productId={productId} days={days} />
