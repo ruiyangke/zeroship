@@ -55,6 +55,7 @@ export const getMessages = query(
 // rail does not deliver" from "no JS ever executed".
 export const boom = query(
   async () => {
+    console.log("[starter] boom: about to throw");
     throw new Error("[starter] boom: deliberate handler failure");
   },
   {
