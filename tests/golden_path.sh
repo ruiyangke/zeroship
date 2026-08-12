@@ -624,9 +624,24 @@ chmod 600 "$GATE_BROKER_SECRET"
 # revocation paths would measure the db-is-None 401 rather than the real
 # behaviour, and would pass while proving nothing. Give the gateway a DSN first
 # if you need those, and check that both tiers actually reach the database.
+# `--signing-key-file` shares the SAME ed25519 key control and migrated already
+# use ($GP_SIGNING_KEY). Without it the gateway has no key to verify an app
+# session cookie against, so every authenticated request is anonymous and any
+# `auth: "user"` procedure answers 401 - which is indistinguishable from a
+# working gate refusing a bad credential, and is why scoped-data coverage could
+# not be written here before.
+#
+# THIS HARNESS IS THE ONLY VEHICLE for that coverage, and the reason is
+# structural rather than a preference. Measured 2026-08-12: tests/lib/e2e_stack.sh
+# runs `zeroship-platform-migrate` only - the PLATFORM schema - and never starts
+# `migrated`, so a creator app's own migration is never applied there and its
+# table does not exist. golden_path starts control + migrated + worker + gateway,
+# so it is the only harness where a creator's rows and the gateway's identity
+# derivation are both live at once.
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles \
-  --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
+  --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
