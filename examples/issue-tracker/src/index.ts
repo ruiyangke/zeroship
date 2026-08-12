@@ -160,6 +160,7 @@ type KeywordRow = SystemRow & {
 type BugKeywordRow = SystemRow & { bugId: string; keywordId: string };
 type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
 type CcRow = SystemRow & { bugId: string; userId: string };
+type WatcherRow = SystemRow & { watcherId: string; watchedId: string };
 type VoteRow = SystemRow & { bugId: string; userId: string; count: number };
 type ProductGroupRow = SystemRow & { productId: string; groupId: string };
 type GroupMemberRow = SystemRow & { groupId: string; userId: string };
@@ -294,6 +295,7 @@ type AppDb = {
   bugDependencies: Collection<DependencyRow>;
   bugCc: Collection<CcRow>;
   votes: Collection<VoteRow>;
+  watchers: Collection<WatcherRow>;
   flagTypes: Collection<FlagTypeRow>;
   flags: Collection<FlagRow>;
   activities: Collection<ActivityRow>;
@@ -1308,7 +1310,7 @@ export const resolveBug = mutation(
     const actor = await requireActor();
     const current = await getRequired(db.bugs, id, "Bug");
     await assertBugAccessible(current, actor);
-    return updateBugWithHistory(
+    const updated = await updateBugWithHistory(
       id,
       actor.id,
       (before) => {
@@ -1326,6 +1328,12 @@ export const resolveBug = mutation(
       },
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
     );
+    await notifyBugChange(
+      updated,
+      actor.id,
+      `${updated.summary} was resolved as ${resolution}`,
+    );
+    return updated;
   },
   { id: "bugs.resolve" },
 );
@@ -1526,7 +1534,17 @@ export const addComment = mutation(
       );
       return comment;
     }, { isolationLevel: "serializable" });
-    return must(result);
+    const comment = must(result);
+    // A private comment's BODY must not travel in a notification -- the
+    // recipients of a fanout are not the same set as the people allowed to
+    // read a private comment, so only the fact of a new comment goes out.
+    await notifyBugChange(
+      bug,
+      actor.id,
+      `New comment on ${bug.summary}`,
+      isPrivate ? undefined : cleanBody.slice(0, 200),
+    );
+    return comment;
   },
   { id: "comments.add" },
 );
@@ -3773,4 +3791,115 @@ export const listMyVotes = query(
       .map((row) => ({ ...row, bug: normalizeBugRow(byId.get(row.bugId)!) }));
   },
   { id: "votes.listMine" },
+);
+
+// ---------------------------------------------------------------------------
+// Watching and notification fanout
+//
+// The `notifications` table had three READ procedures (list, markRead,
+// unreadCount) and NO writer: nothing in the app ever inserted a row, so the
+// inbox was permanently empty and the nav's unread badge could never appear.
+// `watchers` was likewise a table with zero server references.
+//
+// Fanout runs AFTER the mutation's transaction commits, not inside it. That is
+// a deliberate trade: a notification is a side effect, and losing one is much
+// better than rolling back the bug change that caused it. It does mean a crash
+// between commit and fanout drops the notification silently.
+// ---------------------------------------------------------------------------
+
+/**
+ * Everyone who should hear about a change to this bug: assignee, reporter, QA
+ * contact, the CC list, and the watchers of each of those -- minus the actor,
+ * who already knows.
+ *
+ * Recipients are filtered by `canViewBug`. Notifying someone about a bug they
+ * cannot open would leak its summary in the notification title, which is
+ * exactly what a restricted bug is hiding.
+ */
+async function notifyBugChange(
+  bug: BugRow,
+  actorId: string,
+  title: string,
+  body?: string,
+): Promise<void> {
+  const direct = new Set<string>(
+    [bug.assigneeId, bug.reporterId, bug.qaContactId].filter(
+      (id): id is string => Boolean(id),
+    ),
+  );
+  for (const row of await readAll(db.bugCc, { bugId: bug.id })) direct.add(row.userId);
+
+  // Watchers of each interested party also hear about it -- Bugzilla's
+  // "user watching", where a lead follows everything their reports touch.
+  const watched = new Set(direct);
+  for (const page of chunks([...direct])) {
+    for (const row of await readAll(db.watchers, { watchedId: { $in: page } })) {
+      watched.add(row.watcherId);
+    }
+  }
+  watched.delete(actorId);
+  if (watched.size === 0) return;
+
+  const recipients = await readByIds(db.users, [...watched]);
+  for (const user of recipients) {
+    if (user.isDisabled) continue;
+    if (!(await canViewBug(bug, user))) continue;
+    const inserted = await db.notifications.insert({
+      userId: user.id,
+      bugId: bug.id,
+      kind: "bug_changed",
+      title,
+      ...(body ? { body } : {}),
+      isRead: false,
+    });
+    // A failed notification must not fail the mutation that already committed.
+    if (inserted.error) {
+      console.warn(`notification insert failed for ${user.id}: ${String(inserted.error)}`);
+      continue;
+    }
+    // The unread count is cached in KV and written by notifications.markRead.
+    // Inserting a row without refreshing it leaves anyone who has EVER marked
+    // something read looking at a stale count -- their cache is warm, so the
+    // authoritative fallback never runs. Recomputed rather than incremented so
+    // it cannot drift from the rows.
+    const fresh = must(await db.notifications.count({ userId: user.id, isRead: false }));
+    await setUnreadCache(user.id, fresh);
+  }
+}
+
+export const addWatcher = mutation(
+  async ({ watchedId }: { watchedId: string }) => {
+    const actor = await requireActor();
+    const watched = await getRequired(db.users, watchedId, "User");
+    if (watched.id === actor.id) invalid("you cannot watch yourself");
+    const existing = must(await db.watchers.get({ watcherId: actor.id, watchedId: watched.id }));
+    if (existing) return existing;
+    return must(await db.watchers.insert({ watcherId: actor.id, watchedId: watched.id }));
+  },
+  { id: "watchers.add" },
+);
+
+export const removeWatcher = mutation(
+  async ({ watchedId }: { watchedId: string }) => {
+    const actor = await requireActor();
+    const existing = must(await db.watchers.get({ watcherId: actor.id, watchedId }));
+    if (!existing) notFound("Watch");
+    must(await db.watchers.delete(existing.id));
+    return { removed: true };
+  },
+  { id: "watchers.remove" },
+);
+
+export const listWatchers = query(
+  async ({}: EmptyInput) => {
+    const identity = requireIdentity();
+    const user = await appUserForIdentity(identity);
+    if (!user) return [];
+    const rows = await readAll(db.watchers, { watcherId: user.id });
+    if (rows.length === 0) return [];
+    const watched = await readByIds(db.users, rows.map((row) => row.watchedId));
+    const byId = new Map(watched.map((entry) => [entry.id, entry]));
+    return rows.map((row) => ({ ...row, watched: byId.get(row.watchedId) ?? null }));
+  },
+  { id: "watchers.list" },
 );

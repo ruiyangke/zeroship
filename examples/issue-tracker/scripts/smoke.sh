@@ -204,6 +204,7 @@ SECRET_BUG="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP
 # Bob is provisioned by his first authenticated call, and is NOT the first
 # account, so he must not be an admin -- an admin bypasses every restriction
 # below and would make the denial assertions vacuous.
+BOB_ID="$(bob users.me | jget "json.id")"
 BOB_ADMIN="$(bob users.me | jget 'json.isAdmin')"
 [ "$BOB_ADMIN" = "false" ] && pass "the second account is not an admin" \
   || fail "second account is admin=$BOB_ADMIN; restriction assertions below would be vacuous"
@@ -428,6 +429,48 @@ VR="$(call votes.cast "{\"bugId\":\"$VB\",\"count\":2}")"
   || fail "the bug was not auto-confirmed at the vote threshold"
 [ "$(call bugs.get "{\"id\":\"$VB\"}" | jget 'json.bug.status')" = "CONFIRMED" ] \
   && pass "the auto-confirmed status is persisted" || fail "status did not persist as CONFIRMED"
+
+echo "notifications and watching"
+# The notifications table had three READ procedures and no writer, so the inbox
+# was permanently empty and the nav's unread badge could never appear.
+# Bob is CC'd on the bug, so a comment by Alice must reach him.
+call cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
+BOB_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
+call comments.add "{\"bugId\":\"$BUG\",\"body\":\"ping $STAMP\"}" >/dev/null
+BOB_AFTER="$(bob notifications.unreadCount | jget 'json.count')"
+[ "$BOB_AFTER" -gt "$BOB_BEFORE" ] 2>/dev/null \
+  && pass "a comment notifies the CC'd user ($BOB_BEFORE -> $BOB_AFTER)" \
+  || fail "no notification reached the CC'd user" "before=$BOB_BEFORE after=$BOB_AFTER"
+
+# The actor does not notify herself.
+ALICE_BEFORE="$(call notifications.unreadCount | jget 'json.count')"
+call comments.add "{\"bugId\":\"$BUG\",\"body\":\"self $STAMP\"}" >/dev/null
+[ "$(call notifications.unreadCount | jget 'json.count')" = "$ALICE_BEFORE" ] \
+  && pass "the actor is not notified about her own change" \
+  || fail "the actor notified herself"
+
+# A restricted bug must not notify someone who cannot read it -- the title
+# carries the summary, so a notification is a disclosure.
+SEC_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
+call comments.add "{\"bugId\":\"$SECRET_BUG\",\"body\":\"secret note $STAMP\"}" >/dev/null
+[ "$(bob notifications.unreadCount | jget 'json.count')" = "$SEC_BEFORE" ] \
+  && pass "no notification about a bug the recipient cannot read" \
+  || fail "a restricted bug's summary leaked through a notification"
+
+# The unread count is cached in KV and written by notifications.markRead, so a
+# user who has EVER marked something read has a warm cache and the
+# authoritative database fallback never runs for them. A fanout that inserts a
+# row without refreshing that cache leaves them looking at a stale number.
+# This sequence is specifically markRead-then-notify, which is the only order
+# that exposes it.
+FIRST_NOTIF="$(bob notifications.list '{"limit":1}' | jget 'json.0.id')"
+[ -n "$FIRST_NOTIF" ] && bob notifications.markRead "{\"id\":\"$FIRST_NOTIF\"}" >/dev/null
+WARM="$(bob notifications.unreadCount | jget 'json.count')"
+call comments.add "{\"bugId\":\"$BUG\",\"body\":\"cache probe $STAMP\"}" >/dev/null
+AFTER_WARM="$(bob notifications.unreadCount | jget 'json.count')"
+[ "$AFTER_WARM" -gt "$WARM" ] 2>/dev/null \
+  && pass "the unread count is fresh after a notification even with a warm cache ($WARM -> $AFTER_WARM)" \
+  || fail "stale unread count: the KV cache was not refreshed by the fanout" "warm=$WARM after=$AFTER_WARM"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
