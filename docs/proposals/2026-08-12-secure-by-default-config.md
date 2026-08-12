@@ -2,8 +2,18 @@
 
 - **Status:** implemented
 - **Date:** 2026-08-12
-- **Scope:** the five server binaries (control, gateway, worker, auth, migrated)
-  and the `zeroship` CLI
+- **Scope:** the five server binaries that carried a relaxation hatch (control,
+  gateway, worker, auth, migrated) and the `zeroship` CLI
+
+AMENDED 2026-08-12. The scope line previously read "the five server binaries",
+which reads as a count of the platform's services and is not one. Workspace
+metadata classifies SEVEN targets as `platform`: those five, plus
+`zeroship-workflow-scheduler` and the `zeroship-platform-migrate` one-shot.
+Five is correct for THIS proposal because five is how many carried an
+`insecure_dev` hatch to delete - the scheduler's `main` is a placeholder that
+exits 1 and never had one. The scheduler's full state is recorded in the scope
+section of `docs/proposals/2026-08-11-config-name-alignment.md`; nothing here
+implies its configuration is converted.
 
 ## Implementation
 
@@ -234,7 +244,8 @@ window.
 ## Case against this proposal
 
 The strongest argument against is cost against benefit at this moment. The work
-is 391 non-test `insecure_dev` occurrences across five services, plus a new CLI command, plus
+is 391 non-test `insecure_dev` occurrences across the five services that had the hatch,
+plus a new CLI command, plus
 per-check migration in step 4 that cannot be batched. Nothing in it makes a
 creator app work that does not work today. There are no users, and the exposure
 it removes is on a host whose control plane is already loopback-bound, whose

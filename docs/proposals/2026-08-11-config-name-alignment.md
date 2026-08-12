@@ -51,7 +51,21 @@ It rejected config-rs, figment, confique, and a required primary config file
 does not reopen those choices.
 
 The initial server conformance set is `zeroship-control`, `zeroship-gate`,
-`zeroship-worker`, `zeroship-auth`, and `zeroship-migrated`. Migrated is a
+`zeroship-worker`, `zeroship-auth`, and `zeroship-migrated`.
+
+AMENDED 2026-08-12. That set is the CONVERSION order, not the scope. There are
+SIX server binaries and SEVEN targets classified `platform` in workspace
+metadata: the five above, plus `zeroship-workflow-scheduler`
+(`crates/workflow-scheduler/Cargo.toml:7-10`), plus the
+`zeroship-platform-migrate` one-shot
+(`crates/zeroship-migrate-adapter/Cargo.toml:30-33`). Text elsewhere in this
+document, and the scope line of
+`docs/proposals/2026-08-12-secure-by-default-config.md`, said "five"; the
+metadata classification has said six-plus-one since Step 1, and it is the
+authority the anti-vacuity check reads. See the scheduler note below for its
+actual state.
+
+Migrated is a
 deployed long-running service and receives the shared overlay mount
 (`deploy/compose/docker-compose.yml:285-330`), but its parser currently ends
 without `--config` or `--check-config` and initializes tracing directly
@@ -65,6 +79,29 @@ migration one-shot still has a manual argument parser and a raw
 `crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate.rs:73-113`).
 Those processes must be registered before the final gate turns green, even
 though only long-running servers need the full `--check-config` report.
+
+AMENDED 2026-08-12, the scheduler's actual state, so a later step does not
+assume it is done. Step 2 moved its clap definition out of `main.rs` into
+`crates/workflow-scheduler/src/config.rs` so the compiled checker can link it,
+and deliberately did NOT convert its fields. As of this amendment:
+
+- Its fields are hand-spelled `#[arg(long, env = "...")]` with the
+  `WORKFLOW_SCHEDULER_*` family, not the `ZEROSHIP_` projection, so it is the
+  one platform server that would fail the Section 4.1 rule that all in-scope
+  platform env names begin `ZEROSHIP_`.
+- It declares no `ConfigSpec`, no read sites, and none of the six shared
+  identities. It has no `--config`, no `--check-config`, and no overlay.
+- Its `main` is a placeholder that logs and `exit(1)`: the dispatch, ack and
+  registration loop still runs in the control cron, and the standalone process
+  must not run as a production scheduler until that loop moves
+  (`crates/workflow-scheduler/src/lib.rs:1-11`). Its metadata classification is
+  `platform` with a reason that says so.
+
+That last point is why it is in scope but not converted: it is a real workspace
+bin target the anti-vacuity check must account for, and it will be a real
+service, but converting configuration for a process that refuses to start buys
+nothing until the extraction lands. Step 3 must convert it or the step is not
+closed; Step 7 cannot pass while its env family is unprefixed.
 
 The creator CLI and sandbox remain outside this server-config
 overlay, matching the accepted ADR (`docs/decisions/2026-05-28-server-config-unification.md:56-58`).
@@ -516,6 +553,79 @@ class, resolved type, validator, default, env projection, and TOML semantics
 are identical. TOML-path uniqueness is checked between canonical identities,
 not between consumers of the same identity.
 
+### AMENDED 2026-08-12: consumers agree on identity, never on default
+
+The paragraph above is wrong in one clause and was unbuilt in another. Both are
+corrected here, and both are now enforced by code rather than described.
+
+**The default is removed from the coalescing rule.** Requiring every consumer of
+one identity to agree on its DEFAULT has no satisfiable form for the settings
+this design already governs. `observability.log_filter` defaults to
+`info,zeroship_control=debug` in control and `info,zeroship_gateway=debug` in
+the gateway, because the directive names the declaring crate. There is no single
+value that is correct for every binary: `info,zeroship_control=debug` applied to
+the gateway enables nothing. As written, the rule would have rejected the five
+declarations Step 2 landed, and Step 7 turns the rule into a build-blocking
+gate, so the contradiction would have surfaced as a blocked build rather than as
+a design question.
+
+Splitting the identity instead - `control.log_filter`, `gateway.log_filter` -
+is worse, not a workaround. It gives one concept six operator-visible
+environment names and destroys "set the log level once for the deployment,"
+which is the drift this proposal exists to remove.
+
+The amended rule: **consumers of one canonical identity must agree on canonical
+NAME, SUPPLY CLASS, RESOLVED TYPE and SUPPLY SET. They may differ on the
+compiled default.** Every property in that list is something an operator is
+misled by, because one `ZEROSHIP_*` spelling and one overlay path must mean one
+thing everywhere. The compiled default is invisible from outside the process and
+is a per-binary behaviour, not part of the operator-facing contract.
+
+**`#[config(shared = ...)]` is built, narrower than sketched.** Step 2 shipped
+without it, so each of the five servers repeated the canonical string and the
+wrapper type: `name = "config"` appeared five times, and six identities were
+spelled thirty times between them. That repetition made two failures
+representable and neither detectable by any gate in Section 4:
+
+- A TYPO de-shares the identity. `observability.log_filtr` in one binary is a
+  new canonical name with a unique env projection, a unique flag and a matching
+  read site, so the collision check, the projection check and the
+  declared-equals-read check all pass while that service silently ignores the
+  operator's variable. This is the proposal's own failure mode, reintroduced
+  thirty times.
+- A DIVERGENT wrapper or inner type gives one environment variable two parse
+  behaviours, and for `Secret` against `Operational` two different redaction
+  rules. The existing collision check skips same-name pairs, so nothing looked.
+
+The implemented form names the identity by SYMBOL and reads the canonical name,
+supply class and resolved type from a table in `crates/config-macros/src/shared.rs`:
+
+```rust
+#[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]
+pub log_filter: Operational<String>,
+```
+
+An unknown symbol does not compile and the diagnostic lists the known ones. A
+field whose declared type differs from the table's does not compile. And
+`#[config(name = "...")]` REFUSES a string that matches a shared canonical name,
+which is what keeps the table the single spelling rather than a second one -
+the distinction from the manifest rejected in Section 6, where the objection is
+that a second spelling can be edited to agree with a typo.
+
+It is narrower than the sketch in two ways worth stating. It does not share the
+FIELD, only the identity: each binary still declares the field, its help text
+and any extra `#[arg]` attributes, because those legitimately differ (migrated's
+`--check-config` help says "without provisioning, connecting or listening";
+worker adds `worker.workflow_advance_unsigned` next to the shared block). And
+the type check is textual, since a proc macro cannot resolve a path to a type;
+it guarantees that every consumer writes the same tokens, not that those tokens
+name the same type.
+
+The registry-level coalescing check is implemented too, in
+`validate_contract`, as defence in depth for hand-written `ConfigSpec` values
+that the attribute never sees. It compares class, type, environment projection
+and supply set, and deliberately does not compare defaults.
+
 Move each command type into a library-visible config module so a checker can
 link it: new `src/config.rs` modules in control, gateway, worker, migrated, and
 workflow-scheduler, plus auth's existing exported config module
@@ -561,7 +671,9 @@ Its compiled test asserts:
 6. canonical identities, global env projections, and per-binary flag
    projections have no collisions, including a negative fixture for each;
 7. all in-scope platform env names begin `ZEROSHIP_`;
-8. every consumer of a shared identity agrees on the full spec; and
+8. every consumer of a shared identity agrees on its canonical name, class,
+   resolved type and supply set - but NOT on its default (AMENDED 2026-08-12;
+   see the amendment above); and
 9. declared source/consumer pairs and compiled `ReadSite` pairs are equal in
    both directions, except generated sources disabled by a declared target cfg.
 
@@ -743,7 +855,10 @@ worker and migrated as well as control, gateway, and auth; the current build
 and binary list covers only the latter three
 (`tests/config_check_e2e.sh:181-199`). Add the script as a named CI step.
 
-The E2E must assert all five server names, each resolved source, secret
+The E2E must assert all five server names (AMENDED 2026-08-12: five, not six -
+the scheduler has no `--check-config` and its `main` exits 1, so it cannot be
+driven by this script until the extraction described in the scope section
+lands), each resolved source, secret
 presence-only output, CLI-over-env-over-file precedence, and rejection of an
 unknown `ZEROSHIP_*` name. Retain a minimum assertion floor; the current test
 already uses one to prevent a zero-assertion pass
