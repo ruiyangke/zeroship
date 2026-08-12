@@ -1312,12 +1312,27 @@ jobs:
       # any of them.
       #
       # The surviving red is a FIFTH mode, none of the three above: the deployed
-      # `wf.start` RPC itself times out -
+      # `wf.start` refuses with
       #     START-REFUSED {"message":"request timed out","name":"Error"}
-      # which is the @zeroship/rpc client timeout (sdks/rpc/src/transport.ts),
-      # not a readiness loop in the harness. Every one of the 8 failures is
-      # downstream of that one refused start. Still not wired, and still for the
-      # same reason - but anyone sizing budgets should start at the start RPC.
+      # and every one of the 8 failures in that round is downstream of that one
+      # refused start.
+      #
+      # THAT IS THE DEPLOYED APP'S 5s WALL BUDGET, not a client timeout. I first
+      # wrote "the @zeroship/rpc client timeout" here off the first grep hit
+      # (sdks/rpc/src/transport.ts carries the same string) and that was wrong:
+      # the harness calls with `curl -m 20`, so the TS client is not on this
+      # path at all, and the value arrived as a RESPONSE BODY. The server-side
+      # emitter is crates/worker/src/handler.rs (`make_error_msg(504, "request
+      # timed out")`), and examples/workflow-probe/src/index.ts already explains
+      # the cause in a comment written during an earlier investigation: dev
+      # (`zeroship serve`) leaves the per-request wall clock unbounded
+      # (crates/runtime/src/core/serve.rs, `wall_timeout: None`) while a
+      # deployed app inherits FREE_TIER_RUNTIME_LIMITS - 5s wall, 50ms CPU.
+      #
+      # So this is the SAME family as the storage red above: a free-tier budget
+      # sized on an idle host, crossed under contention, and invisible in dev
+      # because dev does not enforce that budget at all. Worth knowing before
+      # anyone treats the two as separate problems.
       # Asserts ABSOLUTELY on the deployed body, not only relatively: production
       # shipped Error.stack to anonymous callers for weeks while the auth harness
       # stayed green, because dev leaked the same stack and the diff was empty.
