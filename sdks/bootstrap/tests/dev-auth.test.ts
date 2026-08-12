@@ -124,14 +124,14 @@ describe("dev-auth provider — config", () => {
     const cfg = parseDevAuthConfig(
       JSON.stringify({
         users: [
-          { id: "pws_a", email: "a@x", scopes: ["openid"] },
-          { id: "pws_b", email: "b@x", scopes: ["openid", "admin"] },
+          { id: "pws_aaaa0000000000000000", email: "a@x", scopes: ["openid"] },
+          { id: "pws_bbbb0000000000000000", email: "b@x", scopes: ["openid", "admin"] },
         ],
-        defaultUserId: "pws_b",
+        defaultUserId: "pws_bbbb0000000000000000",
       }),
     );
     assert.equal(cfg?.users.length, 2);
-    assert.equal(cfg?.defaultUserId, "pws_b");
+    assert.equal(cfg?.defaultUserId, "pws_bbbb0000000000000000");
     assert.deepEqual(cfg?.users[1].scopes, ["openid", "admin"]);
   });
 
@@ -140,10 +140,10 @@ describe("dev-auth provider — config", () => {
     assert.equal(parseDevAuthConfig("1")?.passwords["pws_dev00000000000000000"], "dev");
     // Per-user override is preserved; siblings still default.
     const cfg = parseDevAuthConfig(
-      JSON.stringify({ users: [{ id: "pws_a", email: "a@x", password: "hunter2" }, { id: "pws_b", email: "b@x" }] }),
+      JSON.stringify({ users: [{ id: "pws_aaaa0000000000000000", email: "a@x", password: "hunter2" }, { id: "pws_bbbb0000000000000000", email: "b@x" }] }),
     );
-    assert.equal(cfg?.passwords["pws_a"], "hunter2");
-    assert.equal(cfg?.passwords["pws_b"], "dev");
+    assert.equal(cfg?.passwords["pws_aaaa0000000000000000"], "hunter2");
+    assert.equal(cfg?.passwords["pws_bbbb0000000000000000"], "dev");
   });
 
   test("id-only users get UNIQUE synthesized emails (no collision on the shared default)", () => {
@@ -151,17 +151,17 @@ describe("dev-auth provider — config", () => {
     // NOT all collapse to dev@localhost, or every user but the first becomes
     // unloginnable and the dropdown is ambiguous.
     const cfg = parseDevAuthConfig(
-      JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }),
+      JSON.stringify({ users: [{ id: "pws_aaaa0000000000000000", name: "A" }, { id: "pws_bbbb0000000000000000", name: "B" }] }),
     );
-    assert.equal(cfg?.users[0].email, "pws_a@localhost");
-    assert.equal(cfg?.users[1].email, "pws_b@localhost");
+    assert.equal(cfg?.users[0].email, "pws_aaaa0000000000000000@localhost");
+    assert.equal(cfg?.users[1].email, "pws_bbbb0000000000000000@localhost");
     assert.notEqual(cfg?.users[0].email, cfg?.users[1].email);
   });
 });
 
 describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () => {
   test("signDevSession → verifyDevSession recovers the identity JSON", async () => {
-    const userJson = JSON.stringify({ id: "pws_x", email: "x@y", email_verified: true, scopes: [] });
+    const userJson = JSON.stringify({ id: "pws_xxxx0000000000000000", email: "x@y", email_verified: true, scopes: [] });
     const token = await signDevSession(SECRET, userJson);
     assert.equal(await verifyDevSession(SECRET, token), userJson);
   });
@@ -371,7 +371,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const p = makeProvider();
     const token = await signDevSession(
       SECRET,
-      JSON.stringify({ id: "pws_x", email: "x@y", name: "X", email_verified: true, scopes: [] }),
+      JSON.stringify({ id: "pws_xxxx0000000000000000", email: "x@y", name: "X", email_verified: true, scopes: [] }),
     );
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/session?mint=1", {
@@ -402,8 +402,8 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const p = makeProvider(
       JSON.stringify({
         users: [
-          { id: "pws_a", email: "a@x", name: "A" },
-          { id: "pws_b", email: "b@x", name: "B" },
+          { id: "pws_aaaa0000000000000000", email: "a@x", name: "A" },
+          { id: "pws_bbbb0000000000000000", email: "b@x", name: "B" },
         ],
       }),
     );
@@ -428,10 +428,10 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const p = makeProvider(
       JSON.stringify({
         users: [
-          { id: "pws_a", name: "A" },
-          { id: "pws_b", name: "B", password: "bee" },
+          { id: "pws_aaaa0000000000000000", name: "A" },
+          { id: "pws_bbbb0000000000000000", name: "B", password: "bee" },
         ],
-        defaultUserId: "pws_a",
+        defaultUserId: "pws_aaaa0000000000000000",
       }),
     );
     const getRes = await p.handle(new Request(`${ORIGIN}/__zeroship/auth/authorize?state=s`));
@@ -439,7 +439,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const html = await getRes.text();
     const selectedEmail = /<option value="([^"]*)" selected>/.exec(html)![1];
     const password = /name="password"[^>]*value="([^"]*)"/.exec(html)![1];
-    assert.equal(selectedEmail, "pws_a@localhost"); // default pre-selected
+    assert.equal(selectedEmail, "pws_aaaa0000000000000000@localhost"); // default pre-selected
     const body = new URLSearchParams({
       csrf,
       state: "s",
@@ -463,7 +463,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
         body: JSON.stringify({ code }),
       }),
     );
-    assert.equal(((await exch.json()) as { user: { id: string } }).user.id, "pws_a");
+    assert.equal(((await exch.json()) as { user: { id: string } }).user.id, "pws_aaaa0000000000000000");
   });
 
   test("multi-user: selecting the OTHER user (its mapped password) signs that user in", async () => {
@@ -473,8 +473,8 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const p = makeProvider(
       JSON.stringify({
         users: [
-          { id: "pws_a", name: "A" },
-          { id: "pws_b", name: "B", password: "bee" },
+          { id: "pws_aaaa0000000000000000", name: "A" },
+          { id: "pws_bbbb0000000000000000", name: "B", password: "bee" },
         ],
       }),
     );
@@ -482,13 +482,13 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
     const html = await getRes.text();
     const map = JSON.parse(/var M=(\{.*?\});/.exec(html)![1]) as Record<string, string>;
-    assert.equal(map["pws_b@localhost"], "bee");
+    assert.equal(map["pws_bbbb0000000000000000@localhost"], "bee");
     const body = new URLSearchParams({
       csrf,
       state: "s",
       redirect_uri: `${ORIGIN}/__zeroship/auth/popup-callback`,
-      email: "pws_b@localhost",
-      password: map["pws_b@localhost"],
+      email: "pws_bbbb0000000000000000@localhost",
+      password: map["pws_bbbb0000000000000000@localhost"],
     });
     const post = await p.handle(
       new Request(`${ORIGIN}/__zeroship/auth/authorize`, {
@@ -507,8 +507,8 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
       }),
     );
     const u = ((await exch.json()) as { user: { id: string; email: string } }).user;
-    assert.equal(u.id, "pws_b");
-    assert.equal(u.email, "pws_b@localhost");
+    assert.equal(u.id, "pws_bbbb0000000000000000");
+    assert.equal(u.email, "pws_bbbb0000000000000000@localhost");
   });
 
   test("disabled when no secret is present", () => {
@@ -535,4 +535,60 @@ describe("dev-auth provider — DEV-ONLY by construction (build artifact guard)"
       assert.doesNotMatch(code, /\/__zeroship\/auth\/authorize/, `${artifact} must not embed the dev authorize route`);
     });
   }
+});
+
+/**
+ * A configured dev-user `id` must be a subject the DEPLOYED gateway will accept.
+ *
+ * The gateway's `is_pairwise_subject` (crates/core/src/auth/mod.rs:225) requires
+ * `pws_` plus EXACTLY `PAIRWISE_SUB_BODY_LEN` = 20 ascii-alphanumeric chars, and
+ * `router/auth.rs:972` HARD-REJECTS a session cookie whose `sub` fails it -
+ * `return CookieOutcome::None`, so the caller is anonymous and every
+ * `auth: "user"` procedure answers 401.
+ *
+ * Dev validated nothing, so a malformed id worked locally and failed only on
+ * deploy, with a 401 that names no cause. Measured 2026-08-12: two shipped
+ * examples declared `pws_alice0000000000000000` (body 21) alongside a correct
+ * `pws_bob00000000000000000` (body 20) - asymmetric inside one config block and
+ * copy-pasted to a second example (fixed in 57cc19b93).
+ *
+ * Refusing at config-parse time cannot break a config that currently works: a
+ * subject this rejects is one the gateway would have rejected anyway. The only
+ * behaviour that changes is WHERE the creator finds out.
+ */
+describe("dev user ids must satisfy the gateway's pairwise-subject shape", () => {
+  const cfg = (users: unknown) => JSON.stringify({ users });
+
+  test("a 21-char body is refused, naming the id and the rule", () => {
+    assert.throws(
+      () => parseDevAuthConfig(cfg([{ id: "pws_alice0000000000000000" }])),
+      (err: Error) => {
+        assert.match(err.message, /pws_alice0000000000000000/, "must quote the offending id");
+        assert.match(err.message, /20/, "must state the required length");
+        return true;
+      },
+    );
+  });
+
+  test("the 20-char sibling in the same block is accepted", () => {
+    const parsed = parseDevAuthConfig(cfg([{ id: "pws_bob00000000000000000" }]));
+    assert.equal(parsed?.users[0].id, "pws_bob00000000000000000");
+  });
+
+  test("other malformed shapes are refused too, not just the wrong length", () => {
+    for (const bad of ["pws_", "usr_abc123", "pws_has-a-dash00000000", "notpws_00000000000000000"]) {
+      assert.throws(() => parseDevAuthConfig(cfg([{ id: bad }])), undefined, `${bad} must be refused`);
+    }
+  });
+
+  test("CONTROL: the platform's own defaults still parse", () => {
+    // Guards against a rule so strict it rejects what the plugin itself mints.
+    // `undefined` id -> DEFAULT_DEV_USER.id; index>0 -> the padStart generator.
+    assert.equal(parseDevAuthConfig("1")?.users.length, 1);
+    const multi = parseDevAuthConfig(cfg([{ name: "A" }, { name: "B" }, { name: "C" }]));
+    assert.equal(multi?.users.length, 3);
+    for (const u of multi!.users) {
+      assert.equal(u.id.slice(4).length, 20, `generated id ${u.id} must be 20 chars`);
+    }
+  });
 });
