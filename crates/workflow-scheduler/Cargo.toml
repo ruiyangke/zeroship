@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "zeroship durable-workflow scheduler tier: self-provisioned timer store and compio timer wheel"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-workflow-scheduler"
+class = "platform"
+reason = "Production scheduler process in scope even while its current binary fails closed."
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { workspace = true, features = ["derive", "env"] }

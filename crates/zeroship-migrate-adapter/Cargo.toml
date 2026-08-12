@@ -27,6 +27,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-platform-migrate"
+class = "platform"
+reason = "Production platform migration one-shot that requires configuration registration."
+
 [features]
 # The platform-schema migrate binary (`zeroship-platform-migrate`).
 # Lights up the `platform` module + its V8 authoring front-end (zeroship-runtime).

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship data plane — V8 compute worker"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-worker"
+class = "platform"
+reason = "Initial long-running worker service in the server configuration scope."
+
 [[bin]]
 name = "zeroship-worker"
 path = "src/main.rs"
