@@ -360,15 +360,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                 "Secret<T> fields cannot declare a compiled secret default",
             ));
         }
-        if let Some(env) = &config.env {
-            if class != SupplyClass::Bootstrap {
-                return Err(syn::Error::new_spanned(
-                    env,
-                    "only BootstrapControl<T> may disable its environment source; an \
-                     operational or secret setting needs one, and a command control \
-                     never has one",
-                ));
-            }
+        if let Some(env) = &config.env
+            && class != SupplyClass::Bootstrap
+        {
+            return Err(syn::Error::new_spanned(
+                env,
+                "only BootstrapControl<T> may disable its environment source; an \
+                 operational or secret setting needs one, and a command control \
+                 never has one",
+            ));
         }
         let (shape, carrier_type) = carrier_shape(class, &inner_type);
         if shape != CarrierShape::Valued && config.default.is_some() {

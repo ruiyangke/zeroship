@@ -145,10 +145,12 @@ impl<'ast> Visit<'ast> for Reads<'_> {
 }
 
 fn is_raw_path(segments: &[String], imports: &Imports) -> bool {
-    if let [std, env, method] = segments {
-        if std == "std" && env == "env" && RAW_METHODS.contains(&method.as_str()) {
-            return true;
-        }
+    if let [std, env, method] = segments
+        && std == "std"
+        && env == "env"
+        && RAW_METHODS.contains(&method.as_str())
+    {
+        return true;
     }
     if let [module, method] = segments {
         if imports.module_aliases.contains(module) && RAW_METHODS.contains(&method.as_str()) {
