@@ -1449,9 +1449,38 @@ async fn native_ws_pump(
                 }
                 cz = close_rx.next().fuse() => {
                     let Some((code, reason)) = cz else {
-                        // Reader exited without sending close —
-                        // remaining drain is from kernel_rx; loop.
-                        continue;
+                        // Reader exited WITHOUT sending a close, which means it
+                        // hit EOF or a read error: the TCP peer is gone. There
+                        // is nobody left to write to, so this half is done.
+                        //
+                        // THIS SAID `continue` UNTIL 2026-08-12, and that spun.
+                        // `close_rx` is terminated once the reader drops
+                        // `close_tx`, so `next()` is `Ready(None)` on EVERY
+                        // later poll; `continue` re-entered the select, which
+                        // resolved this arm again immediately. Measured on one
+                        // abandoned socket: an idle server burns 0 CPU ticks
+                        // per 3s, this burned 297 and then 298 - a hot loop, not
+                        // a parked task. And because `join(reader, writer)`
+                        // needs BOTH halves, the writer never finishing meant
+                        // the connection task never finished and its
+                        // `TcpStream` was never dropped, so each abandoned
+                        // socket also leaked its fd (55 -> 56 per upgrade).
+                        //
+                        // The comment it replaced said the remaining drain was
+                        // from `kernel_rx`, and the intent was to keep writing
+                        // whatever JS still sends. That intent cannot be served
+                        // here: the socket the frames would go to is closed.
+                        // The mirror arm above already does the right thing in
+                        // the other direction - when `kernel_rx` ends it awaits
+                        // `close_rx` DIRECTLY rather than re-selecting.
+                        //
+                        // NOT FIXED HERE: on EOF the reader never calls
+                        // `deliver_ws_close`, so the JS `close` event does not
+                        // fire on an abrupt disconnect and `kernel_outbound` is
+                        // never dropped. RFC 6455 would have this be 1006. That
+                        // is a JS-visible behaviour change and is left out of a
+                        // fix whose whole job is to stop the spin.
+                        return;
                     };
                     let mut close_payload = Vec::with_capacity(2 + reason.len());
                     close_payload.extend_from_slice(&code.to_be_bytes());

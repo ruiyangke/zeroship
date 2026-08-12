@@ -1812,6 +1812,38 @@ exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" 2>/dev/null && {
   exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
 }
 WS_FRAME_HEX=$(tail -c 11 "$WS_FRAME_RAW" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+# --- WHAT THE SERVER DOES AFTER THE CLIENT WALKS AWAY ---------------------
+# Every arm above ends by closing the socket without a WebSocket Close frame -
+# which is what a browser tab being closed, a reload, or a crashed client looks
+# like on the wire. The arms above cannot see what that costs, because each one
+# only asks whether ITS OWN request was answered.
+#
+# It costs an entire core. Measured 2026-08-12 on this app: an idle `zeroship
+# serve` burns 0 CPU ticks per 3s; with ONE abandoned upgrade it burns 297, then
+# 298 - a busy spin, not a parked task, and it never stops. The fd is held as a
+# consequence (55 -> 56), so a creator's dev loop of open-socket-reload-repeat
+# accumulates one pinned core per reload.
+#
+# CPU IS THE OBSERVABLE, not the fd count, because CPU is the mechanism. A fix
+# that closed the fd while leaving the loop spinning would satisfy an fd
+# assertion and leave the defect. The gap is ~100x, so the threshold is not
+# delicate: a healthy server scores single digits over 2s on the busiest CI box,
+# a spinning one scores >150.
+WS_CPU_TICKS() { awk '{print $14+$15}' "/proc/$WS_PID/stat" 2>/dev/null || echo 0; }
+WS_CPU_BEFORE="$(WS_CPU_TICKS)"
+sleep 2
+WS_CPU_AFTER="$(WS_CPU_TICKS)"
+WS_CPU_DELTA=$((WS_CPU_AFTER - WS_CPU_BEFORE))
+# 50 ticks over 2s is 25% of a core - far above anything an idle server does and
+# far below the ~200 a single spinning pump produces.
+if [ "$WS_CPU_DELTA" -lt 50 ]; then
+  pass "dev: an abandoned socket costs no CPU once the client is gone ($WS_CPU_DELTA ticks over 2s idle)"
+else
+  fail "dev: the server SPINS after a client disconnects -- $WS_CPU_DELTA CPU ticks over 2s idle, against
+      single digits for an idle server. One abandoned socket pins a core and the
+      connection task never completes, so its fd is never released either."
+fi
+
 kill "$WS_PID" 2>/dev/null || true
 wait "$WS_PID" 2>/dev/null || true
 
@@ -4262,7 +4294,7 @@ gp_close_step
 # Second consecutive raise where the delta and the run agree to the assertion.
 # Mutation-proven before the run by deleting the app's message listener: 3/1,
 # only the frame arm red.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-117}"
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-118}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4321,7 +4353,7 @@ echo "            and its 'only step 11 collation reds are left' reading was tru
 echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
 echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
 echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
-echo "            is 117/15, so the mutated arm should read 123/9 -- DERIVED by"
+echo "            is 118/15, so the mutated arm should read 124/9 -- DERIVED by"
 echo "            subtraction, NOT measured; nobody has run the mutated arm since"
 echo "            the suite grew. If you run it, replace this with the real pair."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
