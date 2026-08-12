@@ -1,11 +1,80 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for db-chat.
 #
-# Exercises the db-chat RPC handlers through the dev server. Requires:
-#   • A running dev server (`pnpm dev` in another shell)
+# Exercises the db-chat RPC handlers through the dev server.
+#
+# SELF-STARTING BY DEFAULT. Run it with nothing else up and it migrates, boots
+# its own dev server on a FREE port, runs, and reaps the server on exit. It used
+# to require `pnpm dev` in another shell and would otherwise die with
+# `curl: (7) Failed to connect to localhost port 3001` -- which meant it had
+# never run unattended, and so could not be gated.
+#
+# Set ZEROSHIP_URL to point at a server you started yourself; the self-start is
+# then skipped entirely and nothing is spawned or killed.
+#
+# WHY A FREE PORT AND NOT 3001: examples that do not set `devServerPort` all
+# share the 3001 default and collide OPAQUELY -- the loser hangs rather than
+# reporting a bound port. Picking a free port and passing it through
+# DB_CHAT_API_PORT (see vite.config.ts) makes this harness independent of
+# whatever else is running.
+#
+# WHY MIGRATE FIRST: schema comes from committed migrations, and the dev runtime
+# only READS it. Without `pnpm migrate` the tables do not exist and every check
+# fails with `no such table`.
 set -euo pipefail
 
-URL="${ZEROSHIP_URL:-http://localhost:3001}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(cd "$HERE/.." && pwd)"
+
+SERVER_PID=""
+cleanup() {
+  # Kill the whole process group: `pnpm dev` spawns vite which spawns the
+  # zeroship runtime, and killing only the pnpm pid strands both children.
+  if [ -n "$SERVER_PID" ]; then
+    kill -- "-$SERVER_PID" 2>/dev/null || kill "$SERVER_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+if [ -n "${ZEROSHIP_URL:-}" ]; then
+  URL="$ZEROSHIP_URL"
+  echo "[setup] using ZEROSHIP_URL=$URL (not starting a server)"
+else
+  PORT="$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port)+"\n");s.close();})')"
+  URL="http://127.0.0.1:${PORT}"
+  echo "[setup] no ZEROSHIP_URL; starting our own dev server on ${URL}"
+
+  ( cd "$APP_ROOT" && DB_CHAT_API_PORT="$PORT" pnpm migrate >/dev/null ) \
+    || { echo "  x pnpm migrate failed - the schema would be missing" >&2; exit 1; }
+
+  # `set -m` (job control) puts the background job in its OWN process group with
+  # the subshell as leader, which is what makes `kill -- -$SERVER_PID` in the
+  # trap reach vite AND the zeroship runtime it spawns.
+  #
+  # DO NOT put `setsid` here. It was the first thing I tried and it LEAKS: setsid
+  # moves the server into a brand-new session, so `$!` captures the short-lived
+  # subshell instead and the trap signals a group the server is no longer in.
+  # Measured -- that version exited 0 with all checks green and left a live
+  # listener behind, which is the worst combination because the run looks clean.
+  set -m
+  ( cd "$APP_ROOT" && DB_CHAT_API_PORT="$PORT" exec pnpm dev >/dev/null 2>&1 ) &
+  SERVER_PID=$!
+  set +m
+
+  # Wait on the DISPATCHER answering, not on the port being open: the port is
+  # bound before the runtime finishes registering procedures, so a port check
+  # would let the first RPC race the boot.
+  READY=0
+  for _ in $(seq 1 60); do
+    if curl -sS -m 2 -X POST -H 'content-type: application/json' \
+         "${URL}/__zeroship/v1/listMessages" -d '{"json":{"channelId":"chan_probe"}}' >/dev/null 2>&1; then
+      READY=1; break
+    fi
+    sleep 1
+  done
+  [ "$READY" -eq 1 ] || { echo "  x dev server never answered on ${URL} within 60s" >&2; exit 1; }
+fi
+
 RPC="${URL}/__zeroship/v1"
 FAILED=0
 
