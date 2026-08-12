@@ -19,29 +19,29 @@ pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_worker=debug";
 #[derive(Debug)]
 pub struct WorkerControls {
     /// Optional shared config overlay path.
-    #[config(name = "config")]
+    #[config(shared = CONFIG)]
     pub config: BootstrapControl<Option<PathBuf>>,
 
     /// Disable auto-discovery of the well-known overlay path; use compiled
     /// defaults even if `/etc/zeroship/zeroship.toml` exists (O5).
-    #[config(name = "no_config")]
+    #[config(shared = NO_CONFIG)]
     pub no_config: BootstrapControl<bool>,
 
     /// Validate config (CLI + overlay + guards) and print the resolved non-secret
     /// config, then exit without starting the server.
-    #[config(name = "check_config")]
+    #[config(shared = CHECK_CONFIG)]
     pub check_config: CommandControl<bool>,
 
     /// Output format for `--check-config`.
-    #[config(name = "check_config_format", default = CheckFormat::Text)]
+    #[config(shared = CHECK_CONFIG_FORMAT, default = CheckFormat::Text)]
     pub check_config_format: CommandControl<CheckFormat>,
 
     /// `EnvFilter` directive for the tracing subscriber.
-    #[config(name = "observability.log_filter", default = DEFAULT_LOG_FILTER.to_owned())]
+    #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]
     pub log_filter: Operational<String>,
 
     /// Tracing output format; `auto` picks pretty on a TTY and json otherwise.
-    #[config(name = "observability.log_format", default = LogFormat::Auto)]
+    #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
 
     /// Enable the unsigned durable-workflow replay ingress, which performs NO
