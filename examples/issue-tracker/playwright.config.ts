@@ -1,0 +1,65 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { defineConfig, devices } from "@playwright/test";
+
+// Prefer the release binary at the repo root, but ONLY if it is really there.
+//
+// `dev-server.ts` uses ZEROSHIP_BIN verbatim when set, with no existence check
+// and no fallback, so pointing it at a missing file is strictly worse than not
+// setting it at all: `pnpm dev` finds a working binary on its own, and setting
+// this to a path that does not exist turns that into
+// `Error: spawn .../target/release/zeroship ENOENT` before the suite starts.
+// That is exactly what happens in a git worktree, where the checkout has no
+// target/ of its own. Measured 2026-08-12.
+const releaseBin = fileURLToPath(new URL("../../target/release/zeroship", import.meta.url));
+const zeroshipBin = process.env.ZEROSHIP_BIN ?? (existsSync(releaseBin) ? releaseBin : undefined);
+
+// Must match vite.config.ts's `webPort`, which sets `strictPort: true` so a
+// clash fails the boot instead of quietly moving the app to another port and
+// leaving these tests pointed at whatever else is listening.
+const webPort = Number(process.env.ISSUE_TRACKER_WEB_PORT ?? 5183);
+const baseURL = `http://localhost:${webPort}`;
+
+export default defineConfig({
+  testDir: "./e2e",
+  fullyParallel: false,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 1 : 0,
+  // One worker: every spec drives the same dev database, and the reports and
+  // bug-list assertions read totals that a concurrent spec would move under
+  // them.
+  workers: 1,
+  reporter: process.env.CI ? "line" : [["list"], ["html", { open: "never" }]],
+  timeout: 60_000,
+  expect: { timeout: 10_000 },
+  use: {
+    baseURL,
+    trace: "on-first-retry",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+    actionTimeout: 10_000,
+    navigationTimeout: 20_000,
+  },
+  projects: [
+    {
+      // The browser comes from the version-matched Nix package via
+      // PLAYWRIGHT_BROWSERS_PATH (set by `nix develop`). @playwright/test is
+      // pinned to the nixpkgs playwright-driver version so the chromium
+      // revision matches -- npm-downloaded browsers cannot link their libs on
+      // NixOS, the Nix ones can.
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
+  webServer: {
+    command: "pnpm dev",
+    url: baseURL,
+    reuseExistingServer: true,
+    timeout: 120_000,
+    // Pinning the RELEASE binary when it exists is deliberate: a stale
+    // target/release/zeroship reproduces already-fixed runtime bugs exactly,
+    // which is a long way to travel before suspecting the binary.
+    ...(zeroshipBin ? { env: { ZEROSHIP_BIN: zeroshipBin } } : {}),
+  },
+});

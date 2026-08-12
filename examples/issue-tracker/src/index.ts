@@ -607,10 +607,14 @@ async function validateProductChildren(
   ]);
   if (component.productId !== product.id) invalid("componentId does not belong to productId");
 
-  if (versionId) {
-    const version = await getRequired(db.versions, versionId, "Version");
-    if (version.productId !== product.id) invalid("versionId does not belong to productId");
-  }
+  // `bugs.versionId` is NOT NULL: a Bugzilla bug is always filed against a
+  // version. Omitting it used to fall through to the insert and surface as
+  // HTTP 500 "internal error" -- the browser spec caught it by filing with the
+  // form's "unspecified" version still selected. A missing version is the
+  // caller's to fix, so it gets a 400 that says which field.
+  if (!versionId) invalid("versionId is required");
+  const version = await getRequired(db.versions, versionId, "Version");
+  if (version.productId !== product.id) invalid("versionId does not belong to productId");
   if (milestoneId) {
     const milestone = await getRequired(db.milestones, milestoneId, "Milestone");
     if (milestone.productId !== product.id) invalid("milestoneId does not belong to productId");

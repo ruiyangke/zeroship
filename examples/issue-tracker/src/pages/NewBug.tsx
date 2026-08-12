@@ -136,8 +136,16 @@ export function NewBugPage() {
                   <div className="field-row">
                     <label>
                       Version
-                      <select value={versionId} onChange={(e) => setVersionId(e.target.value)}>
-                        <option value="">unspecified</option>
+                      {/* Required, not optional: bugs.versionId is NOT NULL,
+                          so an "unspecified" choice here composed a bug that
+                          could not be stored and failed at submit. Milestone
+                          below is genuinely nullable and keeps its blank. */}
+                      <select
+                        value={versionId}
+                        onChange={(e) => setVersionId(e.target.value)}
+                        required
+                      >
+                        <option value="">Select a version</option>
                         {productDetail.versions.map((v) => (
                           <option key={v.id} value={v.id}>
                             {v.name}
