@@ -156,7 +156,9 @@ encoding_rs = "0.8"
 # Proc macros
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "2", features = ["full", "visit"] }
+linkme = "0.3.37"
+cargo_metadata = "0.23.1"
 
 # Logging / tracing — pluggable subscriber init lives in
 # `crates/core/src/observability.rs`. Format pluggable via
@@ -226,6 +228,8 @@ zeroship-metering = { path = "crates/metering" }
 zeroship-stream = { path = "crates/stream" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-config-macros = { path = "crates/config-macros" }
+zeroship-config-contract = { path = "crates/config-contract" }
 zeroship-workflow-scheduler = { path = "crates/workflow-scheduler" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }

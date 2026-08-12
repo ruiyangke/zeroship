@@ -13,6 +13,16 @@ description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, 
 # built via the explicit [[bench]] entries below.
 autobenches = false
 
+[[package.metadata.zeroship-config.targets]]
+target = "echo-server"
+class = "test-dev-tool"
+reason = "Feature-gated HTTP echo peer used only by runtime benchmarks."
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-bench-server"
+class = "test-dev-tool"
+reason = "Feature-gated V8 server used only by runtime benchmarks."
+
 [dependencies]
 # V8
 v8 = { workspace = true }

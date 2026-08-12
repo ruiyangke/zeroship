@@ -19,6 +19,8 @@ hex = { workspace = true }
 rand = "0.8"
 base64 = { workspace = true }
 thiserror = { workspace = true }
+linkme = { workspace = true }
+zeroship-config-macros = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }

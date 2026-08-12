@@ -1,0 +1,17 @@
+error[E0308]: mismatched types
+ --> tests/ui/wrong_consumer.rs
+  |
+  |     let _ = zeroship_core::read_config_env!(CONTROL_PORT, FixtureWorkerConfigConsumer);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |             |
+  |             expected `&FixtureControlConfigConsumer`, found `&FixtureWorkerConfigConsumer`
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&FixtureControlConfigConsumer`
+             found reference `&FixtureWorkerConfigConsumer`
+note: associated function defined here
+ --> $WORKSPACE/crates/core/src/config/names.rs
+  |
+  |     pub const fn new_for(_consumer: &C) -> Self {
+  |                  ^^^^^^^
+  = note: this error originates in the macro `zeroship_core::read_config_env` (in Nightly builds, run with -Z macro-backtrace for more info)

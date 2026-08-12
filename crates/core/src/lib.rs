@@ -1,5 +1,16 @@
 //! zeroship-common — shared types and abstractions for the zeroship platform.
 
+extern crate self as zeroship_core;
+
+/// Re-exports consumed by generated code without forcing service manifests to
+/// depend directly on proc-macro implementation details.
+#[doc(hidden)]
+pub mod __private {
+    pub use clap;
+    pub use linkme;
+    pub use toml;
+}
+
 pub mod types;
 pub mod auth;
 pub mod auth_provider;
