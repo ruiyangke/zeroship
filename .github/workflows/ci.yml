@@ -1201,6 +1201,20 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_redeploy_replaces_app.sh 2>&1 | tee "$RUNNER_TEMP/dvd-redeploy.log"
+      # Scenario 22, DEV half. No docker and no Postgres: the dev tier is
+      # SQLite + the release `zeroship` binary this job already builds, driven
+      # by `pnpm dev`. It edits examples/starter/src/server.ts and restores it
+      # from a trap, which is safe on an ephemeral checkout.
+      #
+      # The span guard is the load-bearing assertion, not the 5xx one: the
+      # first version of this experiment edited a console.log, which dev
+      # DISCARDS (scenario 20), so a clean result was equally consistent with a
+      # reload that never happened. Control-proven - disabling the edit gives
+      # old=909 new=0 and rc=1.
+      - name: Dev reload under load (scenario 22 - dev half, tiers must agree)
+        run: |
+          set -o pipefail
+          tests/e2e_dev_reload_under_load.sh 2>&1 | tee "$RUNNER_TEMP/dvd-devreload.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
