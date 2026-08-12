@@ -117,7 +117,13 @@ type BugRow = SystemRow & {
   isConfirmed: boolean;
   voteCount: number;
   commentCount: number;
+  estimatedTimeMinutes?: number;
+  remainingTimeMinutes?: number;
   deadline?: number | null;
+  // Stamped by bugs.resolve / bugs.markDuplicate and cleared by bugs.reopen.
+  // reports.timeToResolve reads this instead of mining the activities table
+  // for status->RESOLVED transitions, which was a scan plus string matching.
+  resolvedAt?: number | null;
 };
 
 type CommentRow = SystemRow & {
@@ -1199,6 +1205,10 @@ export const resolveBug = mutation(
           resolution: next.resolution,
           duplicateOfId: null,
           isConfirmed: true,
+          // Stamped here, and deliberately NOT in trackedFields below: it is
+          // derived metadata, not a field a user edited, so it does not belong
+          // in the bug's visible history.
+          resolvedAt: portableTimestamp(Date.now()),
         };
       },
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
@@ -1222,6 +1232,10 @@ export const reopenBug = mutation(
           resolution: next.resolution,
           duplicateOfId: null,
           isConfirmed: true,
+          // Cleared on reopen for the same reason it is set on resolve: a
+          // reopened bug is not resolved, and leaving a stale stamp would make
+          // reports.timeToResolve count it as still-closed.
+          resolvedAt: null,
         };
       },
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
@@ -1257,6 +1271,10 @@ export const markBugDuplicate = mutation(
           resolution: next.resolution,
           duplicateOfId: target.id,
           isConfirmed: true,
+          // A duplicate is a resolution too, so it is stamped like the others.
+          // Missing it here would silently exclude every duplicate from
+          // reports.timeToResolve.
+          resolvedAt: portableTimestamp(Date.now()),
         });
         if (!after) notFound("Bug");
         await recordChanges(
@@ -2380,14 +2398,24 @@ export const createComponent = mutation(
     if (must(await db.components.get({ productId, name: cleanName }))) {
       conflict("component name already exists in this product");
     }
-    if (defaultAssigneeId) await getRequired(db.users, defaultAssigneeId, "Default assignee");
+    // `defaultAssigneeId` is NOT NULL in the schema, because a Bugzilla
+    // component must have an initial owner -- that is what `bugs.create` falls
+    // back to when no assignee is given. Omitting it therefore cannot mean
+    // "leave it empty"; it means "the person creating the component owns it",
+    // which is the useful default and the only one that satisfies the column.
+    //
+    // Before this, omitting it let a NULL reach the insert and the NOT NULL
+    // violation surfaced as HTTP 500 "internal error" -- a caller-fixable input
+    // problem reported as a server fault, with nothing in the body to act on.
+    const assigneeId = defaultAssigneeId ?? actor.id;
+    await getRequired(db.users, assigneeId, "Default assignee");
     if (defaultQaContactId) await getRequired(db.users, defaultQaContactId, "Default QA contact");
     return must(
       await db.components.insert({
         productId,
         name: cleanName,
         ...(description ? { description } : {}),
-        ...(defaultAssigneeId ? { defaultAssigneeId } : {}),
+        defaultAssigneeId: assigneeId,
         ...(defaultQaContactId ? { defaultQaContactId } : {}),
         isActive,
       }),
@@ -3299,22 +3327,22 @@ export const reportTimeToResolve = query(
   async ({ productId, days }: ReportInput) => {
     const windowDays = reportDays(days);
     const start = Date.now() - windowDays * 86_400_000;
+    // Read the stamped column rather than replaying history. The previous
+    // implementation scanned `activities` for fieldName="status",
+    // newValue="RESOLVED" and took the earliest per bug -- a scan with string
+    // matching, and env.db has no raw SQL to make it cheaper. `resolvedAt` is
+    // maintained by bugs.resolve / bugs.markDuplicate / bugs.reopen and is
+    // indexed (bugs_resolved_at_idx).
+    //
+    // The `typeof === "number"` test is load-bearing and not defensive noise:
+    // clearing this column on reopen stores an EMPTY STRING rather than SQL
+    // NULL (measured 2026-08-12 on the SQLite dev backend -- a reopened bug
+    // reads back `resolvedAt: ""`). A `!= null` test would let that through
+    // and `"" - created_at` is NaN, which would silently poison the average.
     const bugs = await reportBugs(productId);
-    const byId = new Map(bugs.map((bug) => [bug.id, bug]));
-    const events = await activityEventsForBugs([...byId.keys()], {
-      fieldName: "status",
-      newValue: "RESOLVED",
-      created_at: { $gte: portableTimestamp(start) },
-    });
-    events.sort((left, right) => left.created_at - right.created_at);
-    const firstResolution = new Map<string, number>();
-    for (const event of events) {
-      if (!firstResolution.has(event.bugId)) {
-        firstResolution.set(event.bugId, event.created_at);
-      }
-    }
-    const durations = [...firstResolution.entries()]
-      .map(([bugId, resolvedAt]) => resolvedAt - (byId.get(bugId)?.created_at ?? resolvedAt))
+    const durations = bugs
+      .filter((bug) => typeof bug.resolvedAt === "number" && bug.resolvedAt >= start)
+      .map((bug) => (bug.resolvedAt as number) - bug.created_at)
       .filter((duration) => duration >= 0)
       .sort((a, b) => a - b);
     if (durations.length === 0) {
