@@ -30,9 +30,34 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
   { key: "updated", label: "Updated" },
 ];
 
-function shortId(id: string): string {
+/**
+ * A bug id short enough for a table cell and still unique.
+ *
+ * Takes the END of the body, not the start. A typed_id is a UUIDv7 in base62,
+ * and UUIDv7 is time-ordered: the leading characters encode the timestamp, so
+ * every id minted in the same window shares them. Keeping the first six kept
+ * exactly the half that is identical across rows and threw away the random
+ * half -- measured against the dev database, 61 bugs rendered as 11 distinct
+ * ids, so 50 of them shared a displayed id with another bug. Bugs filed
+ * seconds apart, which is what a test run or an import produces, collided
+ * every time.
+ *
+ * That makes the id column worse than absent in the one job it has: you cannot
+ * tell two rows apart, quote one to a colleague, or match a row against a
+ * screenshot. `title` carries the full id, but hover does not survive reading,
+ * copying or printing.
+ *
+ * The leading ellipsis is deliberate. The detail page shows the id in full, so
+ * a silently shortened form that looks whole would not match it.
+ *
+ * Six base62 characters is ~36 bits. That is not a uniqueness guarantee at
+ * scale -- collisions become likely in the low hundreds of thousands of bugs --
+ * which is why the anchor still carries the full id.
+ */
+export function shortId(id: string): string {
   const parts = id.split("_");
-  return parts.length > 1 ? `${parts[0]}_${parts[1].slice(0, 6)}` : id;
+  if (parts.length < 2 || parts[1].length <= 6) return id;
+  return `${parts[0]}_...${parts[1].slice(-6)}`;
 }
 
 function formatDate(ms: number): string {
