@@ -1074,16 +1074,11 @@ pub async fn webhook(
     }
     let raw = body.as_ref();
 
-    // Verify signature unless the operator explicitly opted in to
-    // insecure dev mode. Empty secret is NOT a dev bypass — requires
-    // `insecure_dev=true` on the AppState.
+    // Signature verification is unconditional. An empty secret is a
+    // misconfiguration and fails closed before JSON parsing or database work.
     if state.stripe_webhook_secret.is_empty() {
-        if !state.insecure_dev {
-            tracing::error!("stripe: webhook secret not configured; rejecting");
-            return err_json(500, "webhook secret not configured");
-        }
-        // insecure_dev: skip verification (allows `stripe listen` without
-        // the signing loop). Logged at startup.
+        tracing::error!("stripe: webhook secret not configured; rejecting");
+        return err_json(500, "webhook secret not configured");
     } else {
         let sig_header = req
             .headers()

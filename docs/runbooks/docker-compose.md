@@ -85,9 +85,9 @@ always win over the `*.zeroship.localhost` catch-all. Site addresses use the
 `http://` scheme so Caddy serves plain HTTP and never tries to provision TLS
 for `.localhost`. Config: `deploy/ops/Caddyfile`.
 
-The Caddyfile also contains a fully commented `control.<domain>` block. It is
-staged for direct CLI deploys, but must remain disabled while control runs with
-`--dev-insecure` and the compose stack uses the hardcoded `platform-key`.
+The Caddyfile exposes `control.<domain>` through Caddy. Control still requires
+the generated control-key bearer on every protected route; it has no host port,
+and Caddy reaches it over the private compose network.
 
 #### Caddy network-alias trick (container-side OIDC)
 
@@ -114,9 +114,9 @@ point; non-edge publications are loopback-only debugging paths):
 The one-shot `migrate` service runs to completion and exits; `verdaccio`
 publishes loopback-only on `localhost:4873`.
 
-Control is reachable only as `control:9090` inside the compose network. The
-base file deliberately publishes no control port. A local tool that must call
-control from the host can add this explicit loopback-only override:
+Control has no direct host port in the base file. Browser and CLI traffic can
+reach it through `http://control.zeroship.localhost`; a local tool that needs a
+raw loopback port can add this explicit override:
 
 ```yaml
 services:
@@ -173,17 +173,16 @@ command explicitly opts into a non-loopback address to be reachable across the
 container network: `control` and `gateway` pass `--bind 0.0.0.0`, `zeroship-worker`
 passes `--bind 0.0.0.0` (paired with `--worker-key`), and `zeroship-auth` passes
 `--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
-need no override. Under `--dev-insecure`, control/gateway emit a warning when bound
-non-loopback because app/admin auth is relaxed - only do this on a trusted network.
+need no override. Authentication and secret checks remain active on those
+non-loopback container binds.
 
 ### Auth service
 
 The `auth` service runs `zeroship-auth`, the native OIDC OP and login UI. The
 gateway redirects unauthenticated end users to the Caddy-fronted host
-(`--auth-ui-url http://auth.zeroship.localhost`). It runs with `--dev-insecure`
-for the remaining local-only behaviors while loading strong generated secrets.
-The flag remains until later work removes its guards one by one; this
-provisioning step does not delete it.
+(`--auth-ui-url http://auth.zeroship.localhost`). Auth loads strong generated
+secrets and applies its normal cookie, CSRF, signature, and secret-strength
+checks in the local topology.
 
 `AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
 is `http://auth.zeroship.localhost` and a TLS-terminating deployment can set the

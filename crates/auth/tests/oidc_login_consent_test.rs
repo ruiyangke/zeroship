@@ -130,7 +130,7 @@ impl Fixture {
         )
         .await
         .expect("create native session");
-        session_cookie::set_cookie(&session.id, true)
+        session_cookie::set_cookie(&session.id)
             .split(';')
             .next()
             .expect("session cookie pair")
@@ -170,18 +170,18 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
 
     let login_get = get(&fx, &login_loc, None).await;
     assert_eq!(login_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("login csrf");
+    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
     let login_body = form(&[
         ("csrf", csrf.as_str()),
         ("email", fx.email.as_str()),
         ("password", PASSWORD),
         ("return_to", authorize_path.as_str()),
     ]);
-    let login_post = post_form(&fx, "/login", &login_body, Some(&format!("zsidp_csrf={csrf}"))).await;
+    let login_post = post_form(&fx, "/login", &login_body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
     assert_eq!(login_post.status().as_u16(), 303);
     assert_eq!(location(&login_post), authorize_path);
-    let session = read_set_cookie(&login_post, "zsidp_session").expect("native session cookie");
-    let cookies = format!("zsidp_session={session}");
+    let session = read_set_cookie(&login_post, "__Host-zsidp_session").expect("native session cookie");
+    let cookies = format!("__Host-zsidp_session={session}");
 
     let after_login = get(&fx, &authorize_path, Some(&cookies)).await;
     assert_eq!(after_login.status().as_u16(), 303);
@@ -190,7 +190,7 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
 
     let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
     assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "zsidp_csrf").expect("consent csrf");
+    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("consent csrf");
     let accept_body = form(&[
         ("csrf", csrf.as_str()),
         ("return_to", authorize_path.as_str()),
@@ -199,7 +199,7 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
         &fx,
         "/consent/accept",
         &accept_body,
-        Some(&format!("{cookies}; zsidp_csrf={csrf}")),
+        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
     )
     .await;
     assert_eq!(accept.status().as_u16(), 303);
@@ -309,7 +309,7 @@ async fn idp_hint_unconfigured_provider_falls_back_to_native_login_form() {
     let login_get = get(&fx, &loc, None).await;
     assert_eq!(login_get.status().as_u16(), 200);
     assert!(
-        read_set_cookie(&login_get, "zsidp_csrf").is_some(),
+        read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
         "login form should render with a csrf cookie"
     );
 
@@ -414,7 +414,7 @@ async fn prompt_none_without_session_redirects_login_required_to_rp() {
     let resp = get(&fx, &authorize_path, None).await;
     assert_eq!(resp.status().as_u16(), 303);
     assert!(
-        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
         "prompt=none must not render the login form"
     );
     let loc = location(&resp);
@@ -452,7 +452,7 @@ async fn prompt_none_with_session_but_no_consent_redirects_consent_required_to_r
     let resp = get(&fx, &authorize_path, Some(&cookies)).await;
     assert_eq!(resp.status().as_u16(), 303);
     assert!(
-        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
         "prompt=none must not render the consent form"
     );
     let loc = location(&resp);
@@ -490,7 +490,7 @@ async fn prompt_none_with_session_and_prior_consent_issues_code_silently() {
     let resp = get(&fx, &authorize_path, Some(&cookies)).await;
     assert_eq!(resp.status().as_u16(), 303);
     assert!(
-        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
         "silent success must not render UI"
     );
     let loc = location(&resp);
@@ -562,7 +562,7 @@ async fn prompt_none_invalid_pkce_redirects_error_to_rp_without_rendering() {
     let resp = get(&fx, &authorize_path, None).await;
     assert_eq!(resp.status().as_u16(), 303);
     assert!(
-        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
         "prompt=none invalid request must not render local UI"
     );
     let loc = location(&resp);
@@ -620,7 +620,7 @@ async fn prompt_login_forces_login_screen_even_with_valid_session() {
     let login_get = get(&fx, &login_loc, Some(&cookies)).await;
     assert_eq!(login_get.status().as_u16(), 200);
     assert!(
-        read_set_cookie(&login_get, "zsidp_csrf").is_some(),
+        read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
         "login form should render with a csrf cookie"
     );
 
@@ -660,7 +660,7 @@ async fn prompt_consent_forces_consent_screen_even_with_prior_grant() {
     let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
     assert_eq!(consent_get.status().as_u16(), 200);
     assert!(
-        read_set_cookie(&consent_get, "zsidp_csrf").is_some(),
+        read_set_cookie(&consent_get, "__Host-zsidp_csrf").is_some(),
         "consent form should render with a csrf cookie"
     );
 
@@ -684,7 +684,7 @@ async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
     );
     let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
     assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "zsidp_csrf").expect("csrf");
+    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
     let body = form(&[
         ("csrf", csrf.as_str()),
         ("return_to", authorize_path.as_str()),
@@ -693,7 +693,7 @@ async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
         &fx,
         "/consent/deny",
         &body,
-        Some(&format!("{cookies}; zsidp_csrf={csrf}")),
+        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
     )
     .await;
     assert_eq!(deny.status().as_u16(), 303);
@@ -724,14 +724,14 @@ async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
     ] {
         let login_get = get(&fx, &format!("/login?return_to={}", urlencoding(bad)), None).await;
         assert_eq!(login_get.status().as_u16(), 200);
-        let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("csrf");
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("csrf");
         let body = form(&[
             ("csrf", csrf.as_str()),
             ("email", fx.email.as_str()),
             ("password", PASSWORD),
             ("return_to", bad),
         ]);
-        let post = post_form(&fx, "/login", &body, Some(&format!("zsidp_csrf={csrf}"))).await;
+        let post = post_form(&fx, "/login", &body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
         assert_eq!(post.status().as_u16(), 303);
         assert_eq!(location(&post), "/me", "bad return_to {bad:?} must fall back");
     }
@@ -745,13 +745,13 @@ async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
     )
     .await;
     assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "zsidp_csrf").expect("csrf");
+    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
     let body = form(&[("csrf", csrf.as_str()), ("return_to", "https://evil.com")]);
     let accept = post_form(
         &fx,
         "/consent/accept",
         &body,
-        Some(&format!("{cookies}; zsidp_csrf={csrf}")),
+        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
     )
     .await;
     // Rejected — never an off-origin redirect. The Location is the safe
@@ -783,7 +783,7 @@ async fn consent_requires_session_and_csrf() {
 
     let cookies = fx.create_session_cookie().await;
     let body = form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]);
-    let bad_csrf = post_form(&fx, "/consent/accept", &body, Some(&format!("{cookies}; zsidp_csrf=right"))).await;
+    let bad_csrf = post_form(&fx, "/consent/accept", &body, Some(&format!("{cookies}; __Host-zsidp_csrf=right"))).await;
     assert_eq!(bad_csrf.status().as_u16(), 403);
 
     // /consent/deny is equally CSRF-gated (LOW-3): a session with a mismatched
@@ -792,7 +792,7 @@ async fn consent_requires_session_and_csrf() {
         &fx,
         "/consent/deny",
         &form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]),
-        Some(&format!("{cookies}; zsidp_csrf=right")),
+        Some(&format!("{cookies}; __Host-zsidp_csrf=right")),
     )
     .await;
     assert_eq!(deny_bad_csrf.status().as_u16(), 403);
@@ -825,9 +825,9 @@ async fn native_consent_rejects_scope_outside_client_registration() {
     )
     .await;
     // The grant page sets a CSRF cookie; the rejection error page does not —
-    // the absence of `zsidp_csrf` proves the consent form was NOT rendered.
+    // the absence of `__Host-zsidp_csrf` proves the consent form was NOT rendered.
     assert!(
-        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
         "over-broad scope must render the error page, not the consent grant form"
     );
     // And it must never bounce to the RP carrying a code.
@@ -861,21 +861,21 @@ async fn totp_login_preserves_native_return_to() {
 
     let authorize_path = authorize_path(&fx.client_id, "openid email", &pkce_verifier(), "state-totp", Some("nonce-totp"));
     let login_get = get(&fx, &format!("/login?{}", form(&[("return_to", authorize_path.as_str())])), None).await;
-    let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("login csrf");
+    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
     let body = form(&[
         ("csrf", csrf.as_str()),
         ("email", fx.email.as_str()),
         ("password", PASSWORD),
         ("return_to", authorize_path.as_str()),
     ]);
-    let password_step = post_form(&fx, "/login", &body, Some(&format!("zsidp_csrf={csrf}"))).await;
+    let password_step = post_form(&fx, "/login", &body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
     assert_eq!(password_step.status().as_u16(), 200);
     assert!(
-        read_set_cookie(&password_step, "zsidp_session").is_none(),
+        read_set_cookie(&password_step, "__Host-zsidp_session").is_none(),
         "password step must not mint a session before TOTP"
     );
-    let csrf = read_set_cookie(&password_step, "zsidp_csrf").expect("totp csrf");
-    let stash = read_set_cookie(&password_step, "zsidp_2fa").expect("totp stash");
+    let csrf = read_set_cookie(&password_step, "__Host-zsidp_csrf").expect("totp csrf");
+    let stash = read_set_cookie(&password_step, "__Host-zsidp_2fa").expect("totp stash");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -890,12 +890,12 @@ async fn totp_login_preserves_native_return_to() {
         &fx,
         "/login/2fa",
         &body,
-        Some(&format!("zsidp_csrf={csrf}; zsidp_2fa={stash}")),
+        Some(&format!("__Host-zsidp_csrf={csrf}; __Host-zsidp_2fa={stash}")),
     )
     .await;
     assert_eq!(done.status().as_u16(), 303);
     assert_eq!(location(&done), authorize_path);
-    assert!(read_set_cookie(&done, "zsidp_session").is_some());
+    assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
     fx.cleanup().await;
 }

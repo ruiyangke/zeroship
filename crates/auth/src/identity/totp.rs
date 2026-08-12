@@ -284,8 +284,6 @@ mod tests {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
         let k = key_from_config(&b64).expect("base64 key");
         assert_eq!(k, [7u8; 32]);
-        // The repo dev sentinel decodes to 32 bytes.
-        assert!(key_from_config(zeroship_core::config::DEV_TOTP_ENC_KEY).is_ok());
         // Too short → rejected.
         assert!(key_from_config("deadbeef").is_err());
         assert!(key_from_config("").is_err());

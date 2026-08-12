@@ -938,7 +938,7 @@ observability, and OIDC/OAuth protocol primitives.
 | Auth utils — trusted OAuth client resolution | 🟢 | internal | `crates/core/src/auth/trusted_clients.rs` | — | — | Empty default (fail-closed). |
 | Config — FileConfig TOML overlay | 🟢 | internal (bootstrap_or_exit) | `crates/core/src/config/file.rs`, `source.rs`, `bootstrap.rs` | — | — | deny_unknown_fields; XDG discovery. |
 | Config — secret reference system | 🟡 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | env/file resolve; vault/awssm parse-but-unresolvable. |
-| Config — secret strength validation | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | ≥32B; dev sentinels; --dev-insecure bypass. |
+| Config - secret strength validation | green | internal | `crates/core/src/config/secrets.rs` | - | `crates/core/src/config/secrets.rs` | At least 32 bytes; enforced in every environment. |
 | Config — loopback URL check | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | Literal-only; no DNS. |
 | Config — bootstrap_or_exit | 🟢 | internal | `crates/core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
 | Observability — tracing subscriber init | 🟢 | ZEROSHIP_LOG_FORMAT / --log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |

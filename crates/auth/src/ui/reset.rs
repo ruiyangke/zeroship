@@ -79,7 +79,7 @@ pub async fn post(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -358,7 +358,7 @@ fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpRespon
 }
 
 fn render_form_with_status(
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     token: &str,
     error: Option<&str>,
     status: StatusCode,
@@ -384,7 +384,7 @@ fn render_form_with_status(
         "Content-Security-Policy",
         headers::content_security_policy_with_script_nonce(&script_nonce),
     );
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 

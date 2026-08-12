@@ -4,65 +4,56 @@ use std::net::IpAddr;
 
 use base64::Engine;
 
-/// Development-only stash signing key used by web binaries when insecure dev is explicit.
-pub const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
+// These values used to be shipped development defaults. They are public and
+// therefore compromised even when they happen to meet a length or decoding
+// requirement. Keep them only as denylist entries; no runtime path supplies
+// them as defaults.
+const KNOWN_WEAK_STASH_KEYS: &[&str] = &[
+    "dev-stash-key-please-rotate",
+    "dev-stash-signing-key-not-for-production",
+    "dev-only-stash-signing-key-not-for-production-use!!",
+];
+const KNOWN_WEAK_PAIRWISE_SALTS: &[&str] = &["dev-pairwise-salt-never-rotate-in-prod"];
+const KNOWN_WEAK_WORKER_KEYS: &[&str] = &["dev-worker-key-not-for-production-use"];
+const KNOWN_WEAK_MASTER_KEYS: &[&str] =
+    &["00000000000000000000000000000000000000000000000000000000000000ff"];
 
-/// Development-only pairwise-salt secret used by gateway + control when insecure
-/// dev is explicit. This is the dedicated seed for the per-app `pws_` identity
-/// anchor (auth-sdk §6.2) — NOT the stash key. It is a PERMANENT value: in
-/// production it must be set to a strong, stable secret and NEVER rotated
-/// without a migration, because rotating it re-keys every app's stored `pws_`.
-/// Both gateway and control must be configured with the IDENTICAL value.
-pub const DEV_PAIRWISE_SALT: &str = "dev-pairwise-salt-never-rotate-in-prod";
-
-/// Development-only TOTP at-rest encryption key (ISS-11) used by the auth
-/// service when insecure dev is explicit. 64 hex chars → 32 bytes, the minimum
-/// `validate_master_key_material` accepts. In production this must be a strong,
-/// stable, high-entropy key set via `AUTH_TOTP_ENC_KEY`; rotating it without
-/// re-encrypting `zeroship.totp_credentials` invalidates every enrolled secret.
-pub const DEV_TOTP_ENC_KEY: &str =
-    "00000000000000000000000000000000000000000000000000000000000000ff";
-
-/// Require `value` to be non-empty unless insecure development mode is explicit.
-///
-/// # Errors
-///
-/// Returns a startup-facing message naming `label` when the value is missing
-/// outside `--dev-insecure`.
-pub fn require_unless_dev(label: &str, value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        Ok(())
+fn reject_known_weak(label: &str, value: &str, denylist: &[&str]) -> Result<(), String> {
+    if denylist.contains(&value) {
+        Err(format!(
+            "{label} is a known public development value; generate a unique secret"
+        ))
     } else {
-        Err(format!("{label} is required outside --dev-insecure"))
+        Ok(())
     }
 }
 
-/// Validate the shared production requirement for a stash signing key.
-///
-/// The single stash validator across every binary: exact-match dev sentinel,
-/// non-empty, raw UTF-8 length ≥ 32 bytes.
+/// Require `value` to be non-empty.
 ///
 /// # Errors
 ///
-/// Returns an explanatory error when `value` is the development sentinel, empty,
-/// or shorter than 32 bytes, unless `insecure_dev` is enabled.
-pub fn validate_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
+/// Returns a startup-facing message naming `label` when the value is missing.
+pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
+    if !value.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{label} is required"))
     }
+}
 
-    if value == DEV_STASH_SIGNING_KEY {
-        return Err(
-            "STASH_SIGNING_KEY is the dev default; refusing to boot without --dev-insecure"
-                .to_owned(),
-        );
-    }
-
+/// Validate the shared requirement for a stash signing key.
+///
+/// The single stash validator across every binary: non-empty, raw UTF-8 length
+/// of at least 32 bytes.
+///
+/// # Errors
+///
+/// Returns an explanatory error when `value` is a known public development
+/// value, empty, or shorter than 32 bytes.
+pub fn validate_stash_key(value: &str) -> Result<(), String> {
+    reject_known_weak("STASH_SIGNING_KEY", value, KNOWN_WEAK_STASH_KEYS)?;
     if value.is_empty() {
-        return Err(
-            "STASH_SIGNING_KEY is required outside --dev-insecure; set a strong (>=32 byte) value"
-                .to_owned(),
-        );
+        return Err("STASH_SIGNING_KEY is required; set a strong (>=32 byte) value".to_owned());
     }
 
     if value.len() < 32 {
@@ -75,33 +66,21 @@ pub fn validate_stash_key(value: &str, insecure_dev: bool) -> Result<(), String>
     Ok(())
 }
 
-/// Validate the production requirement for the dedicated pairwise-salt secret
-/// (auth-sdk §6.2). Same shape as [`validate_stash_key`]: exact-match dev
-/// sentinel rejected, non-empty, raw UTF-8 length ≥ 32 bytes. The error text
+/// Validate the requirement for the dedicated pairwise-salt secret
+/// (auth-sdk section 6.2). Same shape as [`validate_stash_key`]: non-empty,
+/// raw UTF-8 length of at least 32 bytes. The error text
 /// stresses the never-rotate contract so an operator does not treat it like a
 /// rotatable operational key.
 ///
 /// # Errors
 ///
-/// Returns an explanatory error when `value` is the development sentinel, empty,
-/// or shorter than 32 bytes, unless `insecure_dev` is enabled.
-pub fn validate_pairwise_salt(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
-
-    if value == DEV_PAIRWISE_SALT {
-        return Err(
-            "PAIRWISE_SALT is the dev default; refusing to boot without --dev-insecure. \
-             This is the PERMANENT per-app identity anchor — set a strong, stable secret \
-             (identical on gateway + control) and never rotate it without a migration."
-                .to_owned(),
-        );
-    }
-
+/// Returns an explanatory error when `value` is a known public development
+/// value, empty, or shorter than 32 bytes.
+pub fn validate_pairwise_salt(value: &str) -> Result<(), String> {
+    reject_known_weak("PAIRWISE_SALT", value, KNOWN_WEAK_PAIRWISE_SALTS)?;
     if value.is_empty() {
         return Err(
-            "PAIRWISE_SALT is required outside --dev-insecure; set a strong (>=32 byte) value \
+            "PAIRWISE_SALT is required; set a strong (>=32 byte) value \
              (identical on gateway + control, never rotated without a migration)"
                 .to_owned(),
         );
@@ -117,30 +96,22 @@ pub fn validate_pairwise_salt(value: &str, insecure_dev: bool) -> Result<(), Str
     Ok(())
 }
 
-/// Validate the production requirement for the worker dispatch key.
+/// Validate the requirement for the worker dispatch key.
 ///
 /// The `worker_key` authenticates the gateway→worker dispatch bearer AND keys
 /// the per-request `ZeroShip-User` HMAC (the only authoritative identity channel
 /// into app code). An empty or weak key therefore disables auth or makes the
-/// HMAC forgeable — so it carries the SAME strength posture as the stash key /
-/// pairwise salt: non-empty, raw UTF-8 length ≥ 32 bytes. Empty is permitted
-/// ONLY under `--dev-insecure` (where it means "disabled", paired with the
-/// loopback-only bind guard).
+/// HMAC forgeable, so it carries the same strength posture as the stash key and
+/// pairwise salt: non-empty, raw UTF-8 length of at least 32 bytes.
 ///
 /// # Errors
 ///
-/// Returns an explanatory error when `value` is empty or shorter than 32 bytes,
-/// unless `insecure_dev` is enabled.
-pub fn validate_worker_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
-
+/// Returns an explanatory error when `value` is a known public development
+/// value, empty, or shorter than 32 bytes.
+pub fn validate_worker_key(value: &str) -> Result<(), String> {
+    reject_known_weak("WORKER_KEY", value, KNOWN_WEAK_WORKER_KEYS)?;
     if value.is_empty() {
-        return Err(
-            "WORKER_KEY is required outside --dev-insecure; set a strong (>=32 byte) value"
-                .to_owned(),
-        );
+        return Err("WORKER_KEY is required; set a strong (>=32 byte) value".to_owned());
     }
 
     if value.len() < 32 {
@@ -184,16 +155,10 @@ pub fn decoded_master_key_len(value: &str) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// Returns an explanatory error when `value` does not decode to at least 32
-/// bytes, unless `insecure_dev` is enabled.
-pub fn validate_master_key_material(
-    label: &str,
-    value: &str,
-    insecure_dev: bool,
-) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
+/// Returns an explanatory error when `value` is a known public development
+/// value or does not decode to at least 32 bytes.
+pub fn validate_master_key_material(label: &str, value: &str) -> Result<(), String> {
+    reject_known_weak(label, value, KNOWN_WEAK_MASTER_KEYS)?;
     match decoded_master_key_len(value) {
         Some(n) if n >= 32 => Ok(()),
         Some(n) => Err(format!("{label} decodes to {n} bytes; minimum is 32 bytes")),
@@ -490,9 +455,10 @@ mod tests {
 
     use super::{
         decoded_master_key_len, is_loopback_url, is_secret_ref, obtain_secret, parse_secret_ref,
-        require_unless_dev, resolve_secret, validate_master_key_material, validate_pairwise_salt,
+        require_nonempty, resolve_secret, validate_master_key_material, validate_pairwise_salt,
         validate_secret_ref, validate_stash_key, validate_worker_key, SecretError, SecretRef,
-        DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
+        KNOWN_WEAK_MASTER_KEYS, KNOWN_WEAK_PAIRWISE_SALTS, KNOWN_WEAK_STASH_KEYS,
+        KNOWN_WEAK_WORKER_KEYS,
     };
 
     // `std::env::set_var` mutates process-global state; serialize the env-touching
@@ -500,100 +466,90 @@ mod tests {
     static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn require_unless_dev_rejects_missing_only_outside_dev() {
-        let err = require_unless_dev("CONTROL_KEY / --control-key", "", false)
+    fn require_nonempty_rejects_missing_values() {
+        let err = require_nonempty("CONTROL_KEY / --control-key", "")
             .expect_err("missing secret");
-        assert_eq!(
-            err,
-            "CONTROL_KEY / --control-key is required outside --dev-insecure"
-        );
-
-        require_unless_dev("CONTROL_KEY / --control-key", "", true).expect("dev bypass");
-        require_unless_dev("CONTROL_KEY / --control-key", "secret", false).expect("present");
+        assert_eq!(err, "CONTROL_KEY / --control-key is required");
+        require_nonempty("CONTROL_KEY / --control-key", "secret").expect("present");
     }
 
-    // S4: one unified stash validator. The dev sentinel is rejected by
-    // exact-match (not prefix), short keys are rejected, ≥32 ok, dev bypass.
+    // S4: one unified stash validator. Empty and short keys are rejected and
+    // values of at least 32 bytes are accepted.
     #[test]
     fn validate_stash_key_unified() {
-        // dev sentinel rejected non-dev
-        let err = validate_stash_key(DEV_STASH_SIGNING_KEY, false).expect_err("dev default");
-        assert!(err.contains("dev default"));
+        for weak in KNOWN_WEAK_STASH_KEYS {
+            assert!(
+                validate_stash_key(weak)
+                    .expect_err("known public stash key")
+                    .contains("known public")
+            );
+        }
 
         // empty rejected
-        assert!(validate_stash_key("", false)
+        assert!(validate_stash_key("")
             .expect_err("empty key")
             .contains("required"));
 
         // short (<32) rejected
-        assert!(validate_stash_key("short", false)
+        assert!(validate_stash_key("short")
             .expect_err("short key")
             .contains("too short"));
 
         // exactly 32 ok
-        validate_stash_key("0123456789abcdef0123456789abcdef", false).expect("strong key");
-
-        // insecure_dev bypasses every check
-        validate_stash_key("", true).expect("insecure dev bypass");
-        validate_stash_key(DEV_STASH_SIGNING_KEY, true).expect("insecure dev bypass sentinel");
+        validate_stash_key("0123456789abcdef0123456789abcdef").expect("strong key");
     }
 
     /// MAJOR fix (pairwise_salt secret lifecycle) — the dedicated pairwise-salt
     /// secret has its OWN validator with the SAME strength posture as the stash
-    /// key, AND it is a DISTINCT value from the stash key (so they cannot be
-    /// confused / share a lifecycle). The dev sentinel is rejected outside dev.
+    /// key while remaining a distinct input with its own lifecycle.
     #[test]
-    fn validate_pairwise_salt_unified_and_distinct_from_stash() {
-        // The dedicated salt's dev default is its OWN sentinel — NOT the stash
-        // default (proves the two secrets are decoupled).
-        assert_ne!(
-            DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
-            "the pairwise salt must NOT share the stash key's dev default"
-        );
-
-        // dev sentinel rejected non-dev (loudly names the never-rotate contract)
-        let err = validate_pairwise_salt(DEV_PAIRWISE_SALT, false).expect_err("dev default");
-        assert!(err.contains("dev default"));
-        assert!(err.contains("never rotate") || err.contains("migration"));
+    fn validate_pairwise_salt_enforces_strength() {
+        for weak in KNOWN_WEAK_PAIRWISE_SALTS {
+            assert!(
+                validate_pairwise_salt(weak)
+                    .expect_err("known public pairwise salt")
+                    .contains("known public")
+            );
+        }
 
         // empty rejected, short rejected, exactly 32 ok
-        assert!(validate_pairwise_salt("", false)
+        assert!(validate_pairwise_salt("")
             .expect_err("empty")
             .contains("required"));
-        assert!(validate_pairwise_salt("short", false)
+        assert!(validate_pairwise_salt("short")
             .expect_err("short")
             .contains("too short"));
-        validate_pairwise_salt("0123456789abcdef0123456789abcdef", false).expect("strong salt");
-
-        // insecure_dev bypasses every check
-        validate_pairwise_salt("", true).expect("insecure dev bypass");
-        validate_pairwise_salt(DEV_PAIRWISE_SALT, true).expect("insecure dev bypass sentinel");
+        validate_pairwise_salt("0123456789abcdef0123456789abcdef").expect("strong salt");
     }
 
     // L6: the worker_key gates BOTH the dispatch bearer check and the
     // ZeroShip-User HMAC. Presence-only validation let a weak short key bind
     // any interface and be brute-forced for header forgery. It now carries the
     // SAME ≥32-byte strength floor as the stash key / pairwise salt: empty
-    // rejected, short rejected, ≥32 ok, dev bypass.
+    // rejected, short rejected, and values of at least 32 bytes accepted.
     #[test]
-    fn validate_worker_key_enforces_min_len_outside_dev() {
+    fn validate_worker_key_enforces_min_len() {
+        for weak in KNOWN_WEAK_WORKER_KEYS {
+            assert!(
+                validate_worker_key(weak)
+                    .expect_err("known public worker key")
+                    .contains("known public")
+            );
+        }
+
         // empty rejected (an empty key would HMAC-verify against a zero-length
         // key any party can compute)
-        assert!(validate_worker_key("", false)
+        assert!(validate_worker_key("")
             .expect_err("empty key")
             .contains("required"));
 
         // short (<32) rejected
-        assert!(validate_worker_key("short", false)
+        assert!(validate_worker_key("short")
             .expect_err("short key")
             .contains("too short"));
 
         // exactly 32 ok
-        validate_worker_key("0123456789abcdef0123456789abcdef", false).expect("strong key");
-
-        // insecure_dev bypasses every check (empty = "disabled", dev-only)
-        validate_worker_key("", true).expect("insecure dev bypass");
-        validate_worker_key("short", true).expect("insecure dev bypass short");
+        validate_worker_key("0123456789abcdef0123456789abcdef").expect("strong key");
     }
 
     #[test]
@@ -612,20 +568,25 @@ mod tests {
 
     #[test]
     fn validate_master_key_material_enforces_min_len() {
+        for weak in KNOWN_WEAK_MASTER_KEYS {
+            assert!(
+                validate_master_key_material("MASTER_KEY", weak)
+                    .expect_err("known public master key")
+                    .contains("known public")
+            );
+        }
+
         // 32 decoded bytes ok
         let key = "00".repeat(32);
-        validate_master_key_material("MASTER_KEY", &key, false).expect("32 bytes ok");
+        validate_master_key_material("MASTER_KEY", &key).expect("32 bytes ok");
 
         // short decode rejected; error text says "bytes" not "random bytes" (O4)
-        let err = validate_master_key_material("MASTER_KEY", "YWJj", false).unwrap_err();
+        let err = validate_master_key_material("MASTER_KEY", "YWJj").unwrap_err();
         assert!(err.contains("bytes"));
         assert!(!err.contains("random"));
 
         // undecodable rejected
-        assert!(validate_master_key_material("MASTER_KEY", "not!base64!", false).is_err());
-
-        // insecure_dev bypass
-        validate_master_key_material("MASTER_KEY", "password", true).expect("dev bypass");
+        assert!(validate_master_key_material("MASTER_KEY", "not!base64!").is_err());
     }
 
     // S8: literal-only loopback, no DNS resolution.

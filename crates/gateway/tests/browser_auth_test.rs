@@ -181,8 +181,6 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
             auth_ui_url: opts.op_base.clone(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],
-            // insecure_dev=false exercises prod __Host- / Strict / Secure cookies.
-            insecure_dev: false,
             trust_proxy: false,
             public_url: GATEWAY_ISS.into(),
         },

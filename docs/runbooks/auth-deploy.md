@@ -38,11 +38,10 @@ var.
 | `AUTH_BROKER_SECRET_PREVIOUS_FILE` | unset | rotation only | Previous broker secret during rolling rotation. |
 | `REFRESH_HASH_KEY_FILE` | unset | yes in prod | HMAC keyring for refresh-token verifiers. |
 | `REFRESH_IDEM_KEY_FILE` | unset | yes in prod | AEAD key for refresh idempotency cache rows. |
-| `AUTH_STASH_SIGNING_KEY` | dev default | yes in prod | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
-| `AUTH_TOTP_ENC_KEY` | dev default | yes in prod | TOTP secret encryption key. |
+| `AUTH_STASH_SIGNING_KEY` | unset | yes | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
+| `AUTH_TOTP_ENC_KEY` | unset | yes | TOTP secret encryption key. |
 | `AUTH_REFRESH_POOL_SIZE` | `4` | no | Dedicated refresh-family DB session pool size per process. |
 | `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path for non-secret auth config and secret references. |
-| `ZEROSHIP_DEV_INSECURE` / `--dev-insecure` | unset | never in prod | Relaxes cookie/secret guards for local development only. |
 
 ### Mailer
 

@@ -21,6 +21,8 @@
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 PASS=0; FAIL=0
 pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
@@ -151,25 +153,29 @@ TOML
 
 # control with the LAGO provider (forwarder-fed) + the redpanda stream. api_key
 # resolves from LAGO_API_KEY via the env: secret handle. Short recompute interval.
+SIGNING_KEY_FILE="$WORK/sk.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 LAGO_API_KEY="$LAGO_KEY" \
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \
-  --spend-recompute-interval 2 --dev-insecure > "$WORK/control.log" 2>&1 &
+  --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (provider=lago, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (outbox → redpanda)" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
   --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
-  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
@@ -245,7 +251,7 @@ REQS=""; for _ in $(seq 1 20); do REQS="$(curl -s "$CONTROL_URL/api/apps/$APP/us
 
 echo ""; echo "=== Stage 5: spend enforcement — low cap → 402 Block ==="
 curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"cents":1}'
-curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
 STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
 [ "$STATE" = "block" ] && pass "control derived spend state = block" || fail "expected block, got '$STATE'"
 GW402=0; for _ in $(seq 1 15); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: lago-probe.localhost' "http://localhost:$GATE_PORT/probe/blocked")" = "402" ] && { GW402=1; break; }; sleep 1; done

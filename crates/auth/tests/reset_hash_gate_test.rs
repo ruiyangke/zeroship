@@ -37,7 +37,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "zeroship-auth",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);
@@ -100,8 +99,8 @@ macro_rules! reset_service_and_csrf {
         )
         .await;
         assert_eq!(get_resp.status().as_u16(), 200);
-        let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-            .expect("zsidp_csrf cookie set on GET /reset");
+        let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+            .expect("__Host-zsidp_csrf cookie set on GET /reset");
         (app, csrf)
     }};
 }
@@ -115,7 +114,7 @@ fn reset_post(csrf: &str, token: &str, password: &str, ip: &str) -> test::TestRe
     test::TestRequest::post()
         .uri("/reset")
         .header("content-type", "application/x-www-form-urlencoded")
-        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .header("x-forwarded-for", ip)
         .set_payload(body)
 }

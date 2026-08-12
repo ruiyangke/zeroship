@@ -13,14 +13,15 @@
 # plaintext literal there is rejected at startup.
 
 # Public-edge topology for browser-visible URLs and same-origin checks. These
-# are ordinary operational settings, independent of --dev-insecure. Exact
+# are ordinary operational settings, not security-check switches. Exact
 # origins only: no wildcards, paths, queries, fragments, credentials, or null.
 # origin_scheme = "https"
 # trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
 
 [auth]
-# The native OP public origin is supplied to the auth service through
-# AUTH_PUBLIC_URL. This shared overlay does not define that key.
+# Supply the native OP public origin to auth through AUTH_PUBLIC_URL and the
+# matching token issuer to control through AUTH_PLATFORM_ISSUER. This shared
+# overlay defines neither key.
 #
 # First-party OAuth client IDs that skip native OP consent for the first-party
 # CONSOLE only. (The old gateway POST /__zeroship/auth/password first-party gate

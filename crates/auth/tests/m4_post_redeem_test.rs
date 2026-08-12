@@ -196,7 +196,7 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
         &app,
         "/verify/redeem",
         body,
-        Some(format!("zsidp_csrf={csrf}")),
+        Some(format!("__Host-zsidp_csrf={csrf}")),
     )
     .await;
     assert_eq!(resp.status().as_u16(), 200);
@@ -259,7 +259,7 @@ fn verify_post_redeem_with_invalid_token_renders_error_page() {
         &app,
         "/verify/redeem",
         body,
-        Some(format!("zsidp_csrf={csrf}")),
+        Some(format!("__Host-zsidp_csrf={csrf}")),
         &request_id,
     )
     .await;
@@ -292,7 +292,7 @@ fn verify_post_redeem_idempotent_second_call_returns_error() {
         &app,
         "/verify/redeem",
         body.clone(),
-        Some(format!("zsidp_csrf={csrf}")),
+        Some(format!("__Host-zsidp_csrf={csrf}")),
     )
     .await;
     assert_eq!(first.status().as_u16(), 200);
@@ -301,7 +301,7 @@ fn verify_post_redeem_idempotent_second_call_returns_error() {
         &app,
         "/verify/redeem",
         body,
-        Some(format!("zsidp_csrf={csrf}")),
+        Some(format!("__Host-zsidp_csrf={csrf}")),
     )
     .await;
     assert_eq!(second.status().as_u16(), 200);
@@ -431,7 +431,7 @@ where
 {
     let resp = call_get(app, &format!("/verify?token={token}")).await;
     assert_eq!(resp.status().as_u16(), 200);
-    read_set_cookie(resp.headers(), "zsidp_csrf").expect("zsidp_csrf cookie set on GET /verify")
+    read_set_cookie(resp.headers(), "__Host-zsidp_csrf").expect("__Host-zsidp_csrf cookie set on GET /verify")
 }
 
 async fn verification_failure_audit_count(

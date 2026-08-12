@@ -21,6 +21,8 @@ use zeroship_control::{
 
 mod common;
 
+const TEST_WEBHOOK_SECRET: &str = "whsec_control_test_unconditional";
+
 fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
@@ -49,21 +51,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
-        // Default fixture: insecure_dev (empty webhook secret ⇒ signature
-        // verification skipped) — matches the existing audit-coverage test.
-        Self::new_with_secret(db_url, label, "", true).await
+        Self::new_with_secret(db_url, label, TEST_WEBHOOK_SECRET).await
     }
 
-    /// Build a fixture with an explicit webhook signing secret + `insecure_dev`
-    /// flag. A non-empty secret with `insecure_dev=false` exercises the REAL
-    /// signature-verify path (used by the forged-event test).
+    /// Build a fixture with an explicit webhook signing secret.
     async fn new_with_secret(
         db_url: &str,
         label: &str,
         webhook_secret: &str,
-        insecure_dev: bool,
     ) -> Self {
-        Self::new_full(db_url, label, webhook_secret, insecure_dev, "", "https://api.stripe.com").await
+        Self::new_full(db_url, label, webhook_secret, "", "https://api.stripe.com").await
     }
 
     /// Fixture variant that wires a Stripe secret key + base URL — so the D2
@@ -75,7 +72,14 @@ impl Fixture {
         stripe_secret_key: &str,
         stripe_base_url: &str,
     ) -> Self {
-        Self::new_full(db_url, label, "", true, stripe_secret_key, stripe_base_url).await
+        Self::new_full(
+            db_url,
+            label,
+            TEST_WEBHOOK_SECRET,
+            stripe_secret_key,
+            stripe_base_url,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -83,7 +87,6 @@ impl Fixture {
         db_url: &str,
         label: &str,
         webhook_secret: &str,
-        insecure_dev: bool,
         stripe_secret_key: &str,
         stripe_base_url: &str,
     ) -> Self {
@@ -91,7 +94,7 @@ impl Fixture {
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
         let env_store =
-            EnvStore::new(registry.clone(), "test-master-key", false).expect("env store");
+            EnvStore::new(registry.clone(), "test-master-key").expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -125,7 +128,6 @@ impl Fixture {
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
-            insecure_dev,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
@@ -134,7 +136,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
@@ -518,14 +520,37 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
 /// returns without naming its type.
 macro_rules! post_webhook {
     ($app:expr, $body:expr, $sig:expr) => {{
+        let body = $body.to_string();
         let mut req = test::TestRequest::post()
             .uri("/internal/webhooks/stripe")
             .header("content-type", "application/json");
-        let sig: Option<&str> = $sig;
+        let supplied_sig: Option<&str> = $sig;
+        let generated_sig = supplied_sig.is_none().then(|| {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_secs() as i64;
+            format!(
+                "t={timestamp},v1={}",
+                stripe_v1(TEST_WEBHOOK_SECRET, timestamp, &body)
+            )
+        });
+        let sig = supplied_sig.or(generated_sig.as_deref());
         if let Some(s) = sig {
             req = req.header("stripe-signature", s);
         }
-        let req = req.set_payload($body.to_string()).to_request();
+        let req = req.set_payload(body).to_request();
+        test::call_service(&$app, req).await
+    }};
+}
+
+macro_rules! post_webhook_unsigned {
+    ($app:expr, $body:expr) => {{
+        let req = test::TestRequest::post()
+            .uri("/internal/webhooks/stripe")
+            .header("content-type", "application/json")
+            .set_payload($body.to_string())
+            .to_request();
         test::call_service(&$app, req).await
     }};
 }
@@ -1584,7 +1609,7 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
 async fn forged_event_rejected_before_ledger_claim() {
     let db_url = db_url();
     // Real secret + verification ON.
-    let fx = Fixture::new_with_secret(&db_url, "dedup-forged", "whsec_test_g6", false).await;
+    let fx = Fixture::new_with_secret(&db_url, "dedup-forged", "whsec_test_g6").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
     let creator_id = make_user(&conn).await;
@@ -2186,8 +2211,8 @@ fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
 }
 
 /// #9 (body cap): a body over MAX_WEBHOOK_BODY_BYTES (256 KiB) is rejected with 413
-/// BEFORE any parse/HMAC/DB work. insecure_dev fixture (empty secret) so the body cap
-/// — which runs ahead of the signature block — is the gate under test.
+/// BEFORE any parse/HMAC/DB work. The fixture still signs the request, but the body
+/// cap runs ahead of signature verification and remains the gate under test.
 #[compio::test]
 async fn webhook_oversized_body_rejected_413() {
     let db_url = db_url();
@@ -2210,12 +2235,11 @@ async fn webhook_oversized_body_rejected_413() {
 }
 
 /// #9 (signature-header cap): a `stripe-signature` header over MAX_SIGNATURE_HEADER_BYTES
-/// (4096) is rejected 400. Real secret + insecure_dev=false so the header-size guard
-/// (inside the verify block) is reached.
+/// (4096) is rejected 400 while signature verification is active.
 #[compio::test]
 async fn webhook_oversized_signature_header_rejected_400() {
     let db_url = db_url();
-    let fx = Fixture::new_with_secret(&db_url, "boundary-sig", "whsec_test_boundary", false).await;
+    let fx = Fixture::new_with_secret(&db_url, "boundary-sig", "whsec_test_boundary").await;
     let app = init_control!(fx);
     let body = json!({"id":"evt_x","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
     // A 4097-char header.
@@ -2235,13 +2259,13 @@ async fn webhook_oversized_signature_header_rejected_400() {
     common::drain_pg().await;
 }
 
-/// #9 (missing signature header): with verification ON (real secret, insecure_dev=false),
-/// a request carrying NO `stripe-signature` header is rejected 400 (the empty header has
+/// #9 (missing signature header): with a real configured secret, a request carrying NO
+/// `stripe-signature` header is rejected 400 (the empty header has
 /// no `t`/`v1` → verify fails). Proves the unsigned request never reaches a handler.
 #[compio::test]
 async fn webhook_missing_signature_header_rejected_400() {
     let db_url = db_url();
-    let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig", false).await;
+    let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
     let creator_id = make_user(&conn).await;
@@ -2250,7 +2274,7 @@ async fn webhook_missing_signature_header_rejected_400() {
     // No stripe-signature header at all.
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown at the end of this test.
-    let status = post_webhook!(app, &body, None).status();
+    let status = post_webhook_unsigned!(app, &body).status();
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -2273,7 +2297,7 @@ async fn webhook_missing_signature_header_rejected_400() {
 async fn webhook_second_v1_matches_is_accepted() {
     let db_url = db_url();
     let secret = "whsec_test_rotation";
-    let fx = Fixture::new_with_secret(&db_url, "boundary-multiv1", secret, false).await;
+    let fx = Fixture::new_with_secret(&db_url, "boundary-multiv1", secret).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
     let creator_id = make_user(&conn).await;
@@ -2317,15 +2341,12 @@ fn verify_empty_secret_is_err() {
     );
 }
 
-/// #7 (HTTP path, empty secret + insecure_dev=false → 500): the webhook endpoint with NO
-/// configured signing secret and insecure_dev OFF rejects with 500 (misconfiguration —
-/// fail closed, do not process). insecure_dev=true would be the dev bypass; this pins the
-/// PROD posture.
+/// #7 (HTTP path, empty secret -> 500): the webhook endpoint with no configured
+/// signing secret rejects with 500, fails closed, and does not process the event.
 #[compio::test]
-async fn webhook_empty_secret_not_insecure_dev_is_500() {
+async fn webhook_empty_secret_is_always_500() {
     let db_url = db_url();
-    // Empty secret, insecure_dev=false — the production-misconfig posture.
-    let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "", false).await;
+    let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "").await;
     let app = init_control!(fx);
     let body = json!({"id":"evt_emptysecret","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -2334,7 +2355,7 @@ async fn webhook_empty_secret_not_insecure_dev_is_500() {
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
-        "empty webhook secret with insecure_dev=false fails closed (500), never processes"
+        "empty webhook secret always fails closed (500) and never processes"
     );
 
     drop(app);

@@ -354,6 +354,12 @@ Also stale: `zeroship deploy --key=` (now `--token=`), and an **unqualified
 cleanup; deploy against a clean Liquibase-migrated DB). Verified: control starts only with
 `--dev-insecure`.
 
+> **Stale as of 2026-08-12.** `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` no longer exist on any
+> binary; clap rejects them. Half of the prescription above cannot be followed, and the
+> "control starts only with `--dev-insecure`" verification no longer describes the product:
+> control starts with real keys and a signing-key file, and with nothing else. Left in place
+> because the entry is superseded and read as history.
+
 ### ISS-54 · No end-to-end test coverage for app primitives through the gateway
 **Status:** open · **Effort:** M · **Tier:** T2 (test infra)
 

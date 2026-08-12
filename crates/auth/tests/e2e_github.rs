@@ -175,7 +175,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         .await
         .expect("send /oauth/github/start");
     assert_eq!(resp.status().as_u16(), 302);
-    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
     assert_eq!(
@@ -202,7 +202,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
     );
 
     let mut jar = CookieJar::default();
-    jar.set("zsidp_github_stash", &stash_cookie);
+    jar.set("__Host-zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)
@@ -224,7 +224,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         "native callback must not continue through accept_login"
     );
     let session_cookie =
-        read_set_cookie(&resp, "zsidp_session").expect("session cookie on native callback");
+        read_set_cookie(&resp, "__Host-zsidp_session").expect("session cookie on native callback");
     assert!(!session_cookie.is_empty());
 
     let user_rows = fx
@@ -300,7 +300,7 @@ async fn github_native_confirmation_bounce_carries_return_to() {
         .await
         .expect("send /oauth/github/start");
     assert_eq!(resp.status().as_u16(), 302);
-    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
 
@@ -319,7 +319,7 @@ async fn github_native_confirmation_bounce_carries_return_to() {
     );
 
     let mut jar = CookieJar::default();
-    jar.set("zsidp_github_stash", &stash_cookie);
+    jar.set("__Host-zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)
@@ -420,7 +420,7 @@ async fn github_federation_rejects_noreply_only_email() {
         .send()
         .await
         .expect("send /oauth/github/start");
-    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
 
@@ -438,7 +438,7 @@ async fn github_federation_rejects_noreply_only_email() {
     );
 
     let mut jar = CookieJar::default();
-    jar.set("zsidp_github_stash", &stash_cookie);
+    jar.set("__Host-zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)
@@ -550,7 +550,7 @@ async fn github_federation_rejects_unverified_primary_email() {
         .send()
         .await
         .expect("send /oauth/github/start");
-    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
 
@@ -568,7 +568,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     );
 
     let mut jar = CookieJar::default();
-    jar.set("zsidp_github_stash", &stash_cookie);
+    jar.set("__Host-zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)

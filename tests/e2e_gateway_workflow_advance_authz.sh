@@ -38,6 +38,8 @@ set -uo pipefail   # NOTE: not -e; we assert on measured exit codes/bytes.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 
 PG_PORT="${PG_PORT:-5443}"
 PG_CONTAINER="${PG_CONTAINER:-zs-wfadvz-pg}"
@@ -140,10 +142,12 @@ db_recent_queued_run() {
 # NOTE: this runs inside $(...), so any diagnostic MUST go to stderr (>&2),
 # else it is captured into the caller's variable and silently lost.
 create_run() {
-  local out code rid
+  local out code rid token
   out="$WORK/create.out"
+  token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   code="$(curl -s --max-time 20 -o "$out" -w '%{http_code}' \
     -X POST "http://127.0.0.1:$CONTROL_PORT/internal/workflows/ProbeWorkflow/runs" \
+    -H "authorization: Bearer $token" \
     -H "x-zeroship-app-id: $APP_ID" -H 'content-type: application/json' \
     --data '{"input":{}}')"
   if [ "$code" = "201" ] || [ "$code" = "200" ]; then
@@ -162,10 +166,12 @@ create_run() {
 }
 
 run_state() {
-  local rid="$1" out
+  local rid="$1" out token
   out="$WORK/state.out"
+  token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   curl -s --max-time 15 -o "$out" -w '' \
     "http://127.0.0.1:$CONTROL_PORT/internal/workflows/runs/$rid" \
+    -H "authorization: Bearer $token" \
     -H "x-zeroship-app-id: $APP_ID" >/dev/null
   jq -r '.state // "<none>"' "$out" 2>/dev/null || echo "<parse-error>"
 }
@@ -294,9 +300,10 @@ else
   exit 1
 fi
 
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" \
   --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
-  --gateway-url "http://localhost:$GATE_PORT" --dev-insecure \
+  --gateway-url "http://localhost:$GATE_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control.log"
@@ -307,7 +314,7 @@ start_worker() {
     --port "$WORKER_PORT" --worker-threads 1 \
     --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --poll-interval 1 --max-step-blob-bytes 2097152 \
-    --dev-insecure $extra > "$WORK/worker.log" 2>&1 &
+ $extra > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
   wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
 }
@@ -317,12 +324,12 @@ start_worker "--workflow-advance-unsigned"
   --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
-  --db "$DBURL" --poll-interval 1 --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --db "$DBURL" --poll-interval 1 > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate.log"
 
 echo "=== deploy + enable workflows ==="
-ZEROSHIP_DEV_INSECURE=1 "$BIN/dev-provision" \
+"$BIN/dev-provision" \
   --db "$DBURL" --blob-store "$WORK/blobs" --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out" 2>&1 \
   || { fail "dev-provision failed"; cat "$WORK/provision.out"; exit 1; }
@@ -447,7 +454,7 @@ kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
 # control + gateway are down now too (kill_pids kills all). Rebring them.
 "$BIN/zeroship-control" \
   --port "$CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
-  --gateway-url "http://localhost:$GATE_PORT" --dev-insecure \
+  --gateway-url "http://localhost:$GATE_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control2.log"
@@ -456,7 +463,7 @@ start_worker ""   # no --workflow-advance-unsigned
   --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
-  --db "$DBURL" --poll-interval 1 --dev-insecure > "$WORK/gate2.log" 2>&1 &
+  --db "$DBURL" --poll-interval 1 > "$WORK/gate2.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate2.log"
 sleep 3

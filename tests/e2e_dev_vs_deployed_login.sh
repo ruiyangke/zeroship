@@ -84,6 +84,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 APP="$ROOT/examples/auth-probe"
 ZSHIP="$APP/dist/app.zship"
 
@@ -255,20 +257,16 @@ process.stdout.write(v?v[1].replace(/&amp;/g,"&").replace(/&quot;/g,"\"").replac
 # cookie_summary <header-dump> -- `name(flags)` per Set-Cookie, sorted.
 #
 # NORMALISATION, AND WHAT IT HIDES: the two tiers' session cookie NAMES differ
-# by design (`__zeroship_dev_session` vs `zeroship_app_session`, see
+# by design (`__zeroship_dev_session` vs `__Host-zeroship_app_session`, see
 # docs/reference/auth-dev-tier.md), so both collapse to `<SESSION>`. That means
-# this harness CANNOT see a rename of either cookie, and -- because the deployed
-# gateway is running `--dev-insecure` -- it also cannot see the `__Host-` prefix
-# or the `Secure` attribute, both of which are dropped in insecure mode
-# (crates/gateway/src/oidc_rp.rs:979-997). A change that shipped the PRODUCTION
-# cookie without `__Host-` would pass here. The anchor and breadcrumb cookies
+# the deployed cookie summary normalizes its `__Host-` prefix and `Secure`
+# attribute. Absolute assertions below own those deployed invariants. Anchor cookies
 # keep their real names: they have no dev counterpart, and their presence on one
 # side only IS the finding.
 cookie_summary() {
   grep -i '^set-cookie:' "$1" 2>/dev/null | sed -E '
       s/^[Ss]et-[Cc]ookie:[[:space:]]*//;
       s/^__zeroship_dev_session=/<SESSION>=/;
-      s/^zeroship_app_session=/<SESSION>=/;
       s/^__Host-zeroship_app_session=/<SESSION>=/;
     ' | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
@@ -277,7 +275,7 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
     const attrs=line.split(";").slice(1).map(a=>a.trim().toLowerCase());
     const flags=[];
     if(attrs.some(a=>a==="httponly")) flags.push("HttpOnly");
-    if(attrs.some(a=>a==="secure")) flags.push("Secure");
+    if(name!=="<SESSION>" && attrs.some(a=>a==="secure")) flags.push("Secure");
     const ss=attrs.find(a=>a.startsWith("samesite="));
     if(ss) flags.push("SameSite="+ss.split("=")[1]);
     const ma=attrs.find(a=>a.startsWith("max-age="));
@@ -594,33 +592,26 @@ for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $AUTH_PORT; do
 done
 
 # --- the shared secret material --------------------------------------------
-# The gateway derives each app's `oac_` client secret from the broker MASTER and
-# the OP verifies with the same master (crates/core `derive_broker_secret`), so
-# these two processes MUST read the same file. `stack_workspace` already made
-# $WORK/gate-secret 0600, which is what auth's loader requires.
-openssl genpkey -algorithm ed25519 -out "$WORK/auth-signing.pem" 2>/dev/null
-openssl rand -base64 48 > "$WORK/auth-pairwise-salt"
-printf '1:%s\n' "$(openssl rand -hex 48)" > "$WORK/refresh-hash-key"
-openssl rand -base64 48 > "$WORK/refresh-idem-key"
-chmod 0600 "$WORK/auth-signing.pem" "$WORK/auth-pairwise-salt" "$WORK/refresh-hash-key" "$WORK/refresh-idem-key"
-STASH_KEY="$(openssl rand -base64 48)"
-PAIRWISE_SALT="$(openssl rand -base64 48)"
+# `stack_workspace` generated the shared broker and pairwise inputs before the
+# database came up. The OP, control, and gateway deliberately reuse those exact
+# bytes; generating a second auth-only value would break their token topology.
+STASH_KEY="$STASH_SIGNING_KEY"
 AUTH_URL="http://localhost:$AUTH_PORT"
 
 # --- auth (the OP) ----------------------------------------------------------
 # `--relay-forward-mailer stdout` is NOT optional decoration: it defaults to
 # `smtp` and the process exits with
 # `Config("AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
-# even under --dev-insecure. Recorded in the spine; kept explicit here.
+# regardless of environment. Recorded in the spine; kept explicit here.
 "$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --db-url "$DBURL" --public-url "$AUTH_URL" \
-  --dev-insecure \
   --stash-signing-key "$STASH_KEY" \
-  --auth-signing-key-file "$WORK/auth-signing.pem" \
-  --auth-pairwise-salt-file "$WORK/auth-pairwise-salt" \
-  --auth-broker-secret-file "$WORK/gate-secret" \
-  --refresh-hash-key-file "$WORK/refresh-hash-key" \
-  --refresh-idem-key-file "$WORK/refresh-idem-key" \
+  --totp-enc-key "$AUTH_TOTP_ENC_KEY" \
+  --auth-signing-key-file "$AUTH_SIGNING_KEY_FILE" \
+  --auth-pairwise-salt-file "$AUTH_PAIRWISE_SALT_FILE" \
+  --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
+  --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
+  --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
   --mailer stdout --relay-forward-mailer stdout \
   > "$WORK/auth.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -634,7 +625,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --app-base-domain "$APP_BASE_DOMAIN" \
   --pairwise-salt "$PAIRWISE_SALT" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
@@ -643,7 +634,7 @@ curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 \
 # --- worker ----------------------------------------------------------------
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
@@ -658,7 +649,7 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
   --auth-ui-url "$AUTH_URL" \
   --stash-signing-key "$STASH_KEY" \
   --pairwise-salt "$PAIRWISE_SALT" \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
@@ -928,8 +919,8 @@ probe_deployed() {
   local ex
   ex="$(dep_exchange "$code" "$verifier" "$WORK/dep-sess.json" "$WORK/dep-sess.hdr")"
   row "session.exchange" "$ex body=$(json_keys "$WORK/dep-sess.json") user=$(json_types "$WORK/dep-sess.json" user) cookies=$(cookie_summary "$WORK/dep-sess.hdr")" >> "$out"
-  DEP_SESSION="$(grep -i '^set-cookie: *zeroship_app_session=' "$WORK/dep-sess.hdr" | head -1 | sed -E 's/.*zeroship_app_session=([^;]*).*/\1/' | tr -d '\r')"
-  DEP_ANCHOR="$(grep -i '^set-cookie: *zeroship_app_anchor=' "$WORK/dep-sess.hdr" | head -1 | sed -E 's/.*zeroship_app_anchor=([^;]*).*/\1/' | tr -d '\r')"
+  DEP_SESSION="$(grep -i '^set-cookie: *__Host-zeroship_app_session=' "$WORK/dep-sess.hdr" | head -1 | sed -E 's/.*__Host-zeroship_app_session=([^;]*).*/\1/' | tr -d '\r')"
+  DEP_ANCHOR="$(grep -i '^set-cookie: *__Host-zeroship_app_anchor=' "$WORK/dep-sess.hdr" | head -1 | sed -E 's/.*__Host-zeroship_app_anchor=([^;]*).*/\1/' | tr -d '\r')"
 
   # --- 5. replay the SAME code --------------------------------------------
   local rep
@@ -968,7 +959,7 @@ probe_deployed() {
   # --- 9. read the identity back ------------------------------------------
   local get
   get="$(curl -s -m 20 -o "$WORK/dep-get.json" -w '%{http_code}' -H "Host: $HOST" \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION" \
       "$GATE_BASE/__zeroship/auth/session")"
   row "identity.get_session" "$get body=$(json_keys "$WORK/dep-get.json") user=$(json_types "$WORK/dep-get.json" user)" >> "$out"
 
@@ -976,7 +967,7 @@ probe_deployed() {
   local shape
   shape="$(curl -s -m 20 -o "$WORK/dep-shape.json" -w '%{http_code}' -X POST \
       -H "Host: $HOST" -H "Origin: $APP_ORIGIN" -H 'content-type: application/json' \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION" \
       "$GATE_BASE/__zeroship/v1/probe.userShape" -d '{"json":{}}')"
   row "identity.rpc_shape" "$shape $(tr -d '\n' < "$WORK/dep-shape.json")" >> "$out"
 
@@ -984,7 +975,7 @@ probe_deployed() {
   local rpcuser
   rpcuser="$(curl -s -m 20 -o "$WORK/dep-pub.json" -w '%{http_code}' -X POST \
       -H "Host: $HOST" -H "Origin: $APP_ORIGIN" -H 'content-type: application/json' \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION" \
       "$GATE_BASE/__zeroship/v1/probe.public" -d '{"json":{}}')"
   row "identity.rpc_values" "$rpcuser email=$(classify_email "$(json_get "$WORK/dep-pub.json" 'o.json.user.email')") id=$(classify_id "$(json_get "$WORK/dep-pub.json" 'o.json.user.id')")" >> "$out"
 
@@ -1003,18 +994,18 @@ probe_deployed() {
   local so
   so="$(curl -s -m 20 -o "$WORK/dep-so.json" -D "$WORK/dep-so.hdr" -w '%{http_code}' -X POST \
       -H "Host: $HOST" -H "Origin: $APP_ORIGIN" -H 'X-ZS-Auth: 1' -H 'content-type: application/json' \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION; zeroship_app_anchor=$DEP_ANCHOR" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION; __Host-zeroship_app_anchor=$DEP_ANCHOR" \
       "$GATE_BASE/__zeroship/auth/signout" -d '{}')"
   row "signout" "$so cookies=$(cookie_summary "$WORK/dep-so.hdr")" >> "$out"
   local after
   after="$(curl -s -m 20 -o "$WORK/dep-after.json" -w '%{http_code}' -H "Host: $HOST" \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION" \
       "$GATE_BASE/__zeroship/auth/session")"
   row "signout.replay_session" "$after error=$(json_get "$WORK/dep-after.json" 'o.error')" >> "$out"
   local afterrpc
   afterrpc="$(curl -s -m 20 -o "$WORK/dep-afterrpc.json" -w '%{http_code}' -X POST \
       -H "Host: $HOST" -H "Origin: $APP_ORIGIN" -H 'content-type: application/json' \
-      -H "Cookie: zeroship_app_session=$DEP_SESSION" \
+      -H "Cookie: __Host-zeroship_app_session=$DEP_SESSION" \
       "$GATE_BASE/__zeroship/v1/probe.userDeclared" -d '{"json":{}}')"
   row "signout.replay_rpc" "$afterrpc anonymous=$(json_get "$WORK/dep-afterrpc.json" '(o&&o.json&&o.json.user)?"no":"yes"')" >> "$out"
   return 0
@@ -1032,6 +1023,9 @@ grep -q '^credential.wrong .*code_issued=no' "$WORK/deployed.txt" \
 grep -qE '^session.exchange .*<SESSION>\([^)]*HttpOnly' "$WORK/deployed.txt" \
   && pass "ABSOLUTE(deployed): the session cookie is HttpOnly" \
   || fail "ABSOLUTE(deployed): the session cookie is NOT HttpOnly"
+grep -qi '^set-cookie: *__Host-zeroship_app_session=.*; *Secure\([;[:space:]]\|$\)' "$WORK/dep-sess.hdr" \
+  && pass "ABSOLUTE(deployed): the session cookie uses __Host- and Secure" \
+  || fail "ABSOLUTE(deployed): the session cookie lacks __Host- or Secure"
 if [ -s "$WORK/dep-sess.json" ]; then
   [ "$(leaks_token "$WORK/dep-sess.json")" = "no" ] \
     && pass "ABSOLUTE(deployed): no token key in the exchange response body" \

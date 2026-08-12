@@ -117,7 +117,7 @@ impl Fixture {
         )
         .await
         .expect("create idp session");
-        let session_cookie = session_cookie::set_cookie(&session.id, true)
+        let session_cookie = session_cookie::set_cookie(&session.id)
             .split(';')
             .next()
             .expect("cookie pair")

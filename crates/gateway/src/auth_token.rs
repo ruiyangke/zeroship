@@ -699,14 +699,8 @@ pub(crate) async fn mint_session_from_code(
     HttpResponse::Ok()
         .header("cache-control", CACHE_NO_STORE)
         .header("set-cookie", session_cookie)
-        .header(
-            "set-cookie",
-            anchors::set_anchor_cookie(&anchor_id, state.config.insecure_dev),
-        )
-        .header(
-            "set-cookie",
-            anchors::set_breadcrumb_cookie(&route.host, state.config.insecure_dev),
-        )
+        .header("set-cookie", anchors::set_anchor_cookie(&anchor_id))
+        .header("set-cookie", anchors::set_breadcrumb_cookie(&route.host))
         .json(&json!({
             "user": user,
             "expires_at": expires_at,
@@ -759,7 +753,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     //    OP and ends in `login_required` for a revoked family.
     if !want_mint {
         if let (Some(token), Some(verifier)) = (
-            crate::oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev),
+            crate::oidc_rp::parse_app_session_cookie(cookie_header),
             state.session_verifier.as_ref(),
         ) {
             if let Ok(claims) = verifier.verify(&token, &route.client_id) {
@@ -783,13 +777,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                         // user who has one; closing it means adding the claim.
                         None,
                     );
-                    return identity_projection_ok(
-                        &route,
-                        state.config.insecure_dev,
-                        user,
-                        claims.exp,
-                        None,
-                    );
+                    return identity_projection_ok(&route, user, claims.exp, None);
                 }
                 // Revoked family / non-`pws_` sub → fall through to anchor
                 // reload-recovery (which will end in login_required for a revoked
@@ -814,9 +802,8 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     //    anchor, rotate the server-held family, re-create the gateway session,
     //    re-set the session cookie, return the projection. Released
     //    immediately (NO conn held across the OP refresh).
-    let Some(anchor_id) = anchors::parse_anchor_cookie(cookie_header, state.config.insecure_dev)
-    else {
-        return login_required(&route.host, state.config.insecure_dev);
+    let Some(anchor_id) = anchors::parse_anchor_cookie(cookie_header) else {
+        return login_required(&route.host);
     };
 
     let anchor = {
@@ -834,7 +821,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         // `anchor.app_id == route.app_id` bind check.
         match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
-            Ok(None) => return login_required(&route.host, state.config.insecure_dev),
+            Ok(None) => return login_required(&route.host),
             Err(e) => {
                 tracing::error!(error = %e, "/session: anchor read failed");
                 return error_response(
@@ -959,13 +946,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 rotated.avatar_url.as_deref(),
             );
             let expires_at = now_secs() + crate::oidc_rp::APP_SESSION_MAX_AGE_SECS;
-            identity_projection_ok(
-                &route,
-                state.config.insecure_dev,
-                user,
-                expires_at,
-                Some(new_session_cookie),
-            )
+            identity_projection_ok(&route, user, expires_at, Some(new_session_cookie))
         }
         Err(RotationError::LoginRequired) => {
             // Anchor-dead: delete the row + clear the breadcrumb.
@@ -974,7 +955,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     let _ = anchors::delete(&mut conn, route.app_id, anchor_id).await;
                 }
             }
-            login_required(&route.host, state.config.insecure_dev)
+            login_required(&route.host)
         }
         Err(RotationError::Upstream(msg)) => {
             tracing::warn!(error = %msg, "/session: reload-recovery upstream failure");
@@ -995,7 +976,6 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
 /// `Set-Cookie` header (HttpOnly, never JS-readable).
 fn identity_projection_ok(
     route: &RouteCtx,
-    insecure_dev: bool,
     user: serde_json::Value,
     expires_at: i64,
     new_session_cookie: Option<String>,
@@ -1005,10 +985,7 @@ fn identity_projection_ok(
     if let Some(cookie) = new_session_cookie {
         builder.header("set-cookie", cookie);
     }
-    builder.header(
-        "set-cookie",
-        anchors::set_breadcrumb_cookie(&route.host, insecure_dev),
-    );
+    builder.header("set-cookie", anchors::set_breadcrumb_cookie(&route.host));
     builder.json(&json!({ "user": user, "expires_at": expires_at }))
 }
 
@@ -1399,7 +1376,7 @@ fn sign_session_cookie(
                 "session cookie mint failed",
             )
         })?;
-    Ok(crate::oidc_rp::set_app_session_cookie(&token, state.config.insecure_dev))
+    Ok(crate::oidc_rp::set_app_session_cookie(&token))
 }
 
 /// Issue the signed `__Host-zeroship_app_session` cookie for the INTERACTIVE
@@ -1551,11 +1528,11 @@ pub(crate) fn error_response(
         .json(&json!({ "error": code, "error_description": detail }))
 }
 
-fn login_required(host: &str, insecure_dev: bool) -> HttpResponse {
+fn login_required(host: &str) -> HttpResponse {
     HttpResponse::Unauthorized()
         .header("cache-control", CACHE_NO_STORE)
-        .header("set-cookie", anchors::clear_anchor_cookie(insecure_dev))
-        .header("set-cookie", anchors::clear_breadcrumb_cookie(host, insecure_dev))
+        .header("set-cookie", anchors::clear_anchor_cookie())
+        .header("set-cookie", anchors::clear_breadcrumb_cookie(host))
         .json(&json!({ "error": "login_required" }))
 }
 
@@ -1623,11 +1600,7 @@ mod session_csrf_tests {
     const HOST: &str = "app.zeroship.localhost";
     const ORIGIN: &str = "https://app.zeroship.localhost";
 
-    fn gate_config(
-        origin_scheme: OriginScheme,
-        insecure_dev: bool,
-        trusted_origins: &[&str],
-    ) -> GateConfig {
+    fn gate_config(origin_scheme: OriginScheme, trusted_origins: &[&str]) -> GateConfig {
         GateConfig {
             control_url: String::new(),
             control_key: String::new(),
@@ -1640,7 +1613,6 @@ mod session_csrf_tests {
                 .iter()
                 .map(|origin| origin.parse().expect("validated trusted origin"))
                 .collect(),
-            insecure_dev,
             trust_proxy: false,
             public_url: String::new(),
         }
@@ -1655,7 +1627,7 @@ mod session_csrf_tests {
             .header("x-zs-auth", "1")
             // no Origin header
             .to_http_request();
-        let config = gate_config(OriginScheme::Https, false, &[]);
+        let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(
             res.is_err(),
@@ -1671,7 +1643,7 @@ mod session_csrf_tests {
             .header("x-zs-auth", "1")
             .header(http::header::ORIGIN, "https://evil.example")
             .to_http_request();
-        let config = gate_config(OriginScheme::Https, false, &[]);
+        let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_err(), "mint with a foreign Origin must be rejected");
     }
@@ -1684,7 +1656,7 @@ mod session_csrf_tests {
             .header(http::header::ORIGIN, ORIGIN)
             // no X-ZS-Auth
             .to_http_request();
-        let config = gate_config(OriginScheme::Https, false, &[]);
+        let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_err(), "mint without X-ZS-Auth must be rejected");
     }
@@ -1699,13 +1671,13 @@ mod session_csrf_tests {
             .header(http::header::ORIGIN, ORIGIN)
             .header("sec-fetch-site", "same-origin")
             .to_http_request();
-        let config = gate_config(OriginScheme::Https, false, &[]);
+        let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_ok(), "legitimate same-origin SDK mint must succeed: {res:?}");
     }
 
     #[test]
-    fn origin_scheme_is_independent_of_insecure_dev() {
+    fn origin_scheme_controls_same_origin_guard() {
         let https_req = TestRequest::default()
             .header(http::header::HOST, HOST)
             .header("x-zs-auth", "1")
@@ -1717,24 +1689,19 @@ mod session_csrf_tests {
             .header(http::header::ORIGIN, "http://app.zeroship.localhost")
             .to_http_request();
 
-        let https_with_insecure_cookies = gate_config(OriginScheme::Https, true, &[]);
-        assert!(
-            session_csrf_guard(&https_req, HOST, &https_with_insecure_cookies, true).is_ok()
-        );
-        assert!(
-            session_csrf_guard(&http_req, HOST, &https_with_insecure_cookies, true).is_err()
-        );
+        let https_config = gate_config(OriginScheme::Https, &[]);
+        assert!(session_csrf_guard(&https_req, HOST, &https_config, true).is_ok());
+        assert!(session_csrf_guard(&http_req, HOST, &https_config, true).is_err());
 
-        let http_with_secure_cookies = gate_config(OriginScheme::Http, false, &[]);
-        assert!(session_csrf_guard(&http_req, HOST, &http_with_secure_cookies, true).is_ok());
-        assert!(session_csrf_guard(&https_req, HOST, &http_with_secure_cookies, true).is_err());
+        let http_config = gate_config(OriginScheme::Http, &[]);
+        assert!(session_csrf_guard(&http_req, HOST, &http_config, true).is_ok());
+        assert!(session_csrf_guard(&https_req, HOST, &http_config, true).is_err());
     }
 
     #[test]
     fn configured_origins_accept_realistic_metadata_without_weakening_checks() {
         let config = gate_config(
             OriginScheme::Https,
-            false,
             &[
                 ORIGIN,
                 "https://console.zeroship.localhost",
@@ -1808,7 +1775,7 @@ mod session_csrf_tests {
         let req = TestRequest::default()
             .header(http::header::HOST, HOST)
             .to_http_request();
-        let config = gate_config(OriginScheme::Https, false, &[]);
+        let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, false);
         assert!(res.is_ok(), "non-mint read must not require Origin or X-ZS-Auth: {res:?}");
     }

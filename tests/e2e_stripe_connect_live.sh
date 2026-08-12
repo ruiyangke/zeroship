@@ -81,6 +81,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 PASS=0; FAIL=0; DIVERGENCE=0
@@ -291,11 +293,14 @@ chmod 600 "$WORK/signing-key.pem"
 # control — REAL https://api.stripe.com, the operator's TEST secret key (from env,
 # NEVER on argv where it'd hit /proc/cmdline), and a known throwaway webhook
 # secret so the harness can produce VALID signatures (the REAL verify path).
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \

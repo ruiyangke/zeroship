@@ -60,55 +60,50 @@ pub const ANCHOR_ABS_DAYS: i64 = 30;
 /// `ANCHOR_ABS_DAYS` and the breadcrumb.
 pub const ANCHOR_COOKIE_MAX_AGE_SECS: i64 = ANCHOR_ABS_DAYS * 24 * 3600;
 
-/// Production anchor cookie name (`__Host-` prefix → Secure required).
+/// Anchor cookie name (`__Host-` prefix requires `Secure`).
 ///
 /// DISTINCT from the interactive `__Host-zeroship_app_session` cookie
-/// (`oidc_rp::APP_SESSION_COOKIE_PROD`). The interactive credential is a
+/// (`oidc_rp::APP_SESSION_COOKIE`). The interactive credential is a
 /// locally verified `zeroship-sess+jwt` assertion (SameSite=Lax, about 15
 /// minutes); the reload-recovery credential identifies a
 /// `zeroship.app_session_anchors` row (SameSite=Strict, 30 days). Separate names
 /// keep the live-session assertion and recovery credential unambiguous.
-pub const ANCHOR_COOKIE_PROD: &str = "__Host-zeroship_app_anchor";
-/// Dev anchor cookie name (no `__Host-` prefix, no Secure).
-pub const ANCHOR_COOKIE_DEV: &str = "zeroship_app_anchor";
+pub const ANCHOR_COOKIE: &str = "__Host-zeroship_app_anchor";
 
-/// Resolve the anchor cookie name for the current environment. The anchor has
-/// its OWN cookie name (`__Host-zeroship_app_anchor`), separate from the interactive
-/// `oidc_rp::app_session_cookie_name` (`__Host-zeroship_app_session`), and uses
-/// `SameSite=Strict` (vs the interactive cookie's `Lax`).
+/// The anchor has its OWN cookie name (`__Host-zeroship_app_anchor`), separate
+/// from the interactive `oidc_rp::app_session_cookie_name`
+/// (`__Host-zeroship_app_session`), and uses `SameSite=Strict` (vs the
+/// interactive cookie's `Lax`).
 #[must_use]
-pub fn anchor_cookie_name(insecure_dev: bool) -> &'static str {
-    if insecure_dev { ANCHOR_COOKIE_DEV } else { ANCHOR_COOKIE_PROD }
+pub const fn anchor_cookie_name() -> &'static str {
+    ANCHOR_COOKIE
 }
 
 /// Build the `Set-Cookie` value for the `__Host-zeroship_app_anchor` anchor.
 ///
 /// `SameSite=Strict`: the anchor is never legitimately
 /// needed on a cross-site request, so a top-level navigation cannot ride
-/// it. `HttpOnly` (XSS cannot read it). `insecure_dev` drops `Secure` AND
-/// the `__Host-` prefix together (RFC 6265bis §4.1.3.2 requires `Secure`
-/// for `__Host-`).
+/// it. `HttpOnly` prevents JavaScript from reading it. `Secure` and the
+/// `__Host-` prefix are unconditional in every environment.
 #[must_use]
-pub fn set_anchor_cookie(anchor_id: &Uuid, insecure_dev: bool) -> String {
-    let name = anchor_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
+pub fn set_anchor_cookie(anchor_id: &Uuid) -> String {
+    let name = anchor_cookie_name();
     format!(
-        "{name}={anchor_id}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age={ANCHOR_COOKIE_MAX_AGE_SECS}"
+        "{name}={anchor_id}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age={ANCHOR_COOKIE_MAX_AGE_SECS}"
     )
 }
 
 /// Clear the anchor cookie (signout / anchor-dead recovery).
 #[must_use]
-pub fn clear_anchor_cookie(insecure_dev: bool) -> String {
-    let name = anchor_cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0")
+pub fn clear_anchor_cookie() -> String {
+    let name = anchor_cookie_name();
+    format!("{name}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0")
 }
 
 /// Parse the anchor id out of a `Cookie` header value.
 #[must_use]
-pub fn parse_anchor_cookie(cookie_header: &str, insecure_dev: bool) -> Option<Uuid> {
-    let name = anchor_cookie_name(insecure_dev);
+pub fn parse_anchor_cookie(cookie_header: &str) -> Option<Uuid> {
+    let name = anchor_cookie_name();
     let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -132,21 +127,18 @@ pub fn breadcrumb_cookie_name(host: &str) -> String {
 }
 
 /// Build the `Set-Cookie` value for the breadcrumb. Non-HttpOnly,
-/// `SameSite=Lax`, `Secure` (dropped in dev), 30-day `Max-Age` matching the
-/// anchor (§8.3).
+/// `SameSite=Lax`, `Secure`, 30-day `Max-Age` matching the anchor (section 8.3).
 #[must_use]
-pub fn set_breadcrumb_cookie(host: &str, insecure_dev: bool) -> String {
+pub fn set_breadcrumb_cookie(host: &str) -> String {
     let name = breadcrumb_cookie_name(host);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=true; Path=/; SameSite=Lax{secure}; Max-Age={ANCHOR_COOKIE_MAX_AGE_SECS}")
+    format!("{name}=true; Path=/; SameSite=Lax; Secure; Max-Age={ANCHOR_COOKIE_MAX_AGE_SECS}")
 }
 
 /// Clear the breadcrumb cookie (only on a `401 login_required`, §4.3).
 #[must_use]
-pub fn clear_breadcrumb_cookie(host: &str, insecure_dev: bool) -> String {
+pub fn clear_breadcrumb_cookie(host: &str) -> String {
     let name = breadcrumb_cookie_name(host);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; SameSite=Lax{secure}; Max-Age=0")
+    format!("{name}=; Path=/; SameSite=Lax; Secure; Max-Age=0")
 }
 
 /// One anchor row.
@@ -588,9 +580,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anchor_cookie_prod_is_host_strict_httponly_secure() {
+    fn anchor_cookie_is_host_strict_httponly_secure() {
         let id = Uuid::new_v4();
-        let c = set_anchor_cookie(&id, false);
+        let c = set_anchor_cookie(&id);
         assert!(c.starts_with("__Host-zeroship_app_anchor="), "{c}");
         assert!(c.contains(&id.to_string()));
         assert!(c.contains("Path=/"));
@@ -603,45 +595,29 @@ mod tests {
     }
 
     #[test]
-    fn anchor_cookie_dev_drops_secure_and_host_prefix() {
-        let id = Uuid::new_v4();
-        let c = set_anchor_cookie(&id, true);
-        assert!(!c.starts_with("__Host-"), "dev must drop __Host-: {c}");
-        assert!(c.starts_with("zeroship_app_anchor="), "{c}");
-        assert!(!c.contains("Secure"), "{c}");
-        assert!(c.contains("HttpOnly"));
-        assert!(c.contains("SameSite=Strict"));
-    }
-
-    #[test]
     fn anchor_cookie_clear_zeroes_max_age() {
-        let c = clear_anchor_cookie(false);
+        let c = clear_anchor_cookie();
         assert!(c.contains("Max-Age=0"));
         assert!(c.contains("Secure"));
-        let dev = clear_anchor_cookie(true);
-        assert!(!dev.contains("Secure"));
-        assert!(!dev.starts_with("__Host-"));
+        assert!(c.starts_with("__Host-"));
     }
 
     #[test]
     fn anchor_cookie_parse_roundtrips() {
         let id = Uuid::new_v4();
         let header = format!("foo=bar; __Host-zeroship_app_anchor={id}; baz=qux");
-        assert_eq!(parse_anchor_cookie(&header, false), Some(id));
-        assert_eq!(parse_anchor_cookie("nothing", false), None);
+        assert_eq!(parse_anchor_cookie(&header), Some(id));
+        assert_eq!(parse_anchor_cookie("nothing"), None);
         assert_eq!(
-            parse_anchor_cookie("__Host-zeroship_app_anchor=not-a-uuid", false),
+            parse_anchor_cookie("__Host-zeroship_app_anchor=not-a-uuid"),
             None
         );
-        let dev = format!("zeroship_app_anchor={id}");
-        assert_eq!(parse_anchor_cookie(&dev, true), Some(id));
-        // Prod-named cookie does not match in dev mode.
-        assert_eq!(parse_anchor_cookie(&header, true), None);
+        assert_eq!(parse_anchor_cookie(&format!("zeroship_app_anchor={id}")), None);
         // CRITICAL (MAJOR fix): the interactive OIDC cookie name must NOT be
         // parsed as an anchor — distinct stores, distinct names.
         let interactive = format!("__Host-zeroship_app_session={id}");
         assert_eq!(
-            parse_anchor_cookie(&interactive, false),
+            parse_anchor_cookie(&interactive),
             None,
             "the interactive __Host-zeroship_app_session must NOT resolve as an anchor"
         );
@@ -649,23 +625,21 @@ mod tests {
 
     #[test]
     fn breadcrumb_is_non_httponly_lax_host_keyed() {
-        let c = set_breadcrumb_cookie("myapp.zeroship.ai", false);
+        let c = set_breadcrumb_cookie("myapp.zeroship.ai");
         assert!(c.starts_with("zs.myapp.zeroship.ai.is.authenticated=true"), "{c}");
         // Breadcrumb is readable by JS — NOT HttpOnly.
         assert!(!c.contains("HttpOnly"), "breadcrumb must be JS-readable: {c}");
         assert!(c.contains("SameSite=Lax"), "{c}");
         assert!(c.contains("Secure"));
         assert!(c.contains("Max-Age=2592000"), "matches anchor 30d: {c}");
-
-        let dev = set_breadcrumb_cookie("myapp.localhost", true);
-        assert!(!dev.contains("Secure"), "{dev}");
     }
 
     #[test]
     fn breadcrumb_clear_zeroes_max_age() {
-        let c = clear_breadcrumb_cookie("h", false);
+        let c = clear_breadcrumb_cookie("h");
         assert!(c.contains("Max-Age=0"));
         assert!(!c.contains("HttpOnly"));
+        assert!(c.contains("Secure"));
     }
 
     #[test]

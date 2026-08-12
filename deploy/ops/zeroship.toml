@@ -8,8 +8,9 @@
 # must accept an additional exact origin; an absent list means no additions.
 
 [auth]
-# The native OP issuer is supplied to the auth service through AUTH_PUBLIC_URL
-# in deploy/compose/docker-compose.yml. This shared overlay does not define that key.
+# The native OP public origin is supplied to auth through AUTH_PUBLIC_URL, and
+# control receives the matching token issuer through AUTH_PLATFORM_ISSUER in
+# deploy/compose/docker-compose.yml. This shared overlay defines neither key.
 #
 # First-party trusted OAuth client(s) that skip native OP consent. This is the
 # FIRST-PARTY CONSOLE only - a deliberate, narrow exception to the spec rule
@@ -67,9 +68,8 @@ log_format = "json"
 #
 # LOCAL COMPOSE: `zeroship dev init` writes strong, stable values to the
 # gitignored deploy/compose/.env file. Compose supplies those values to every
-# consumer through these references. Services still run with --dev-insecure
-# until the later guard-by-guard migration removes that flag; this provisioning
-# step changes the inputs, not the flag.
+# consumer through these references. Every service runs the same secret and
+# authentication checks locally that it runs in any other deployment.
 [secrets]
 control_key  = "urn:zeroship:env:ZEROSHIP_CONTROL_KEY"
 master_key   = "urn:zeroship:env:ZEROSHIP_MASTER_KEY"

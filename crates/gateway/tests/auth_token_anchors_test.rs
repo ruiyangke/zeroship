@@ -525,9 +525,6 @@ fn build_state_with_route(
             auth_ui_url: op_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],
-            // insecure_dev = false exercises the prod __Host- / Strict / Secure
-            // cookie attributes.
-            insecure_dev: false,
             trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),
         },
@@ -727,8 +724,7 @@ fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> Stri
             scopes,
         })
         .expect("issue signed session cookie");
-    // `insecure_dev = false` in build_state ⇒ the prod `__Host-` cookie name.
-    let name = zeroship_gateway::oidc_rp::app_session_cookie_name(false);
+    let name = zeroship_gateway::oidc_rp::app_session_cookie_name();
     format!("{name}={token}")
 }
 
@@ -1759,7 +1755,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
     let anchor_id =
-        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+        anchors::parse_anchor_cookie(&anchor_pair).expect("anchor id parses from cookie");
 
     {
         let client = connect_pg(&dsn).await;
@@ -1938,7 +1934,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
     let anchor_id =
-        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+        anchors::parse_anchor_cookie(&anchor_pair).expect("anchor id parses from cookie");
 
     // First rotation presents the initial family token and persists rt_rotated_1.
     let req = test::TestRequest::get()
@@ -2035,7 +2031,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
     let anchor_id =
-        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+        anchors::parse_anchor_cookie(&anchor_pair).expect("anchor id parses from cookie");
 
     op.invalid_grant.store(true, Ordering::SeqCst);
     let req = test::TestRequest::get()

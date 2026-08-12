@@ -260,7 +260,7 @@ async fn logout_post_revokes_local_session_cookie() {
         .header("content-type", "application/x-www-form-urlencoded")
         .header(
             "cookie",
-            format!("zsidp_csrf={csrf}; zsidp_session={}", session.id),
+            format!("__Host-zsidp_csrf={csrf}; __Host-zsidp_session={}", session.id),
         )
         .set_payload(body)
         .to_request();

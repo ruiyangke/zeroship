@@ -197,7 +197,7 @@ probe() {
   local rpc="$base/__zeroship/v1"
   local cookie_name proc cred hdr
 
-  if [ "$side" = "dev" ]; then cookie_name="__zeroship_dev_session"; else cookie_name="zeroship_app_session"; fi
+  if [ "$side" = "dev" ]; then cookie_name="__zeroship_dev_session"; else cookie_name="__Host-zeroship_app_session"; fi
 
   # Blank only what a clock or a random id makes volatile. request ids leak into
   # some error envelopes; timestamps into the session projection.
@@ -207,8 +207,9 @@ probe() {
   # exactly that in the diff -- present on one side only still diverges.
   #
   # AS OF THE STACK STRIP in crates/runtime/src/core/dispatch.rs, no tier emits
-  # a `stack` in an RPC error body at all (unless AUTH_INSECURE_DEV is set), so
-  # this substitution is now a TRIPWIRE rather than a normaliser.
+  # a `stack` in an RPC error body at all -- the strip is unconditional and the
+  # `AUTH_INSECURE_DEV` escape hatch that used to lift it is deleted -- so this
+  # substitution is now a TRIPWIRE rather than a normaliser.
   #
   # DO NOT READ IT AS EVIDENCE ABOUT LEAKS EITHER WAY. Because the scrub runs on
   # BOTH sides, this diff goes GREEN when both tiers emit a stack just as
@@ -510,7 +511,7 @@ SQL
 # gateway Ed25519 key -- the same technique tests/e2e_auth_rpc.sh uses, and the
 # same one that mints the admin PAT. The gateway's REAL cookie validation runs
 # (signature, kid, iss, exp, app binding, pws_ sanity, revocation gate); nothing
-# is bypassed and no --dev-insecure auth escape hatch is added to the binaries.
+# is bypassed and no auth escape hatch is added to the binaries.
 # What is skipped is only the interactive OIDC dance that would otherwise need a
 # live OP standing beside the stack.
 mint_session() {  # mint_session <sub> <email> <name> <avatar-json> <exp-offset-secs>
@@ -552,7 +553,7 @@ CRED_deployed_forged="$(flip_last "$CRED_deployed_alpha")"
 ready=0
 for _ in $(seq 1 25); do
   c="$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST -H 'content-type: application/json' \
-      -H "Host: $HOST" -H "Origin: http://$HOST" -H "Cookie: zeroship_app_session=$CRED_deployed_alpha" \
+      -H "Host: $HOST" -H "Origin: http://$HOST" -H "Cookie: __Host-zeroship_app_session=$CRED_deployed_alpha" \
       "http://localhost:$GATE_PORT/__zeroship/v1/probe.userDeclared" -d '{"json":{}}')"
   [ "$c" = "200" ] && { ready=1; break; }
   sleep 2

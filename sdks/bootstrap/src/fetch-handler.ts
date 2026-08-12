@@ -289,7 +289,7 @@ function statusFromError(e: { status?: unknown } | null | undefined): number {
 }
 
 function errResponse(status: number, code: string, message: string, details?: unknown) {
-  if (status >= 500 && !insecureDevErrorsEnabled()) {
+  if (status >= 500) {
     const requestId = newRequestId();
     logRawError(requestId, status, "Error", message, { code, details });
     return new Response(JSON.stringify({
@@ -319,7 +319,7 @@ function errorBodyFromThrown(e: unknown, status: number): Record<string, unknown
     retryable?: unknown;
     request_id?: unknown;
   } | null | undefined;
-  if (status >= 500 && !insecureDevErrorsEnabled()) {
+  if (status >= 500) {
     const requestId = typeof err?.request_id === "string" ? err.request_id : newRequestId();
     logRawError(
       requestId,
@@ -350,17 +350,6 @@ function errorBodyFromThrown(e: unknown, status: number): Record<string, unknown
   if (typeof err?.retryable === "boolean") body.retryable = err.retryable;
   if (typeof err?.request_id === "string") body.request_id = err.request_id;
   return body;
-}
-
-function insecureDevErrorsEnabled(): boolean {
-  const proc = (globalThis as {
-    process?: { env?: Record<string, string | undefined> };
-  }).process;
-  const value =
-    proc?.env?.AUTH_INSECURE_DEV ??
-    proc?.env?.INSECURE_DEV ??
-    (globalThis as { env?: Record<string, string | undefined> }).env?.AUTH_INSECURE_DEV;
-  return value === "1" || value === "true" || value === "TRUE";
 }
 
 function newRequestId(): string {

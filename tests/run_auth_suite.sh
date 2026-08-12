@@ -217,7 +217,13 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  echo "AUTH SUITE: ${passed} tests passed, 0 unexpected skips, ${tolerated} allowlisted (floor ${AUTH_MIN_PASSED})"
+  # ZS_SKIP_TOLERATED, not `tolerated`: the census lives in
+  # tests/lib/skip_census.sh and exports the ZS_-prefixed names. Under `set -u`
+  # the unprefixed spelling aborted the script HERE, on the success line, so a
+  # fully green suite exited 1 with no verdict printed and the failure looked
+  # like a test failure. Only the success branch was affected, which is why it
+  # survived: a red run takes the else branch and reports normally.
+  echo "AUTH SUITE: ${passed} tests passed, 0 unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted (floor ${AUTH_MIN_PASSED})"
 else
   echo "AUTH SUITE: FAILED"
 fi

@@ -61,6 +61,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 APP="$ROOT/examples/workflow-probe"
 ZSHIP="$APP/dist/app.zship"
 WORK="$(mktemp -d)"
@@ -87,7 +89,6 @@ VITE_PORT="${VITE_PORT:-5051}"
 REDIS_PORT="${REDIS_PORT:-6399}"
 REDIS_CONTAINER="zs-devdeploy-wf-redis"
 CONTROL_KEY="dd-wf-ck"; MASTER_KEY="dd-wf-mk"
-export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="wfprobe"
 MUTATE="${MUTATE:-none}"
@@ -305,6 +306,8 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 # own scheduler run (that script passes --disable-workflow-engine and drives
 # the engine from a Rust test): the whole point here is the path a deployed
 # app actually takes.
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --gateway-url "http://localhost:$GATE_PORT" > "$WORK/control.log" 2>&1 & PIDS+=($!)

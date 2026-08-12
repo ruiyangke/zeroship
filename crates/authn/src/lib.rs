@@ -75,10 +75,15 @@ impl PatIssuer {
         })
     }
 
+    /// Creates an issuer backed by a fresh, process-local signing key.
+    ///
+    /// This is suitable for ephemeral fixtures. Long-lived services should use
+    /// [`Self::new`] with operator-managed signing material so issued tokens
+    /// remain valid across restarts.
     #[must_use]
-    pub fn dev_insecure() -> Self {
+    pub fn generate_ephemeral() -> Self {
         let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        Self::new(&key).expect("generated dev PAT key is valid")
+        Self::new(&key).expect("generated ephemeral PAT key is valid")
     }
 
     pub fn issue(
@@ -506,13 +511,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dev_insecure_generates_fresh_key_per_issuer() {
-        let first = PatIssuer::dev_insecure();
-        let second = PatIssuer::dev_insecure();
+    fn generate_ephemeral_uses_fresh_key_per_issuer() {
+        let first = PatIssuer::generate_ephemeral();
+        let second = PatIssuer::generate_ephemeral();
 
         assert_ne!(
             first.kid, second.kid,
-            "dev_insecure PAT issuers must not share one constant signing key"
+            "ephemeral PAT issuers must not share one constant signing key"
         );
     }
 }

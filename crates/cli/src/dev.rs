@@ -19,7 +19,9 @@ const ENV_KEYS: &[&str] = &[
     "ZEROSHIP_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
     "GATEWAY_OIDC_SECRET",
+    "MIGRATED_POLICY_SEAL_KEY",
     "STASH_SIGNING_KEY",
+    "STRIPE_WEBHOOK_SECRET",
     "PAIRWISE_SALT",
     "AUTH_STASH_SIGNING_KEY",
     "AUTH_TOTP_ENC_KEY",
@@ -470,14 +472,17 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
     }
     match name {
         "ZEROSHIP_MASTER_KEY" | "AUTH_TOTP_ENC_KEY" => {
-            zeroship_core::config::validate_master_key_material(name, value, false)
+            zeroship_core::config::validate_master_key_material(name, value)
         }
-        "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(value, false),
+        "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(value),
         "STASH_SIGNING_KEY" | "AUTH_STASH_SIGNING_KEY" => {
-            zeroship_core::config::validate_stash_key(value, false)
+            zeroship_core::config::validate_stash_key(value)
         }
-        "PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value, false),
-        "ZEROSHIP_CONTROL_KEY" | "GATEWAY_OIDC_SECRET" => Ok(()),
+        "PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value),
+        "ZEROSHIP_CONTROL_KEY"
+        | "GATEWAY_OIDC_SECRET"
+        | "MIGRATED_POLICY_SEAL_KEY"
+        | "STRIPE_WEBHOOK_SECRET" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }
 }

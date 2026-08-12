@@ -308,12 +308,18 @@ jobs:
       # in the container's writable layer while the Redis cache and the Redpanda
       # log both had durable volumes. Text-only, runs no docker.
       #
-      # Its sibling tests/compose_port_exposure_gate.sh is deliberately NOT wired:
-      # it is RED at HEAD on the control plane's 0.0.0.0 publication, which is a
-      # live exposure pending an operator decision, and allow-listing it green
-      # would be the hollow-arm shape this repo keeps removing.
       - name: compose keeps stateful data on named volumes
         run: tests/compose_stateful_volume_gate.sh
+      # Its sibling was NOT wired for a while: the note here said it was RED on
+      # the control plane's 0.0.0.0 publication. That stopped being true when
+      # control lost its host port, and the gate is now green on both sides of
+      # this change. It is wired because it is what pins the property this
+      # commit's series established: the Caddy control route is active ONLY
+      # while the compose control service carries no security-relaxation input.
+      # Discriminates -- adding `--dev-insecure` back to the control block takes
+      # it from 10 passed / 0 failed to 8 / 2, exit 1. Text-only, runs no docker.
+      - name: compose exposes only the edge on 0.0.0.0
+        run: tests/compose_port_exposure_gate.sh
       # Derived from crates/core/src/config/secrets.rs: compose shipped a
       # 10-byte WORKER_KEY and a 27-byte STASH_SIGNING_KEY against a 32-byte
       # minimum, so worker and control refused to start. Text-only.
@@ -835,10 +841,16 @@ jobs:
   # it unset (the case here) step 3 takes the `dev-provision` arm instead, which
   # writes to the database and blob store directly and whose own header says it
   # "deliberately bypasses the PAT/OAuth flow". So the deploy CLI - the command
-  # the golden path is named after - is NOT exercised here. Minting a PAT needs
-  # zeroship-control started with `--signing-key-file`, which golden_path.sh does
-  # not do (it runs under ZEROSHIP_DEV_INSECURE with an ephemeral key nothing can
-  # sign against). Closing that is a change to the harness, not to this file.
+  # the golden path is named after - is NOT exercised here.
+  #
+  # THE STATED BLOCKER IS GONE, and the gap is not. This note used to say minting
+  # a PAT needs zeroship-control started with `--signing-key-file`, "which
+  # golden_path.sh does not do (it runs under ZEROSHIP_DEV_INSECURE with an
+  # ephemeral key nothing can sign against)". Both halves stopped being true when
+  # the relaxation flag was deleted: every zeroship-control the harness starts now
+  # passes `--signing-key-file "$GP_SIGNING_KEY"`. What still gates the PAT arm is
+  # only that nothing in CI sets ZEROSHIP_TOKEN. Closing it remains a change to
+  # the harness, not to this file.
   golden-path:
     runs-on: ubuntu-latest
     # A bound, because one of the seven local runs taken while wiring this up

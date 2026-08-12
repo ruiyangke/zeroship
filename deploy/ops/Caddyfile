@@ -51,18 +51,9 @@ http://auth.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 
 # control.<domain> - creator control plane (app CRUD, deploy, environment,
 # secrets, and billing).
-#
-# STAGED, NOT LIVE. Do not uncomment this block until BOTH prerequisites hold:
-#   1. control no longer runs with --dev-insecure; and
-#   2. the hardcoded platform-key has been replaced with a provisioned secret
-#      shared by every control-key consumer.
-# Publishing this route before then would expose relaxed control-plane auth and
-# a known credential at the public edge. Once both prerequisites land, Caddy
-# reaches control by service name over the compose network; no host port is
-# needed.
-# http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
-# 	reverse_proxy control:9090
-# }
+http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
+	reverse_proxy control:9090
+}
 
 # console.<domain> - the creator console.
 #

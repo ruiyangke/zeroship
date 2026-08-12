@@ -43,6 +43,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 PASS=0; FAIL=0; KNOWN=0
@@ -191,9 +193,12 @@ chmod 600 "$WORK/signing-key.pem"
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control — writes deploy blobs + manifests to S3.
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
@@ -202,7 +207,7 @@ curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "contro
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
   --storage-url "$STORAGE_S3" \
-  --blob-store "$BLOB_S3" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (blob-store=s3, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
@@ -211,7 +216,7 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker 
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$BLOB_S3" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --signing-key-file "$WORK/signing-key.pem" --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
@@ -283,6 +288,7 @@ envelope() {
 }
 dispatch() {
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$ST_APP" \
+    -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/json' -d "$(envelope "$1" "$2")"
 }
 jget_json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json'"$1"')??"")}catch(e){console.log("")}})'; }

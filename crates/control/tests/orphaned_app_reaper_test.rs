@@ -68,7 +68,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
     zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
-    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
     let blob_store: Arc<dyn BlobStore> =
@@ -105,7 +105,6 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
-        insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
@@ -116,7 +115,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),

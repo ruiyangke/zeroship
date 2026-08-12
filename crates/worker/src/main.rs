@@ -9,8 +9,7 @@ use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
-    CheckValue,
+    bootstrap_or_exit, CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -46,20 +45,6 @@ struct WorkerCli {
     /// Admin/control API shared secret.
     #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
     control_key: String,
-
-    /// Allow explicitly insecure local development startup.
-    ///
-    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
-    /// disables even when `ZEROSHIP_DEV_INSECURE=1` is set in the environment
-    /// (CLI presence overrides env — proper `CLI > env` precedence, S1).
-    #[arg(
-        long = "dev-insecure",
-        env = "ZEROSHIP_DEV_INSECURE",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    dev_insecure: Option<bool>,
 
     // No --trust-proxy: the worker has no client-facing IP logic.
 
@@ -186,7 +171,6 @@ impl std::fmt::Debug for WorkerCli {
             .field("worker_threads", &self.worker_threads)
             .field("control", &self.control)
             .field("control_key", &"<redacted>")
-            .field("dev_insecure", &self.dev_insecure)
             .field("max_isolates", &self.max_isolates)
             .field(
                 "max_pinned_isolates_per_app",
@@ -319,9 +303,6 @@ fn main() -> std::io::Result<()> {
     // early, so later partial moves of the overlay config can't invalidate it.
     let file_secrets = boot.overlay.config.secrets.clone();
 
-    // CLI presence overrides env: `--dev-insecure=false` disables even a stray
-    // `ZEROSHIP_DEV_INSECURE=1` (S1).
-    let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let port = cli.port;
     let workers_count = resolve_worker_threads(cli.worker_threads);
     let control_url = cli.control;
@@ -401,26 +382,11 @@ fn main() -> std::io::Result<()> {
     let bind_host = cli.bind;
     let socket_path = cli.socket;
 
-    if let Err(message) =
-        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
-    {
-        tracing::error!(error = %message, "worker: refusing to start without control key");
+    if control_key.is_empty() {
+        tracing::error!(
+            "worker: CONTROL_KEY / --control-key is required; refusing to start without control key"
+        );
         std::process::exit(1);
-    }
-
-    if worker_key.is_empty() {
-        if is_loopback_bind(&bind_host) {
-            tracing::warn!(
-                bind = %bind_host,
-                "WORKER_KEY not set — dispatch endpoints unauthenticated (loopback-only, dev mode)"
-            );
-        } else {
-            tracing::error!(
-                bind = %bind_host,
-                "refusing to bind non-loopback without WORKER_KEY — would expose unauthenticated code execution"
-            );
-            std::process::exit(1);
-        }
     }
 
     // `--workflow-advance-unsigned` makes POST /internal/workflow/advance-unsigned
@@ -429,14 +395,8 @@ fn main() -> std::io::Result<()> {
     // that - so the flag is the only thing standing between an unauthenticated
     // caller and workflow state replay.
     //
-    // Same posture as the empty-WORKER_KEY guard above, because it is the same
-    // hazard: unauthenticated mutation reachable over the network. Loopback is a
-    // developer running the durable-workflow e2e; anything else is an accident.
-    //
-    // Deliberately keyed on the FLAG, not on --dev-insecure. The e2e sets
-    // ZEROSHIP_DEV=1, which is a different variable from ZEROSHIP_DEV_INSECURE, so
-    // binding this to the dev-insecure posture would force every legitimate user of
-    // the flag to also waive the security posture - a strictly worse trade.
+    // The unsigned route has its own deliberately narrow loopback-only guard. It is
+    // unrelated to the deleted process-wide security-relaxation mode.
     if !unsigned_advance_bind_allowed(&bind_host, cli.workflow_advance_unsigned) {
         tracing::error!(
             bind = %bind_host,
@@ -446,17 +406,13 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if !worker_key.is_empty() && (!cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key)) {
-        // L6: a present-but-weak WORKER_KEY skips the empty-key loopback guard
-        // above, can bind any interface, and is brute-forceable for the
-        // ZeroShip-User HMAC. Hold a NON-EMPTY worker_key to the same ≥32-byte
-        // strength floor as the stash key / pairwise salt (empty stays handled
-        // by the dev-loopback branch above). Skipped for a secret REFERENCE
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+        // WORKER_KEY authenticates dispatch and the ZeroShip-User HMAC, so every
+        // worker requires the same 32-byte floor regardless of bind address.
+        // Skipped only for an unresolved secret REFERENCE
         // under --check-config (the raw ref text would wrongly fail the length
         // check); it runs on the resolved value at real boot.
-        if let Err(message) =
-            zeroship_core::config::validate_worker_key(&worker_key, insecure_dev)
-        {
+        if let Err(message) = zeroship_core::config::validate_worker_key(&worker_key) {
             tracing::error!(error = %message, "worker: refusing to start with unsafe WORKER_KEY");
             std::process::exit(1);
         }
@@ -511,7 +467,6 @@ fn main() -> std::io::Result<()> {
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
-        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
@@ -808,20 +763,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_control_key_rejects_missing_in_non_dev() {
-        let err =
-            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
-        assert!(err.contains("CONTROL_KEY"), "{err}");
+    fn worker_cli_has_no_security_relaxation_flag() {
+        let error = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure"])
+            .expect_err("deleted --dev-insecure flag must be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
-    fn worker_control_key_accepts_nonempty_in_non_dev() {
-        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
-    }
-
-    #[test]
-    fn worker_control_key_allows_missing_in_insecure_dev() {
-        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
+    fn worker_env_has_no_security_relaxation_binding() {
+        assert!(WorkerCli::try_parse_from(["zeroship-worker"]).is_ok());
     }
 
     /// `--workflow-advance-unsigned` must not be combined with a routable bind.
@@ -922,37 +872,6 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
-    // Serialise the tests that mutate the shared `ZEROSHIP_DEV_INSECURE`
-    // process environment so they don't race each other.
-    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// S1 regression: an explicit `--dev-insecure=false` on the CLI overrides a
-    /// stray `ZEROSHIP_DEV_INSECURE=1` in the environment. Pre-fix the env half
-    /// was a separate `SetTrue`-OR-`env_is_exact` pair, so env always won and the
-    /// CLI could not turn insecure mode back off. Now both share one
-    /// `Option<bool>` field and CLI presence wins.
-    #[test]
-    fn worker_dev_insecure_cli_false_overrides_env_one() {
-        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-
-        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure=false"])
-            .expect("--dev-insecure=false should parse");
-        // CLI presence overrides the env var.
-        assert_eq!(cli.dev_insecure, Some(false));
-        assert!(
-            !cli.dev_insecure.unwrap_or(false),
-            "resolved insecure_dev must be false"
-        );
-
-        // Sanity: with no CLI flag the env var still flows through to `Some(true)`.
-        let env_only = WorkerCli::try_parse_from(["zeroship-worker"])
-            .expect("env-only parse should succeed");
-        assert_eq!(env_only.dev_insecure, Some(true));
-
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
-    }
-
     // --- secret-reference resolver wiring (control_key / worker_key / db) ---
 
     /// A literal secret resolves to itself byte-for-byte: the resolver is a
@@ -1047,20 +966,4 @@ mod tests {
         assert_eq!(resolved, "literal-cli-worker-key");
     }
 
-    /// Bare `--dev-insecure` (no value) enables insecure mode via the
-    /// `default_missing_value = "true"`.
-    #[test]
-    fn worker_dev_insecure_bare_flag_enables() {
-        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
-
-        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure"])
-            .expect("bare --dev-insecure should parse");
-        assert_eq!(cli.dev_insecure, Some(true));
-
-        // Absent flag + absent env resolves to false (secure default).
-        let bare = WorkerCli::try_parse_from(["zeroship-worker"]).expect("bare parse");
-        assert_eq!(bare.dev_insecure, None);
-        assert!(!bare.dev_insecure.unwrap_or(false));
-    }
 }
