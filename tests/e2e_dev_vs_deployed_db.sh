@@ -1387,6 +1387,11 @@ else
   # Count the divergent rows for the classifier at the bottom. Taken from the
   # SAME diff that is printed, so the number and the evidence cannot disagree.
   DIVERGENT_ROWS="$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep -c '^<' || true)"
+  # ...and the row NAMES, sorted and deduplicated, for the identity-based
+  # classifier at the bottom. Same diff as the count and as the print, so all
+  # three agree by construction.
+  DIVERGENT_NAMES="$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep '^<' \
+    | awk '{print $2}' | sort -u | tr '\n' ' ')"
   diff "$WORK/dev.txt" "$WORK/deployed.txt" | cut -c1-400 | head -60
   echo ""
   # Repeat the staleness verdict HERE, not only at boot. Measured 2026-08-10:
@@ -1508,11 +1513,31 @@ cut -c1-240 "$WORK/deployed.raw" | sed 's/^/  /'
 # instance of the host-sensitivity class ci.yml already documents for
 # storage and workflows.
 #
-# THE STABLE CORE IS 3: cxPlain, cxTotal, tsres. Wiring this needs either that
-# instability root-caused, or the classifier taught to tolerate the known
-# intermittent pair by NAME rather than by count. Neither is done here; what is
-# done is that the harness no longer exits 1 on a red nothing intends to fix,
-# and the flake is characterised instead of unknown.
+# THAT IS NOW DONE, by NAME rather than by count. The count-based version above
+# is kept only as the fallback when the names are unavailable. Two lists:
+#
+#   REQUIRED   cxPlain cxTotal tsres    must ALL diverge. If one stops, that is
+#                                       either a fix worth recording or a probe
+#                                       that quietly stopped running.
+#   TOLERATED  txBranch txOrphan        MAY diverge or not. These are the known
+#                                       dev cross-request race, which scenario 3
+#                                       already documents and explicitly judges
+#                                       "on integrity invariants rather than tier
+#                                       equality" - so their tier-equality result
+#                                       is not a signal in either direction here.
+#
+# This is strictly stronger than the count it replaces: five divergences that
+# are a DIFFERENT five now go RED, where the count let them pass. That closes
+# the limitation the auth and login siblings still carry and still state.
+#
+# ATTRIBUTION, corrected 2026-08-12: I found the 5/5/3 instability by running
+# this classifier's own arms and started writing it up as a new defect. It is
+# not new - docs/pilot/e2e-scenarios.md scenario 3 names txBranch countAfter:1
+# and txOrphan begin_failed, attributes them to a dev cross-request race, and
+# warns that probe ORDER matters because the scope probes contaminate it. What
+# was new was only that the harness could not tell that shape from a regression.
+DB_REQUIRED_DIVERGENT="${DB_REQUIRED_DIVERGENT:-cxPlain cxTotal tsres}"
+DB_TOLERATED_DIVERGENT="${DB_TOLERATED_DIVERGENT:-txBranch txOrphan}"
 DB_EXPECTED_DIVERGENT="${DB_EXPECTED_DIVERGENT:-5}"
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 
@@ -1530,7 +1555,47 @@ fi
 # Only the row diff may be forgiven, and only at the documented count. Anything
 # else -- a second failure, a breached floor, a changed divergence count -- keeps
 # the non-zero exit it already has.
-if [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$DB_MIN_PASSED" ]; then
+if [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$DB_MIN_PASSED" ] \
+   && [ -n "${DIVERGENT_NAMES:-}" ]; then
+  # Identity comparison. Unexpected = diverged but named in neither list.
+  # Missing = required but did not diverge.
+  db_unexpected=""; db_missing=""
+  for row in $DIVERGENT_NAMES; do
+    case " $DB_REQUIRED_DIVERGENT $DB_TOLERATED_DIVERGENT " in
+      *" $row "*) ;;
+      *) db_unexpected="$db_unexpected $row" ;;
+    esac
+  done
+  for row in $DB_REQUIRED_DIVERGENT; do
+    case " $DIVERGENT_NAMES " in
+      *" $row "*) ;;
+      *) db_missing="$db_missing $row" ;;
+    esac
+  done
+  if [ -z "$db_unexpected" ] && [ -z "$db_missing" ]; then
+    echo "" >&2
+    echo "CLASSIFIER: exit 0 on the documented red - every divergent row is a KNOWN one." >&2
+    echo "  required, all present:$(printf ' %s' $DB_REQUIRED_DIVERGENT)" >&2
+    echo "  tolerated (dev cross-request race, scenario 3):$(printf ' %s' $DB_TOLERATED_DIVERGENT)" >&2
+    echo "  this run diverged on: $DIVERGENT_NAMES" >&2
+    echo "  Row IDENTITIES are compared, not just the count, so a different set" >&2
+    echo "  of the same size is RED." >&2
+    rc=0
+  else
+    echo "" >&2
+    [ -n "$db_unexpected" ] && {
+      echo "CLASSIFIER: REGRESSION. Divergent rows nobody documented:$db_unexpected" >&2
+      echo "  dev and deployed now disagree somewhere new. The diff above has them." >&2
+    }
+    [ -n "$db_missing" ] && {
+      echo "CLASSIFIER: STALE EXPECTATION. Required rows that did NOT diverge:$db_missing" >&2
+      echo "  Either they were FIXED - record which, and drop them from" >&2
+      echo "  DB_REQUIRED_DIVERGENT - or the probe stopped running, which is not" >&2
+      echo "  good news at all. Check which before believing the cheerful reading." >&2
+    }
+  fi
+elif [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$DB_MIN_PASSED" ]; then
+  # Fallback: names unavailable (no diff captured), so fall back to the count.
   if [ "$DIVERGENT_ROWS" -eq "$DB_EXPECTED_DIVERGENT" ]; then
     echo "" >&2
     echo "CLASSIFIER: exit 0 on the documented red - $DIVERGENT_ROWS divergent rows," >&2
