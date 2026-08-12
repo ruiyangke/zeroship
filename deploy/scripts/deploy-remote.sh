@@ -32,7 +32,8 @@
 #   - Generation is strictly additive: an existing value is KEPT, never
 #     rotated. Rotating on deploy would invalidate issued tokens.
 #   - Every mutated file is backed up first, and `--rollback` restores the
-#     most recent backup set and re-rolls.
+#     most recent backup of each and re-rolls. It restores all three or none:
+#     a half-restored configuration is the failure it exists to undo.
 #
 # WHAT THIS DOES NOT DO: it does not manage DNS, TLS, the database, or
 # migrations, and it does not verify the app beyond liveness. Point
@@ -166,11 +167,37 @@ main() {
     # The glob is [0-9]* rather than *: only this script's own STAMPED backups
     # have a position in that ordering. A hand-made `.env.bak.manual` sorts
     # after every digit and would win forever.
+    # ALL THREE OR NONE. This used to print `no backup for <f>`, restore the
+    # others anyway and restart the stack. An old .env against a new
+    # docker-compose.yml is the exact pairing the top of this file exists to
+    # prevent: the renamed variable takes its compiled default, compose
+    # renders, every service comes up, and only behaviour like the OIDC issuer
+    # changes. Doing that during a recovery and reporting success is worse
+    # than refusing.
+    #
+    # "Some restore is better than none in an outage" is the obvious
+    # objection, and it does not survive the question of WHEN a backup can be
+    # absent: a deploy writes all three in one `set -e` block, so a missing one
+    # means no deploy ever completed for that file and there is no coherent
+    # state to return to. An operator who really wants one file back can cp it
+    # by hand; this script must not do it silently on their behalf. So the
+    # scan runs to completion BEFORE anything is copied.
     rsh "set -e
     cd '$REMOTE_DIR'
-    for f in compose/.env compose/docker-compose.yml ops/Caddyfile; do
-      b=\$(ls -1d \"\$f\".bak.[0-9]* 2>/dev/null | sort | tail -1)
-      if [ -n \"\$b\" ]; then cp -a \"\$b\" \"\$f\"; echo \"restored \$f from \$b\"; else echo \"no backup for \$f\"; fi
+    files='compose/.env compose/docker-compose.yml ops/Caddyfile'
+    newest() { ls -1d \"\$1\".bak.[0-9]* 2>/dev/null | sort | tail -1; }
+    missing=''
+    for f in \$files; do
+      [ -n \"\$(newest \"\$f\")\" ] || missing=\"\$missing \$f\"
+    done
+    if [ -n \"\$missing\" ]; then
+      echo \"no backup for:\$missing\" >&2
+      echo 'REFUSING to roll back. Restoring only some of the three would pair an old .env with a new compose file, which is the silent mis-render this script exists to prevent, and then restart the stack on it. Nothing was changed.' >&2
+      exit 3
+    fi
+    for f in \$files; do
+      b=\"\$(newest \"\$f\")\"
+      cp -a \"\$b\" \"\$f\"; echo \"restored \$f from \$b\"
     done
     cd compose && docker compose up -d --remove-orphans"
     say "rolled back"
