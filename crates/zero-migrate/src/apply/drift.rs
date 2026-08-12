@@ -1606,6 +1606,23 @@ pub(crate) fn partition_divergences(
 /// CHECK/PK/UNIQUE bodies use the catalog-author comparison spelling. Any
 /// divergence becomes an [`AlteredObject`] — closing the out-of-band-`ALTER`
 /// blind spot that pure name diffing left open.
+///
+/// # This comparison is dialect-blind, and partitions are where that shows
+///
+/// No dialect is supplied and none is inferred, so both sides are compared as
+/// written. That is correct for every object class except one. SQLite and MySQL
+/// collapse a partition child into its parent instead of creating a relation, so
+/// their introspection reports no partition, while a folded `expected` records the
+/// child unconditionally because the lower reads those bounds back to derive the
+/// collapsed deletes. Comparing the two therefore reports `missing` for a
+/// `partition <name>` that is not absent so much as never separately created, and
+/// no schema change clears it.
+///
+/// A caller diffing a folded history against a live SQLite or MySQL database should
+/// treat a missing `partition ...` as an artifact of that collapse rather than
+/// drift. PostgreSQL is unaffected: it creates real partitions and both sides agree.
+/// [`crate::render::fold`] carries the mechanism and why the fold cannot simply stop
+/// recording the child.
 #[must_use]
 pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
     diff_snapshots_with_index_aliases(expected, actual, &BTreeMap::new())

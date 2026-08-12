@@ -22,6 +22,32 @@
 //! (`tests/fold_roundtrip_pg.rs`): apply a corpus to real PG, introspect, assert
 //! equality.
 //!
+//! ## The one exception: a partition on a collapsed dialect
+//!
+//! `fold == introspect` holds on PostgreSQL, which is what the round-trip oracle
+//! above measures. It does NOT hold for `partitions` on SQLite or MySQL, and the
+//! oracle cannot see that because it only runs against PostgreSQL.
+//!
+//! `Op::CreatePartition` records a child unconditionally here. Off PostgreSQL the
+//! lower collapses that child into its parent behind a mirror guard and creates no
+//! relation at all (`render/lower.rs`, "createPartition needs a collapse-affirmed
+//! parent on SQLite/MySQL"), so those backends correctly snapshot no partition.
+//! A folded snapshot therefore claims a relation live introspection cannot report,
+//! and a dialect-blind comparison calls it missing.
+//!
+//! The recorded child is NOT removable: the bounds are read back out to derive the
+//! collapsed deletes (`PartitionLowerState::from_live`), and a folded history is fed
+//! straight back into lowering by `tests/partition_render.rs`. The fold has to keep
+//! it. What follows from that is a comparison contract, stated on
+//! [`diff_snapshots`](crate::apply::drift::diff_snapshots), not a change here.
+//!
+//! Partitions is the ONLY class where this bites. Named types are the near miss that
+//! shows the shape: `createEnum` and `createDomain` are portable on MySQL, so the
+//! engine authors them there, but the insert below is gated on
+//! `Capability::MaterializedEnumType`, false off PostgreSQL, so both sides carry
+//! nothing and agree. Sequences, roles, schemas and extensions are PostgreSQL-only
+//! and cannot appear in a MySQL or SQLite history at all.
+//!
 //! # Fail-closed
 //!
 //! An incoherent op stream (add-column-to-missing-table, drop-absent-column,

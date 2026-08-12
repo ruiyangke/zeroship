@@ -1434,6 +1434,11 @@ pub struct ExtensionSnapshot {
 }
 
 /// A deterministic snapshot of one child partition relation.
+///
+/// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
+/// its parent rather than creating one, so their introspection reports no partition
+/// and this map stays empty there while a folded snapshot still carries the child -
+/// see the fold's own account of the exception in [`crate::render::fold`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSnapshot {
     /// Parent partitioned table.
