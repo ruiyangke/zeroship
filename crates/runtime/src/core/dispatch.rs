@@ -703,7 +703,7 @@ mod tests {
     ///
     /// ```text
     /// sanitized: {"message":"internal error","name":"Error","request_id":"24"}
-    /// verbose:   {"message":"{\"code\":\"fk_violation\",…}",…,
+    /// verbose:   {"message":"{\"code\":\"fk_violation\",...}",...,
     ///             "code":"FOREIGN_KEY_VIOLATION"}
     /// ```
     ///
