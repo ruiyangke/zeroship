@@ -316,18 +316,22 @@ fn emit(
         let canonical = config.canonical.value();
         let flag = flag_projection(&canonical, &scope.value(), config.class);
         match config.class {
+            // `Option` is deliberately unqualified. clap's derive only treats a
+            // field as optional when the type path has exactly one segment, so
+            // `::std::option::Option<T>` is parsed as a required value whose
+            // parser must accept `Option<T>`, and the carrier fails to compile.
             SupplyClass::Operational => {
                 let env = env_projection(&canonical);
                 quote! {
                     #(#attrs)*
                     #[arg(long = #flag, env = #env)]
-                    #visibility #ident: ::std::option::Option<#inner>
+                    #visibility #ident: Option<#inner>
                 }
             }
             SupplyClass::Secret => quote! {
                 #(#attrs)*
                 #[arg(long = #flag, value_name = "PATH")]
-                #visibility #ident: ::std::option::Option<::std::path::PathBuf>
+                #visibility #ident: Option<::std::path::PathBuf>
             },
         }
     });
