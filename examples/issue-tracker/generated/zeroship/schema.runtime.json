@@ -1,0 +1,2316 @@
+{
+  "version": 1,
+  "collections": {
+    "activities": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "actorId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "attachmentId": {
+          "type": "string",
+          "refTarget": "attachments",
+          "refColumn": "id"
+        },
+        "fieldName": {
+          "type": "string",
+          "required": true
+        },
+        "oldValue": {
+          "type": "string"
+        },
+        "newValue": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "activities_bug_idx",
+          "fields": [
+            "bugId"
+          ]
+        },
+        {
+          "name": "activities_bug_field_idx",
+          "fields": [
+            "bugId",
+            "fieldName"
+          ]
+        },
+        {
+          "name": "activities_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "activities_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "activities_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "attachments": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "uploaderId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "filename": {
+          "type": "string",
+          "required": true
+        },
+        "contentType": {
+          "type": "string",
+          "required": true,
+          "default": "application/octet-stream"
+        },
+        "sizeBytes": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0
+        },
+        "storageKey": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "isPatch": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "isObsolete": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "attachments_bug_idx",
+          "fields": [
+            "bugId"
+          ]
+        },
+        {
+          "name": "attachments_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "attachments_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "attachments_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugCc": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bug_cc_pair_uniq",
+          "fields": [
+            "bugId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bug_cc_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "bugCc_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugCc_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugCc_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugDependencies": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "dependsOnId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bug_deps_pair_uniq",
+          "fields": [
+            "bugId",
+            "dependsOnId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bug_deps_depends_idx",
+          "fields": [
+            "dependsOnId"
+          ]
+        },
+        {
+          "name": "bugDependencies_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugDependencies_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugDependencies_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugGroups": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "groupId": {
+          "type": "string",
+          "refTarget": "groups",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bug_groups_pair_uniq",
+          "fields": [
+            "bugId",
+            "groupId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bug_groups_group_idx",
+          "fields": [
+            "groupId"
+          ]
+        },
+        {
+          "name": "bugGroups_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugGroups_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugGroups_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugKeywords": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "keywordId": {
+          "type": "string",
+          "refTarget": "keywords",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bug_keywords_pair_uniq",
+          "fields": [
+            "bugId",
+            "keywordId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bug_keywords_keyword_idx",
+          "fields": [
+            "keywordId"
+          ]
+        },
+        {
+          "name": "bugKeywords_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugKeywords_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugKeywords_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugSeeAlso": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "url": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bug_see_also_pair_uniq",
+          "fields": [
+            "bugId",
+            "url"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bugSeeAlso_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugSeeAlso_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugSeeAlso_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "bugs": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "componentId": {
+          "type": "string",
+          "refTarget": "components",
+          "refColumn": "id",
+          "required": true
+        },
+        "versionId": {
+          "type": "string",
+          "refTarget": "versions",
+          "refColumn": "id",
+          "required": true
+        },
+        "milestoneId": {
+          "type": "string",
+          "refTarget": "milestones",
+          "refColumn": "id"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "UNCONFIRMED"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "required": true,
+          "default": "normal"
+        },
+        "priority": {
+          "type": "string",
+          "required": true,
+          "default": "P3"
+        },
+        "reporterId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "assigneeId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "qaContactId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "duplicateOfId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id"
+        },
+        "whiteboard": {
+          "type": "string"
+        },
+        "opSys": {
+          "type": "string",
+          "required": true,
+          "default": "Unspecified"
+        },
+        "platform": {
+          "type": "string",
+          "required": true,
+          "default": "Unspecified"
+        },
+        "url": {
+          "type": "string"
+        },
+        "isConfirmed": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "voteCount": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "commentCount": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "estimatedTimeMinutes": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "remainingTimeMinutes": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "deadline": {
+          "type": "date"
+        },
+        "resolvedAt": {
+          "type": "date"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "bugs_product_idx",
+          "fields": [
+            "productId"
+          ]
+        },
+        {
+          "name": "bugs_component_idx",
+          "fields": [
+            "componentId"
+          ]
+        },
+        {
+          "name": "bugs_status_idx",
+          "fields": [
+            "status"
+          ]
+        },
+        {
+          "name": "bugs_assignee_idx",
+          "fields": [
+            "assigneeId"
+          ]
+        },
+        {
+          "name": "bugs_reporter_idx",
+          "fields": [
+            "reporterId"
+          ]
+        },
+        {
+          "name": "bugs_duplicate_of_idx",
+          "fields": [
+            "duplicateOfId"
+          ]
+        },
+        {
+          "name": "bugs_resolved_at_idx",
+          "fields": [
+            "resolvedAt"
+          ]
+        },
+        {
+          "name": "bugs_alias_uniq",
+          "fields": [
+            "alias"
+          ],
+          "unique": true
+        },
+        {
+          "name": "bugs_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "bugs_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "bugs_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "comments": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "authorId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "body": {
+          "type": "string",
+          "required": true
+        },
+        "commentNumber": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "isPrivate": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "workTimeMinutes": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "comments_bug_number_uniq",
+          "fields": [
+            "bugId",
+            "commentNumber"
+          ],
+          "unique": true
+        },
+        {
+          "name": "comments_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "comments_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "comments_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "components": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "defaultAssigneeId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "defaultQaContactId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "initialCc": {
+          "type": "json"
+        },
+        "isActive": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "components_product_idx",
+          "fields": [
+            "productId"
+          ]
+        },
+        {
+          "name": "components_product_name_uniq",
+          "fields": [
+            "productId",
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "components_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "components_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "components_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "flagTypes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "targetType": {
+          "type": "string",
+          "required": true,
+          "default": "bug"
+        },
+        "isRequestable": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        },
+        "isMultiplicable": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "flag_types_name_target_uniq",
+          "fields": [
+            "name",
+            "targetType"
+          ],
+          "unique": true
+        },
+        {
+          "name": "flagTypes_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "flagTypes_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "flagTypes_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "flags": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "flagTypeId": {
+          "type": "string",
+          "refTarget": "flagTypes",
+          "refColumn": "id",
+          "required": true
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id"
+        },
+        "attachmentId": {
+          "type": "string",
+          "refTarget": "attachments",
+          "refColumn": "id"
+        },
+        "setterId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "requesteeId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "?"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "flags_bug_idx",
+          "fields": [
+            "bugId"
+          ]
+        },
+        {
+          "name": "flags_attachment_idx",
+          "fields": [
+            "attachmentId"
+          ]
+        },
+        {
+          "name": "flags_requestee_idx",
+          "fields": [
+            "requesteeId"
+          ]
+        },
+        {
+          "name": "flags_setter_idx",
+          "fields": [
+            "setterId"
+          ]
+        },
+        {
+          "name": "flags_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "flags_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "flags_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "groupMembers": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "groupId": {
+          "type": "string",
+          "refTarget": "groups",
+          "refColumn": "id",
+          "required": true
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "group_members_pair_uniq",
+          "fields": [
+            "groupId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "group_members_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "groupMembers_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "groupMembers_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "groupMembers_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "groups": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "isBugGroup": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "groups_name_key",
+          "fields": [
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "groups_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "groups_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "groups_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "keywords_name_key",
+          "fields": [
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "keywords_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "keywords_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "keywords_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "milestones": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "sortKey": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "isActive": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "milestones_product_idx",
+          "fields": [
+            "productId"
+          ]
+        },
+        {
+          "name": "milestones_product_name_uniq",
+          "fields": [
+            "productId",
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "milestones_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "milestones_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "milestones_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "notifications": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id"
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "default": "bug_changed"
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "body": {
+          "type": "string"
+        },
+        "isRead": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "notifications_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "notifications_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "notifications_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "notifications_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "productGroups": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "groupId": {
+          "type": "string",
+          "refTarget": "groups",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "product_groups_pair_uniq",
+          "fields": [
+            "productId",
+            "groupId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "product_groups_group_idx",
+          "fields": [
+            "groupId"
+          ]
+        },
+        {
+          "name": "productGroups_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "productGroups_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "productGroups_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "products": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string",
+          "required": true,
+          "default": "Unclassified"
+        },
+        "defaultMilestone": {
+          "type": "string"
+        },
+        "allowsUnconfirmed": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        },
+        "isActive": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        },
+        "votesPerUser": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "maxVotesPerBug": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "votesToConfirm": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "products_name_key",
+          "fields": [
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "products_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "products_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "products_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "savedSearches": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "ownerId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "queryJson": {
+          "type": "json",
+          "required": true
+        },
+        "isShared": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "saved_searches_owner_name_uniq",
+          "fields": [
+            "ownerId",
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "savedSearches_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "savedSearches_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "savedSearches_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "users": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "handle": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "timezone": {
+          "type": "string",
+          "required": true,
+          "default": "UTC"
+        },
+        "isAdmin": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "isDisabled": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "prefs": {
+          "type": "json"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_email_key",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_handle_key",
+          "fields": [
+            "handle"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "versions": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "sortKey": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "isActive": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "versions_product_idx",
+          "fields": [
+            "productId"
+          ]
+        },
+        {
+          "name": "versions_product_name_uniq",
+          "fields": [
+            "productId",
+            "name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "versions_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "versions_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "versions_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "votes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "bugId": {
+          "type": "string",
+          "refTarget": "bugs",
+          "refColumn": "id",
+          "required": true
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "count": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "votes_pair_uniq",
+          "fields": [
+            "bugId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "votes_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "votes_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "votes_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "votes_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "watchers": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "watcherId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "watchedId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "watchers_pair_uniq",
+          "fields": [
+            "watcherId",
+            "watchedId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "watchers_watched_idx",
+          "fields": [
+            "watchedId"
+          ]
+        },
+        {
+          "name": "watchers_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "watchers_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "watchers_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}
