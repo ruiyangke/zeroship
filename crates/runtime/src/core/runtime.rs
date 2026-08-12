@@ -2432,7 +2432,23 @@ impl RuntimeInner {
                 // not the previous hardcoded 500. Forward any structured-
                 // error extras (code/details/retryable) verbatim.
                 self.clear_executing_request();
-                self.discard_request_state(request_id);
+                // DRAIN, do not discard. This arm used to call
+                // `discard_request_state`, which REMOVES `per_request_logs[id]`
+                // and returns nothing, and then emitted `logs: vec![]` - so
+                // everything the procedure printed before it threw was destroyed
+                // here, one layer above anything that could forward it (#334).
+                //
+                // Measured: `getMessages` and `boom` in the same app, same run,
+                // same GET /api/apps/<id>/logs payload - the succeeding
+                // procedure's line delivered, the throwing one's absent. The
+                // capture was never the problem; the entry existed under a real
+                // request id right up until this line removed it.
+                //
+                // `drain_request_logs` is a SUPERSET of `discard_request_state`:
+                // it drops the same sibling per-request state (user, bound ctx,
+                // Request) and additionally clears `executing_request_id`, which
+                // is why the success arm calls it alone.
+                let logs = self.drain_request_logs(request_id);
                 let extras = crate::dispatch::ErrorExtras {
                     stack: stack.as_deref(),
                     code: code.as_deref(),
@@ -2446,7 +2462,7 @@ impl RuntimeInner {
                         status, request_id, &message, &name, extras,
                     )
                     .into_bytes(),
-                    logs: vec![],
+                    logs,
                 }
             }
             Ok(DispatchResult::Error(msg)) => {
