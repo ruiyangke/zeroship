@@ -280,6 +280,40 @@ Stable contracts, live in `docs/reference/`:
 
 ---
 
+## Committing
+
+A `commit-msg` hook enforces this. Turn it on once per clone, or your commits
+are only checked in CI:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+```
+type(scope): imperative summary of what the change does
+```
+
+- `type` is exactly one of: `fix` `feat` `refactor` `test` `docs` `merge`
+  `chore` `style` `build` `ci` `perf` `bench` `revert`. A scope is never a type
+  — write `build(deploy): ...`, never `deploy: ...`.
+- Exactly one lowercase scope, always present. Never `fix(a,b): ...`, never a
+  bare `ci: ...`.
+- Imperative and lowercase after the colon (`add`, `reject`, `keep`), no
+  trailing period, **100 characters max**.
+- No `#123`, no `3 of 8`, no `phase`/`stage`/`wave`/`milestone`. They are
+  meaningless to anyone reading the log later; state the outcome instead.
+- ASCII only. No em-dash, curly quote or arrow.
+- Body only when the why is not obvious: prose, a few sentences, blank line
+  after the subject. A good subject carries most changes.
+- Breaking change: `!` before the colon (`refactor(core)!: ...`). No
+  `BREAKING CHANGE:` footer.
+- Every bug fix adds a regression test that would fail before the fix.
+
+Full rules, scope vocabulary and worked examples: `CONTRIBUTING.md`. Check a
+range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
+
+---
+
 ## Development
 
 ```bash

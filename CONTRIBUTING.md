@@ -120,6 +120,11 @@ Do not violate these without discussion (`AGENTS.md` has the full list):
 
 This repo uses Conventional Commits. Keep `git log` a readable, greppable changelog.
 
+A `commit-msg` hook enforces the mechanical rules below. Enable it once per
+clone with `git config core.hooksPath .githooks`; CI runs the same checks over
+the PR range, so an unconfigured clone or a `--no-verify` is still caught.
+Check a range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
+
 ### Format
 
 ```
@@ -186,8 +191,15 @@ named after it.
 - Imperative, present tense: `add`, `reject`, `remove`, `support`, `preserve`,
   `rename`, as if completing "This commit will ...". Not `added` or `adding`.
 - Describe the effect, not the mechanics - a real outcome ("keep decimal-literal column
-  defaults in CREATE TABLE DDL"), not "update code". Roughly 50-72 characters; never
-  exceed about 80.
+  defaults in CREATE TABLE DDL"), not "update code". Aim for 50-72 characters; the
+  enforced ceiling is 100.
+
+  That ceiling is measured rather than picked. Over a week of 699 commits the
+  subject length ran p50 75, p90 91, p99 116: a 72-char limit would have
+  rejected 413 of them, and was in fact ignored. 100 accepts 676 and refuses
+  only the multi-clause outliers. A ceiling that is kept beats one that is
+  rewritten every few days - if you find yourself over it, the subject is
+  carrying two changes or a sentence that belongs in the body.
 - Lowercase first word after the colon; no trailing period.
 - No internal-process markers. Strip orchestration artifacts before committing:
   `phase N`, `stage N`, `part N`, `wave N`, `milestone`, job/task IDs (`J2`, `M0`,
@@ -219,7 +231,7 @@ and links compio-postgres, so it is the natural home; core is now a true leaf.
 
 - [ ] `type(scope): ...` with a known type and an existing scope
 - [ ] Imperative, lowercase after colon, no trailing period
-- [ ] Describes a real outcome; about 72 characters or fewer
+- [ ] Describes a real outcome; 100 characters or fewer (aim for 72)
 - [ ] `!` added if and only if it breaks a public contract
 - [ ] Body only when the why is not obvious
 - [ ] A regression test accompanies every bug fix
