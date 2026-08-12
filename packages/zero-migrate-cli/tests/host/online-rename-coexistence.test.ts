@@ -168,3 +168,132 @@ test("during an online rename both names stay aligned, and the destination wins 
     await admin.end().catch(() => {});
   }
 });
+
+// What the destination column does NOT inherit, and what still binds anyway.
+//
+// `docs/node-api.md`: "The rename does not transfer `NOT NULL`, defaults, unique
+// or primary-key rules, indexes, comments, or dependent objects."
+//
+// Measured, that is exactly right - the destination comes out nullable, with no
+// default, no unique constraint, no index and no comment. But an operator reading
+// only that sentence draws the wrong conclusion, because it describes the COLUMN
+// and not the WRITES. The dual-write trigger copies every write to the source, so
+// the source's constraints still bind writes made through the DESTINATION name:
+//
+//   UPDATE users SET full_name = NULL
+//     -> null value in column "display_name" ... violates not-null constraint
+//   INSERT ... (full_name) VALUES ('original')
+//     -> duplicate key value violates unique constraint "users_display_name_key"
+//
+// So an application that has fully cut over to the new name still cannot write
+// values the OLD column would reject, and the error it gets NAMES A COLUMN ITS
+// CODE NO LONGER MENTIONS. That is the surprising half, and it is the half worth
+// pinning: "the destination is nullable" and "you may now write NULL" look like
+// the same statement and are not.
+//
+// This is safe behaviour, not a defect - constraints staying enforced across the
+// window is what keeps the source usable for rollback. The fixture exists so the
+// asymmetry is measured rather than inferred.
+
+test("during coexistence the source's constraints still bind writes made through the destination", async (ctx) => {
+  const admin = await connectLivePg(ctx);
+  if (!admin) return;
+
+  const projectSchema = uniqueNamespace("coexist_constraints");
+  const meta = `${projectSchema}_migrations`;
+  const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
+
+  const created = authored("create_users", () => {
+    table("users").create({
+      columns: {
+        id: t.int().notNull(),
+        display_name: t.string({ length: 255 }).notNull().default("anon"),
+      },
+      primaryKey: ["id"],
+      uniques: [{ name: "users_display_name_key", columns: ["display_name"] }],
+    });
+    table("users").insert({ rows: { id: 1, display_name: "original" } });
+  });
+  const renamed = authored("rename_display_name", () => {
+    table("users").column("display_name").rename({
+      to: "full_name",
+      type: t.string({ length: 255 }),
+    });
+  });
+
+  const applyOne = (migration: NamedMigration, priors: NamedMigration[], registry = {}) =>
+    apply({
+      migration,
+      priorMigrations: priors,
+      priorNameFallbacks: priors.map((p) => p.name),
+      ownerApp: OWNER_APP,
+      projectSchema,
+      driver,
+      registry,
+      policy: [noInjectPolicy(projectSchema)],
+      approved: true,
+      appliedBy: "online-rename-coexistence",
+      nameFallback: migration.name,
+    });
+
+  try {
+    await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
+    await applyOne(created, []);
+    await applyOne(renamed, [created], { users: OWNER_APP });
+
+    // 1. The documented half: the destination inherits none of it.
+    const { rows } = await admin.query(
+      `SELECT column_name, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'users'
+          AND column_name IN ('display_name', 'full_name')
+        ORDER BY column_name`,
+      [projectSchema],
+    );
+    assert.deepEqual(
+      rows.map((row) => [row.column_name, row.is_nullable, row.column_default === null]),
+      [
+        ["display_name", "NO", false],
+        ["full_name", "YES", true],
+      ],
+      "the destination must be nullable and default-less while the source keeps both",
+    );
+
+    // 2. The half the sentence does not say. Both writes go through the NEW name
+    //    and both are rejected by a constraint on the OLD one.
+    await assert.rejects(
+      admin.query(`UPDATE ${pgIdent(projectSchema)}.users SET full_name = NULL WHERE id = 1`),
+      /null value in column "display_name".*violates not-null constraint/s,
+      "a NULL written through the destination must still hit the source's NOT NULL",
+    );
+    await assert.rejects(
+      admin.query(
+        `INSERT INTO ${pgIdent(projectSchema)}.users (id, full_name) VALUES (2, 'original')`,
+      ),
+      /violates unique constraint "users_display_name_key"/,
+      "a duplicate written through the destination must still hit the source's UNIQUE",
+    );
+
+    // 3. The control. Both refusals above must be the SOURCE's constraints biting,
+    //    not the destination being unwritable: a legal write still succeeds.
+    await admin.query(
+      `UPDATE ${pgIdent(projectSchema)}.users SET full_name = 'renamed' WHERE id = 1`,
+    );
+    const after = await admin.query(
+      `SELECT display_name, full_name FROM ${pgIdent(projectSchema)}.users WHERE id = 1`,
+    );
+    assert.deepEqual(
+      [after.rows[0].display_name, after.rows[0].full_name],
+      ["renamed", "renamed"],
+      "a legal write through the destination still lands on both columns",
+    );
+  } finally {
+    await admin
+      .query(
+        `DROP SCHEMA IF EXISTS ${pgIdent(projectSchema)} CASCADE;
+         DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
