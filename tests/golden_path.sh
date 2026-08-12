@@ -551,6 +551,47 @@ auth_suppress=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc 
   && pass "zeroship_auth holds INSERT+UPDATE on email_suppressions (bounce suppression upserts)" \
   || fail "zeroship_auth email_suppressions privileges read $auth_suppress of 2: bounce/complaint suppression is silently discarded (#359)"
 
+# PROSPECTIVE CANARY for the whole class, rather than one more named pair.
+#
+# The five assertions above pin the six instances we FOUND (#319, #356, #357,
+# #358 x2, #359). They say nothing about the seventh. This one watches the
+# population those instances were drawn from: (role, table) pairs where the role
+# can INSERT but not UPDATE. Every instance of the class lived in that set,
+# because that is exactly the state in which an ON CONFLICT ... DO UPDATE cannot
+# be planned.
+#
+# WHY THIS DIRECTION IS SOUND: the grant list is authoritative and finite, so
+# unlike enumerating what the CODE touches it cannot miss by construction. The
+# reverse direction was proven unsound three ways while fixing this class --
+# pattern shape, cross-crate delegation, and format!-interpolated table names.
+#
+# 27 MEASURED 2026-08-12 on a database built only by zeroship-platform-migrate
+# from db/migrations-ts, no hand-granting. It reconciles: the same query read 31
+# before the four grant migrations landed, and 31 - 4 = 27.
+#
+# PROVEN TO MOVE IN BOTH DIRECTIONS, on that database, each inside a rolled-back
+# transaction:
+#   GRANT UPDATE ON zeroship.app_usage TO zeroship_control   -> 26  (pair resolved)
+#   GRANT INSERT ON zeroship.app_usage TO zeroship_gateway   -> 28  (new risky pair)
+# so it is not a constant dressed as an assertion.
+#
+# WHEN THIS FAILS, IT IS A PROMPT, NOT A VERDICT. Read the delta:
+#   count went UP   -> a role gained INSERT on a table it cannot UPDATE. If any
+#                      code upserts that table, it is a new instance of the class.
+#                      Check before bumping the number.
+#   count went DOWN -> a pair was resolved, or a grant was withdrawn. Confirm it
+#                      was deliberate, then bump.
+# Bumping without reading the delta is how this becomes decoration.
+#
+# WHAT IT DOES NOT CATCH: a statement needing a privilege OTHER than UPDATE
+# (#319 was DELETE and would not appear here), and any pair whose role never
+# executes the upsert. It is a canary over one population, not a proof.
+lp_pairs=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join unnest(array['zeroship_gateway','zeroship_auth','zeroship_control','zeroship_worker']) r where n.nspname='zeroship' and c.relkind='r' and has_table_privilege(r,c.oid,'INSERT') and not has_table_privilege(r,c.oid,'UPDATE')" 2>/dev/null | tr -d '[:space:]')
+[ "$lp_pairs" = "27" ] \
+  && pass "INSERT-without-UPDATE role/table pairs still 27 (the population the upsert class is drawn from)" \
+  || fail "INSERT-without-UPDATE pairs moved 27 -> $lp_pairs. Read the delta before bumping: UP means a role gained INSERT on a table it cannot UPDATE, and any upsert on it is a new #356-class defect."
+
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
@@ -3874,7 +3915,11 @@ gp_close_step
 # this block gains exactly four passes. What was NOT measured: the absolute
 # total on a full green run. If a future full run disagrees, trust the run and
 # restate this as a measurement rather than adjusting the run to fit.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-105}"
+# 105 -> 106, same day: the prospective INSERT-without-UPDATE canary was added
+# beside the five named privilege arms. Same delta reasoning as the raise above,
+# and the canary is proven to move in BOTH directions rather than being a
+# constant (26 when a pair is resolved, 28 when a risky one is added).
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-106}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
