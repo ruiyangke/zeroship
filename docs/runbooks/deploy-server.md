@@ -185,6 +185,17 @@ issuer must advertise `https`. Defaults are `zeroship.localhost` + `http`,
 which is a working local-dev stack with no DNS. This topology setting does not
 enable or disable a security check.
 
+**What the browser must see is `https` or `localhost`, and there is no setting
+that relaxes it.** Every auth cookie is issued `Secure` with a `__Host-` prefix
+unconditionally. Two configurations work: a real `https` origin at the browser,
+or the default `*.localhost` domain, which browsers treat as a trustworthy
+origin and therefore accept `Secure` cookies over plain `http`. A third does
+not: a custom `ZEROSHIP_DOMAIN` (say `zeroship.lan`, or a bare IP) reached over
+plain `http`. There the server sets the cookies and the browser silently
+discards them, so login loops back to the form with nothing logged server-side.
+Diagnose it by looking for `Set-Cookie` on the response while the next request
+carries no `Cookie`. The fix is TLS at the edge, not a config change.
+
 Check the merge rather than the intent, since a missed spot fails as a 404 and
 not as an error:
 
