@@ -110,7 +110,7 @@ impl SupplyClass {
 /// unconditionally.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CarrierShape {
-    /// `bool` carrier with `ArgAction::SetTrue`: a bare presence flag.
+    /// `bool` carrier: a bare presence flag that also accepts `=VALUE`.
     Flag,
     /// `Option<U>` carrier resolving to `Option<U>`: absence is a real value.
     Optional,
@@ -421,9 +421,22 @@ fn emit(
         // `::std::option::Option<T>` is parsed as a required value whose
         // parser must accept `Option<T>`, and the carrier fails to compile.
         match config.shape {
+            // NOT `ArgAction::SetTrue`. That action parses an environment value
+            // with clap's strict bool parser, so `ZEROSHIP_NO_CONFIG=1` is a
+            // startup ERROR and only `true`/`false` are accepted - the one
+            // spelling an operator is least likely to reach for. This is the
+            // shape `--trust-proxy` already uses: bare presence means true,
+            // `=false` still works, and the environment goes through the
+            // workspace's single boolean grammar (1/0/true/false/yes/no).
             CarrierShape::Flag => quote! {
                 #(#attrs)*
-                #[arg(long = #flag #env, action = ::zeroship_core::__private::clap::ArgAction::SetTrue)]
+                #[arg(
+                    long = #flag #env,
+                    num_args = 0..=1,
+                    default_value_t = false,
+                    default_missing_value = "true",
+                    value_parser = ::zeroship_core::config::parse_bool_flag
+                )]
                 #visibility #ident: bool
             },
             CarrierShape::Optional => {
@@ -911,7 +924,8 @@ mod tests {
         let compact = compact(&output);
         assert!(compact.contains("no_config:bool"), "{output}");
         assert!(compact.contains("check_config:bool"));
-        assert!(output.contains("ArgAction::SetTrue"));
+        assert!(output.contains("default_missing_value = \"true\""));
+        assert!(output.contains("parse_bool_flag"));
         assert!(
             compact.contains("config:Option<PathBuf>"),
             "an Option<T> control keeps exactly one Option layer:\n{output}"
@@ -1025,7 +1039,7 @@ mod tests {
             .expect("operational bool expands"),
         );
         assert!(
-            !output.contains("ArgAction::SetTrue"),
+            !output.contains("default_missing_value"),
             "only a control may become a bare flag; an operational value keeps \
              its env and TOML tiers:\n{output}"
         );

@@ -385,6 +385,50 @@ fn a_control_resolves_with_no_overlay_and_keeps_clap_precedence() {
 }
 
 #[test]
+fn a_flag_control_accepts_the_workspace_boolean_grammar() {
+    // Regression. `ArgAction::SetTrue` parses an ENVIRONMENT value with clap's
+    // strict bool parser, so `ZEROSHIP_NO_CONFIG=1` was rejected outright:
+    //   error: invalid value '1' for '--no-config' [possible values: true, false]
+    // That is the one spelling an operator reaches for first, and every other
+    // boolean input in this workspace accepts it via `parse_bool_flag`.
+    //
+    // Asserted through the CLI rather than the environment because the env tier
+    // is process-global and would race sibling tests; the value parser is the
+    // same object on both tiers, which is the whole point of the fix.
+    for (spelling, expected) in [
+        ("1", true),
+        ("0", false),
+        ("true", true),
+        ("FALSE", false),
+        ("yes", true),
+        ("no", false),
+    ] {
+        let parsed = FixtureControlsSources::try_parse_from([
+            "zeroship-fixture-gate",
+            &format!("--no-config={spelling}"),
+        ])
+        .unwrap_or_else(|error| panic!("--no-config={spelling} rejected: {error}"));
+        assert_eq!(parsed.no_config, expected, "--no-config={spelling}");
+    }
+
+    assert!(
+        FixtureControlsSources::try_parse_from(["zeroship-fixture-gate", "--no-config"])
+            .expect("bare flag")
+            .no_config,
+        "bare presence must still mean true"
+    );
+    assert!(
+        FixtureControlsSources::try_parse_from(["zeroship-fixture-gate", "--no-config=maybe"])
+            .is_err(),
+        "an unrecognised spelling must still be an error, not a silent true"
+    );
+
+    // Does not cover: that clap applies this parser to the environment tier.
+    // Only a process-level test can show that, and tests/config_check_e2e.sh
+    // exercises the real binaries.
+}
+
+#[test]
 fn the_resolved_struct_redacts_its_secret_without_a_hand_written_debug() {
     // Direct replacement for the hand-maintained redaction lists in
     // crates/control/src/main.rs and crates/worker/src/main.rs: the resolved
