@@ -77,7 +77,10 @@ REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
 CONTROL_KEY="gp-ck"
 MASTER_KEY="gp-mk"
 # Local dev: run the platform without the production secret set (signing keys,
-# worker key, …). NEVER use this outside local dev. Mirrors tests/m0_gate.sh.
+# worker key, …). NEVER use this outside local dev. This used to cite
+# tests/m0_gate.sh as the harness it mirrors; that file was deleted once its
+# subject moved to the sibling zeroship-builder repo, so the pattern now stands
+# on its own rather than pointing at something gone.
 export ZEROSHIP_DEV_INSECURE=1
 export WORKER_KEY="${WORKER_KEY:-golden-path-worker-key-0123456789abcdef}"
 APP_NAME="starter"
