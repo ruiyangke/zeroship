@@ -363,16 +363,17 @@ async fn resolve_auth_inner(
             // cross-site top-level form-POST is the residual CSRF risk the BFF
             // trade explicitly bounds. We require, for state-changing methods
             // authenticated PURELY by this cookie: an `Origin` present and an
-            // exact match of the app's own origin, plus `Sec-Fetch-Site:
-            // same-origin` when the browser sends it. GET/HEAD are exempt
-            // (non-state-changing). No mandatory custom header — raw-JS deploys
+            // exact match of the app's own origin or a configured trusted
+            // origin, plus fetch metadata consistent with that match when the
+            // browser sends it. GET/HEAD are exempt (non-state-changing). No
+            // mandatory custom header - raw-JS deploys
             // that POST a plain form must still work, so the Origin match (which
             // the browser sets and script cannot forge cross-site) carries the
             // defense. A failure REJECTS the cookie credential for this request
             // (treated as if no session resolved) rather than 403, so a public
             // (`Anon`) route still serves anonymously and a `User` route 401s —
             // identical posture to a missing cookie.
-            if cookie_csrf_rejected(req, state.config.insecure_dev) {
+            if cookie_csrf_rejected(req, &state.config) {
                 None
             } else {
                 Some(header)
@@ -403,8 +404,8 @@ async fn resolve_auth_inner(
 /// Returns `true` (reject the cookie credential) when the method is
 /// state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) AND the same-origin posture
 /// fails: a missing `Origin`, an `Origin: null`, a foreign `Origin` (no
-/// substring/subdomain match, never reflected), or a present `Sec-Fetch-Site`
-/// that is not `same-origin`. `GET`/`HEAD`/`OPTIONS` are exempt
+/// substring/subdomain match, never reflected), or inconsistent fetch
+/// metadata. `GET`/`HEAD`/`OPTIONS` are exempt
 /// (non-state-changing). When `true`, the caller drops the resolved
 /// `ZeroShip-User` so the request is treated as if no session was present
 /// (anon on a public route, 401 on a protected route) — never a leaked
@@ -416,7 +417,7 @@ async fn resolve_auth_inner(
 /// carries the defense. Bearer-authenticated requests never reach this
 /// gate — they are resolved on the earlier arms and carry an explicit,
 /// non-auto-attached `Authorization` header that is itself CSRF-proof.
-fn cookie_csrf_rejected(req: &HttpRequest, insecure_dev: bool) -> bool {
+fn cookie_csrf_rejected(req: &HttpRequest, config: &crate::GateConfig) -> bool {
     let method = req.method();
     let state_changing = matches!(
         *method,
@@ -434,26 +435,24 @@ fn cookie_csrf_rejected(req: &HttpRequest, insecure_dev: bool) -> bool {
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let scheme = if insecure_dev { "http" } else { "https" };
-    let expected_origin = format!("{scheme}://{host}");
-
     // Origin: required + exact-match. Missing/null/foreign ⇒ reject.
-    match req
+    let origin_match = match req
         .headers()
         .get(http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
     {
-        Some(origin) if origin == expected_origin => {}
+        Some(origin) => match config.classify_origin(origin, host) {
+            Some(origin_match) => origin_match,
+            None => return true,
+        },
         _ => return true,
-    }
+    };
 
-    // Sec-Fetch-Site: enforced WHEN present, advisory when absent.
-    if let Some(sfs) = req
-        .headers()
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-    {
-        if sfs != "same-origin" {
+    // Sec-Fetch-Site: when present, require metadata consistent with the exact
+    // Origin class. Its absence remains advisory for older clients.
+    if let Some(value) = req.headers().get("sec-fetch-site") {
+        let sfs = value.to_str().unwrap_or("");
+        if !origin_match.accepts_sec_fetch_site(sfs) {
             return true;
         }
     }
@@ -1330,6 +1329,8 @@ mod tests {
                 poll_interval_secs: 5,
                 worker_key: "wk".into(),
                 auth_ui_url: oidc_rp.auth_ui_url.clone(),
+                origin_scheme: zeroship_core::config::OriginScheme::Http,
+                trusted_origins: vec![],
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
@@ -1570,8 +1571,7 @@ mod tests {
 
     // ─── BFF P3 anti-CSRF gate on cookie-authenticated dispatch (DB-free) ──
 
-    /// Build a request with an explicit method + optional Origin / Sec-Fetch-Site
-    /// for the `cookie_csrf_rejected` gate (dev ⇒ `http://` origin compare).
+    /// Build a request with an explicit method and optional origin metadata.
     fn csrf_req(
         method: ntex::http::Method,
         host: &str,
@@ -1591,25 +1591,50 @@ mod tests {
         b.to_http_request()
     }
 
+    fn csrf_config(
+        origin_scheme: zeroship_core::config::OriginScheme,
+        insecure_dev: bool,
+        trusted_origins: &[&str],
+    ) -> crate::GateConfig {
+        crate::GateConfig {
+            control_url: String::new(),
+            control_key: String::new(),
+            worker_urls: vec![],
+            poll_interval_secs: 5,
+            worker_key: String::new(),
+            auth_ui_url: String::new(),
+            origin_scheme,
+            trusted_origins: trusted_origins
+                .iter()
+                .map(|origin| origin.parse().expect("validated trusted origin"))
+                .collect(),
+            insecure_dev,
+            trust_proxy: false,
+            public_url: String::new(),
+        }
+    }
+
     #[test]
     fn csrf_gate_exempts_safe_methods() {
         // GET/HEAD are non-state-changing: never rejected, even with a foreign
         // Origin (the cookie still authenticates reads).
         let host = "myapp.zeroship.ai";
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::GET, host, Some("https://evil.example"), None),
-            true,
+            &config,
         ));
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::HEAD, host, None, None),
-            true,
+            &config,
         ));
     }
 
     #[test]
     fn csrf_gate_accepts_same_origin_state_change() {
-        // POST with the app's own Origin (dev ⇒ http) + same-origin Sec-Fetch.
+        // POST with the app's own HTTP origin and same-origin Sec-Fetch.
         let host = "myapp.zeroship.ai";
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(
                 ntex::http::Method::POST,
@@ -1617,34 +1642,95 @@ mod tests {
                 Some("http://myapp.zeroship.ai"),
                 Some("same-origin"),
             ),
-            true,
+            &config,
         ));
         // Sec-Fetch-Site absent is tolerated (advisory) when Origin matches.
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
-            true,
+            &config,
         ));
+    }
+
+    #[test]
+    fn csrf_gate_accepts_validated_configured_origins_with_realistic_metadata() {
+        let host = "myapp.zeroship.ai";
+        let config = csrf_config(
+            zeroship_core::config::OriginScheme::Https,
+            false,
+            &[
+                "https://console.zeroship.ai",
+                "https://console.zeroship.example",
+            ],
+        );
+
+        for (origin, fetch_site) in [
+            ("https://console.zeroship.example", "same-origin"),
+            ("https://console.zeroship.ai", "same-site"),
+            ("https://console.zeroship.example", "cross-site"),
+        ] {
+            assert!(!cookie_csrf_rejected(
+                &csrf_req(
+                    ntex::http::Method::POST,
+                    host,
+                    Some(origin),
+                    Some(fetch_site),
+                ),
+                &config,
+            ));
+        }
+
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(
+                ntex::http::Method::POST,
+                host,
+                Some("https://console.zeroship.example"),
+                None,
+            ),
+            &config,
+        ));
+    }
+
+    #[test]
+    fn csrf_gate_rejects_inconsistent_metadata_for_configured_origin() {
+        let host = "myapp.zeroship.ai";
+        let config = csrf_config(
+            zeroship_core::config::OriginScheme::Https,
+            false,
+            &["https://console.zeroship.example"],
+        );
+        for fetch_site in ["none", "unknown"] {
+            assert!(cookie_csrf_rejected(
+                &csrf_req(
+                    ntex::http::Method::POST,
+                    host,
+                    Some("https://console.zeroship.example"),
+                    Some(fetch_site),
+                ),
+                &config,
+            ));
+        }
     }
 
     #[test]
     fn csrf_gate_rejects_foreign_missing_and_cross_site_state_change() {
         let host = "myapp.zeroship.ai";
-        // Foreign Origin on a state-changing POST → reject (drop the cookie cred).
+        let config = csrf_config(zeroship_core::config::OriginScheme::Http, true, &[]);
+        // Foreign Origin on a state-changing POST rejects the cookie credential.
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("https://evil.example"), None),
-            true,
+            &config,
         ));
-        // MISSING Origin on a state-changing POST → reject (no Origin to match).
+        // Missing Origin on a state-changing POST has no origin to match.
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, None, None),
-            true,
+            &config,
         ));
-        // Origin: null → reject.
+        // Origin: null is never trusted.
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("null"), None),
-            true,
+            &config,
         ));
-        // Present Sec-Fetch-Site != same-origin → reject even with matching Origin.
+        // Cross-site fetch metadata rejects even a matching origin.
         assert!(cookie_csrf_rejected(
             &csrf_req(
                 ntex::http::Method::POST,
@@ -1652,29 +1738,43 @@ mod tests {
                 Some("http://myapp.zeroship.ai"),
                 Some("cross-site"),
             ),
-            true,
+            &config,
         ));
         // PUT/PATCH/DELETE are state-changing too.
         for m in [ntex::http::Method::PUT, ntex::http::Method::PATCH, ntex::http::Method::DELETE] {
             assert!(
-                cookie_csrf_rejected(&csrf_req(m.clone(), host, Some("https://evil.example"), None), true),
+                cookie_csrf_rejected(
+                    &csrf_req(m.clone(), host, Some("https://evil.example"), None),
+                    &config,
+                ),
                 "{m} with foreign Origin must be rejected"
             );
         }
     }
 
     #[test]
-    fn csrf_gate_prod_scheme_is_https() {
-        // insecure_dev=false ⇒ expected origin is https://<host>.
+    fn csrf_gate_origin_scheme_is_independent_of_insecure_dev() {
         let host = "myapp.zeroship.ai";
+        let https_with_insecure_cookies =
+            csrf_config(zeroship_core::config::OriginScheme::Https, true, &[]);
         assert!(!cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), Some("same-origin")),
-            false,
+            &https_with_insecure_cookies,
         ));
-        // An http Origin in prod is foreign (scheme mismatch) → reject.
         assert!(cookie_csrf_rejected(
             &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
-            false,
+            &https_with_insecure_cookies,
+        ));
+
+        let http_with_secure_cookies =
+            csrf_config(zeroship_core::config::OriginScheme::Http, false, &[]);
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
+            &http_with_secure_cookies,
+        ));
+        assert!(cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), None),
+            &http_with_secure_cookies,
         ));
     }
 
@@ -3744,7 +3844,7 @@ mod tests {
             .method(ntex::http::Method::POST)
             .uri("/api/transfer")
             .header(http::header::HOST, aud)
-            .header(http::header::ORIGIN, "http://myapp.zeroship.ai") // dev ⇒ http
+            .header(http::header::ORIGIN, "http://myapp.zeroship.ai") // origin_scheme=Http
             .header("sec-fetch-site", "same-origin")
             .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();

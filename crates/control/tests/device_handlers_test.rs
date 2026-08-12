@@ -32,6 +32,7 @@ use zeroship_core::auth_provider::{
     AuthProvider, DualIssuerProvider, LegacyAuthProvider, PlatformConfig, PlatformProvider,
     ProviderAuthz, SupabaseConfig, SupabaseProvider,
 };
+use zeroship_core::config::OriginScheme;
 use zeroship_authz::{Action, Resource};
 
 mod common;
@@ -455,6 +456,9 @@ impl Fixture {
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(admin_quota)),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            // Deliberately differs from insecure_dev below: public topology
+            // must not inherit a security-relaxation setting.
+            origin_scheme: OriginScheme::Https,
             insecure_dev: true,
             trust_proxy,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
@@ -807,14 +811,16 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
     assert_eq!(decoded.len(), 32, "device_code must carry 256 bits");
     assert_eq!(auth_body["interval"], 5);
     assert_eq!(auth_body["expires_in"], 600);
-    assert!(auth_body["verification_uri"]
-        .as_str()
-        .expect("verification_uri")
-        .ends_with("/device"));
-    assert!(auth_body["verification_uri_complete"]
-        .as_str()
-        .expect("verification_uri_complete")
-        .contains(user_code));
+    assert_eq!(
+        auth_body["verification_uri"].as_str(),
+        Some("https://auth.zeroship.localhost/device")
+    );
+    assert_eq!(
+        auth_body["verification_uri_complete"].as_str(),
+        Some(
+            format!("https://auth.zeroship.localhost/device?user_code={user_code}").as_str()
+        )
+    );
 
     let device_code_hash = fx.track_hash(device_code);
     let row = fx

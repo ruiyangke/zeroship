@@ -523,8 +523,10 @@ fn build_state_with_route(
             poll_interval_secs: 5,
             worker_key: "worker-key".into(),
             auth_ui_url: op_base.to_string(),
-            // insecure_dev = false so we exercise the prod __Host- / Strict
-            // / Secure cookie attributes and the https Origin compare.
+            origin_scheme: zeroship_core::config::OriginScheme::Https,
+            trusted_origins: vec![],
+            // insecure_dev = false exercises the prod __Host- / Strict / Secure
+            // cookie attributes.
             insecure_dev: false,
             trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),

@@ -256,6 +256,8 @@ fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<Ga
             poll_interval_secs: 5,
             worker_key: "gateway-e2e-worker-key".to_string(),
             auth_ui_url: auth_base.to_string(),
+            origin_scheme: zeroship_core::config::OriginScheme::Https,
+            trusted_origins: vec![],
             insecure_dev: false,
             trust_proxy: false,
             public_url: GATEWAY_ISS.to_string(),

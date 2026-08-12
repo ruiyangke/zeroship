@@ -13,6 +13,7 @@ use zeroship_control::app_oauth_client::{self, client_id_for_app, redirect_uris_
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::config::OriginScheme;
 
 mod common;
 
@@ -322,6 +323,9 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        // Deliberately differs from insecure_dev below: public OAuth URLs
+        // follow deployment topology, not the security-relaxation flag.
+        origin_scheme: OriginScheme::Https,
         insecure_dev: true,
         trust_proxy: false,
         deploy_tmp_dir: blob_root.clone(),
@@ -351,11 +355,13 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
 }
 
 #[compio::test]
-async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
+async fn appstate_origin_scheme_provisions_urls_then_purge_deletes_oauth_rows() {
     let url = db_url();
 
     let app_base_domain = "zeroship.localhost";
     let state = build_state(&url, app_base_domain).await;
+    assert_eq!(state.origin_scheme, OriginScheme::Https);
+    assert!(state.insecure_dev);
     let owner_id = seed_owner(&state.control_pg, "oac-state-owner").await;
 
     let app_name = format!("zs-1d-state-{}", Uuid::new_v4().simple());
@@ -379,14 +385,14 @@ async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
     let uris = redirect_uris(&state.control_pg, &client_id).await;
     assert!(
         uris.iter()
-            .any(|uri| uri == &format!("http://{expected_apex}/__zeroship/auth/callback")),
+            .any(|uri| uri == &format!("https://{expected_apex}/__zeroship/auth/callback")),
         "apex host derived by provision_app_oauth_client must match gateway host {expected_apex}: {uris:?}"
     );
     let routes = state.registry.get_routes().await.expect("get_routes");
     let entry = routes.get(&app_id).expect("route entry");
     assert_eq!(
         entry.sector_identifier.as_deref(),
-        Some(format!("http://{expected_apex}").as_str())
+        Some(format!("https://{expected_apex}").as_str())
     );
     assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 1);
 

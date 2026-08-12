@@ -12,6 +12,12 @@
 # REFERENCES (urn:/arn:) that point at where each secret actually lives; a
 # plaintext literal there is rejected at startup.
 
+# Public-edge topology for browser-visible URLs and same-origin checks. These
+# are ordinary operational settings, independent of --dev-insecure. Exact
+# origins only: no wildcards, paths, queries, fragments, credentials, or null.
+# origin_scheme = "https"
+# trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
+
 [auth]
 # The native OP public origin is supplied to the auth service through
 # AUTH_PUBLIC_URL. This shared overlay does not define that key.

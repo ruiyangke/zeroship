@@ -9,7 +9,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
+# The base deployment intentionally gives control no host port. This harness
+# needs localhost access for its HTTP assertions, so it adds an isolated,
+# test-only loopback publication. Relative paths continue to resolve from the
+# first compose file.
+export COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml:$ROOT/tests/e2e_docker.override.yml"
 
 # PROJECT ISOLATION IS A SAFETY REQUIREMENT, NOT A CONVENIENCE.
 #

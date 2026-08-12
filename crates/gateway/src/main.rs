@@ -10,8 +10,9 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_unless_dev, validate_stash_key,
-    CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_origin_scheme,
+    resolve_trusted_origins, validate_stash_key, CheckConfigReport, CheckFormat, CheckValue,
+    OriginScheme, TrustedOrigin, DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
@@ -112,6 +113,18 @@ struct GateCli {
         default_value = "https://api.zeroship.ai"
     )]
     gateway_public_url: String,
+
+    /// Scheme used in public app URLs and same-origin checks.
+    #[arg(long, env = "ZEROSHIP_ORIGIN_SCHEME", value_enum)]
+    origin_scheme: Option<OriginScheme>,
+
+    /// Additional exact origins accepted by same-origin guards.
+    #[arg(
+        long,
+        env = "ZEROSHIP_TRUSTED_ORIGINS",
+        value_delimiter = ','
+    )]
+    trusted_origins: Option<Vec<TrustedOrigin>>,
 
     /// Upstream URL for the auth service UI and OAuth surfaces.
     #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
@@ -289,6 +302,10 @@ fn main() -> std::io::Result<()> {
     // is sufficient (no clone needed). Precedence per field: CLI/env > this
     // reference-only file tier > default, applied by `obtain_secret`.
     let file_secrets = &file.secrets;
+
+    let origin_scheme = resolve_origin_scheme(cli.origin_scheme, file.origin_scheme);
+    let trusted_origins =
+        resolve_trusted_origins(cli.trusted_origins, file.trusted_origins.clone());
 
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
@@ -531,6 +548,11 @@ fn main() -> std::io::Result<()> {
         );
         report.field("control_url", CheckValue::Plain(control_url));
         report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
+        report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
+        report.field(
+            "trusted_origins_count",
+            CheckValue::Count(trusted_origins.len()),
+        );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
@@ -708,6 +730,8 @@ fn main() -> std::io::Result<()> {
             poll_interval_secs: poll_interval,
             worker_key,
             auth_ui_url,
+            origin_scheme,
+            trusted_origins,
             insecure_dev,
             trust_proxy,
             public_url,
@@ -948,6 +972,54 @@ mod tests {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    #[test]
+    fn topology_cli_overrides_environment_and_environment_overrides_file() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let old_scheme = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
+        let old_origins = std::env::var_os("ZEROSHIP_TRUSTED_ORIGINS");
+        std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
+        std::env::set_var(
+            "ZEROSHIP_TRUSTED_ORIGINS",
+            "https://env.example,http://localhost:3000",
+        );
+
+        let env = GateCli::try_parse_from(["zeroship-gate"]).expect("parse env topology");
+        assert_eq!(
+            resolve_origin_scheme(env.origin_scheme, Some(OriginScheme::Https)),
+            OriginScheme::Http
+        );
+        assert_eq!(
+            resolve_trusted_origins(
+                env.trusted_origins,
+                Some(vec!["https://file.example".parse().expect("file origin")]),
+            )
+            .iter()
+            .map(TrustedOrigin::as_str)
+            .collect::<Vec<_>>(),
+            vec!["https://env.example", "http://localhost:3000"]
+        );
+
+        let cli = GateCli::try_parse_from([
+            "zeroship-gate",
+            "--origin-scheme",
+            "https",
+            "--trusted-origins",
+            "https://cli.example",
+        ])
+        .expect("parse CLI topology");
+        assert_eq!(cli.origin_scheme, Some(OriginScheme::Https));
+        assert_eq!(
+            cli.trusted_origins
+                .as_deref()
+                .expect("CLI trusted origins")[0]
+                .as_str(),
+            "https://cli.example"
+        );
+
+        restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old_scheme);
+        restore_env_var("ZEROSHIP_TRUSTED_ORIGINS", old_origins);
     }
 
     // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be

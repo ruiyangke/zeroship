@@ -11,8 +11,8 @@ use zeroship_core::auth_provider::{
     SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, resolve_overlay_string,
-    validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
+    bootstrap_or_exit, parse_bool_flag, resolve_origin_scheme, resolve_overlay_string,
+    validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue, OriginScheme,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -375,6 +375,10 @@ struct ControlCli {
     #[arg(long = "app-base-domain", env = "APP_BASE_DOMAIN", default_value = "zeroship.ai")]
     app_base_domain: String,
 
+    /// Scheme used in public app, auth, and console URLs.
+    #[arg(long, env = "ZEROSHIP_ORIGIN_SCHEME", value_enum)]
+    origin_scheme: Option<OriginScheme>,
+
     /// Retention horizon (months) for the append-only audit tables
     /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
     /// are swept by the in-process retention cron — the sanctioned deleter for
@@ -439,6 +443,7 @@ impl std::fmt::Debug for ControlCli {
             .field("pairwise_salt_file", &self.pairwise_salt_file)
             .field("oauth_audience", &self.oauth_audience)
             .field("app_base_domain", &self.app_base_domain)
+            .field("origin_scheme", &self.origin_scheme)
             .field("spend_recompute_interval", &self.spend_recompute_interval)
             .field("audit_retention_months", &self.audit_retention_months)
             .field("audit_retention_check_secs", &self.audit_retention_check_secs)
@@ -649,6 +654,7 @@ fn main() -> std::io::Result<()> {
     // `ZEROSHIP_DEV_INSECURE=1`.
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
+    let origin_scheme = resolve_origin_scheme(cli.origin_scheme, file.origin_scheme);
 
     let auth_provider_name = cli.auth_provider.clone();
     let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
@@ -1028,6 +1034,7 @@ fn main() -> std::io::Result<()> {
         report.field("log_format", CheckValue::Plain(log_format_str));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
+        report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
@@ -1458,6 +1465,7 @@ fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         control_pg,
         app_base_domain,
+        origin_scheme,
         trusted_oauth_clients,
         expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()
@@ -1744,6 +1752,15 @@ mod tests {
     use super::*;
     use zeroship_core::config::require_unless_dev;
 
+    static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
+        match old {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     #[test]
     fn control_blob_store_flag_uses_unified_name() {
         let cli =
@@ -1751,6 +1768,29 @@ mod tests {
                 .expect("blob-store flag should parse");
 
         assert_eq!(cli.blob_store, "/tmp/blob-root");
+    }
+
+    #[test]
+    fn origin_scheme_cli_overrides_environment_and_environment_overrides_file() {
+        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
+        std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
+
+        let env = ControlCli::try_parse_from(["zeroship-control"]).expect("parse env topology");
+        assert_eq!(
+            resolve_origin_scheme(env.origin_scheme, Some(OriginScheme::Https)),
+            OriginScheme::Http
+        );
+
+        let cli = ControlCli::try_parse_from([
+            "zeroship-control",
+            "--origin-scheme",
+            "https",
+        ])
+        .expect("parse CLI topology");
+        assert_eq!(cli.origin_scheme, Some(OriginScheme::Https));
+
+        restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old);
     }
 
     #[test]
@@ -1918,9 +1958,8 @@ mod tests {
     // while env=1 alone (no CLI flag) enables.
     #[test]
     fn dev_insecure_cli_false_overrides_env_one() {
-        // Serialise env mutation across the two env-touching tests.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        // Serialise process-wide environment mutation across config tests.
+        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
         let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
 
@@ -1939,10 +1978,7 @@ mod tests {
         let insecure_dev = cli.dev_insecure.unwrap_or(false);
         assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
 
-        match old {
-            Some(value) => std::env::set_var("ZEROSHIP_DEV_INSECURE", value),
-            None => std::env::remove_var("ZEROSHIP_DEV_INSECURE"),
-        }
+        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
     }
 
     // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.

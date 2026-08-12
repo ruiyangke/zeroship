@@ -813,7 +813,7 @@ fn sha256_hex(value: &str) -> String {
 }
 
 fn verification_uri(state: &AppState) -> String {
-    let scheme = if state.insecure_dev { "http" } else { "https" };
+    let scheme = state.app_scheme();
     let domain = state.app_base_domain.trim();
     let domain = if domain.is_empty() {
         "zeroship.ai"

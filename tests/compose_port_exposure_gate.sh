@@ -10,8 +10,8 @@
 #
 #   verdaccio  127.0.0.1:4873     postgres  127.0.0.1:5440
 #   redpanda   127.0.0.1:19092    redpanda  127.0.0.1:9644
-#   control    9090               gateway   8000
-#   auth       9092               caddy     80
+#   migrated   127.0.0.1:9091     gateway   127.0.0.1:8000
+#   auth       127.0.0.1:9092     caddy     80
 #
 # `"8000:8000"` with no address publishes on 0.0.0.0. On the internet-facing
 # host this deployment targets, that is a second entrance to the gateway that
@@ -26,14 +26,11 @@
 # from the host, so every local harness and every `curl localhost:8000` keeps
 # working. Only REMOTE reach is removed.
 #
-# CONTROL IS DIFFERENT AND THIS GATE IS DELIBERATELY RED ON IT. There is no
-# Caddy site block for the control plane at all - `api.zeroship.co` proxies to
-# `gateway:8000`, not to control. So 9090's publication is the ONLY way a
-# creator's `zeroship deploy --control=...` can reach it, and loopback-binding
-# it would break the primary creator flow. That is a design gap, not a typo: an
-# internet-facing deploy needs a control route at the edge so TLS terminates in
-# one place. Until an operator decides that, the exposure is real and this gate
-# says so rather than allow-listing it green. See task #186.
+# Control no longer publishes a host port. A control.<domain> Caddy block is
+# staged in deploy/ops/Caddyfile, but remains fully commented while control
+# still runs with --dev-insecure and the hardcoded platform-key. The server
+# runbook documents a loopback-only override for SSH-tunnel access until those
+# two prerequisites land and the edge route can safely be enabled.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
 #   - it does not run docker and does not probe any host
@@ -47,6 +44,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CF="$ROOT/deploy/compose/docker-compose.yml"
+CADDYFILE="$ROOT/deploy/ops/Caddyfile"
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
@@ -56,6 +54,7 @@ echo "  deploy/compose publishes only the edge on 0.0.0.0"
 echo "============================================"
 
 [ -f "$CF" ] || { echo "  x REFUSED: $CF not found." >&2; exit 1; }
+[ -f "$CADDYFILE" ] || { echo "  x REFUSED: $CADDYFILE not found." >&2; exit 1; }
 
 # The ONLY service allowed to publish on all interfaces. Caddy is the edge; that
 # is its entire job. Keep this list at one entry - every addition is a second
@@ -65,7 +64,7 @@ EDGE_SERVICE="caddy"
 # service + published-port spec, e.g. "gateway 8000:8000".
 #
 # BLOCK-AWARE ON PURPOSE. My first version of this parser matched any 6-space
-# `- "…"` list item holding digits and colons, and it reported FOURTEEN ports
+# `- "..."` list item holding digits and colons, and it reported FOURTEEN ports
 # where the file has eight - inventing `worker publishes 4`, `200`, `3` and
 # `redpanda publishes 1` out of quoted scalars in `command:` and healthcheck
 # blocks. That is a gate that lies, so it is not what ships. Entries are taken
@@ -98,18 +97,55 @@ for e in "${ENTRIES[@]}"; do
   fi
 done
 
+PORT_RAN=$((PASS + FAIL))
+
+# This is separate from the eight-port inventory: it couples activation of the
+# staged public control route to removal of both known insecure compose inputs.
+# Commented Caddy examples do not match the anchored active-site expression.
+CONTROL_BLOCK=$(awk '
+  /^  control:[[:space:]]*$/ { in_control = 1; next }
+  in_control && /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { exit }
+  in_control && !/^[[:space:]]*#/ { print }
+' "$CF")
+CONTROL_ROUTE_ACTIVE=0
+CONTROL_POSTURE_RELAXED=0
+CONTROL_ROUTE_STAGED=0
+if grep -Eq '^[[:space:]]*#[[:space:]]*http://control[.]\{\$ZEROSHIP_DOMAIN(:[^}]*)?\}[[:space:]]*\{' \
+    "$CADDYFILE" && \
+   grep -Eq '^[[:space:]]*#[[:space:]]*reverse_proxy[[:space:]]+control:9090([[:space:]]|$)' \
+    "$CADDYFILE"; then
+  CONTROL_ROUTE_STAGED=1
+fi
+grep -Eq '^[[:space:]]*(https?://)?control[.]\{\$ZEROSHIP_DOMAIN(:[^}]*)?\}[[:space:]]*\{' \
+  "$CADDYFILE" && CONTROL_ROUTE_ACTIVE=1
+grep -q -- '--dev-insecure' <<<"$CONTROL_BLOCK" && CONTROL_POSTURE_RELAXED=1
+grep -Eq '^[[:space:]]*ZEROSHIP_CONTROL_KEY:[[:space:]]*platform-key([[:space:]]|$)' \
+  <<<"$CONTROL_BLOCK" && CONTROL_POSTURE_RELAXED=1
+
+if [ "$CONTROL_ROUTE_STAGED" -eq 1 ]; then
+  pass "commented control route targets control:9090 by service name"
+else
+  fail "commented control route to control:9090 is missing"
+fi
+
+if [ "$CONTROL_ROUTE_ACTIVE" -eq 1 ] && [ "$CONTROL_POSTURE_RELAXED" -eq 1 ]; then
+  fail "control route is active while control still has an insecure compose input"
+else
+  pass "control route remains inactive while compose has an insecure input"
+fi
+
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
-# MEASURED 2026-08-11: 8 published ports in the file.
+# MEASURED 2026-08-12: 8 published ports in the file after removing control's
+# host publication.
 MIN_RAN="${COMPOSE_PORTS_MIN_RAN:-8}"
-RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$RAN" -lt "$MIN_RAN" ]; then
-  echo "  x FLOOR: only $RAN published ports checked, expected at least $MIN_RAN." >&2
+if [ "$PORT_RAN" -lt "$MIN_RAN" ]; then
+  echo "  x FLOOR: only $PORT_RAN published ports checked, expected at least $MIN_RAN." >&2
   echo "    Ports went missing from the parse - a smaller green is not a pass." >&2
   rc=1
 fi
