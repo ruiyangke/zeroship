@@ -59,9 +59,161 @@ pub struct FileConfig {
     /// fields fall back to env/default.
     #[serde(default)]
     pub metering: MeteringSection,
+    /// Root directory or `s3://` URL for content-addressed deploy blobs,
+    /// shared by control, gateway and worker.
+    pub blob_store: Option<String>,
+    /// Control-plane API base URL, shared by gateway and worker.
+    pub control_url: Option<String>,
+    /// Comma-separated worker base URLs, shared by control and gateway.
+    pub worker_urls: Option<String>,
+    /// Polling interval in seconds, shared by gateway and worker.
+    pub poll_interval: Option<u64>,
+    /// Expected OAuth access-token audience, shared by control and migrated.
+    pub oauth_audience: Option<String>,
+    /// Trust `X-Forwarded-For` from an upstream proxy, shared by control and
+    /// gateway.
+    pub trust_proxy: Option<bool>,
+    /// Control-plane settings.
+    #[serde(default)]
+    pub control: ControlSection,
+    /// Gateway settings.
+    #[serde(default)]
+    pub gateway: GatewaySection,
+    /// Worker settings.
+    #[serde(default)]
+    pub worker: WorkerSection,
+    /// Migration-service settings.
+    #[serde(default)]
+    pub migrated: MigratedSection,
     /// Standalone workflow-scheduler settings.
     #[serde(default)]
     pub workflow_scheduler: SchedulerSection,
+}
+
+/// Control-plane operational values supplied by the overlay.
+///
+/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS a
+/// `[control]` table and still rejects a typo inside it; the values come from
+/// the generated declarations walking the same canonical paths.
+///
+/// The two `BootstrapControl` fields on that declaration -
+/// `disable_workflow_engine` and `allow_unsupported_billing` - are deliberately
+/// ABSENT. A bootstrap control has no overlay tier, so a key here would be
+/// accepted by the parser and then ignored by the resolver, which is worse than
+/// being rejected.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSection {
+    /// HTTP listen port.
+    pub port: Option<u16>,
+    /// Bind address.
+    pub bind: Option<String>,
+    /// Gateway internal base URL for the workflow dispatch seam.
+    pub gateway_url: Option<String>,
+    /// Usage meter provider.
+    pub meter_provider: Option<String>,
+    /// Invoicer provider.
+    pub invoicer_provider: Option<String>,
+    /// Opaque provider JSON config.
+    pub provider_config: Option<String>,
+    /// Durable usage-event stream transport.
+    pub stream_transport: Option<String>,
+    /// Opaque stream transport JSON config.
+    pub stream_config: Option<String>,
+    /// Billing forwarder consumer group.
+    pub billing_forwarder_group_id: Option<String>,
+    /// Spend recompute consumer group.
+    pub spend_recompute_group_id: Option<String>,
+    /// Spend recompute interval in seconds.
+    pub spend_recompute_interval: Option<u64>,
+    /// Tax provider backend.
+    pub tax_provider: Option<String>,
+    /// Stripe REST API base URL.
+    pub stripe_base_url: Option<String>,
+    /// Billing-notification mailer driver.
+    pub mailer: Option<String>,
+    /// SMTP host.
+    pub smtp_host: Option<String>,
+    /// SMTP port.
+    pub smtp_port: Option<u16>,
+    /// SMTP username.
+    pub smtp_username: Option<String>,
+    /// Directory for in-flight deploy bodies.
+    pub deploy_tmp_dir: Option<String>,
+    /// JWKS URL for asymmetric GoTrue JWT verification.
+    pub supabase_jwks_url: Option<String>,
+    /// GoTrue JWT issuer pinned during Supabase token verification.
+    pub supabase_jwt_issuer: Option<String>,
+    /// Apex domain hosted creator apps serve under.
+    pub app_base_domain: Option<String>,
+    /// Audit retention horizon in months.
+    pub audit_retention_months: Option<u32>,
+    /// Audit retention cron tick in seconds.
+    pub audit_retention_check_secs: Option<u64>,
+}
+
+/// Gateway operational values supplied by the overlay. See [`ControlSection`].
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GatewaySection {
+    /// HTTP listen port.
+    pub port: Option<u16>,
+    /// Bind address.
+    pub bind: Option<String>,
+    /// In-memory blob cache budget in MiB.
+    pub blob_cache_mem_mb: Option<usize>,
+    /// On-disk blob cache budget in GiB.
+    pub blob_cache_disk_gb: Option<u64>,
+    /// Root directory for the on-disk blob cache.
+    pub blob_cache_disk_root: Option<String>,
+    /// Pooled `PostgreSQL` connection ceiling.
+    pub db_pool_size: Option<usize>,
+    /// Public URL advertised as the session-cookie issuer.
+    pub public_url: Option<String>,
+    /// Upstream URL for the auth service UI and OAuth surfaces.
+    pub auth_ui_url: Option<String>,
+}
+
+/// Worker operational values supplied by the overlay. See [`ControlSection`].
+///
+/// `workflow_advance_unsigned` is deliberately absent for the same reason the
+/// control safety controls are: it is a `BootstrapControl` with no overlay tier.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSection {
+    /// HTTP listen port.
+    pub port: Option<u16>,
+    /// Bind address.
+    pub bind: Option<String>,
+    /// Optional Unix domain socket path.
+    pub socket: Option<String>,
+    /// ntex worker threads.
+    pub threads: Option<usize>,
+    /// Maximum cached app isolates.
+    pub max_isolates: Option<usize>,
+    /// Maximum deploy-pinned workflow replay isolates per app.
+    pub max_pinned_isolates_per_app: Option<usize>,
+    /// Shutdown drain timeout in seconds.
+    pub shutdown_timeout: Option<u64>,
+    /// Object-store location for the app `env.storage` namespace.
+    pub storage_url: Option<String>,
+    /// Maximum persisted bytes for one workflow step output blob.
+    pub max_step_blob_bytes: Option<u64>,
+}
+
+/// Migration-service operational values supplied by the overlay.
+/// See [`ControlSection`].
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MigratedSection {
+    /// HTTP listen port.
+    pub port: Option<u16>,
+    /// Bind address.
+    pub bind: Option<String>,
+    /// Directory for staged request migration files.
+    pub tmp_dir: Option<std::path::PathBuf>,
+    /// Active managed ceiling version stamped into sealed profiles.
+    pub policy_ceiling_version: Option<u64>,
 }
 
 /// Workflow-scheduler operational values supplied by the overlay.
@@ -644,6 +796,71 @@ auth_internal_key = "urn:zeroship:env:AUTH_INTERNAL_KEY"
 
         let err = FileConfig::load(Some(&file.path))
             .expect_err("[secrets].auth_internal_key must be rejected (field deleted)");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // The per-binary sections added for the operational conversion. Without
+    // them `deny_unknown_fields` rejects the very overlay the generated
+    // resolvers walk, so a canonical `[control] port = 9090` would be a startup
+    // ERROR rather than the supported way to set it.
+    #[test]
+    fn the_per_binary_sections_parse_and_still_reject_a_typo_inside_them() {
+        let file = TempFile::write(
+            "per-binary-sections.toml",
+            r#"
+blob_store = "./bundles"
+control_url = "http://control:9090"
+worker_urls = "http://worker:8080"
+poll_interval = 5
+oauth_audience = "control.zeroship.ai"
+trust_proxy = true
+
+[control]
+port = 9090
+mailer = "stdout"
+
+[gateway]
+port = 80
+db_pool_size = 16
+
+[worker]
+threads = 4
+max_isolates = 200
+
+[migrated]
+port = 9091
+
+[workflow_scheduler]
+tick_secs = 1
+"#,
+        );
+        let config = FileConfig::load(Some(&file.path)).expect("canonical overlay parses");
+        assert_eq!(config.control.port, Some(9090));
+        assert_eq!(config.gateway.db_pool_size, Some(16));
+        assert_eq!(config.worker.threads, Some(4));
+        assert_eq!(config.migrated.port, Some(9091));
+        assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
+        assert_eq!(config.trust_proxy, Some(true));
+
+        // The one-variable control: the SAME file with one key misspelled must
+        // still fail. Adding a section that accepted anything would be worse
+        // than not adding it.
+        let typo = TempFile::write(
+            "per-binary-typo.toml",
+            "[worker]\nthredas = 4\n",
+        );
+        let err = FileConfig::load(Some(&typo.path)).expect_err("a typo inside a section");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+
+        // A bootstrap control has no overlay tier, so its key must NOT be
+        // accepted here: accepted-then-ignored is the silent failure the
+        // section exists to prevent.
+        let control = TempFile::write(
+            "per-binary-bootstrap.toml",
+            "[worker]\nworkflow_advance_unsigned = true\n",
+        );
+        let err = FileConfig::load(Some(&control.path))
+            .expect_err("a bootstrap control has no overlay tier");
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 }

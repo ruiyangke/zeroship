@@ -10,13 +10,12 @@ use zeroship_core::auth_provider::{
     SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, resolve_origin_scheme, resolve_overlay_string,
-    validate_master_key_material, CheckConfigReport, CheckValue, OriginScheme,
+    bootstrap_or_exit, validate_master_key_material, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
-use zeroship_control::config::{ControlControls, ControlControlsSources};
+use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
     admin_handlers, api, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, plan_catalog, stripe_handlers, token_handlers,
@@ -34,17 +33,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const DEFAULT_DB_URL: &str = "postgres://localhost/zeroship";
 
 /// zeroship control-plane startup configuration.
+///
+/// Only the credential-bearing fields remain here; every operational value is
+/// generated in `zeroship_control::config`.
 #[derive(Parser)]
 #[command(name = "zeroship-control")]
 struct ControlCli {
-    /// HTTP listen port.
-    #[arg(long, env = "CONTROL_PORT", default_value_t = 9090)]
-    port: u16,
-
-    /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
-    #[arg(long, env = "CONTROL_BIND", default_value = "127.0.0.1")]
-    bind: String,
-
     /// `PostgreSQL` DSN for control-plane data.
     ///
     /// The default is EMPTY, and it has to be: `obtain_secret`'s contract is
@@ -52,20 +46,11 @@ struct ControlCli {
     /// the CLI branch on ANY non-empty string. A compiled-in `default_value`
     /// here is indistinguishable from an operator-supplied `--db`, so it wins
     /// over the `[secrets] database_url` reference and the file tier can never
-    /// be reached. That is not hypothetical: the compose stack resolves its DSN
-    /// through `deploy/ops/zeroship.toml`'s
-    /// `database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"` and never sets
-    /// `DATABASE_URL`, so control dialled `localhost:5432` inside its own
-    /// container and crash-looped on `Registry::new` while every other binary
-    /// on the same network connected. The compiled fallback is applied AFTER
-    /// `obtain_secret`, which is the only place it can sit without shadowing
-    /// the file tier (precedence: CLI/env > `[secrets]` reference > default).
+    /// be reached. The compiled fallback is applied AFTER `obtain_secret`,
+    /// which is the only place it can sit without shadowing the file tier
+    /// (precedence: CLI/env > `[secrets]` reference > default).
     #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
-
-    /// Root directory for bundles and content-addressed deploy blobs.
-    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
-    blob_store: String,
 
     /// Admin/control API shared secret.
     #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
@@ -74,10 +59,6 @@ struct ControlCli {
     /// Master key used for control-plane encrypted env/secrets.
     #[arg(long = "master-key", env = "MASTER_KEY", default_value = "", hide_env_values = true)]
     master_key: String,
-
-    /// Comma-separated worker base URLs.
-    #[arg(long = "workers", env = "WORKER_URLS", default_value = "http://localhost:8080")]
-    workers: String,
 
     /// Shared secret for worker admin endpoints.
     #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
@@ -107,99 +88,11 @@ struct ControlCli {
     )]
     stripe_secret_key: String,
 
-    /// Stripe REST API base URL the outbound client targets. Defaults to
-    /// `https://api.stripe.com`; override only for testing against a mock.
-    #[arg(
-        long = "stripe-base-url",
-        env = "STRIPE_BASE_URL",
-        default_value = "https://api.stripe.com"
-    )]
-    stripe_base_url: String,
-
-    /// Gateway internal base URL used by the workflow engine dispatch seam.
-    #[arg(
-        long = "gateway-url",
-        env = "ZEROSHIP_GATEWAY_URL",
-        default_value = "http://localhost"
-    )]
-    gateway_url: String,
-
-    /// Provider used as the usage meter.
-    #[arg(long = "meter-provider", env = "METER_PROVIDER", default_value = "lite")]
-    meter_provider: String,
-
-    /// Provider used to close and invoice billing periods.
-    #[arg(long = "invoicer-provider", env = "INVOICER_PROVIDER", default_value = "lite")]
-    invoicer_provider: String,
-
-    /// Opaque provider JSON config. Use nested keys when the meter and invoicer
-    /// are different, e.g. {"openmeter":{...},"stripe_invoice":{...}}.
-    #[arg(long = "provider-config", env = "PROVIDER_CONFIG", default_value = "{}")]
-    provider_config: String,
-
-    /// Durable usage-event stream transport. Empty disables the event-forwarder
-    /// and keeps the legacy aggregate export cron active.
-    #[arg(long = "stream-transport", env = "STREAM_TRANSPORT")]
-    stream_transport: Option<String>,
-
-    /// Opaque stream transport JSON config, parsed by the selected transport.
-    #[arg(long = "stream-config", env = "STREAM_CONFIG", default_value = "{}")]
-    stream_config: String,
-
-    /// Stream consumer group for the provider billing forwarder.
-    #[arg(
-        long = "billing-forwarder-group-id",
-        env = "BILLING_FORWARDER_GROUP_ID",
-        default_value = zeroship_control::DEFAULT_BILLING_FORWARDER_GROUP_ID
-    )]
-    billing_forwarder_group_id: String,
-
-    /// Stream consumer group for the local spend recompute witness.
-    #[arg(
-        long = "spend-recompute-group-id",
-        env = "SPEND_RECOMPUTE_GROUP_ID",
-        default_value = zeroship_control::DEFAULT_SPEND_RECOMPUTE_GROUP_ID
-    )]
-    spend_recompute_group_id: String,
-
-    /// Interval in seconds for the stream-backed spend recompute cron. Default
-    /// is hourly per billing-provider-platform v7 enforcement.
-    #[arg(
-        long = "spend-recompute-interval",
-        env = "SPEND_RECOMPUTE_INTERVAL",
-        default_value_t = zeroship_control::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS
-    )]
-    spend_recompute_interval: u64,
-
-    /// Tax provider backend (billing-ops gap #26, PR-5). `native` (default)
-    /// computes `0` — the USD launch owes no tax. The seam exists so enabling a
-    /// real `StripeTaxProvider` (Stripe `automatic_tax`) later is a provider swap,
-    /// not a schema change (`invoices.tax_cents` already exists).
-    #[arg(long = "tax-provider", env = "TAX_PROVIDER", default_value = "native")]
-    tax_provider: String,
-
-    /// Mailer driver for billing notifications (billing-ops gap #26, PR-6).
-    /// `stdout` (default, dev) | `smtp` | `resend`. The `resend` driver honours
-    /// the per-message `Idempotency-Key` the notifier passes, making a re-driven
-    /// notification an effective no-op at the provider (MAJOR-A). `smtp`/`stdout`
-    /// do not dedup (documented). SMTP creds via `CONTROL_SMTP_*`; Resend key via
-    /// `CONTROL_RESEND_API_KEY`.
-    #[arg(long = "mailer", env = "CONTROL_MAILER", default_value = "stdout")]
-    mailer: String,
-
-    /// SMTP host — required when `--mailer=smtp`.
-    #[arg(long = "smtp-host", env = "CONTROL_SMTP_HOST")]
-    smtp_host: Option<String>,
-    /// SMTP port (default 587, STARTTLS).
-    #[arg(long = "smtp-port", env = "CONTROL_SMTP_PORT", default_value_t = 587)]
-    smtp_port: u16,
-    /// SMTP username (optional; unauthenticated relay if unset).
-    #[arg(long = "smtp-username", env = "CONTROL_SMTP_USERNAME")]
-    smtp_username: Option<String>,
     /// SMTP password (optional).
     #[arg(long = "smtp-password", env = "CONTROL_SMTP_PASSWORD")]
     smtp_password: Option<String>,
-    /// Resend API key — required when `--mailer=resend`.
+
+    /// Resend API key - required when the mailer is `resend`.
     #[arg(long = "resend-api-key", env = "CONTROL_RESEND_API_KEY")]
     resend_api_key: Option<String>,
 
@@ -211,33 +104,6 @@ struct ControlCli {
         hide_env_values = true
     )]
     legacy_master_keys: String,
-
-    /// Trust `X-Forwarded-For` from an upstream proxy.
-    #[arg(
-        long = "trust-proxy",
-        env = "ZEROSHIP_TRUST_PROXY",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    trust_proxy: Option<bool>,
-
-    /// Directory for in-flight deploy bodies; empty means the OS temp dir.
-    #[arg(long = "deploy-tmp-dir", env = "DEPLOY_TMP_DIR", default_value = "")]
-    deploy_tmp_dir: String,
-
-    /// Bootstrap, command and observability controls, generated from one
-    /// declaration in `zeroship_control::config`.
-    #[command(flatten)]
-    controls: ControlControlsSources,
-
-    /// Platform auth provider backend.
-    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "platform")]
-    auth_provider: String,
-
-    /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
-    #[arg(long = "supabase-url", env = "SUPABASE_URL", default_value = "")]
-    supabase_url: String,
 
     /// Supabase anon API key used for GoTrue browser/session API calls.
     #[arg(
@@ -258,7 +124,7 @@ struct ControlCli {
     )]
     supabase_service_role_key: String,
 
-    /// HS256 GoTrue JWT secret. Mutually exclusive with `--supabase-jwks-url`.
+    /// HS256 GoTrue JWT secret. Mutually exclusive with the Supabase JWKS URL.
     #[arg(
         long = "supabase-jwt-secret",
         env = "SUPABASE_JWT_SECRET",
@@ -267,39 +133,10 @@ struct ControlCli {
     )]
     supabase_jwt_secret: String,
 
-    /// JWKS URL for asymmetric GoTrue JWT verification. Mutually exclusive with
-    /// `--supabase-jwt-secret`.
-    #[arg(long = "supabase-jwks-url", env = "SUPABASE_JWKS_URL", default_value = "")]
-    supabase_jwks_url: String,
-
-    /// GoTrue JWT issuer pinned during Supabase token verification.
-    #[arg(
-        long = "supabase-jwt-issuer",
-        env = "SUPABASE_JWT_ISSUER",
-        default_value = ""
-    )]
-    supabase_jwt_issuer: String,
-
-    /// Platform OP issuer for platform-issued control/deploy access tokens.
-    #[arg(
-        long = "auth-platform-issuer",
-        env = "AUTH_PLATFORM_ISSUER",
-        default_value = ""
-    )]
-    auth_platform_issuer: String,
-
-    /// Platform OP JWKS URL. Defaults to `{AUTH_PLATFORM_ISSUER}/.well-known/jwks.json`.
-    #[arg(
-        long = "auth-platform-jwks-url",
-        env = "AUTH_PLATFORM_JWKS_URL",
-        default_value = ""
-    )]
-    auth_platform_jwks_url: String,
-
     /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
-    /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
-    /// the rotatable stash key. MUST be identical to the gateway's value and
-    /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
+    /// app's `pws_` per-app identity anchor - independent of the rotatable
+    /// stash key. MUST be identical to the gateway's value and MUST NOT be
+    /// rotated without a per-app `pws_` migration. Prefer
     /// `--pairwise-salt-file` in production.
     #[arg(
         long = "pairwise-salt",
@@ -314,43 +151,10 @@ struct ControlCli {
     #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
     pairwise_salt_file: String,
 
-    /// Expected OAuth access-token audience for control bearer auth.
-    #[arg(long = "oauth-audience", env = "OAUTH_AUDIENCE", default_value = "control.zeroship.ai")]
-    oauth_audience: String,
-
-    /// Apex domain hosted creator apps serve under. An app named `myapp`
-    /// serves at `myapp.{app_base_domain}`; the per-app OAuth client's
-    /// redirect_uris + sector_identifier are derived from that apex host
-    /// by the client-provisioning path. Defaults to the prod apex; dev/compose
-    /// set `zeroship.localhost`.
-    #[arg(long = "app-base-domain", env = "APP_BASE_DOMAIN", default_value = "zeroship.ai")]
-    app_base_domain: String,
-
-    /// Scheme used in public app, auth, and console URLs.
-    #[arg(long, env = "ZEROSHIP_ORIGIN_SCHEME", value_enum)]
-    origin_scheme: Option<OriginScheme>,
-
-    /// Retention horizon (months) for the append-only audit tables
-    /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
-    /// are swept by the in-process retention cron — the sanctioned deleter for
-    /// those tables (peer of the auth `audit_events` sweep). Default 12 months
-    /// matches the events-retention default.
-    #[arg(
-        long = "audit-retention-months",
-        env = "CONTROL_AUDIT_RETENTION_MONTHS",
-        default_value_t = zeroship_control::cron::audit_retention::DEFAULT_RETENTION_MONTHS
-    )]
-    audit_retention_months: u32,
-
-    /// Tick interval (seconds) for the audit-retention cron. Default 3600
-    /// (hourly). Operators can drop this for tests; production should leave the
-    /// default.
-    #[arg(
-        long = "audit-retention-check-secs",
-        env = "CONTROL_AUDIT_RETENTION_CHECK_SECS",
-        default_value_t = zeroship_control::cron::audit_retention::DEFAULT_CHECK_SECS
-    )]
-    audit_retention_check_secs: u64,
+    /// Every operational value, generated from one declaration in
+    /// `zeroship_control::config`.
+    #[command(flatten)]
+    settings: ControlSettingsSources,
 }
 
 // S2: hand-written `Debug` that redacts every raw-secret field. The derive is
@@ -360,38 +164,22 @@ struct ControlCli {
 impl std::fmt::Debug for ControlCli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlCli")
-            .field("port", &self.port)
-            .field("bind", &self.bind)
             .field("db", &"<redacted>")
-            .field("blob_store", &self.blob_store)
             .field("control_key", &"<redacted>")
             .field("master_key", &"<redacted>")
-            .field("workers", &self.workers)
             .field("worker_key", &"<redacted>")
             .field("signing_key_file", &self.signing_key_file)
             .field("stripe_webhook_secret", &"<redacted>")
-            .field("gateway_url", &self.gateway_url)
+            .field("stripe_secret_key", &"<redacted>")
+            .field("smtp_password", &"<redacted>")
+            .field("resend_api_key", &"<redacted>")
             .field("legacy_master_keys", &"<redacted>")
-            .field("trust_proxy", &self.trust_proxy)
-            .field("deploy_tmp_dir", &self.deploy_tmp_dir)
-            .field("controls", &self.controls)
-            .field("auth_provider", &self.auth_provider)
-            .field("supabase_url", &self.supabase_url)
             .field("supabase_anon_key", &"<redacted>")
             .field("supabase_service_role_key", &"<redacted>")
             .field("supabase_jwt_secret", &"<redacted>")
-            .field("supabase_jwks_url", &self.supabase_jwks_url)
-            .field("supabase_jwt_issuer", &self.supabase_jwt_issuer)
-            .field("auth_platform_issuer", &self.auth_platform_issuer)
-            .field("auth_platform_jwks_url", &self.auth_platform_jwks_url)
             .field("pairwise_salt", &"<redacted>")
             .field("pairwise_salt_file", &self.pairwise_salt_file)
-            .field("oauth_audience", &self.oauth_audience)
-            .field("app_base_domain", &self.app_base_domain)
-            .field("origin_scheme", &self.origin_scheme)
-            .field("spend_recompute_interval", &self.spend_recompute_interval)
-            .field("audit_retention_months", &self.audit_retention_months)
-            .field("audit_retention_check_secs", &self.audit_retention_check_secs)
+            .field("settings", &self.settings)
             .finish()
     }
 }
@@ -406,21 +194,27 @@ impl std::fmt::Debug for ControlCli {
 /// Build the billing-notification mailer from `--mailer` (default stdout), mirroring
 /// auth's `build_mailer`. Returns a `String` error (consumed at the boot call site,
 /// which logs + exits) when a selected driver's required creds are missing.
-fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
+fn build_billing_mailer(
+    cli: &ControlCli,
+    settings: &ControlSettings,
+) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
     use zeroship_mailer::{
         ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, SmtpTls, StdoutMailer,
     };
-    match cli.mailer.as_str() {
+    match settings.mailer.get().as_str() {
         "stdout" => Ok(Arc::new(StdoutMailer)),
         "smtp" => {
-            let host = cli
-                .smtp_host
-                .clone()
-                .ok_or_else(|| "CONTROL_SMTP_HOST is required when --mailer=smtp".to_string())?;
+            let host = settings.smtp_host.get().clone();
+            if host.is_empty() {
+                return Err(
+                    "ZEROSHIP_CONTROL_SMTP_HOST is required when --mailer=smtp".to_string()
+                );
+            }
+            let username = settings.smtp_username.get().clone();
             let driver = SmtpMailer::new(&SmtpConfig {
                 host,
-                port: cli.smtp_port,
-                username: cli.smtp_username.clone(),
+                port: *settings.smtp_port.get(),
+                username: (!username.is_empty()).then_some(username),
                 password: cli.smtp_password.clone(),
                 tls: SmtpTls::Starttls,
             })
@@ -569,22 +363,29 @@ fn main() -> std::io::Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let cli = ControlCli::parse();
-    // Billing notifier mailer (PR-6): built from the --mailer flag up front, before any
-    // `cli` field is moved out below. An unknown driver / missing creds refuses to boot.
-    let billing_mailer: Arc<dyn zeroship_mailer::Mailer> = match build_billing_mailer(&cli) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!(error = %e, "control: refusing to start — billing mailer not available");
-            std::process::exit(1);
-        }
-    };
-    let mailer_kind = cli.mailer.clone();
-    let (controls, boot) = bootstrap_or_exit::<ControlControls>(
-        cli.controls,
+    // The generated sources are taken out of the parser first; everything left
+    // on `cli` is a secret awaiting the Secret<T> conversion.
+    let sources = cli.settings.clone();
+    let (settings, boot) = bootstrap_or_exit::<ControlSettings>(
+        sources,
         zeroship_control::config::DEFAULT_LOG_FILTER,
         "control",
     );
-    let check_config = *controls.check_config.get();
+    // Billing notifier mailer (PR-6): built from the resolved mailer setting.
+    // An unknown driver or missing creds refuses to boot.
+    let billing_mailer: Arc<dyn zeroship_mailer::Mailer> =
+        match build_billing_mailer(&cli, &settings) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "control: refusing to start - billing mailer not available"
+                );
+                std::process::exit(1);
+            }
+        };
+    let mailer_kind = settings.mailer.get().clone();
+    let check_config = *settings.check_config.get();
     let file = &boot.overlay.config;
     // `[secrets]` file-overlay tier for the secret-reference resolver. Cloned once
     // up front so individual `obtain_secret` calls can borrow the per-field refs
@@ -594,10 +395,10 @@ fn main() -> std::io::Result<()> {
     let file_metering = boot.overlay.config.metering.clone();
     let filter = &boot.log_filter;
 
-    let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let origin_scheme = resolve_origin_scheme(cli.origin_scheme, file.origin_scheme);
+    let trust_proxy = *settings.trust_proxy.get();
+    let origin_scheme = *settings.origin_scheme.get();
 
-    let auth_provider_name = cli.auth_provider.clone();
+    let auth_provider_name = settings.auth_provider.get().clone();
     let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
         Ok(kind) => kind,
         Err(message) => {
@@ -606,38 +407,26 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
-    let supabase_url = cli.supabase_url.clone();
+    let supabase_url = settings.supabase_url.get().clone();
     let supabase_anon_key = cli.supabase_anon_key.clone();
     let supabase_service_role_key = cli.supabase_service_role_key.clone();
     let supabase_jwt_secret = cli.supabase_jwt_secret.clone();
-    let supabase_jwks_url = cli.supabase_jwks_url.clone();
-    let supabase_jwt_issuer = cli.supabase_jwt_issuer.clone();
-    let auth_platform_issuer = resolve_overlay_string(
-        if cli.auth_platform_issuer.is_empty() {
-            None
-        } else {
-            Some(cli.auth_platform_issuer.clone())
-        },
-        file.auth.platform_issuer.clone(),
-        None,
-    );
-    let auth_platform_jwks_url = resolve_overlay_string(
-        if cli.auth_platform_jwks_url.is_empty() {
-            None
-        } else {
-            Some(cli.auth_platform_jwks_url.clone())
-        },
-        file.auth.platform_jwks_url.clone(),
-        None,
-    );
+    let supabase_jwks_url = settings.supabase_jwks_url.get().clone();
+    let supabase_jwt_issuer = settings.supabase_jwt_issuer.get().clone();
+    // The overlay tier these two used to reach by hand is now the generated
+    // resolver's: `auth.platform_issuer` and `auth.platform_jwks_url` ARE the
+    // canonical paths, so the values below already carry CLI / env / overlay
+    // precedence and `resolve_overlay_string` has nothing left to add.
+    let auth_platform_issuer = settings.auth_platform_issuer.get().clone();
+    let auth_platform_jwks_url = settings.auth_platform_jwks_url.get().clone();
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
         "control: trusted OAuth client set resolved"
     );
 
-    let port = cli.port;
-    let bind_host = cli.bind;
+    let port = *settings.port.get();
+    let bind_host = settings.bind.get().clone();
     // Secret-bearing inputs (the fields `ControlCli::Debug` redacts) are resolved
     // through the shared secret-reference resolver. On the real boot path a
     // `urn:zeroship:{env,file,...}` / `arn:aws:secretsmanager:...` reference is
@@ -665,7 +454,7 @@ fn main() -> std::io::Result<()> {
     } else {
         db_url
     };
-    let blob_store_root = cli.blob_store;
+    let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store (control writes deploys through the SAME
     // store gateway/worker read), bare path → local disk (dev default).
     // Validated now so a bad `s3://` URL fails fast.
@@ -689,8 +478,8 @@ fn main() -> std::io::Result<()> {
         file_secrets.master_key.as_deref(),
         check_config,
     );
-    let workers_str = cli.workers;
-    let gateway_url = cli.gateway_url.trim_end_matches('/').to_string();
+    let workers_str = settings.worker_urls.get().clone();
+    let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
     let worker_key = zeroship_core::config::obtain_secret(
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
@@ -710,7 +499,7 @@ fn main() -> std::io::Result<()> {
         file_secrets.stripe_secret_key.as_deref(),
         check_config,
     );
-    let stripe_base_url = cli.stripe_base_url.clone();
+    let stripe_base_url = settings.stripe_base_url.get().clone();
     // Comma-separated list of previous master keys, tried as fallbacks on decrypt
     // failure during a rotation grace period. A CLI/env value is a comma-list where
     // EACH entry may be a literal or its own secret reference (resolved per entry); an
@@ -750,7 +539,7 @@ fn main() -> std::io::Result<()> {
             })
             .collect()
     };
-    let deploy_tmp_dir_str = cli.deploy_tmp_dir;
+    let deploy_tmp_dir_str = settings.deploy_tmp_dir.get().clone();
     // Dedicated pairwise-salt secret (auth-sdk §6.2). MUST match the gateway's
     // value — both derive the per-app `pws_`. `--pairwise-salt-file` wins over
     // the inline value / overlay reference.
@@ -760,11 +549,11 @@ fn main() -> std::io::Result<()> {
         file_secrets.pairwise_salt.as_deref(),
         check_config,
     );
-    let expected_oauth_audience = cli.oauth_audience;
-    let app_base_domain = cli.app_base_domain;
-    let spend_recompute_interval = cli.spend_recompute_interval;
-    let audit_retention_months = cli.audit_retention_months;
-    let audit_retention_check_secs = cli.audit_retention_check_secs;
+    let expected_oauth_audience = settings.oauth_audience.get().clone();
+    let app_base_domain = settings.app_base_domain.get().clone();
+    let spend_recompute_interval = *settings.spend_recompute_interval.get();
+    let audit_retention_months = *settings.audit_retention_months.get();
+    let audit_retention_check_secs = *settings.audit_retention_check_secs.get();
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
     // file) is deferred to the real startup path (M1) so `--check-config`
@@ -945,11 +734,11 @@ fn main() -> std::io::Result<()> {
         report.field(
             "stream_transport",
             CheckValue::Plain(
-                cli.stream_transport
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("(disabled)")
-                    .to_string(),
+                if settings.stream_transport.get().trim().is_empty() {
+                    "(disabled)".to_string()
+                } else {
+                    settings.stream_transport.get().clone()
+                },
             ),
         );
         report.field(
@@ -967,7 +756,7 @@ fn main() -> std::io::Result<()> {
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
 
-        report.emit(*controls.check_config_format.get());
+        report.emit(*settings.check_config_format.get());
         return Ok(());
     }
 
@@ -1124,7 +913,8 @@ fn main() -> std::io::Result<()> {
             std::io::Error::other(err.to_string())
         })?;
 
-    let provider_config_json: serde_json::Value = match serde_json::from_str(&cli.provider_config) {
+    let provider_config_json: serde_json::Value =
+        match serde_json::from_str(settings.provider_config.get()) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "control: --provider-config must be valid JSON");
@@ -1135,7 +925,7 @@ fn main() -> std::io::Result<()> {
     // Tax provider (PR-5): parse the kind, then build it. `native` (default)
     // computes 0 (USD launch). An unknown value refuses to boot rather than
     // silently mis-taxing.
-    let tax_provider_kind = match zeroship_control::tax::TaxProviderKind::parse(&cli.tax_provider) {
+    let tax_provider_kind = match zeroship_control::tax::TaxProviderKind::parse(settings.tax_provider.get()) {
         Ok(k) => k,
         Err(bad) => {
             tracing::error!(value = %bad, "control: unknown --tax-provider (expected native)");
@@ -1175,10 +965,10 @@ fn main() -> std::io::Result<()> {
         &provider_registry,
         &provider_ctx,
         &zeroship_control::metering::provider::BillingStackConfig {
-            meter_provider: cli.meter_provider.clone(),
-            invoicer_provider: cli.invoicer_provider.clone(),
+            meter_provider: settings.meter_provider.get().clone(),
+            invoicer_provider: settings.invoicer_provider.get().clone(),
             production: true,
-            allow_unsupported_billing: *controls.allow_unsupported_billing.get(),
+            allow_unsupported_billing: *settings.allow_unsupported_billing.get(),
         },
     ) {
         Ok(stack) => Arc::new(stack),
@@ -1198,10 +988,7 @@ fn main() -> std::io::Result<()> {
     // gateway) can configure the control-plane consumers — fully from
     // zeroship.toml, not env-only. Explicit --stream-transport / --stream-config
     // (or their env) still win.
-    let effective_transport = cli
-        .stream_transport
-        .as_deref()
-        .map(str::trim)
+    let effective_transport = Some(settings.stream_transport.get().trim())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| {
@@ -1211,10 +998,10 @@ fn main() -> std::io::Result<()> {
                 .filter(|s| !s.trim().is_empty())
                 .map(|_| "redpanda".to_string())
         });
-    let effective_stream_config = if cli.stream_config.trim() != "{}"
-        && !cli.stream_config.trim().is_empty()
+    let effective_stream_config = if settings.stream_config.get().trim() != "{}"
+        && !settings.stream_config.get().trim().is_empty()
     {
-        cli.stream_config.clone()
+        settings.stream_config.get().clone()
     } else if let Some(brokers) = file_metering
         .redpanda_brokers
         .as_deref()
@@ -1228,7 +1015,7 @@ fn main() -> std::io::Result<()> {
             .unwrap_or("usage-events");
         serde_json::json!({ "brokers": brokers, "topic": topic }).to_string()
     } else {
-        cli.stream_config.clone()
+        settings.stream_config.get().clone()
     };
 
     let billing_stream = match effective_transport
@@ -1253,8 +1040,8 @@ fn main() -> std::io::Result<()> {
                 Arc::clone(&stream_registry),
                 id,
                 config,
-                cli.billing_forwarder_group_id.clone(),
-                cli.spend_recompute_group_id.clone(),
+                settings.billing_forwarder_group_id.get().clone(),
+                settings.spend_recompute_group_id.get().clone(),
             ) {
                 Ok(streams) => {
                     if let Err(e) = streams
@@ -1380,9 +1167,9 @@ fn main() -> std::io::Result<()> {
         audit_retention_check_secs,
         spend_recompute_interval,
         zeroship_control::cron::SpawnOptions {
-            workflow_scan: !*controls.disable_workflow_engine.get(),
-            workflow_reaper: !*controls.disable_workflow_engine.get(),
-            workflow_sweeps: !*controls.disable_workflow_engine.get(),
+            workflow_scan: !*settings.disable_workflow_engine.get(),
+            workflow_reaper: !*settings.disable_workflow_engine.get(),
+            workflow_sweeps: !*settings.disable_workflow_engine.get(),
             scheduler_authoritative: false,
         },
     );
@@ -1625,6 +1412,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::config::{GeneratedConfig, OriginScheme};
 
     static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1641,7 +1429,7 @@ mod tests {
             ControlCli::try_parse_from(["zeroship-control", "--blob-store", "/tmp/blob-root"])
                 .expect("blob-store flag should parse");
 
-        assert_eq!(cli.blob_store, "/tmp/blob-root");
+        assert_eq!(cli.settings.blob_store.as_deref(), Some("/tmp/blob-root"));
     }
 
     #[test]
@@ -1650,11 +1438,15 @@ mod tests {
         let old = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
         std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
 
+        // The environment reaches the same clap carrier the flag does, and the
+        // generated resolver prefers that carrier over the overlay. The
+        // hand-written resolve_origin_scheme helper this used to call is gone.
+        let overlay: toml::Value =
+            toml::from_str("origin_scheme = \"https\"\n").expect("fixture overlay");
         let env = ControlCli::try_parse_from(["zeroship-control"]).expect("parse env topology");
-        assert_eq!(
-            resolve_origin_scheme(env.origin_scheme, Some(OriginScheme::Https)),
-            OriginScheme::Http
-        );
+        let resolved =
+            ControlSettings::resolve_config(env.settings, Some(&overlay)).expect("resolve");
+        assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
 
         let cli = ControlCli::try_parse_from([
             "zeroship-control",
@@ -1662,7 +1454,9 @@ mod tests {
             "https",
         ])
         .expect("parse CLI topology");
-        assert_eq!(cli.origin_scheme, Some(OriginScheme::Https));
+        let flagged =
+            ControlSettings::resolve_config(cli.settings, Some(&overlay)).expect("resolve");
+        assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
 
         restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old);
     }
@@ -1670,8 +1464,12 @@ mod tests {
     #[test]
     fn auth_provider_selector_defaults_to_platform_and_accepts_supabase() {
         let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        assert_eq!(cli.auth_provider, "platform");
-        assert_eq!(control_auth_provider_kind(&cli.auth_provider), Ok("platform"));
+        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        assert_eq!(resolved.auth_provider.get(), "platform");
+        assert_eq!(
+            control_auth_provider_kind(resolved.auth_provider.get()),
+            Ok("platform")
+        );
         assert_eq!(control_auth_provider_kind(""), Ok("platform"));
         assert_eq!(control_auth_provider_kind("platform"), Ok("platform"));
         assert_eq!(control_auth_provider_kind("supabase"), Ok("supabase"));

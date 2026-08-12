@@ -28,7 +28,10 @@ pub use bootstrap::{
     ObservabilityControls, OverlaySelector,
 };
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
-pub use file::{AuthSection, ConfigError, FileConfig, ObsSection, SchedulerSection, SecretSection};
+pub use file::{
+    AuthSection, ConfigError, ControlSection, FileConfig, GatewaySection, MigratedSection,
+    ObsSection, SchedulerSection, SecretSection, WorkerSection,
+};
 pub use names::{
     BootstrapControl, CanonicalName, CanonicalNameError, CliEnv, CommandControl, CommandEnv,
     ConfigConsumer, ConfigResolveError, ConfigSpec, Consumer, ConsumerToken, DevEnv, EnvKey,
