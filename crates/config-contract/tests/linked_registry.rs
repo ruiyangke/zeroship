@@ -2,19 +2,33 @@
 //!
 //! Everything here is measured against declarations that live in the LIBRARY
 //! crate (`zeroship_config_contract::fixtures`) while the assertions run in this
-//! separate integration-test crate. A hand-written clap struct could reproduce
-//! the three spellings; it could not produce a registry that a different crate
-//! enumerates without naming the declaration.
+//! separate integration-test crate. This file names no read site of its own; the
+//! one hand-written accessor call lives in tests/typed_accessor.rs, a different
+//! test binary with a different registry.
+//!
+//! THE MACRO REGISTERS BY TWO INDEPENDENT PATHS, and a test that does not
+//! distinguish them can be satisfied by either alone:
+//!
+//!   path 1  the direct `#[distributed_slice]` statics emitted per field
+//!           (config-macros `emit`, the `read_sites` block). Supplies
+//!           `Cli`/`CliFile`/`Toml`, plus `Env` for an operational field.
+//!   path 2  the `read_config_env!` expansion inside the generated secret
+//!           resolver, which registers through the core macro. Supplies `Env`
+//!           for a secret field, and NOTHING else -- it has no other kind to
+//!           emit.
+//!
+//! So `Cli`, `CliFile` and `Toml` are exclusive to path 1. Any claim about the
+//! attribute registering must be phrased over those kinds, not over "the
+//! registry is non-empty", which path 2 satisfies on its own.
 
 use clap::CommandFactory;
 use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::fixtures::{
-    FixtureControlConfig, FixtureControlConfigConsumer, FixtureControlConfigSources,
-    FixtureWorkerConfig, FixtureWorkerConfigSources,
+    FixtureControlConfig, FixtureControlConfigSources, FixtureWorkerConfig,
+    FixtureWorkerConfigSources,
 };
 use zeroship_core::config::{
-    CanonicalName, ConfigSpec, EnvKey, GeneratedConfig, ReadSite, Sensitivity, SourceKind,
-    CONFIG_READ_SITES,
+    ConfigSpec, GeneratedConfig, ReadSite, Sensitivity, SourceKind, CONFIG_READ_SITES,
 };
 
 const FIXTURE_BINARIES: [&str; 2] = ["zeroship-fixture-control", "zeroship-fixture-worker"];
@@ -45,20 +59,26 @@ fn tuples(sites: &[ReadSite]) -> Vec<(String, String, SourceKind)> {
         })
         .collect::<Vec<_>>();
     rows.sort();
-    // Set semantics, matching contract.rs. Two readers of one identity in one
-    // binary is legitimate: this test crate adds a second reader of
-    // `control.port` as the positive control below.
-    rows.dedup();
+    // Deliberately NOT deduplicated. Nothing in this binary registers a site by
+    // hand any more, so each declared source must appear exactly once; a second
+    // copy would mean the macro registered the same tuple twice.
     rows
 }
 
 #[test]
 fn read_sites_declared_in_another_crate_are_linked_and_enumerable() {
-    // This is the load-bearing claim for keeping config-macros: the registry is
-    // populated by expansions in the library crate, and enumerated here without
-    // this crate naming a single read site. If linkme were dropping the entries
-    // the vector would be empty and this test would fail rather than pass
-    // vacuously.
+    // What this measures: linkme retention and CROSS-CRATE enumeration. The
+    // entries are emitted in the library crate and read here, which is the
+    // property a five-service registry needs.
+    //
+    // What this does NOT measure, despite an earlier version of this comment
+    // claiming it did: that the ATTRIBUTE registered them. Path 2 (see the
+    // module header) supplies an Env site for each secret field on its own, so
+    // deleting every path-1 static leaves this test green. Measured, not
+    // assumed: mutation M20/M30 does exactly that and this test still passes.
+    // The path-1 claim is
+    // `the_attribute_registers_the_sources_no_env_read_can_supply` below.
+    //
     // Does not cover: retention under `--release`, LTO, `-C linker-plugin-lto`,
     // or a cdylib/staticlib target. Only the dev-profile rlib path is measured.
     let sites = fixture_sites();
@@ -87,6 +107,41 @@ fn read_sites_declared_in_another_crate_are_linked_and_enumerable() {
     for site in &sites {
         assert!(site.location().1 > 0, "read site has no source line");
     }
+}
+
+#[test]
+fn the_attribute_registers_the_sources_no_env_read_can_supply() {
+    // The path-1 claim, stated over the kinds only path 1 can emit. A
+    // `read_config_env!` expansion registers `SourceKind::Env` and nothing
+    // else, so Cli, CliFile and Toml sites exist if and only if the attribute's
+    // own `#[distributed_slice]` statics were emitted and linked. Deleting
+    // those attributes turns this red while leaving every Env site intact.
+    // Does not cover: whether the registered tuple is CORRECT. That is the
+    // set equality in the next test; this one only proves path 1 exists.
+    let sites = fixture_sites();
+    let kinds = sites
+        .iter()
+        .map(|site| site.source())
+        .collect::<Vec<SourceKind>>();
+
+    for exclusive in [SourceKind::Cli, SourceKind::CliFile, SourceKind::Toml] {
+        assert!(
+            kinds.contains(&exclusive),
+            "no {exclusive:?} read site is linked; path 2 cannot emit this kind, \
+             so the attribute's own registrations are missing. Linked kinds: \
+             {kinds:?}"
+        );
+    }
+
+    // The counterpart: path 2 is load-bearing too. A secret field gets its Env
+    // site only from the resolver's read_config_env! expansion.
+    let secret_env = sites.iter().any(|site| {
+        site.source() == SourceKind::Env && site.canonical().as_str() == "control.database_url"
+    });
+    assert!(
+        secret_env,
+        "the secret resolver registered no Env read site, so path 2 is missing"
+    );
 }
 
 #[test]
@@ -221,21 +276,6 @@ fn the_two_transform_implementations_agree() {
             }
         }
     }
-}
-
-const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =
-    EnvKey::from_static(CanonicalName::from_static("control.port"));
-
-#[test]
-fn the_matching_consumer_token_compiles_and_reads() {
-    // Positive control for tests/ui/wrong_consumer.rs. Same macro, same const
-    // key, same shape; the ONLY difference is that the consumer marker matches
-    // the key's. That partner is what separates "the type check works" from
-    // "the fixture failed for some unrelated reason".
-    // Does not cover: the value itself. This asserts the call type-checks and
-    // reports absence, not any particular environment content.
-    let read = zeroship_core::read_config_env!(CONTROL_PORT, FixtureControlConfigConsumer);
-    assert!(read.is_ok());
 }
 
 #[test]
