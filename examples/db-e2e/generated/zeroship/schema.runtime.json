@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "collections": {
+    "places": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "workspaceId": {
+          "type": "string",
+          "refTarget": "workspaces",
+          "refColumn": "id",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": true
+        },
+        "category": {
+          "type": "string",
+          "required": true
+        },
+        "loc": {
+          "type": "geoPoint",
+          "required": true
+        },
+        "embedding": {
+          "type": "vector",
+          "vectorDims": 4,
+          "vectorMetric": "cosine"
+        },
+        "open": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "places_workspace_category_idx",
+          "fields": [
+            "workspaceId",
+            "category"
+          ]
+        },
+        {
+          "name": "places_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "places_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "places_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "tasks": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "workspaceId": {
+          "type": "string",
+          "refTarget": "workspaces",
+          "refColumn": "id",
+          "required": true
+        },
+        "ownerId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "open"
+        },
+        "priority": {
+          "type": "number",
+          "required": true
+        },
+        "score": {
+          "type": "number",
+          "required": true
+        },
+        "category": {
+          "type": "string",
+          "required": true
+        },
+        "tags": {
+          "type": "json"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "tasks_workspace_status_idx",
+          "fields": [
+            "workspaceId",
+            "status"
+          ]
+        },
+        {
+          "name": "tasks_workspace_priority_idx",
+          "fields": [
+            "workspaceId",
+            "priority"
+          ]
+        },
+        {
+          "name": "tasks_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "tasks_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "tasks_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "users": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "workspaceId": {
+          "type": "string",
+          "refTarget": "workspaces",
+          "refColumn": "id",
+          "required": true
+        },
+        "handle": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "fullName": {
+          "type": "string",
+          "required": true
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "contactEmail": {
+          "type": "string",
+          "encrypted": {
+            "mode": "randomised",
+            "keyId": "default",
+            "wraps": "string"
+          },
+          "mask": {
+            "kind": "full",
+            "classification": "pii"
+          }
+        },
+        "ssn": {
+          "type": "string",
+          "encrypted": {
+            "mode": "randomised",
+            "keyId": "default",
+            "wraps": "string"
+          },
+          "mask": {
+            "kind": "full",
+            "classification": "pii"
+          }
+        },
+        "city": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_handle_key",
+          "fields": [
+            "handle"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_email_key",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_workspace_idx",
+          "fields": [
+            "workspaceId"
+          ]
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "workspaces": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "slug": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "tier": {
+          "type": "string",
+          "required": true,
+          "default": "free"
+        },
+        "region": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "workspaces_slug_key",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
+        },
+        {
+          "name": "workspaces_tier_idx",
+          "fields": [
+            "tier"
+          ]
+        },
+        {
+          "name": "workspaces_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "workspaces_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "workspaces_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}

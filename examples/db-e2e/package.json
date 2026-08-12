@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "migrate": "zeroship-dev-migrate",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "e2e": "node e2e/run.mjs"
