@@ -45,7 +45,7 @@ trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
 frame_ancestor_origins = ["http://console.zeroship.localhost"]
 
 [observability]
-rust_log   = "info,zeroship_=debug"
+log_filter = "info,zeroship_=debug"
 log_format = "json"
 
 # Secret REFERENCES only - never a plaintext literal (a literal is rejected at

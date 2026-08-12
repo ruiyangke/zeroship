@@ -13,6 +13,7 @@ pub mod auth_audit;
 pub mod authz_guard;
 pub mod billing_read;
 pub mod bootstrap_builder;
+pub mod config;
 pub mod credit;
 pub mod cron;
 pub mod deploy;

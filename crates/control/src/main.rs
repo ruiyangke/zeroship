@@ -17,6 +17,7 @@ use zeroship_core::config::{
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
+use zeroship_control::config::{ControlControls, ControlControlsSources};
 use zeroship_control::{
     admin_handlers, api, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, plan_catalog, stripe_handlers, token_handlers,
@@ -124,12 +125,6 @@ struct ControlCli {
     )]
     gateway_url: String,
 
-    /// Test harness only: do not spawn durable-workflow background work.
-    /// The e2e harness drives the scheduler path explicitly from its test
-    /// process while this control process serves sync/deploy state.
-    #[arg(long = "disable-workflow-engine", hide = true, default_value_t = false)]
-    disable_workflow_engine: bool,
-
     /// Provider used as the usage meter.
     #[arg(long = "meter-provider", env = "METER_PROVIDER", default_value = "lite")]
     meter_provider: String,
@@ -176,10 +171,6 @@ struct ControlCli {
         default_value_t = zeroship_control::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS
     )]
     spend_recompute_interval: u64,
-
-    /// Permit an evaluation-grade provider such as `lite` in production.
-    #[arg(long = "allow-unsupported-billing", env = "ALLOW_UNSUPPORTED_BILLING")]
-    allow_unsupported_billing: bool,
 
     /// Tax provider backend (billing-ops gap #26, PR-5). `native` (default)
     /// computes `0` — the USD launch owes no tax. The seam exists so enabling a
@@ -236,25 +227,10 @@ struct ControlCli {
     #[arg(long = "deploy-tmp-dir", env = "DEPLOY_TMP_DIR", default_value = "")]
     deploy_tmp_dir: String,
 
-    /// Optional shared config overlay path.
-    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
-    config_path: Option<PathBuf>,
-
-    /// Disable auto-discovery of the well-known config overlay (compiled defaults only).
-    #[arg(long = "no-config")]
-    no_config: bool,
-
-    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
-    #[arg(long = "check-config")]
-    check_config: bool,
-
-    /// Output format for `--check-config`: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
-    check_config_format: String,
-
-    /// Observability CLI/env overrides.
+    /// Bootstrap, command and observability controls, generated from one
+    /// declaration in `zeroship_control::config`.
     #[command(flatten)]
-    obs: zeroship_core::observability::ObservabilityFlags,
+    controls: ControlControlsSources,
 
     /// Platform auth provider backend.
     #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "platform")]
@@ -399,11 +375,7 @@ impl std::fmt::Debug for ControlCli {
             .field("legacy_master_keys", &"<redacted>")
             .field("trust_proxy", &self.trust_proxy)
             .field("deploy_tmp_dir", &self.deploy_tmp_dir)
-            .field("config_path", &self.config_path)
-            .field("no_config", &self.no_config)
-            .field("check_config", &self.check_config)
-            .field("check_config_format", &self.check_config_format)
-            .field("obs", &self.obs)
+            .field("controls", &self.controls)
             .field("auth_provider", &self.auth_provider)
             .field("supabase_url", &self.supabase_url)
             .field("supabase_anon_key", &"<redacted>")
@@ -608,13 +580,12 @@ fn main() -> std::io::Result<()> {
         }
     };
     let mailer_kind = cli.mailer.clone();
-    let boot = bootstrap_or_exit(
-        cli.config_path.as_deref(),
-        !cli.no_config,
-        &cli.obs,
-        "info,zeroship_control=debug",
+    let (controls, boot) = bootstrap_or_exit::<ControlControls>(
+        cli.controls,
+        zeroship_control::config::DEFAULT_LOG_FILTER,
         "control",
     );
+    let check_config = *controls.check_config.get();
     let file = &boot.overlay.config;
     // `[secrets]` file-overlay tier for the secret-reference resolver. Cloned once
     // up front so individual `obtain_secret` calls can borrow the per-field refs
@@ -681,7 +652,7 @@ fn main() -> std::io::Result<()> {
         "DATABASE_URL / --db",
         &cli.db,
         file_secrets.database_url.as_deref(),
-        cli.check_config,
+        check_config,
     );
     // The compiled fallback, applied only once BOTH higher tiers came up empty.
     // `--check-config` is a read-only report of what was CONFIGURED, so it keeps
@@ -690,7 +661,7 @@ fn main() -> std::io::Result<()> {
     // two binaries' `--check-config` output was diffed byte-for-byte (timestamps
     // aside) across this change. It is here so the guard is already right if the
     // DSN is ever added to the report, NOT because it fixes anything today.
-    let db_url = if db_url.is_empty() && !cli.check_config {
+    let db_url = if db_url.is_empty() && !check_config {
         DEFAULT_DB_URL.to_string()
     } else {
         db_url
@@ -711,13 +682,13 @@ fn main() -> std::io::Result<()> {
         "CONTROL_KEY / --control-key",
         &cli.control_key,
         file_secrets.control_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let master_key = zeroship_core::config::obtain_secret(
         "MASTER_KEY / --master-key",
         &cli.master_key,
         file_secrets.master_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let workers_str = cli.workers;
     let gateway_url = cli.gateway_url.trim_end_matches('/').to_string();
@@ -725,20 +696,20 @@ fn main() -> std::io::Result<()> {
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
         file_secrets.worker_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let signing_key_file = cli.signing_key_file;
     let stripe_webhook_secret = zeroship_core::config::obtain_secret(
         "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
         &cli.stripe_webhook_secret,
         file_secrets.stripe_webhook_secret.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let stripe_secret_key = zeroship_core::config::obtain_secret(
         "STRIPE_SECRET_KEY / --stripe-secret-key",
         &cli.stripe_secret_key,
         file_secrets.stripe_secret_key.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let stripe_base_url = cli.stripe_base_url.clone();
     // Comma-separated list of previous master keys, tried as fallbacks on decrypt
@@ -752,11 +723,11 @@ fn main() -> std::io::Result<()> {
             legacy_label,
             "",
             file_secrets.legacy_master_keys.as_deref(),
-            cli.check_config,
+            check_config,
         );
         // In --check-config the file reference is only format-validated (csv is then
         // the raw ref, which must not be split); split only a resolved/literal value.
-        if cli.check_config && zeroship_core::config::is_secret_ref(&csv) {
+        if check_config && zeroship_core::config::is_secret_ref(&csv) {
             Vec::new()
         } else {
             csv.split(',')
@@ -771,7 +742,7 @@ fn main() -> std::io::Result<()> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|entry| {
-                if cli.check_config {
+                if check_config {
                     zeroship_core::config::validate_secret_ref_or_exit(legacy_label, entry);
                     entry.to_owned()
                 } else {
@@ -788,7 +759,7 @@ fn main() -> std::io::Result<()> {
         &cli.pairwise_salt_file,
         &cli.pairwise_salt,
         file_secrets.pairwise_salt.as_deref(),
-        cli.check_config,
+        check_config,
     );
     let expected_oauth_audience = cli.oauth_audience;
     let app_base_domain = cli.app_base_domain;
@@ -812,7 +783,7 @@ fn main() -> std::io::Result<()> {
     // secret REFERENCE under --check-config (the local is then the raw ref
     // string, which would wrongly fail the length check); it runs on the
     // resolved value at real boot.
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
         if let Err(message) = zeroship_core::config::validate_worker_key(&worker_key) {
             eprintln!("control: {message}");
             tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
@@ -842,7 +813,7 @@ fn main() -> std::io::Result<()> {
     // string (not yet dereferenced), so skip the strength check for a ref - it
     // would wrongly fail length/entropy on the reference text. A literal is
     // checked in both modes.
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&master_key) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&master_key) {
         if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key) {
             tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
             std::process::exit(1);
@@ -850,7 +821,7 @@ fn main() -> std::io::Result<()> {
     }
     for (idx, legacy_key) in legacy_keys.iter().enumerate() {
         let label = format!("LEGACY_MASTER_KEYS[{idx}]");
-        if !cli.check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
+        if !check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
             if let Err(message) = validate_master_key_material(&label, legacy_key) {
                 tracing::error!(
                     error = %message,
@@ -877,7 +848,7 @@ fn main() -> std::io::Result<()> {
     // The dedicated pairwise-salt secret must be strong and stable. It seeds
     // the permanent per-app `pws_` anchor and must equal the gateway's value.
     // Skip the strength check when `--check-config` holds a raw reference.
-    if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+    if !check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
         if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
             tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
             std::process::exit(1);
@@ -904,16 +875,14 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    if cli.check_config {
+    if check_config {
         // M1: read-only. No filesystem mutation, no signing-key load.
         let workers_count = workers_str
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .count();
-        let log_format_str = boot
-            .log_format
-            .map_or_else(|| "auto".to_string(), |fmt| fmt.to_string());
+        let log_format_str = boot.log_format.to_string();
 
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
@@ -999,12 +968,7 @@ fn main() -> std::io::Result<()> {
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
 
-        let fmt = if cli.check_config_format == "json" {
-            CheckFormat::Json
-        } else {
-            CheckFormat::Text
-        };
-        report.emit(fmt);
+        report.emit(*controls.check_config_format.get());
         return Ok(());
     }
 
@@ -1215,7 +1179,7 @@ fn main() -> std::io::Result<()> {
             meter_provider: cli.meter_provider.clone(),
             invoicer_provider: cli.invoicer_provider.clone(),
             production: true,
-            allow_unsupported_billing: cli.allow_unsupported_billing,
+            allow_unsupported_billing: *controls.allow_unsupported_billing.get(),
         },
     ) {
         Ok(stack) => Arc::new(stack),
@@ -1417,9 +1381,9 @@ fn main() -> std::io::Result<()> {
         audit_retention_check_secs,
         spend_recompute_interval,
         zeroship_control::cron::SpawnOptions {
-            workflow_scan: !cli.disable_workflow_engine,
-            workflow_reaper: !cli.disable_workflow_engine,
-            workflow_sweeps: !cli.disable_workflow_engine,
+            workflow_scan: !*controls.disable_workflow_engine.get(),
+            workflow_reaper: !*controls.disable_workflow_engine.get(),
+            workflow_sweeps: !*controls.disable_workflow_engine.get(),
             scheduler_authoritative: false,
         },
     );

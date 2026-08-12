@@ -168,7 +168,7 @@ const OPERATIONAL_SOURCES: &[SourceKind] =
 const SECRET_SOURCES: &[SourceKind] =
     &[SourceKind::CliFile, SourceKind::Env, SourceKind::Toml];
 const BOOTSTRAP_SOURCES: &[SourceKind] = &[SourceKind::Cli, SourceKind::Env];
-const COMMAND_SOURCES: &[SourceKind] = &[SourceKind::Cli];
+const FLAG_ONLY_SOURCES: &[SourceKind] = &[SourceKind::Cli];
 
 /// Which supply set a declaration's wrapper type selects.
 ///
@@ -181,11 +181,13 @@ pub enum SupplyClass {
     Operational,
     /// `Secret<T>`: `-file` flag, env, TOML, no compiled default.
     Secret,
-    /// `BootstrapControl<T>`: flag and env only.
+    /// `BootstrapControl<T>`: flag, and env unless the declaration disables it.
     ///
     /// Either the value is needed BEFORE the overlay can be loaded (the overlay
     /// selector itself), or it is a safety control that must not be persistable
-    /// in the overlay it would otherwise be read from.
+    /// in the overlay it would otherwise be read from. A safety control may also
+    /// refuse the environment, because "someone left a variable set" is exactly
+    /// how a protection gets turned off by accident.
     Bootstrap,
     /// `CommandControl<T>`: flag only. An action, not a server setting.
     Command,
@@ -197,6 +199,8 @@ pub struct ConfigSpec {
     canonical: CanonicalName<'static>,
     consumers: &'static [Consumer],
     class: SupplyClass,
+    /// Only a bootstrap control may set this false; see [`SupplyClass`].
+    env_enabled: bool,
     field: &'static str,
     arg_id: &'static str,
     rust_type: &'static str,
@@ -218,6 +222,7 @@ impl ConfigSpec {
             canonical,
             consumers,
             class: SupplyClass::Operational,
+            env_enabled: true,
             field,
             arg_id,
             rust_type,
@@ -243,6 +248,7 @@ impl ConfigSpec {
             canonical,
             consumers,
             class: SupplyClass::Secret,
+            env_enabled: true,
             field,
             arg_id,
             rust_type,
@@ -250,11 +256,15 @@ impl ConfigSpec {
         }
     }
 
-    /// Declare a bootstrap control: flag and environment, never TOML.
+    /// Declare a bootstrap control: flag, optionally environment, never TOML.
+    ///
+    /// `env_enabled` is the transform table's "env when enabled". A safety
+    /// control sets it false so no ambient variable can relax the protection.
     #[must_use]
     pub const fn bootstrap(
         canonical: CanonicalName<'static>,
         consumers: &'static [Consumer],
+        env_enabled: bool,
         field: &'static str,
         arg_id: &'static str,
         rust_type: &'static str,
@@ -264,6 +274,7 @@ impl ConfigSpec {
             canonical,
             consumers,
             class: SupplyClass::Bootstrap,
+            env_enabled,
             field,
             arg_id,
             rust_type,
@@ -285,6 +296,7 @@ impl ConfigSpec {
             canonical,
             consumers,
             class: SupplyClass::Command,
+            env_enabled: false,
             field,
             arg_id,
             rust_type,
@@ -327,20 +339,15 @@ impl ConfigSpec {
         match self.class {
             SupplyClass::Operational => OPERATIONAL_SOURCES,
             SupplyClass::Secret => SECRET_SOURCES,
-            SupplyClass::Bootstrap => BOOTSTRAP_SOURCES,
-            SupplyClass::Command => COMMAND_SOURCES,
+            SupplyClass::Bootstrap if self.env_enabled => BOOTSTRAP_SOURCES,
+            SupplyClass::Bootstrap | SupplyClass::Command => FLAG_ONLY_SOURCES,
         }
     }
 
-    /// Canonical environment projection, absent for a command control.
+    /// Canonical environment projection, absent when the class has no env tier.
     #[must_use]
     pub fn env_name(self) -> Option<String> {
-        match self.class {
-            SupplyClass::Command => None,
-            SupplyClass::Operational | SupplyClass::Secret | SupplyClass::Bootstrap => {
-                Some(self.canonical.env_name())
-            }
-        }
+        self.env_enabled.then(|| self.canonical.env_name())
     }
 
     /// Consumer-local flag projection.
@@ -1077,6 +1084,7 @@ database_url = "postgres://operator-mounted-secret"
         let bootstrap = ConfigSpec::bootstrap(
             CanonicalName::from_static("config"),
             CONSUMERS,
+            true,
             "config",
             "config",
             "Option<PathBuf>",
@@ -1103,6 +1111,20 @@ database_url = "postgres://operator-mounted-secret"
         );
         assert_eq!(command.sources(), [SourceKind::Cli]);
         assert_eq!(command.env_name(), None);
+        assert_eq!(
+            ConfigSpec::bootstrap(
+                CanonicalName::from_static("worker.workflow_advance_unsigned"),
+                CONSUMERS,
+                false,
+                "workflow_advance_unsigned",
+                "workflow_advance_unsigned",
+                "bool",
+                None,
+            )
+            .sources(),
+            [SourceKind::Cli],
+            "a safety control that refuses the environment declares no Env source"
+        );
         assert_eq!(
             command.flag_name(CONSUMERS[0]).as_deref(),
             Some("check-config")

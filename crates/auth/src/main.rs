@@ -9,11 +9,11 @@ use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
     bootstrap_or_exit, is_secret_ref, obtain_secret, validate_master_key_material,
-    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, SecretSection,
+    validate_stash_key, CheckConfigReport, CheckValue, SecretSection,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
-use zeroship_auth::config::AuthConfig;
+use zeroship_auth::config::{AuthConfig, AuthControls};
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::server;
@@ -23,13 +23,12 @@ use zeroship_mailer::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
-    let boot = bootstrap_or_exit(
-        cfg.config_path.as_deref(),
-        !cfg.no_config,
-        &cfg.obs,
-        "info,zeroship_auth=debug",
+    let (controls, boot) = bootstrap_or_exit::<AuthControls>(
+        cfg.controls.clone(),
+        zeroship_auth::config::DEFAULT_LOG_FILTER,
         "auth",
     );
+    let check_config = *controls.check_config.get();
     // Snapshot the [secrets] file overlay so each secret can consult its file-tier
     // reference. `file` stays a shared borrow of the overlay and `cfg.resolve` below
     // gets a clone of the `[auth]` section, so nothing is moved out of the overlay;
@@ -48,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // plain literal passes through byte-identically in both modes. Pure file-PATH
     // fields (none in auth today) are excluded; these are the exact fields the
     // redacting Debug impl prints as "<redacted>" minus the OAuth client *IDs*.
-    resolve_auth_secrets(&mut cfg, &file_secrets);
+    resolve_auth_secrets(&mut cfg, &file_secrets, check_config);
 
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
@@ -57,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // still the raw `urn:`/`arn:` string — running a strength check on it would
     // wrongly fail, so skip it for a reference in that mode only (format was
     // already validated by resolve_auth_secrets).
-    if !cfg.check_config || !is_secret_ref(&cfg.stash_signing_key) {
+    if !check_config || !is_secret_ref(&cfg.stash_signing_key) {
         if let Err(message) = validate_stash_key(&cfg.stash_signing_key) {
             tracing::error!("{message}");
             std::process::exit(1);
@@ -68,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --check-config (the format was already validated in resolve_auth_secrets),
     // but always validate the resolved literal on real boot. Decodes (hex or
     // base64url) to ≥32 bytes, identical to the bundle/master key posture.
-    if !cfg.check_config || !is_secret_ref(&cfg.totp_enc_key) {
+    if !check_config || !is_secret_ref(&cfg.totp_enc_key) {
         if let Err(message) = validate_master_key_material(
             "AUTH_TOTP_ENC_KEY / --totp-enc-key",
             &cfg.totp_enc_key,
@@ -84,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // concerns — they must NOT gate a config dry-run (ISS-62). The report below
     // references only `cfg.*` (e.g. `cfg.mailer`, a plain string), never the
     // constructed drivers, so it stands alone ahead of mailer construction.
-    if cfg.check_config {
+    if check_config {
         let mut report = CheckConfigReport::new();
         report.field("addr", CheckValue::Plain(cfg.addr.clone()));
         report.field(
@@ -119,8 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field(
             "log_format",
             CheckValue::Plain(
-                boot.log_format
-                    .map_or_else(|| "auto".to_string(), |f| f.to_string()),
+                boot.log_format.to_string(),
             ),
         );
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
@@ -167,12 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "github_oauth_configured",
             CheckValue::Flag(cfg.github_client_id.is_some()),
         );
-        let fmt = if cfg.check_config_format == "json" {
-            CheckFormat::Json
-        } else {
-            CheckFormat::Text
-        };
-        report.emit(fmt);
+        report.emit(*controls.check_config_format.get());
         return Ok(());
     }
 
@@ -324,8 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `Option<String>` secrets fall back to the `[secrets]` file tier only when the
 /// CLI/env value is absent or empty; when neither tier supplies a value the field
 /// stays `None` (its provider arm is disabled).
-fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
-    let check = cfg.check_config;
+fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection, check_config: bool) {
+    let check = check_config;
 
     // Required-string secrets (always present on the CLI struct).
     cfg.db_url = obtain_secret(

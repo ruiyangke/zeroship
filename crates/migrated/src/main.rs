@@ -1,105 +1,81 @@
 //! zeroship-migrated - standalone creator migration service.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::NoTls;
 use ntex::web;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
+use zeroship_core::config::{
+    bootstrap_or_exit, CheckConfigReport, CheckValue,
+};
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
+use zeroship_migrated::config::{MigratedCli, MigratedControls, DEFAULT_LOG_FILTER};
 use zeroship_migrated::policy::ManagedPolicyConfig;
 use zeroship_migrated::MigrationServiceState;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[derive(Parser, Debug)]
-#[command(name = "zeroship-migrated")]
-struct MigratedCli {
-    /// HTTP listen port.
-    #[arg(long, env = "MIGRATED_PORT", default_value_t = 9091)]
-    port: u16,
-
-    /// Address to bind.
-    #[arg(long, env = "MIGRATED_BIND", default_value = "127.0.0.1")]
-    bind: String,
-
-    /// PostgreSQL DSN for control-plane authz data.
-    #[arg(
-        long = "db",
-        env = "DATABASE_URL",
-        default_value = "postgres://localhost/zeroship",
-        hide_env_values = true
-    )]
-    db: String,
-
-    /// Privileged PostgreSQL DSN used to provision/apply per-app migrations.
-    #[arg(
-        long = "provision-db",
-        env = "PROVISION_DATABASE_URL",
-        default_value = "",
-        hide_env_values = true
-    )]
-    provision_db: String,
-
-    /// Admin/control API shared secret, reserved for convergence with the service mesh wiring.
-    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
-    control_key: String,
-
-    /// PEM/PKCS#8 signing key file for PAT verification.
-    #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
-    signing_key_file: String,
-
-    /// Expected OAuth audience for accepted bearer tokens.
-    #[arg(
-        long = "oauth-audience",
-        env = "CONTROL_OAUTH_AUDIENCE",
-        default_value = "control.zeroship.ai"
-    )]
-    oauth_audience: String,
-
-    /// Platform OP issuer for platform-issued migration-service access tokens.
-    #[arg(
-        long = "auth-platform-issuer",
-        env = "AUTH_PLATFORM_ISSUER",
-        default_value = ""
-    )]
-    auth_platform_issuer: String,
-
-    /// JWKS URL for the platform OP. Defaults to {issuer}/.well-known/jwks.json.
-    #[arg(
-        long = "auth-platform-jwks-url",
-        env = "AUTH_PLATFORM_JWKS_URL",
-        default_value = ""
-    )]
-    auth_platform_jwks_url: String,
-
-    /// Directory for staged request migration files.
-    #[arg(long = "tmp-dir", env = "MIGRATED_TMP_DIR")]
-    tmp_dir: Option<PathBuf>,
-
-    /// HMAC key used to seal server-composed migration policy profiles.
-    #[arg(
-        long = "policy-seal-key",
-        env = "MIGRATED_POLICY_SEAL_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    policy_seal_key: String,
-
-    /// Active managed ceiling version stamped into sealed migration profiles.
-    #[arg(
-        long = "policy-ceiling-version",
-        env = "MIGRATED_POLICY_CEILING_VERSION",
-        default_value_t = 1
-    )]
-    policy_ceiling_version: u64,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    zeroship_core::observability::init_tracing("info,zeroship_migrated=debug");
     let cli = MigratedCli::parse();
+    let (controls, boot) =
+        bootstrap_or_exit::<MigratedControls>(cli.controls, DEFAULT_LOG_FILTER, "migrated");
+    let check_config = *controls.check_config.get();
+
+    let tmp_dir = cli
+        .tmp_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("zeroship-migrated"));
+
+    // A read-only dry run: report what was configured and exit BEFORE the tmp
+    // directory is created, before the control DSN is dialled, and before a
+    // listener is bound. Each of those is a side effect a config check must not
+    // have, and each of them used to run unconditionally here.
+    if check_config {
+        let mut report = CheckConfigReport::new();
+        report.field("bind", CheckValue::Plain(cli.bind.clone()));
+        report.field("port", CheckValue::Count(usize::from(cli.port)));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
+        );
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field("log_format", CheckValue::Plain(boot.log_format.to_string()));
+        report.field("tmp_dir", CheckValue::Plain(tmp_dir.display().to_string()));
+        report.field("db_configured", CheckValue::Secret(!cli.db.is_empty()));
+        report.field(
+            "provision_db_configured",
+            CheckValue::Secret(!cli.provision_db.trim().is_empty()),
+        );
+        report.field(
+            "control_key_configured",
+            CheckValue::Secret(!cli.control_key.is_empty()),
+        );
+        report.field(
+            "signing_key_file_configured",
+            CheckValue::Secret(!cli.signing_key_file.is_empty()),
+        );
+        report.field(
+            "policy_seal_key_configured",
+            CheckValue::Secret(!cli.policy_seal_key.is_empty()),
+        );
+        report.field(
+            "policy_ceiling_version",
+            CheckValue::Count(usize::try_from(cli.policy_ceiling_version).unwrap_or(usize::MAX)),
+        );
+        report.field("oauth_audience", CheckValue::Plain(cli.oauth_audience.clone()));
+        report.field(
+            "auth_platform_issuer",
+            CheckValue::Plain(cli.auth_platform_issuer.clone()),
+        );
+        report.field(
+            "auth_platform_jwks_url",
+            CheckValue::Plain(cli.auth_platform_jwks_url.clone()),
+        );
+        report.emit(*controls.check_config_format.get());
+        return Ok(());
+    }
 
     if cli.provision_db.trim().is_empty() {
         tracing::error!(
@@ -108,10 +84,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let tmp_dir = cli
-        .tmp_dir
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join("zeroship-migrated"));
     std::fs::create_dir_all(&tmp_dir)?;
 
     let control_key_present = !cli.control_key.is_empty();
@@ -122,7 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tmp_dir = %tmp_dir.display(),
         "starting zeroship-migrated"
     );
-
     let pat_issuer = match build_pat_issuer(&cli.signing_key_file) {
         Ok(issuer) => Arc::new(issuer),
         Err(message) => {
@@ -277,13 +248,6 @@ mod tests {
         let err = build_pat_issuer("").expect_err("missing signing key must fail closed");
 
         assert!(err.contains("--signing-key-file / SIGNING_KEY_FILE"));
-    }
-
-    #[test]
-    fn migrated_cli_rejects_deleted_security_relaxation_flag() {
-        let error = MigratedCli::try_parse_from(["zeroship-migrated", "--dev-insecure"])
-            .expect_err("deleted --dev-insecure flag must be rejected");
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

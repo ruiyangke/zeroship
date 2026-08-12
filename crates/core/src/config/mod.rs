@@ -7,8 +7,13 @@
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
 //!
-//! Observability config (`ObservabilityFlags`, `LogFormat`, `resolve_observability`,
-//! `resolve_log_filter`) lives in [`crate::observability`].
+//! - [`names`] — canonical identities, source-policy wrappers, and the
+//!   `zeroship_config` attribute that generates every spelling from one
+//!   declaration.
+//!
+//! Observability types (`LogFormat`, `resolve_log_filter`, tracing init) live in
+//! [`crate::observability`]; the observability SETTINGS are ordinary generated
+//! `observability.*` declarations owned by each binary's config module.
 
 pub mod bootstrap;
 pub mod env;
@@ -20,6 +25,7 @@ pub mod topology;
 
 pub use bootstrap::{
     bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,
+    ObservabilityControls, OverlaySelector,
 };
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{AuthSection, ConfigError, FileConfig, ObsSection, SecretSection};

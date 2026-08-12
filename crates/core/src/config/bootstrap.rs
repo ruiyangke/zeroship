@@ -6,10 +6,9 @@
 use std::path::Path;
 
 use crate::config::file::ConfigError;
+use crate::config::names::GeneratedConfig;
 use crate::config::source::{load_overlay, log_overlay_source, LoadedOverlay};
-use crate::observability::{
-    init_tracing_with, resolve_observability, LogFormat, ObservabilityFlags,
-};
+use crate::observability::{init_tracing_with, resolve_log_filter, LogFormat};
 
 /// Everything a binary needs after the shared boot dance has run.
 #[derive(Debug)]
@@ -18,71 +17,101 @@ pub struct Bootstrap {
     pub overlay: LoadedOverlay,
     /// The resolved tracing filter directive.
     pub log_filter: String,
-    /// The resolved tracing format (None = auto-detect by TTY).
-    pub log_format: Option<LogFormat>,
+    /// The resolved tracing format.
+    pub log_format: LogFormat,
 }
 
-/// Run the shared boot dance: load overlay, resolve observability, init tracing,
-/// and log the overlay source. Pure — no `process::exit`.
+/// The two bootstrap controls the shared boot dance needs BEFORE the overlay is
+/// loaded, exposed by a generated clap source struct.
+///
+/// This reads the raw clap carriers rather than the resolved declaration, and
+/// it has to: the overlay selector cannot be resolved against the overlay it
+/// selects. `BootstrapControl<T>` encodes exactly that - flag and environment,
+/// no TOML tier - so the two carriers below are already fully merged by clap.
+pub trait OverlaySelector {
+    /// Explicit `--config` / `ZEROSHIP_CONFIG` path, if any.
+    fn overlay_path(&self) -> Option<&Path>;
+    /// False when `--no-config` / `ZEROSHIP_NO_CONFIG` suppressed discovery.
+    fn allow_discovery(&self) -> bool;
+}
+
+/// The observability values a resolved declaration supplies to tracing init.
+pub trait ObservabilityControls {
+    /// Resolved `observability.log_filter`.
+    fn log_filter(&self) -> &str;
+    /// Resolved `observability.log_format`.
+    fn log_format(&self) -> LogFormat;
+}
+
+/// Run the shared boot dance for a generated declaration: load the overlay,
+/// resolve the declaration against it, init tracing, and log the overlay
+/// source. Pure - no `process::exit`.
 ///
 /// # Errors
 ///
-/// Propagates any [`ConfigError`] from overlay loading or observability
-/// resolution.
-pub fn bootstrap(
-    config_path: Option<&Path>,
-    allow_discovery: bool,
-    obs: &ObservabilityFlags,
+/// Propagates any [`ConfigError`] from overlay loading, and any generated
+/// resolution failure as [`ConfigError::Resolve`].
+pub fn bootstrap<C>(
+    sources: C::Sources,
     default_filter: &str,
     binary: &str,
-) -> Result<Bootstrap, ConfigError> {
-    let overlay = load_overlay(config_path, allow_discovery, binary)?;
-    let (log_filter, log_format) =
-        resolve_observability(obs, &overlay.config.observability, default_filter)?;
+) -> Result<(C, Bootstrap), ConfigError>
+where
+    C: GeneratedConfig + ObservabilityControls,
+    C::Sources: OverlaySelector,
+{
+    let overlay = load_overlay(
+        sources.overlay_path(),
+        sources.allow_discovery(),
+        binary,
+    )?;
+    let controls = C::resolve_config(sources, overlay.raw.as_ref())?;
+
+    // O3 (restated): a syntactically invalid filter degrades to the compiled
+    // default rather than refusing to boot, so keep the resolved candidate to
+    // warn about AFTER the subscriber is up - a pre-tracing eprintln! is
+    // exactly what a structured log pipeline drops.
+    let candidate = controls.log_filter().to_owned();
+    let log_filter = resolve_log_filter(Some(candidate.clone()), default_filter);
+    let log_format = controls.log_format();
 
     init_tracing_with(&log_filter, log_format);
     log_overlay_source(&overlay.source);
-
-    // O3: an invalid log filter falls back to the default silently in
-    // `resolve_log_filter`. Surface that here as a STRUCTURED warning — now that
-    // the subscriber is up, it honors `--log-format` (JSON, etc.) instead of being
-    // a pre-tracing `eprintln!` a structured log pipeline would miss.
-    let filter_candidate = obs
-        .log_filter
-        .clone()
-        .or_else(|| overlay.config.observability.log_filter.clone());
-    if let Some(candidate) = filter_candidate {
-        if tracing_subscriber::EnvFilter::try_new(candidate.as_str()).is_err() {
-            tracing::warn!(
-                invalid_filter = %candidate,
-                fallback = %log_filter,
-                "invalid tracing filter; falling back to the default filter"
-            );
-        }
+    if log_filter != candidate {
+        tracing::warn!(
+            invalid_filter = %candidate,
+            fallback = %log_filter,
+            "invalid tracing filter; falling back to the default filter"
+        );
     }
 
-    Ok(Bootstrap {
-        overlay,
-        log_filter,
-        log_format,
-    })
+    Ok((
+        controls,
+        Bootstrap {
+            overlay,
+            log_filter,
+            log_format,
+        },
+    ))
 }
 
-/// [`bootstrap`] for the binary boundary: on error, print `{binary}: …` to
+/// [`bootstrap`] for the binary boundary: on error, print `{binary}: ...` to
 /// stderr + tracing and `process::exit(1)`.
 ///
 /// This is the SINGLE `process::exit` in `core`; its name signals that it is the
 /// binary-boundary helper, not a library primitive.
 #[must_use]
-pub fn bootstrap_or_exit(
-    config_path: Option<&Path>,
-    allow_discovery: bool,
-    obs: &ObservabilityFlags,
+pub fn bootstrap_or_exit<C>(
+    sources: C::Sources,
     default_filter: &str,
     binary: &str,
-) -> Bootstrap {
-    match bootstrap(config_path, allow_discovery, obs, default_filter, binary) {
-        Ok(bootstrap) => bootstrap,
+) -> (C, Bootstrap)
+where
+    C: GeneratedConfig + ObservabilityControls,
+    C::Sources: OverlaySelector,
+{
+    match bootstrap::<C>(sources, default_filter, binary) {
+        Ok(resolved) => resolved,
         Err(err) => {
             let message = format!("{binary}: {err}");
             // Tracing may not be initialised yet; emit to both sinks.

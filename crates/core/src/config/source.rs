@@ -36,6 +36,9 @@ impl fmt::Display for ConfigSource {
 pub struct LoadedOverlay {
     /// Parsed overlay (all-default when `source` is [`ConfigSource::None`]).
     pub config: FileConfig,
+    /// The same bytes as an untyped tree, for generated canonical-path lookups.
+    /// `None` exactly when no overlay file was read.
+    pub raw: Option<toml::Value>,
     /// Where the overlay was resolved from.
     pub source: ConfigSource,
 }
@@ -44,6 +47,7 @@ impl LoadedOverlay {
     fn defaults() -> Self {
         Self {
             config: FileConfig::default(),
+            raw: None,
             source: ConfigSource::None,
         }
     }
@@ -73,8 +77,10 @@ impl FileConfig {
     ) -> Result<LoadedOverlay, ConfigError> {
         if let Some(path) = explicit {
             // Explicit path: missing/broken is fatal.
+            let (config, raw) = Self::load_with_raw(Some(path))?;
             return Ok(LoadedOverlay {
-                config: Self::load(Some(path))?,
+                config,
+                raw,
                 source: ConfigSource::Explicit(path.to_path_buf()),
             });
         }
@@ -85,10 +91,14 @@ impl FileConfig {
         }
 
         match well_known.try_exists() {
-            Ok(true) => Ok(LoadedOverlay {
-                config: Self::load(Some(well_known))?,
-                source: ConfigSource::Discovered(well_known.to_path_buf()),
-            }),
+            Ok(true) => {
+                let (config, raw) = Self::load_with_raw(Some(well_known))?;
+                Ok(LoadedOverlay {
+                    config,
+                    raw,
+                    source: ConfigSource::Discovered(well_known.to_path_buf()),
+                })
+            }
             Ok(false) => Ok(LoadedOverlay::defaults()),
             // S5: never fatal for a path nobody requested. A flaky/locked-down
             // /etc must not DoS the whole fleet — warn and fall back to defaults.
@@ -244,7 +254,7 @@ auth_provider = "platform"
             "resolve-well-known.toml",
             r#"
 [observability]
-rust_log = "info,zeroship_=debug"
+log_filter = "info,zeroship_=debug"
 "#,
         );
 
@@ -277,7 +287,7 @@ rust_log = "info,zeroship_=debug"
             "resolve-no-config.toml",
             r#"
 [observability]
-rust_log = "info,zeroship_=debug"
+log_filter = "info,zeroship_=debug"
 "#,
         );
 
