@@ -1173,6 +1173,34 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_gateway_workflow_advance_authz.sh 2>&1 | tee "$RUNNER_TEMP/dvd-wfadvz.log"
+      # examples/ are workspace packages (pnpm-workspace.yaml lists `examples/*`)
+      # but root `pnpm build` is `pnpm -r --filter './sdks/*' ...`, so it does
+      # NOT build them. Without this step the harness below reaches its own
+      # prereq check and exits 1 with
+      #   FAIL missing .../examples/kv-dashboard/dist/app.zship
+      # i.e. a wired job that cannot run, the defect ac3bfd2cf and a001f28f9
+      # already cost this project. MEASURED, not estimated: 7s + 4s = 11s from a
+      # cleaned dist/ on a workstation. That is noise against this job's 90m
+      # bound even if a 2-vCPU runner is several times slower.
+      - name: Build the two example apps the redeploy harness deploys
+        run: |
+          (cd examples/kv-dashboard && pnpm build)
+          (cd examples/starter && pnpm build)
+      # Scenario 22: a redeploy while end users are mid-request. The harness
+      # deploys two DIFFERENT apps under one name, so the swap is real -- a
+      # rebuild of the SAME source is not, because deploy_hash comes from the
+      # worker module blob and two builds of unchanged source produce the same
+      # blob (measured: archives differ, blob is byte-identical).
+      #
+      # It asserts on 5xx-or-transport, NOT on non-200: A and B expose disjoint
+      # procedures, so a 404 after the swap is CORRECT and counting non-200s
+      # would report a break out of a healthy run. A span guard requires the
+      # traffic to have seen both bundles, because with zero requests the 5xx
+      # assertion passes vacuously.
+      - name: Redeploy under load (scenario 22 - in-flight requests survive)
+        run: |
+          set -o pipefail
+          tests/e2e_redeploy_replaces_app.sh 2>&1 | tee "$RUNNER_TEMP/dvd-redeploy.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
