@@ -68,7 +68,8 @@ CADDY_CONTAINER=""
 FAILS=0
 
 pass() { echo "  PASS $1"; }
-fail() { echo "  FAIL $1"; FAILS=$((FAILS+1)); }
+declare -a AUTHZ_FAILURES=()
+fail() { echo "  FAIL $1"; FAILS=$((FAILS+1)); AUTHZ_FAILURES+=("$1"); }
 note() { echo "  ---- $1"; }
 
 kill_pids() {
@@ -533,10 +534,71 @@ fi
 
 echo
 echo "############ SUMMARY ############"
-if [ "$FAILS" -eq 0 ]; then
-  echo "ALL ASSERTIONS PASSED (see per-arm PASS/FAIL above)"
-  exit 0
-else
-  echo "$FAILS assertion(s) FAILED"
+# WHICH failures, not just how many.
+#
+# This probe is RED AT HEAD BY DESIGN: #199's authorization gap is real and
+# unfixed, so `exit 1` carries no regression signal on its own -- it is already 1
+# before anything new breaks. Wiring it into CI without this block would make the
+# job permanently red and hide the next real change inside a failure everyone has
+# learned to ignore. Same reasoning and the same two-sided shape as
+# GOLDEN_EXPECTED_FAILURES in tests/golden_path.sh.
+#
+# TWO-SIDED ON PURPOSE:
+#   - a failure matching NO pattern is a REGRESSION or a new defect
+#   - a pattern matching NO failure means the gap was FIXED and this list is
+#     stale, which is the notification missing today: whoever closes #199
+#     currently gets told by nothing
+# Both set rc=1.
+#
+# THE BOUNDS BELONG WITH THE EXPECTATION, because a bare "expected" invites the
+# reading that it does not matter. It matters and it is mitigated, and this
+# probe measures both mitigations itself: phase 2 shows the shipped worker
+# refusing the unsigned advance (HTTP 403, run stays queued) and phase 3 shows
+# the dotless Host that bypasses the gate is not routable through Caddy.
+# Reaching the gap in the shipped topology needs BOTH the worker flag ON and
+# direct gateway access.
+AUTHZ_EXPECTED_FAILURES=${AUTHZ_EXPECTED_FAILURES:-"CONFIRMED AUTHZ GAP"}
+IFS='|' read -r -a _apats <<< "$AUTHZ_EXPECTED_FAILURES"
+# FIXED-STRING matching, both directions. An earlier golden_path classifier used
+# an ERE and `sort({id:-1})` matched nothing because `{id:-1}` is an invalid
+# interval, so it reported its own known failure as UNEXPECTED. grep -F cannot
+# do that.
+_aunexp=0; _astale=0
+# THE LENGTH GUARD IS NOT DEFENSIVE PADDING. Without it this loop iterates ONCE
+# on an empty array in this shell -- `"${A[@]+"${A[@]}"}"` still yields a single
+# empty word -- so a run with ZERO failures reported a phantom
+# `UNEXPECTED FAILURE: ` and `-1 expected`. That is the gap-was-FIXED case, the
+# one this whole block exists to announce, and a reader seeing "-1 expected"
+# would rightly distrust the entire line. Caught by a three-arm standalone test
+# before this was ever committed; arms A and B were already correct, which is
+# exactly why arm C had to be run separately rather than inferred from them.
+if [ "${#AUTHZ_FAILURES[@]}" -gt 0 ]; then
+  for _f in "${AUTHZ_FAILURES[@]}"; do
+    _hit=0
+    for _p in "${_apats[@]}"; do
+      printf '%s' "$_f" | grep -qF -- "$_p" && { _hit=1; break; }
+    done
+    [ "$_hit" -eq 1 ] || { echo "  UNEXPECTED FAILURE (not in the red-at-HEAD set): $_f"; _aunexp=$((_aunexp+1)); }
+  done
+fi
+for _p in "${_apats[@]}"; do
+  _seen=0
+  # Same guard, same reason. Here a phantom empty element would merely fail to
+  # match and leave _seen=0, which happens to give the RIGHT answer -- so this
+  # loop was not visibly broken. Guarding it anyway, because "correct by
+  # coincidence" is the state that turns into a defect the next time someone
+  # edits the matching.
+  if [ "${#AUTHZ_FAILURES[@]}" -gt 0 ]; then
+  for _f in "${AUTHZ_FAILURES[@]}"; do
+    printf '%s' "$_f" | grep -qF -- "$_p" && { _seen=1; break; }
+  done
+  fi
+  [ "$_seen" -eq 1 ] || { echo "  STALE EXPECTATION (no failure matched): $_p -- was #199 fixed? update this list in that same change"; _astale=$((_astale+1)); }
+done
+echo "  failures: $FAILS total, $((FAILS-_aunexp)) expected, $_aunexp unexpected, $_astale stale expectation(s)"
+if [ "$_aunexp" -gt 0 ] || [ "$_astale" -gt 0 ]; then
+  echo "FAIL: the red-at-HEAD set no longer describes this run." >&2
   exit 1
 fi
+echo "OK: every failure is the documented, bounded #199 gap; nothing new."
+exit 0
