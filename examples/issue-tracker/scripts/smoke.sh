@@ -364,6 +364,35 @@ done
 bob deps.graph | grep -q "$SECRET_BUG" \
   && fail "the restricted bug appears as a node in Bob's dependency graph" \
   || pass "the restricted bug is absent from Bob's dependency graph"
+
+# Shared saved searches must run under the VIEWER's permissions, never the
+# owner's. The design satisfies this by construction -- savedSearches.list
+# returns the stored queryJson but never EXECUTES it, and execution goes
+# through search.query under the caller's own identity -- so this asserts the
+# behaviour rather than the mechanism, and would catch a future "run it for
+# them server-side" convenience.
+SS_QUERY='{"field":"productId","operator":"eq","value":"'"$PROD"'"}'
+call savedSearches.save "{\"name\":\"shared-$STAMP\",\"queryJson\":$SS_QUERY,\"isShared\":true}" >/dev/null
+
+bob savedSearches.list | grep -q "shared-$STAMP" \
+  && pass "Bob can see Alice's shared saved search" \
+  || fail "the shared saved search is not visible to Bob, so the check below is vacuous"
+
+# Alice's own run of that query sees the restricted bug; Bob's must not.
+call search.query "{\"where\":$SS_QUERY,\"limit\":200}" | grep -q "$SECRET_BUG" \
+  && pass "control: the shared query does match the restricted bug for its owner" \
+  || fail "control failed: the query does not match the restricted bug even for Alice"
+
+bob search.query "{\"where\":$SS_QUERY,\"limit\":200}" | grep -q "$SECRET_BUG" \
+  && fail "a shared saved search runs with the OWNER's visibility for Bob" \
+  || pass "the shared search runs under Bob's own visibility"
+
+# The advanced-search compiler takes a caller-supplied clause tree, so it is
+# an untrusted input surface: fields are whitelisted rather than passed
+# through to the query builder.
+[ "$(code search.query '{"where":{"field":"passwordHash","operator":"eq","value":"x"}}')" = "400" ] \
+  && pass "an unsupported search field is rejected (400)" \
+  || fail "search.query accepted a field outside the whitelist"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
