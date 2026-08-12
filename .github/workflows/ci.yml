@@ -1236,6 +1236,16 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_uri.sh 2>&1 | tee "$RUNNER_TEMP/dvd-uri.log"
+      # Scenario 15's harness (#305) - SSG / SSR / CSR through the gateway. It
+      # was WALKED and mutation-proven in this review and then sat ungated,
+      # which is task #340's point in one artifact: 29/0 is the same figure
+      # #305 recorded, so the thing that proved the scenario was reporting to
+      # nobody. Run by me at HEAD before wiring: 29 passed, 0 failed, 0
+      # known-fail, 0 skipped, rc=0.
+      - name: App primitives - rendering modes (scenario 15, 29/0 at HEAD)
+        run: |
+          set -o pipefail
+          tests/e2e_app_primitives_render.sh 2>&1 | tee "$RUNNER_TEMP/dvd-render.log"
       # The service logs these harnesses leave behind are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. They live in per-run mktemp dirs that the harness deletes on
