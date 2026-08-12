@@ -58,6 +58,6 @@
     "test:codegen": "node __test__/gen_artifacts_typecheck.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.3"
+    "@napi-rs/cli": "3.7.3"
   }
 }
