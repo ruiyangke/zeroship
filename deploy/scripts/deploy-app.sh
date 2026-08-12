@@ -5,6 +5,7 @@
 #   deploy/scripts/deploy-app.sh --host root@1.2.3.4 --app <app-id> --dir examples/db-todos \
 #                                --probe https://db-todos.example.com
 #   deploy/scripts/deploy-app.sh --host root@1.2.3.4 --app <app-id> --zship dist/app.zship
+#                                --probe-script examples/db-todos/scripts/probe-live.mjs
 #
 # WHY THIS EXISTS, 2026-08-12. `zeroship deploy` needs to reach the control
 # plane, and on a correctly configured host it CANNOT:
@@ -33,8 +34,9 @@
 # by any other user on this machine.
 #
 # WHAT THIS DOES NOT DO: it does not create the app, run migrations, or manage
-# DNS. `--probe` is the only behavioural assertion, and it is only as good as
-# the probe you point it at.
+# DNS. `--probe` alone asserts only liveness -- a 200 from an SPA shell says
+# the asset route works and nothing about the app. Add `--probe-script` for a
+# real behavioural check, and it is only as good as the script you point at.
 
 set -euo pipefail
 
@@ -46,6 +48,7 @@ PROBE_URL=""
 TOKEN_FILE=""
 REMOTE_CONTROL_PORT=9090
 SKIP_BUILD=0
+PROBE_SCRIPT=""
 
 usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -56,6 +59,7 @@ while [ $# -gt 0 ]; do
     --dir)        APP_DIR="$2"; shift 2 ;;
     --zship)      ZSHIP="$2"; shift 2 ;;
     --probe)      PROBE_URL="$2"; shift 2 ;;
+    --probe-script) PROBE_SCRIPT="$2"; shift 2 ;;
     --token-file) TOKEN_FILE="$2"; shift 2 ;;
     --control-port) REMOTE_CONTROL_PORT="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
@@ -165,12 +169,18 @@ echo "ok  deploy accepted"
 # ------------------------------------------------------------------- verify
 if [ -n "$PROBE_URL" ]; then
   say "probing $PROBE_URL"
-  PROBE="$ROOT/examples/db-todos/scripts/probe-live.mjs"
-  if [ -f "$PROBE" ] && [ -n "${ZEROSHIP_APP_PROBE:-}" ]; then
-    node "$PROBE" "$PROBE_URL" || fail "app probe failed after deploy"
+  if [ -n "$PROBE_SCRIPT" ]; then
+    # An explicit behavioural check. This is a FLAG rather than the env var it
+    # used to be: an undocumented variable that silently swaps a liveness check
+    # for a functional one means two runs printing "ok" can have asserted very
+    # different things, and nothing in the output says which.
+    [ -f "$PROBE_SCRIPT" ] || fail "probe script not found: $PROBE_SCRIPT"
+    node "$PROBE_SCRIPT" "$PROBE_URL" || fail "app probe failed after deploy"
   else
-    # Generic liveness. Deliberately not called a functional check: a 200 from
-    # an SPA shell says the asset route works and nothing about the app.
+    # Generic liveness. Deliberately NOT called a functional check: a 200 from
+    # an SPA shell says the asset route works and nothing about the app. For
+    # anything stronger pass --probe-script (see examples/db-todos/scripts/
+    # probe-live.mjs, which asserts a subscription carries a real write).
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$PROBE_URL" || echo 000)"
     [ "$code" = "200" ] || fail "probe returned HTTP $code from $PROBE_URL"
     echo "ok  $PROBE_URL returned 200 (liveness only, not a behavioural check)"
