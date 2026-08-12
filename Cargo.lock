@@ -7415,8 +7415,10 @@ dependencies = [
  "serde_json",
  "serial_test",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "tracing",
  "uuid",
+ "zeroship-core",
 ]
 
 [[package]]

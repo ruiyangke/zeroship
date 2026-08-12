@@ -51,7 +51,7 @@ Run a separate workflow scheduler process for timer authority:
 ```bash
 zeroship-workflow-scheduler \
   --db "$DATABASE_URL" \
-  --scheduler-schema zeroship \
+  --schema zeroship \
   --gateway-url "$GATEWAY_URL" \
   --control-apply-url "$CONTROL_APPLY_URL" \
   --tick-secs 1 \

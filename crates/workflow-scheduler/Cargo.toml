@@ -12,6 +12,7 @@ reason = "Production scheduler process in scope even while its current binary fa
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { workspace = true, features = ["derive", "env"] }
+zeroship-core = { workspace = true }
 compio = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-uuid-1"] }
 flume = { workspace = true }
@@ -23,6 +24,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 serial_test = "3"
+toml = { workspace = true }
 
 [[bin]]
 name = "zeroship-workflow-scheduler"

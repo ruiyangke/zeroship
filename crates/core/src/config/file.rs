@@ -59,6 +59,39 @@ pub struct FileConfig {
     /// fields fall back to env/default.
     #[serde(default)]
     pub metering: MeteringSection,
+    /// Standalone workflow-scheduler settings.
+    #[serde(default)]
+    pub workflow_scheduler: SchedulerSection,
+}
+
+/// Workflow-scheduler operational values supplied by the overlay.
+///
+/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS a
+/// `[workflow_scheduler]` table and still rejects a typo inside it. The values
+/// each binary uses come from the generated declarations, which walk the same
+/// overlay by canonical path, so the key spellings here and there are the same
+/// by construction.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerSection {
+    /// Schema holding the scheduler timer and inflight tables.
+    pub schema: Option<String>,
+    /// Gateway internal base URL the dispatch seam posts to.
+    pub gateway_url: Option<String>,
+    /// Control-plane apply endpoint the scheduler acknowledges through.
+    pub control_apply_url: Option<String>,
+    /// Timer-wheel tick interval in seconds.
+    pub tick_secs: Option<u64>,
+    /// Interval in seconds between inflight-lease reaper sweeps.
+    pub reaper_interval_secs: Option<u64>,
+    /// Horizon in milliseconds within which a timer is loaded into the wheel.
+    pub near_horizon_ms: Option<i64>,
+    /// Maximum timers held in the in-memory wheel.
+    pub max_loaded_timers: Option<i64>,
+    /// Maximum due timers claimed per tick.
+    pub max_due_per_tick: Option<usize>,
+    /// Inflight-lease time-to-live in milliseconds.
+    pub inflight_ttl_ms: Option<i64>,
 }
 
 /// Usage-metering stream configuration supplied by the shared file overlay.
