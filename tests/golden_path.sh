@@ -213,6 +213,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# --- PREREQUISITE: the binaries this harness starts ------------------------
+#
+# These were documented at the top of this file and checked NOWHERE. MEASURED
+# 2026-08-12: with `target/` removed, the run got as far as step 2 and died on
+# a raw shell error --
+#     tests/golden_path.sh: line 359:
+#       .../target/release/zeroship-platform-migrate: No such file or directory
+# preceded by a `platform migrations failed` row, which reads as a PLATFORM
+# defect. The build command that fixes it is written twelve lines above, in a
+# comment the reader has no reason to be looking at once a step has failed.
+#
+# ABORTS rather than accumulating a failure: every later row would measure a
+# stack that was never started, and 100 misleading rows are worse than one
+# honest refusal. Exit 2 marks "prerequisite absent" as distinct from exit 1
+# "assertions failed", matching tests/create_demo_invoices.sh and
+# tests/supabase_deploy_e2e.sh (`ensure_release_bins`).
+#
+# NO pass row on success, deliberately: a prerequisite is not an assertion
+# about the product, and emitting one would shift GOLDEN_MIN_PASSED for a
+# reason unrelated to coverage.
+gp_missing_bins=()
+for _b in dev-provision zeroship zeroship-control zeroship-gate zeroship-migrated \
+         zeroship-platform-migrate zeroship-worker; do
+  [ -x "$BIN/$_b" ] || gp_missing_bins+=("$_b")
+done
+if [ "${#gp_missing_bins[@]}" -gt 0 ]; then
+  echo "  ✗ PREREQUISITE MISSING: ${#gp_missing_bins[@]} of 7 release binaries are absent from $BIN" >&2
+  for _b in "${gp_missing_bins[@]}"; do echo "      - $_b" >&2; done
+  echo "      Nothing below would measure the platform: the services never start." >&2
+  echo "      Build them with:" >&2
+  echo "        cargo build --release -p zeroship-control -p zeroship-worker \\" >&2
+  echo "          -p zeroship-gateway -p zeroship -p zeroship-migrated --bins" >&2
+  echo "        cargo build --release -p zeroship-migrate-adapter \\" >&2
+  echo "          --features platform-cli --bin zeroship-platform-migrate" >&2
+  exit 2
+fi
+
 # --- HTTP probes that separate "listening" from "answered 2xx" -------------
 #
 # `curl -sf` conflates the two: it fails on ANY non-2xx, so an app whose RPC
