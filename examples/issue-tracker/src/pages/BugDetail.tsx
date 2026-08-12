@@ -6,6 +6,7 @@ import { CcPanel } from "../components/bug-detail/CcPanel";
 import { CommentsPanel } from "../components/bug-detail/CommentsPanel";
 import { FieldsPanel } from "../components/bug-detail/FieldsPanel";
 import { FlagsPanel } from "../components/bug-detail/FlagsPanel";
+import { SecurityPanel } from "../components/bug-detail/SecurityPanel";
 import { VotesPanel } from "../components/bug-detail/VotesPanel";
 import { HistoryPanel } from "../components/bug-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/bug-detail/RelationsPanel";
@@ -114,6 +115,7 @@ export function BugDetailPage({ id }: { id: string }) {
               flagTypes={productDetail?.flagTypes ?? null}
               onChanged={reload}
             />
+            <SecurityPanel bugId={id} onChanged={reload} />
             <DependenciesPanel bugId={id} />
             <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
             <CcPanel bugId={id} />

@@ -266,3 +266,64 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
   await page.reload();
   await expect(inbox.getByText(summary)).toHaveCount(0);
 });
+
+test("an admin can restrict a bug to a group through the UI", async ({ page, baseURL }) => {
+  // The whole access-control model -- eight procedures -- had no interface at
+  // all, so the app's most consequential feature could only be reached over
+  // raw RPC. This drives it the way an operator would.
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const product = await rpc("products.create", { name: `Sec ${RUN}`, description: "sec spec" });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary: `Confidential ${RUN}`,
+    description: "sensitive",
+  });
+
+  // Create the group through the admin page, not over RPC: that surface is
+  // the thing under test.
+  await page.goto("/#/products");
+  const groups = page.locator("section.groups-admin");
+  await expect(groups).toBeVisible();
+  await groups.getByLabel("New group").fill(`sec-${RUN}`);
+  await groups.getByRole("button", { name: "Create" }).click();
+  // Scoped to the LIST. Creating a group also adds an <option> to the
+  // add-member picker, so a bare getByText matches two nodes and fails strict
+  // mode -- which reads as "the group was not created" when it was.
+  await expect(groups.locator("ul.group-list").getByText(`sec-${RUN}`)).toBeVisible();
+
+  // Then restrict the bug from its detail page.
+  await page.goto(`/#/bugs/${bug.id}`);
+  const security = page.locator("section.security-panel");
+  await expect(security).toBeVisible();
+  // Selected by VALUE, read off the option itself, rather than by label.
+  // These options are rendered as `<option>{'\n  '}{group.name}{'\n'}</option>`
+  // in JSX, so their text carries surrounding whitespace and a label match
+  // silently selects nothing -- the control stayed on "Select a group" and the
+  // buttons stayed disabled, which reads as a broken panel rather than a
+  // mis-aimed selector.
+  const groupSelect = security.getByLabel("Group");
+  const groupValue = await groupSelect
+    .locator("option")
+    .filter({ hasText: `sec-${RUN}` })
+    .getAttribute("value");
+  expect(groupValue, "the group created above should appear in the security picker").toBeTruthy();
+  await groupSelect.selectOption(groupValue!);
+  await security.getByRole("button", { name: "Restrict", exact: true }).click();
+
+  // The confirmation must state the consequence, not just "done" -- restricting
+  // a bug changes who can see it and that is the point of the action.
+  await expect(security.getByText(/only members of that group/i)).toBeVisible();
+});
