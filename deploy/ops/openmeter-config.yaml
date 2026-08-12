@@ -2,7 +2,7 @@
 #
 # Stood up by deploy/compose/openmeter.yml and consumed by the `openmeter` API
 # + `sink-worker` services. This is a DEV-ONLY local config (weak ClickHouse /
-# Postgres passwords, no TLS, an insecure portal token) — it exists purely so
+# Postgres passwords, no TLS, an insecure portal token) - it exists purely so
 # the zeroship OpenMeterProvider's REAL cyper client can be exercised against a
 # LIVE OpenMeter, not the in-test mock. See tests/e2e_openmeter_export.sh and
 # docs/runbooks/docker-compose.md (OpenMeter section).
@@ -35,7 +35,7 @@ sink:
   # delta under a deterministic id so a transport retry / same-window re-push
   # REPLAYS instead of double-counting. 32d window mirrors the upstream default;
   # the e2e's C2 re-drive scenario runs INSIDE this window (so a blind re-push
-  # WOULD be deduped — the test proves the cron's aggregate-reconcile still
+  # WOULD be deduped - the test proves the cron's aggregate-reconcile still
   # pushes the correct delta), and ALSO documents the >window behaviour.
   dedupe:
     enabled: true
@@ -52,7 +52,7 @@ postgres:
 # THE zeroship meter. Must match the OpenMeterProvider emit/query contract:
 #   * slug == --openmeter-meter-slug   (the C2 reconcile queries /meters/<slug>/query)
 #   * eventType == --openmeter-event-type == the CloudEvent `type` report_usage sends
-#   * aggregation SUM over valueProperty $.value — OpenMeter SUMS the per-event
+#   * aggregation SUM over valueProperty $.value - OpenMeter SUMS the per-event
 #     `data.value` (the CU delta) per subject, which is exactly the cumulative
 #     high-water `reported_total` reads back.
 # Subject is the CloudEvent `subject` (zeroship maps it to the creator handle);

@@ -6,12 +6,12 @@
 # in deploy/compose/docker-compose.yml. This shared overlay does not define that key.
 #
 # First-party trusted OAuth client(s) that skip native OP consent. This is the
-# FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule
+# FIRST-PARTY CONSOLE only - a deliberate, narrow exception to the spec rule
 # that per-app (THIRD-PARTY creator) clients NEVER skip consent. A consent prompt
 # for the platform's OWN console is meaningless, and the immersive iframe login
-# frames the /login dance — a console consent screen would also have to be a
+# frames the /login dance - a console consent screen would also have to be a
 # framed document. (The old gateway POST /__zeroship/auth/password first-party
-# gate this value also fed is GONE — the anti-clickjacking gate is now the
+# gate this value also fed is GONE - the anti-clickjacking gate is now the
 # browser-enforced `frame-ancestors` allowlist; see
 # [auth].frame_ancestor_origins below.)
 #
@@ -32,22 +32,22 @@
 trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
 # Console origin(s) the auth-service login/signup/consent documents admit via CSP
 # `frame-ancestors` so the console's immersive iframe login can embed them
-# (design §4.3/§10.1). Browser-enforced anti-clickjacking: ONLY a listed origin
+# (design sec. 4.3/sec. 10.1). Browser-enforced anti-clickjacking: ONLY a listed origin
 # may frame /login; everyone else is blocked and falls back to the popup. EXACT
-# origins only — NO wildcards. This compose serves the console at the Caddy host.
+# origins only - NO wildcards. This compose serves the console at the Caddy host.
 frame_ancestor_origins = ["http://console.zeroship.localhost"]
 
 [observability]
 rust_log   = "info,zeroship_=debug"
 log_format = "json"
 
-# Secret REFERENCES only — never a plaintext literal (a literal is rejected at
+# Secret REFERENCES only - never a plaintext literal (a literal is rejected at
 # resolve by crates/core/src/config/secrets.rs::obtain_secret). Each value is a
 # `urn:zeroship:env:<VAR>` reference: the named env var is read PER BINARY from
 # that service's compose `environment:` block, so a binary backfills its secret
 # from this shared file instead of carrying it as a literal CLI flag. Precedence
 # is CLI/env-flag > [secrets] file reference > default, so any leftover literal
-# flag would silently win and defeat this indirection — keep them OFF the
+# flag would silently win and defeat this indirection - keep them OFF the
 # command lines.
 #
 # DB URLs are PER BINARY (different least-priv PG roles: zeroship_control /

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot: tell all 3 Dragonfly nodes about the cluster topology.
-# Slots 0–5460 → node-0 (:7000), 5461–10922 → node-1 (:7001),
-# 10923–16383 → node-2 (:7002).
+# Slots 0-5460 -> node-0 (:7000), 5461-10922 -> node-1 (:7001),
+# 10923-16383 -> node-2 (:7002).
 #
 # Dragonfly's cluster_mode=yes ships empty until it receives a
 # DFLYCLUSTER CONFIG push. Each node needs the full topology so it

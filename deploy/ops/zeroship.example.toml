@@ -4,7 +4,7 @@
 # Placing this file at the well-known path /etc/zeroship/zeroship.toml makes
 # --config unnecessary: the binaries auto-discover that fixed system path when no
 # explicit --config / ZEROSHIP_CONFIG is given. (That is the ONLY auto-discovered
-# location — there is no CWD/env redirect.)
+# location - there is no CWD/env redirect.)
 #
 # All keys are optional. Absent keys use the binary's compiled default.
 # Scalar key precedence: CLI flag > env > this file > default.
@@ -18,14 +18,14 @@
 #
 # First-party OAuth client IDs that skip native OP consent for the first-party
 # CONSOLE only. (The old gateway POST /__zeroship/auth/password first-party gate
-# this value also fed is GONE — the immersive iframe login replaced it; the
+# this value also fed is GONE - the immersive iframe login replaced it; the
 # anti-clickjacking gate is now the browser-enforced `frame_ancestor_origins`
 # allowlist below.) A consent prompt for the platform's own console is
 # meaningless, and the framed /login dance would otherwise have to render a
 # framed consent document.
 # Option<Vec<String>> semantics: OMIT this key => the compiled default, which
 # is now EMPTY (fail-closed: NO client skips consent unless listed here); a
-# PRESENT list => exactly that set; `[]` => none. File/default ONLY — no CLI
+# PRESENT list => exactly that set; `[]` => none. File/default ONLY - no CLI
 # flag or env var override.
 #
 # To skip consent for the console, set this to the console's per-app PKCE client
@@ -37,13 +37,13 @@ trusted_oauth_clients = []
 
 # Console origin(s) the auth-service login/signup/consent documents admit via
 # CSP `frame-ancestors` so the console's immersive iframe login can embed them
-# (design §4.3/§10.1). Browser-enforced anti-clickjacking: ONLY a listed origin
-# may frame /login — every other surface (creator apps, external sites) is
-# blocked by the browser and falls back to the popup. EXACT origins only — NO
+# (design sec. 4.3/sec. 10.1). Browser-enforced anti-clickjacking: ONLY a listed origin
+# may frame /login - every other surface (creator apps, external sites) is
+# blocked by the browser and falls back to the popup. EXACT origins only - NO
 # wildcards (a `https://*.zeroship.ai` would re-admit every creator app and
 # defeat the property). Also settable via `--frame-ancestor-origin` /
 # `FRAME_ANCESTOR_ORIGINS` (comma-separated); a non-empty CLI/env wins, else this
-# overlay applies, else empty (the relax is a no-op → strict frame-ancestors
+# overlay applies, else empty (the relax is a no-op -> strict frame-ancestors
 # 'none'). Empty/omitted => single-origin / dev (no immersive iframe).
 # frame_ancestor_origins = ["https://console.zeroship.ai"]
 frame_ancestor_origins = []
@@ -64,14 +64,14 @@ log_format = "json"
 # Secret-reference overlay. PORTABILITY NOTE: this file holds REFERENCES only,
 # NEVER literal secret values. Every key below is an optional pointer to where
 # the real secret lives (env var, file path, Vault, AWS Secrets Manager). A
-# plaintext literal here is rejected at startup — the config file must never
+# plaintext literal here is rejected at startup - the config file must never
 # carry a secret. That keeps the file safe to commit per-environment alongside
 # the rest of deploy/ops/.
 #
 # Precedence for every secret: CLI flag > env var > this file > compiled default.
 # References here are RESOLVED AT BOOT (the env var is read, the file is opened,
 # the backend is fetched). Under `--check-config` only the reference FORMAT is
-# validated — nothing is read or fetched — so a dry run never needs the secret
+# validated - nothing is read or fetched - so a dry run never needs the secret
 # backends to be reachable.
 #
 # Reference forms (a value NOT starting with urn:/arn: is treated as a literal
@@ -83,7 +83,7 @@ log_format = "json"
 #   arn:aws:secretsmanager:<...>   AWS Secrets Manager, full ARN (not yet implemented)
 #
 # Every key is OPTIONAL; omit a key to fall back to CLI/env/default. The
-# examples below show each reference form — pick whichever backend an
+# examples below show each reference form - pick whichever backend an
 # environment uses.
 
 # Bundle/master encryption key.
