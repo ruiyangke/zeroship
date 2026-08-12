@@ -42,3 +42,6 @@ nomad-driver-ch/bin/
 
 # Claude Code local state
 .claude/
+
+# Pilot notes: local working artifacts, deliberately never committed.
+docs/pilot/
