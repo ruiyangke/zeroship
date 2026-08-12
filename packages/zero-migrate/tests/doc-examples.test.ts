@@ -61,7 +61,10 @@ const VOCAB_PREAMBLE = `import {
  *  compile harness. Everything else is a runnable example and IS compiled. */
 function extractTsBlocks(md: string): string[] {
   const blocks: string[] = [];
-  const re = /```ts\n([\s\S]*?)```/g;
+  // Accept BOTH fence spellings. Matching only ```ts made every ```typescript
+  // block invisible to this gate, which claims to cover "every typed example":
+  // getting-started.md carries two and writing-migrations.md one.
+  const re = /```(?:ts|typescript)\n([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(md)) !== null) {
     const block = m[1];
