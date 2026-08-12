@@ -550,12 +550,16 @@ SB_MISS="$FIX/sb_missing"; seed_sandbox "$SB_MISS" CURRENT
 rm -f "$SB_MISS"/ops/Caddyfile.bak.*
 run_rollback "$SB_MISS"
 
-[ "$ROLL_RC" != 0 ] \
-  && pass "a missing backup for one file makes --rollback exit non-zero" \
-  || fail "--rollback exited 0 with no backup for ops/Caddyfile; a partial recovery reported as success"
-[[ "$ROLL_OUT" == *"ops/Caddyfile"* ]] \
-  && pass "the refusal names the file that has no backup" \
-  || fail "the refusal never names ops/Caddyfile: $ROLL_OUT"
+# EXIT 3 EXACTLY, not merely non-zero. Measured by mutation: deleting the scan
+# leaves `cp -a "" ops/Caddyfile` to fail under set -e, which also exits
+# non-zero, so "non-zero" cannot tell a deliberate refusal from a crash that
+# happens to abort in roughly the right place. 3 is reached only by the scan.
+[ "$ROLL_RC" = 3 ] \
+  && pass "a missing backup for one file makes --rollback exit 3 (the refusal, not an incidental failure)" \
+  || fail "--rollback exited $ROLL_RC with no backup for ops/Caddyfile; 3 is the refusal, 0 would be a partial recovery reported as success"
+[[ "$ROLL_OUT" == *"ops/Caddyfile"* && "$ROLL_OUT" == *"REFUSING to roll back"* ]] \
+  && pass "the refusal says it is refusing and names the file that has no backup" \
+  || fail "the refusal did not both say REFUSING and name ops/Caddyfile: $ROLL_OUT"
 if [ "$(cat "$SB_MISS/compose/.env")" = "CURRENT" ] \
    && [ "$(cat "$SB_MISS/compose/docker-compose.yml")" = "CURRENT" ]; then
   pass "the two files that DO have backups are left untouched (no half-restored configuration)"
