@@ -1053,9 +1053,11 @@ if diff -q "$WORK/dev.txt" "$WORK/deployed.txt" >/dev/null 2>&1; then
   pass "dev and deployed agree on every probed login operation"
 else
   n=$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep -c '^<')
-  # Hand the count to the classifier at the bottom, from the SAME diff that is
-  # printed, so the number and the evidence cannot disagree.
+  # Hand the count AND the row names to the classifier at the bottom, from the
+  # SAME diff that is printed, so number, names and evidence cannot disagree.
   DIVERGENT_ROWS="$n"
+  DIVERGENT_NAMES="$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep '^<' \
+    | awk '{print $2}' | sort -u | tr '\n' ' ')"
   fail "dev and deployed DIVERGE on $n of $(wc -l < "$WORK/dev.txt") login rows (< dev, > deployed)"
   diff "$WORK/dev.txt" "$WORK/deployed.txt"
   echo ""
@@ -1087,16 +1089,25 @@ fi
 #   identity.values  session.exchange  session.foreign_origin  session.no_xzsauth
 #   signout  signout.replay_rpc  signout.replay_session
 #
-# WHAT IT DOES NOT DO, in the same words its auth and db siblings use: it counts
-# rows, not identities. Eleven divergences that are a DIFFERENT eleven would
-# still exit 0. Pinning the set needs scenario 6's per-row verdicts to become
-# machine-readable, which they are not today.
+# IT COMPARES IDENTITIES, NOT A COUNT. The first version of this classifier
+# counted, and carried the caveat its auth sibling still carries - "eleven
+# divergences that are a DIFFERENT eleven would still exit 0". The db sibling
+# had to grow identity comparison anyway (its count could not tell a known
+# intermittent race from a regression), and once written it applies here for
+# free and strictly stronger: a different eleven now goes RED.
+#
+# All eleven are REQUIRED. Unlike db, none are tolerated: every one of them was
+# present in all five runs and the sorted set was byte-identical by md5, so
+# there is no known-intermittent row here to carve out. If one starts flapping,
+# the honest move is to move it to a TOLERATED list with the measurement that
+# justified it - not to loosen this back to a count.
 #
 # STILL NOT WIRED into CI by this change. Three identical runs on one machine is
 # not the same as stability on a contended CI box, and storage/workflows/db are
 # three standing examples of exactly that difference. Wire it once it has run
 # green here across enough runs to mean something.
 LOGIN_MIN_PASSED="${LOGIN_MIN_PASSED:-30}"
+LOGIN_REQUIRED_DIVERGENT="${LOGIN_REQUIRED_DIVERGENT:-authorize.entry identity.get_session identity.rpc_shape identity.rpc_values identity.values session.exchange session.foreign_origin session.no_xzsauth signout signout.replay_rpc signout.replay_session}"
 LOGIN_EXPECTED_DIVERGENT="${LOGIN_EXPECTED_DIVERGENT:-11}"
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 
@@ -1114,7 +1125,43 @@ if [ "$PASS" -lt "$LOGIN_MIN_PASSED" ]; then
 fi
 
 # Only the row diff may be forgiven, and only at the documented count.
-if [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$LOGIN_MIN_PASSED" ]; then
+if [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$LOGIN_MIN_PASSED" ] \
+   && [ -n "${DIVERGENT_NAMES:-}" ]; then
+  lg_unexpected=""; lg_missing=""
+  for row in $DIVERGENT_NAMES; do
+    case " $LOGIN_REQUIRED_DIVERGENT " in
+      *" $row "*) ;;
+      *) lg_unexpected="$lg_unexpected $row" ;;
+    esac
+  done
+  for row in $LOGIN_REQUIRED_DIVERGENT; do
+    case " $DIVERGENT_NAMES " in
+      *" $row "*) ;;
+      *) lg_missing="$lg_missing $row" ;;
+    esac
+  done
+  if [ -z "$lg_unexpected" ] && [ -z "$lg_missing" ]; then
+    echo "" >&2
+    echo "CLASSIFIER: exit 0 on the documented red - every divergent row is a KNOWN one." >&2
+    echo "  this run diverged on: $DIVERGENT_NAMES" >&2
+    echo "  Row IDENTITIES are compared, not just the count, so a different set" >&2
+    echo "  of the same size is RED. Scenario 6 has the per-row verdicts." >&2
+    rc=0
+  else
+    echo "" >&2
+    [ -n "$lg_unexpected" ] && {
+      echo "CLASSIFIER: REGRESSION. Divergent rows nobody documented:$lg_unexpected" >&2
+      echo "  dev and deployed now disagree somewhere new. The diff above has them." >&2
+    }
+    [ -n "$lg_missing" ] && {
+      echo "CLASSIFIER: STALE EXPECTATION. Required rows that did NOT diverge:$lg_missing" >&2
+      echo "  Either they were FIXED - record which, and drop them from" >&2
+      echo "  LOGIN_REQUIRED_DIVERGENT - or the probe stopped running, which is not" >&2
+      echo "  good news at all. Check which before believing the cheerful reading." >&2
+    }
+  fi
+elif [ "$rc" -ne 0 ] && [ "$FAIL" -eq 1 ] && [ "$PASS" -ge "$LOGIN_MIN_PASSED" ]; then
+  # Fallback: names unavailable, so fall back to the count.
   if [ "$DIVERGENT_ROWS" -eq "$LOGIN_EXPECTED_DIVERGENT" ]; then
     echo "" >&2
     echo "CLASSIFIER: exit 0 on the documented red - $DIVERGENT_ROWS divergent rows," >&2
