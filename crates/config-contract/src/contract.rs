@@ -138,29 +138,28 @@ pub fn validate_contract(
     let mut flag_names: BTreeMap<(String, String), String> = BTreeMap::new();
     for spec in specs {
         let canonical = spec.canonical().as_str().to_owned();
-        if let Some(env) = spec.env_name() {
-            if let Some(first) = env_names.insert(env.clone(), canonical.clone()) {
-                if first != canonical {
-                    errors.push(ContractError::EnvCollision {
-                        projection: env,
-                        first,
-                        second: canonical.clone(),
-                    });
-                }
-            }
+        if let Some(env) = spec.env_name()
+            && let Some(first) = env_names.insert(env.clone(), canonical.clone())
+            && first != canonical
+        {
+            errors.push(ContractError::EnvCollision {
+                projection: env,
+                first,
+                second: canonical.clone(),
+            });
         }
         for consumer in spec.consumers() {
             if let Some(flag) = spec.flag_name(*consumer) {
                 let key = (consumer.target().to_owned(), flag.clone());
-                if let Some(first) = flag_names.insert(key, canonical.clone()) {
-                    if first != canonical {
-                        errors.push(ContractError::FlagCollision {
-                            consumer: consumer.target().to_owned(),
-                            projection: flag,
-                            first,
-                            second: canonical.clone(),
-                        });
-                    }
+                if let Some(first) = flag_names.insert(key, canonical.clone())
+                    && first != canonical
+                {
+                    errors.push(ContractError::FlagCollision {
+                        consumer: consumer.target().to_owned(),
+                        projection: flag,
+                        first,
+                        second: canonical.clone(),
+                    });
                 }
             }
         }
