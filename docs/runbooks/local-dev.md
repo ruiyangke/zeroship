@@ -78,7 +78,6 @@ CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
 MASTER_KEY="$ZEROSHIP_MASTER_KEY" \
 WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 PAIRWISE_SALT="$PAIRWISE_SALT" \
-STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET" \
 AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ./target/release/zeroship-control \
   --port 9090 \
@@ -86,6 +85,12 @@ AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
   --blob-store ./bundles \
   --signing-key-file deploy/compose/secrets/control-signing.pem
 ```
+
+`STRIPE_WEBHOOK_SECRET` is not in that list and `dev init` does not generate it:
+only Stripe issues a value that verifies. Control starts without it, warns, and
+rejects every `/internal/webhooks/stripe` delivery with 500. To work on webhooks
+locally, prefix the command with the secret `stripe listen --print-secret`
+prints, and point the listener at this control instance.
 
 Terminal 2:
 

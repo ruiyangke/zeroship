@@ -227,8 +227,14 @@ PAIRWISE_SALT=<openssl rand -hex 32>
 
 `ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `GATEWAY_OIDC_SECRET` `MIGRATED_POLICY_SEAL_KEY` `STASH_SIGNING_KEY`
-`STRIPE_WEBHOOK_SECRET` `PAIRWISE_SALT` `AUTH_STASH_SIGNING_KEY`
-`AUTH_TOTP_ENC_KEY`
+`PAIRWISE_SALT` `AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+
+`STRIPE_WEBHOOK_SECRET` is **not** generated and **not** required. Only Stripe
+can issue a value that verifies, so leave it unset unless this deployment
+accepts Stripe webhooks; then set it to the `whsec_...` your Stripe dashboard
+endpoint (or `stripe listen --print-secret`) prints. While it is unset, control
+warns at boot and rejects every delivery to `/internal/webhooks/stripe` with
+500 - which is the correct answer for a deployment Stripe cannot reach anyway.
 
 Do not replace them with shared examples or per-service values. In particular,
 one `ZEROSHIP_CONTROL_KEY` now supplies control, gateway, worker, migrated, and

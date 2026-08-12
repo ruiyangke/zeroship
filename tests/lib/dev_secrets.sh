@@ -32,11 +32,13 @@
 _dev_secrets_complete() {
   local env_file="$1" secrets_dir="$2" name file
   [ -f "$env_file" ] || return 1
+  # STRIPE_WEBHOOK_SECRET is NOT in this set: only Stripe issues a value that
+  # verifies, so `dev init` does not generate one and compose defaults it to
+  # empty. Control still refuses every webhook while it is empty.
   for name in \
     ZEROSHIP_CONTROL_KEY ZEROSHIP_MASTER_KEY ZEROSHIP_WORKER_KEY \
     GATEWAY_OIDC_SECRET MIGRATED_POLICY_SEAL_KEY STASH_SIGNING_KEY \
-    STRIPE_WEBHOOK_SECRET PAIRWISE_SALT AUTH_STASH_SIGNING_KEY \
-    AUTH_TOTP_ENC_KEY; do
+    PAIRWISE_SALT AUTH_STASH_SIGNING_KEY AUTH_TOTP_ENC_KEY; do
     grep -q "^${name}=" "$env_file" 2>/dev/null || return 1
   done
   for file in \

@@ -14,6 +14,14 @@ const DEFAULT_SECRETS_DIR: &str = "deploy/compose/secrets";
 const DEFAULT_ENV_FILE: &str = "deploy/compose/.env";
 const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 
+/// Secrets this deployment issues to ITSELF, and therefore can generate.
+///
+/// `STRIPE_WEBHOOK_SECRET` is deliberately absent: the value is issued by
+/// Stripe (`whsec_...` from the dashboard endpoint or `stripe listen
+/// --print-secret`), so a locally generated one can never verify a real
+/// Stripe-Signature. Generating it produced an inert placeholder that made an
+/// unconfigured deployment look configured. Compose now defaults it to empty
+/// and control fails every webhook closed with 500 while it stays empty.
 const ENV_KEYS: &[&str] = &[
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_MASTER_KEY",
@@ -21,7 +29,6 @@ const ENV_KEYS: &[&str] = &[
     "GATEWAY_OIDC_SECRET",
     "MIGRATED_POLICY_SEAL_KEY",
     "STASH_SIGNING_KEY",
-    "STRIPE_WEBHOOK_SECRET",
     "PAIRWISE_SALT",
     "AUTH_STASH_SIGNING_KEY",
     "AUTH_TOTP_ENC_KEY",
@@ -479,10 +486,7 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
             zeroship_core::config::validate_stash_key(value)
         }
         "PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value),
-        "ZEROSHIP_CONTROL_KEY"
-        | "GATEWAY_OIDC_SECRET"
-        | "MIGRATED_POLICY_SEAL_KEY"
-        | "STRIPE_WEBHOOK_SECRET" => Ok(()),
+        "ZEROSHIP_CONTROL_KEY" | "GATEWAY_OIDC_SECRET" | "MIGRATED_POLICY_SEAL_KEY" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }
 }
