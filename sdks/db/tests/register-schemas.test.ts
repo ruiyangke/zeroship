@@ -115,7 +115,6 @@ describe("installSchema", () => {
       "collection",
       "registerModel",
       "openSubscription",
-      "startReplicationConsumer",
       "migrations",
       "replication",
       "transaction",

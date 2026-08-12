@@ -1,103 +1,16 @@
-//! V8 bridge for the `db.replication.*` operator namespace and the
-//! `db.startReplicationConsumer()` auto-spawn entry point.
+//! V8 bridge for replication diagnostics.
 //!
-//! The operator dispatchers ([`replication_setup_dispatch`],
-//! [`replication_watchdog_dispatch`],
-//! [`replication_drop_abandoned_dispatch`]) are thin wrappers that
-//! grab the pool via `ensure_pool` and forward to the pool-driven
-//! helpers in [`crate::replication`].
-//!
-//! [`start_replication_consumer_dispatch`] is the opt-in entry point
-//! apps call from module init to wire up reactive queries. It:
-//!
-//! 1. Provisions the publication + slot (idempotent — same as
-//!    `replicationSetup`).
-//! 2. Spawns a supervised WAL consumer task on the isolate's compio
-//!    runtime. The task lives for the isolate's lifetime and
-//!    reconnects with exponential backoff on transient failure (see
-//!    [`crate::wal_consumer::run_supervised`]).
-//! 3. Returns the `SetupOutcome` JSON.
-//!
-//! Idempotent — second call returns a JSON envelope with
-//! `{"alreadyRunning": true}` and short-circuits without spawning a
-//! second task. Tracked per-thread via the per-isolate context's
-//! `running_consumers` slot (`IsolateDbContext::running_consumers`)
-//! because the consumer task is thread-bound (the compio runtime is
-//! one per worker, the broker is thread-local).
-//!
-//! We chose explicit opt-in (a) over implicit spawn-on-first-subscribe
-//! (b): the failure surfaces at the call site, not deep inside a
-//! subscribe Promise. Apps with no reactive surface skip the cost.
-//!
-//! ## Error rail
-//!
-//! Every dispatch failure here is routed through [`crate::error::DbError`]
-//! → [`crate::error::DbError::to_op_error`] so the rejection carries a
-//! stable `.code` the SDK can branch on:
-//!
-//! - `ensure_pool` failures preserve their DbError variant verbatim
-//!   (typically `not_configured` / `transient`).
-//! - The `replication::*` helpers return `Result<_, DbError>` directly
-//!   — SQLSTATE classification + Configuration/Transient/LockContention
-//!   variants are picked inside `crate::replication` and flow through
-//!   here verbatim (no Internal-wrapping at the dispatch boundary).
-//! - `WalConsumer::new` failures preserve their typed DbError variant
-//!   (post-aa639715): an empty `db_url` surfaces as
-//!   [`crate::error::DbError::Configuration`] with `code =
-//!   "not_provisioned"` (operator/config error), while a bad `app_id`
-//!   (sanitisation failure) surfaces as
-//!   [`crate::error::DbError::ValidationFailed`] with `code =
-//!   "invalid_app_id"` (developer/deploy error). The dispatch boundary
-//!   no longer re-stamps a generic `"not_provisioned"` over both classes.
+//! Consumer provisioning is intentionally absent. Native Subscription.ready()
+//! owns the only provision-and-spawn path through `cdc_lifecycle`, so an app
+//! cannot create a logical slot with no task responsible for it. This module
+//! retains only app-scoped watchdog and abandoned-slot maintenance operations.
 
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-use crate::backend::ChangeStream;
 use crate::exec::ensure_pool;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
-/// `db.replication.setup(opts?)` dispatch.
-pub fn replication_setup_dispatch<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    app_id: String,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let pool = match ensure_pool().await {
-            Ok(p) => p,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                }
-            }
-        };
-        match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
-            Ok(out) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::String(out.to_json()),
-                request_id,
-            },
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
-    promise
-}
-
 /// `db.replication.watchdog()` dispatch.
-///
-/// `app_id` is the mint-time stamp from the `Replication` v8_class
-/// wrapper — see the cross-tenant scoping note on
-/// [`crate::replication::watchdog_query`]. The dispatch boundary never
-/// reads an `appId` field from JS opts; callers in `v8_classes/replication.rs`
-/// always pass `self.app_id`.
 pub fn replication_watchdog_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: String,
@@ -107,13 +20,13 @@ pub fn replication_watchdog_dispatch<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match ensure_pool().await {
-            Ok(p) => p,
-            Err(e) => {
+            Ok(pool) => pool,
+            Err(error) => {
                 return OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
+                    value: ResolveValue::RejectError(error.to_op_error()),
                     request_id,
-                }
+                };
             }
         };
         match crate::replication::watchdog_query(&pool, &app_id).await {
@@ -122,9 +35,9 @@ pub fn replication_watchdog_dispatch<'s>(
                 value: ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
                 request_id,
             },
-            Err(e) => OpResult::JsValue {
+            Err(error) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
+                value: ResolveValue::RejectError(error.to_op_error()),
                 request_id,
             },
         }
@@ -133,12 +46,6 @@ pub fn replication_watchdog_dispatch<'s>(
 }
 
 /// `db.replication.dropAbandoned(opts?)` dispatch.
-///
-/// `app_id` is the mint-time stamp from the `Replication` v8_class
-/// wrapper — see the cross-tenant scoping note on
-/// [`crate::replication::drop_abandoned_slots`]. The dispatch boundary
-/// never reads an `appId` field from JS opts; callers in
-/// `v8_classes/replication.rs` always pass `self.app_id`.
 pub fn replication_drop_abandoned_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: String,
@@ -149,318 +56,29 @@ pub fn replication_drop_abandoned_dispatch<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match ensure_pool().await {
-            Ok(p) => p,
-            Err(e) => {
+            Ok(pool) => pool,
+            Err(error) => {
                 return OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
+                    value: ResolveValue::RejectError(error.to_op_error()),
                     request_id,
-                }
+                };
             }
         };
         match crate::replication::drop_abandoned_slots(&pool, &app_id, inactive_seconds).await {
             Ok(names) => OpResult::JsValue {
                 resolver,
                 value: ResolveValue::String(
-                    serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string()),
                 ),
                 request_id,
             },
-            Err(e) => OpResult::JsValue {
+            Err(error) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
+                value: ResolveValue::RejectError(error.to_op_error()),
                 request_id,
             },
         }
     }));
     promise
-}
-
-/// `zeroship.db.startReplicationConsumer()` → `Promise<SetupOutcome JSON>`
-///
-/// Idempotent. The first call provisions the slot+publication, spawns
-/// a supervised WAL consumer for the current app, and resolves once
-/// `replicationSetup` returns (i.e. provisioning is durable). The
-/// consumer continues running on the compio runtime in the background;
-/// it suppresses local-emit for this app via the per-app suppression
-/// gate so subscribers receive each event exactly once via WAL.
-///
-/// Subsequent calls short-circuit and resolve with the cached outcome
-/// envelope plus `"alreadyRunning": true`.
-pub fn start_replication_consumer_dispatch<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    app_id: String,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // Idempotent: if a consumer is already running for this app on
-        // this thread, return a short-circuit envelope.
-        let already = crate::context::with(|c| c.is_consumer_running(&app_id));
-        if already {
-            let value = serde_json::json!({
-                "alreadyRunning": true,
-                "app_id": app_id,
-            })
-            .to_string();
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::String(value),
-                request_id,
-            };
-        }
-
-        // Step 1: provision (idempotent).
-        let pool = match ensure_pool().await {
-            Ok(p) => p,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                }
-            }
-        };
-        let setup = match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
-            Ok(s) => s,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                }
-            }
-        };
-
-        // Step 1b: route the consumer-spawn handshake through the new
-        // `ChangeStream` capability adapter. The PG-arm `spawn_consumer` is a no-op
-        // marker today (the actual `compio::runtime::spawn` of
-        // `run_supervised` stays at this dispatcher because the
-        // `ConsumerRunningGuard` claim needs the spawn-closure capture);
-        // routing through the trait surface here proves the adapter is
-        // reachable from a `BackendHandle`-routed call shape and
-        // gives a stable site to migrate the spawn into later.
-        //
-        // **PG behaviour unchanged**: the call does not provision (the
-        // direct `ensure_publication_and_slot` call above already did
-        // that with the `SetupOutcome` we need for the response
-        // envelope), does not allocate any background task, and the
-        // returned `WalConsumerHandle` is intentionally unused here.
-        let backend = match crate::context::with(|c| c.backend()) {
-            Some(b) => b,
-            None => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(
-                        crate::error::DbError::config(
-                            "backend_not_initialized",
-                            "db: backend not initialized",
-                        )
-                        .to_op_error(),
-                    ),
-                    request_id,
-                };
-            }
-        };
-        let Some(change_stream) = backend.as_change_stream_pg() else {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(
-                    crate::error::DbError::backend_unsupported("startReplicationConsumer")
-                        .to_op_error(),
-                ),
-                request_id,
-            };
-        };
-        let _consumer_handle = match change_stream.spawn_consumer(&app_id).await {
-            Ok(h) => h,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-
-        // Step 2: build the consumer descriptor.
-        //
-        // WalConsumer::new returns Result<_, DbError>. Two failure
-        // classes flow through verbatim:
-        // - DbError::ValidationFailed { code: "invalid_app_id" } for
-        //   developer/deploy errors (sanitise failure).
-        // - DbError::Configuration { code: "not_provisioned" } for
-        //   operator/configuration errors (missing db_url).
-        // The dispatch boundary no longer re-stamps the error.
-        let url = crate::context::with(|c| c.db_url()).unwrap_or_default();
-        let consumer = match crate::wal_consumer::WalConsumer::new(&app_id, &url) {
-            Ok(c) => c.with_start_lsn(setup.confirmed_flush_lsn.clone()),
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-
-        // Step 3: spawn the supervised task. `detach()` lets it run
-        // for the lifetime of the isolate's compio runtime — there's
-        // nowhere to join it, and the supervisor exits cleanly on
-        // CopyDone or a fatal error.
-        //
-        // Mark + unmark live on a ConsumerRunningGuard whose lifetime
-        // is bound to the spawned future. Both mark and unmark execute
-        // INSIDE the future (mark on guard construction via try_claim;
-        // unmark via Drop, on ANY exit — graceful, panic, future
-        // dropped before first poll). The outer is_consumer_running
-        // gate at line 195 short-circuits the common case (same-thread
-        // re-call); try_claim closes the tight race window where two
-        // rapid-succession dispatches both pass the outer gate before
-        // either has marked.
-        //
-        // Defense: spawned task try-marks atomically via
-        // `ConsumerRunningGuard::try_claim` (defined at module scope
-        // below). If another task won the race, the loser bails
-        // without provisioning or marking. The winner constructs the
-        // guard, ensuring Drop unmarks on every exit path.
-        let app_for_task = app_id.clone();
-        compio::runtime::spawn(async move {
-            let Some(_guard) = ConsumerRunningGuard::try_claim(app_for_task) else {
-                // Another task won the race; nothing to do.
-                return;
-            };
-            crate::wal_consumer::run_supervised(consumer).await;
-            // _guard drops here on graceful exit; Drop also fires on
-            // panic-unwind, so the running marker is always cleared.
-        })
-        .detach();
-
-        // Resolve with the setup outcome plus the "running" marker.
-        let mut env = serde_json::from_str::<serde_json::Value>(&setup.to_json())
-            .unwrap_or(serde_json::Value::Null);
-        if let serde_json::Value::Object(ref mut m) = env {
-            m.insert("consumerStarted".into(), serde_json::Value::Bool(true));
-            m.insert("alreadyRunning".into(), serde_json::Value::Bool(false));
-        }
-        OpResult::JsValue {
-            resolver,
-            value: ResolveValue::String(env.to_string()),
-            request_id,
-        }
-    }));
-    promise
-}
-
-/// **Test-only**: probe whether the auto-spawn registry holds an entry
-/// for `app_id`. Used by `tests/integration.rs` to assert idempotency
-/// without reaching into private state.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
-    crate::context::with(|c| c.is_consumer_running(app_id))
-}
-
-/// **Test-only**: clear the auto-spawn registry. Used to reset state
-/// between integration tests that share a thread.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub fn clear_consumer_registry_for_tests() {
-    crate::context::with_mut(|c| c.clear_consumer_registry());
-}
-
-/// RAII guard owning the per-app `running_consumers` marker for the
-/// lifetime of a spawned `run_supervised` future. See the comment
-/// block at `start_replication_consumer_dispatch` for the design
-/// history (commits e399eeea, 34d209b5, 70921112).
-///
-/// Two invariants:
-/// 1. `try_claim()` is atomic — if another task already holds the
-///    mark, returns `None` and the caller MUST NOT spawn.
-/// 2. `Drop` unmarks unconditionally. Fires on graceful exit, panic
-///    unwind, AND future-dropped-pre-poll.
-struct ConsumerRunningGuard {
-    app_id: String,
-}
-
-impl ConsumerRunningGuard {
-    /// Try to claim the running-marker; returns Some(guard) on
-    /// success, None if another task already holds it.
-    ///
-    /// **Lazy construction is load-bearing**: we use `then(|| ...)`
-    /// rather than `then_some(...)` because `then_some` evaluates its
-    /// argument eagerly. If we constructed `Self { app_id }` even on
-    /// the lost-race path, that ephemeral Self would immediately
-    /// drop, firing our `Drop` impl, which would unmark the running
-    /// consumer that the winner just claimed.
-    fn try_claim(app_id: String) -> Option<Self> {
-        let won = crate::context::with_mut(|c| c.try_mark_consumer_running(&app_id));
-        won.then(|| Self { app_id })
-    }
-}
-
-impl Drop for ConsumerRunningGuard {
-    fn drop(&mut self) {
-        crate::context::with_mut(|c| c.unmark_consumer_running(&self.app_id));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context;
-
-    /// Reset state before each test to avoid cross-test pollution.
-    fn reset_consumer_registry(app_id: &str) {
-        context::with_mut(|c| c.unmark_consumer_running(app_id));
-    }
-
-    #[test]
-    fn consumer_running_guard_new_marks_app() {
-        reset_consumer_registry("guard_t1");
-        assert!(!context::with(|c| c.is_consumer_running("guard_t1")));
-        let _g = ConsumerRunningGuard::try_claim("guard_t1".into()).expect("first claim wins");
-        assert!(context::with(|c| c.is_consumer_running("guard_t1")));
-        // Cleanup: drop _g implicitly at end of scope.
-    }
-
-    #[test]
-    fn consumer_running_guard_drop_unmarks_app() {
-        reset_consumer_registry("guard_t2");
-        {
-            let _g = ConsumerRunningGuard::try_claim("guard_t2".into()).expect("first claim wins");
-            assert!(context::with(|c| c.is_consumer_running("guard_t2")));
-        } // _g dropped here
-        assert!(!context::with(|c| c.is_consumer_running("guard_t2")));
-    }
-
-    #[test]
-    fn consumer_running_guard_drop_unmarks_on_panic_unwind() {
-        reset_consumer_registry("guard_t3");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = ConsumerRunningGuard::try_claim("guard_t3".into()).expect("first claim wins");
-            assert!(context::with(|c| c.is_consumer_running("guard_t3")));
-            panic!("simulated supervisor panic mid-loop");
-        }));
-        assert!(result.is_err(), "the closure should have panicked");
-        // The Drop guard should have cleared the mark despite the panic.
-        assert!(
-            !context::with(|c| c.is_consumer_running("guard_t3")),
-            "Drop must run on panic-unwind and clear the running marker"
-        );
-    }
-
-    #[test]
-    fn consumer_running_guard_try_claim_loses_when_already_marked() {
-        reset_consumer_registry("guard_t4");
-        let g1 = ConsumerRunningGuard::try_claim("guard_t4".into()).expect("first claim wins");
-        // Second try_claim should return None — the loser bails.
-        let g2 = ConsumerRunningGuard::try_claim("guard_t4".into());
-        assert!(g2.is_none(), "second concurrent claim must return None");
-        // First guard still holds the mark.
-        assert!(context::with(|c| c.is_consumer_running("guard_t4")));
-        drop(g1);
-        assert!(!context::with(|c| c.is_consumer_running("guard_t4")));
-    }
 }

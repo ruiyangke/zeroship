@@ -132,6 +132,10 @@ pub mod encryption;
 // helpers (`replication.rs` / `wal_consumer.rs`) are PG-only.
 pub(crate) mod change_stream_pg;
 
+// Process-wide owner for per-app CDC consumers. Native Subscription wrappers
+// acquire leases here so all isolates in one worker share one logical slot.
+mod cdc_lifecycle;
+
 // Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod audit;
@@ -801,6 +805,29 @@ pub async fn init_pool_async() -> Result<(), String> {
         Ok(())
     }
     .await
+}
+
+/// Tear down all CDC state for a deleted app without requiring a live V8
+/// isolate.
+///
+/// The worker's process-wide version poller calls this after an app disappears
+/// from the control-plane registry. It closes local subscriptions, stops this
+/// process's consumer, then drops every worker slot and the shared publication.
+/// The Postgres teardown is idempotent so every worker container may observe
+/// the same deletion safely.
+pub async fn deprovision_app_cdc(db_url: &str, app_id: &str) -> Result<(), DbError> {
+    cdc_lifecycle::shutdown_app(app_id).await;
+    broker::drop_app(Some(app_id));
+
+    match backend_for_url(db_url)? {
+        BackendUrl::Sqlite { .. } => Ok(()),
+        BackendUrl::Postgres => {
+            let pool = Pool::connect(db_url, 2).await.map_err(|error| DbError::Transient {
+                message: format!("db CDC app-delete connection failed: {error}"),
+            })?;
+            replication::drop_publication_and_slots(&pool, app_id).await
+        }
+    }
 }
 
 #[cfg(test)]

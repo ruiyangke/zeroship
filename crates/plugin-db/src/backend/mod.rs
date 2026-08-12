@@ -958,19 +958,9 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
 /// detached `compio::runtime::spawn` task on PG, an actor-driven flume
 /// channel on SQLite) doesn't naturally share an erased shape.
 ///
-/// **Some guards start as no-ops** — they exist so call sites can
-/// adopt the shape today; the real Drop bodies that wire into
-/// `wal_consumer::suppress_app` / `broker::resume_app_with_resync`
-/// land once the consumers below are wired up.
-// `#[allow(dead_code)]` on the trait: today the surface ships with
-// only `spawn_consumer` invoked from
-// `replication_ops::start_replication_consumer_dispatch` (the no-op
-// marker call). `provision` / `deprovision` / `pause_broker` /
-// `engage_schema_pending` are part of the stable trait surface that
-// still needs wiring — `migrations.run` will pull `pause_broker`, the
-// `bundle_invalidated` control-event will pull `engage_schema_pending`,
-// and per-app deletion will pull `deprovision`. Remove
-// the allow once those callers exist.
+/// The process-wide CDC lifecycle invokes `spawn_consumer` when the first
+/// subscription opens. App deletion invokes `deprovision`; migration and
+/// schema coordination own the pause guards.
 #[allow(dead_code)]
 pub trait ChangeStream: 'static {
     /// Concrete handle representing a spawned-but-still-running
@@ -980,27 +970,22 @@ pub trait ChangeStream: 'static {
     /// `Box<dyn Future>` price the dyn-safe shape would force.
     type ConsumerHandle: 'static;
 
-    /// Idempotently provision the CDC infrastructure for `app_id`. On
-    /// PG this creates the publication + logical replication slot;
-    /// on SQLite it ensures the per-app session has the
-    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet armed.
-    /// Safe to call multiple times for the same `app_id`.
-    #[allow(async_fn_in_trait)]
-    async fn provision(&self, app_id: &str) -> Result<(), DbError>;
-
     /// Idempotently tear down the CDC infrastructure for `app_id`.
-    /// Counterpart to [`Self::provision`] used during app deletion;
-    /// PG drops the publication + slot, SQLite disarms hooks.
+    /// Used during app deletion; PG drops the publication and every worker
+    /// slot, while SQLite disarms hooks.
     #[allow(async_fn_in_trait)]
     async fn deprovision(&self, app_id: &str) -> Result<(), DbError>;
 
-    /// Spawn the long-running consumer task for `app_id`. The returned
-    /// [`Self::ConsumerHandle`] represents the running consumer; the
-    /// orchestrator does not currently join it (PG detaches; SQLite
-    /// runs in the session actor) but the handle exists so explicit
-    /// shutdown can be implemented when needed.
+    /// Provision and spawn the long-running consumer for `(app_id,
+    /// worker_id)`. This is the sole provisioning path so a slot cannot be
+    /// created without an owned task. The returned handle controls explicit
+    /// shutdown and completion.
     #[allow(async_fn_in_trait)]
-    async fn spawn_consumer(&self, app_id: &str) -> Result<Self::ConsumerHandle, DbError>;
+    async fn spawn_consumer(
+        &self,
+        app_id: &str,
+        worker_id: &str,
+    ) -> Result<Self::ConsumerHandle, DbError>;
 
     /// Pause broker delivery for `app_id` during a backfill window.
     /// Returns a [`BrokerPauseGuard`] whose `Drop` resumes delivery

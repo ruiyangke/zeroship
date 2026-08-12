@@ -3,8 +3,8 @@
 //!
 //! ## Why this class exists
 //!
-//! The platform-internal entry points — `registerModel`,
-//! `setMaskPolicy`, `startReplicationConsumer`, and the `replication`
+//! The platform-internal entry points - `registerModel`,
+//! `setMaskPolicy`, and the `replication`
 //! sub-namespace — do not live directly on the `Db` v8_class
 //! (`env.db`). Living there would make them directly reachable from
 //! creator JS (`env.db.registerModel(...)`) and would surface them in
@@ -26,7 +26,7 @@
 //!
 //! Every method delegates to the SAME dispatch helper the `Db` method
 //! used to call — only the JS carrier moved. The `register_model` /
-//! `set_mask_policy` / `start_replication_consumer` pipelines and the
+//! `set_mask_policy` pipeline and the
 //! `Replication` v8_class are unchanged; this wrapper is a thin,
 //! app-scoped re-home of the platform entry points.
 //!
@@ -35,8 +35,6 @@
 //! `app_id` is stamped at mint time (in `db.rs::mint_db`, from the live
 //! `Db`'s own `app_id`). The handle is therefore bound to exactly one
 //! tenant; there is no caller-supplied app-id override on any method
-//! (the `startReplicationConsumer` hardening is preserved verbatim —
-//! see [`super::db`]'s `resolve_consumer_app_id`).
 
 #![allow(unsafe_code)]
 
@@ -49,7 +47,6 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::crud::dispatch_set_mask_policy_field;
 use crate::register_model::register_model_dispatch;
-use crate::replication_ops::start_replication_consumer_dispatch;
 use crate::v8_bridge::read_json_arg;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +65,7 @@ pub struct DbPlatform {
     /// the live `Db`'s `app_id`; never mutated. Security-critical — the
     /// platform methods route to `"<app_id>".*` schemas, so a
     /// caller-supplied override is never honoured (see
-    /// `start_replication_consumer`).
+    /// platform operations).
     pub(crate) app_id: String,
     /// Cache of the `Replication` namespace wrapper minted on first
     /// access of `__platform.replication`. Stable identity.
@@ -170,27 +167,6 @@ impl DbPlatform {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let policy_v = read_json_arg(scope, Some(policy));
         Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
-    }
-
-    /// `__platform.startReplicationConsumer(opts?)` — provisions the
-    /// per-app publication + slot and spawns the supervised WAL
-    /// consumer. Idempotent. Moved off `Db`.
-    ///
-    /// Always scoped to `self.app_id`. Any app-id-shaped `opts` value is
-    /// intentionally ignored — honouring a JS-supplied app_id here would
-    /// let App A spawn a WAL consumer against App B's stream. Resolution
-    /// runs through [`super::db::resolve_consumer_app_id`] (the
-    /// security-critical policy lives in one unit-tested place; this
-    /// handle calls the same function).
-    #[v8_method]
-    #[v8_name = "startReplicationConsumer"]
-    fn start_replication_consumer<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        opts: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
-        let app_id = super::db::resolve_consumer_app_id(&self.app_id, scope, opts);
-        start_replication_consumer_dispatch(scope, app_id).into()
     }
 
     /// `__platform.replication` — the [`super::replication::Replication`]

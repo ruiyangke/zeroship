@@ -1128,7 +1128,6 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   // `env.db`, so it stays reserved.
   "openSubscription",
   "registerModel",
-  "startReplicationConsumer",
   "transaction",
   "live",
 ]);

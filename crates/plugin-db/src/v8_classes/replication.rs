@@ -1,8 +1,8 @@
 //! `Replication` — `#[v8_class]` namespace backing `env.db.replication`.
 //!
-//! Three methods scoped to the calling app, mirroring the legacy flat
-//! callbacks `replicationSetup` / `replicationWatchdog` /
-//! `replicationDropAbandoned`. The app scope is always the `app_id`
+//! Two diagnostic methods scoped to the calling app. Provisioning is owned by
+//! Subscription.ready(), so this namespace cannot create an unowned slot.
+//! The app scope is always the `app_id`
 //! stamped on the wrapper at mint time — it cannot be overridden from
 //! JS. The v8_class runs inside the tenant isolate; there is no
 //! reliable operator-vs-tenant distinction at this layer, so an
@@ -18,7 +18,7 @@ use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
 use crate::replication_ops::{
-    replication_drop_abandoned_dispatch, replication_setup_dispatch, replication_watchdog_dispatch,
+    replication_drop_abandoned_dispatch, replication_watchdog_dispatch,
 };
 use crate::v8_bridge::read_json_arg;
 
@@ -42,29 +42,6 @@ impl Replication {
     #[v8_constructor]
     fn new() -> Result<Replication, OpError> {
         Err(OpError::type_error("Illegal constructor"))
-    }
-
-    /// `db.replication.setup(opts?)` → `Promise<SetupOutcome JSON>`.
-    /// Provisions the per-app publication + logical replication slot
-    /// for the calling app. The app scope is always `self.app_id` (the
-    /// id stamped on the wrapper at mint time, sourced from the
-    /// isolate's `APP_ID` env var). `opts` is reserved for forward
-    /// compatibility — any `appId` field is intentionally ignored to
-    /// prevent cross-app provisioning from tenant JS.
-    #[v8_method]
-    fn setup<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        opts: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
-        // Parse `opts` so any future fields can be plumbed through, but
-        // route through `resolve_setup_app_id` which deliberately
-        // discards any caller-supplied `appId` (see module docs for the
-        // cross-app hijack rationale, and the `setup_app_id_*` unit
-        // tests for the regression guard).
-        let opts_v = read_json_arg(scope, Some(opts));
-        let app_id = resolve_setup_app_id(&self.app_id, &opts_v);
-        replication_setup_dispatch(scope, app_id).into()
     }
 
     /// `db.replication.watchdog()` → `Promise<SlotHealth[] JSON>`.
@@ -111,29 +88,11 @@ impl Replication {
     }
 }
 
-/// Resolve the app_id used by `Replication::setup` for dispatch.
-///
-/// Returns `stamped` verbatim, ignoring any `appId` field in the
-/// JS-supplied `opts` object. Lifted out of the `#[v8_method]` body
-/// (a) so the security-critical resolution policy is unit-testable
-/// without V8 plumbing and (b) so a future contributor restoring
-/// caller-controlled overrides has to delete this helper (and its
-/// tests) — making the regression visible in review.
-#[inline]
-fn resolve_setup_app_id(stamped: &str, _opts: &Value) -> String {
-    // INVARIANT: never read app-id-shaped fields from `_opts`. The
-    // v8_class executes inside the tenant isolate; any caller-supplied
-    // override is a cross-app hijack vector. See module docs.
-    stamped.to_string()
-}
-
 /// Resolve the app_id used by `Replication::watchdog` for dispatch.
 ///
 /// Returns `stamped` verbatim, ignoring any `appId` field in the
-/// JS-supplied `opts` object. Lifted out for the same reasons as
-/// [`resolve_setup_app_id`] — a security-critical resolution policy
-/// that must stay unit-testable and visible to reviewers if anyone
-/// tries to restore caller-controlled overrides.
+/// JS-supplied `opts` object. This security-critical resolution policy stays
+/// unit-testable so a caller-controlled override is visible in review.
 ///
 /// Sibling of the cross-app `setup` hijack closed at 309ed52f: prior
 /// to this fix, `watchdog()` issued a cluster-wide
@@ -205,62 +164,10 @@ pub(crate) fn mint_replication<'s>(
 
 #[cfg(test)]
 mod tests {
-    //! Regression guards for the cross-app replication hijack fix
-    //! (security review r2, 2026-05-22). Prior to the fix,
-    //! `Replication::setup` honoured an `opts.appId` override from JS,
-    //! letting App A provision a publication/slot for any victim app
-    //! on the same worker. The fix routes app-id resolution through
-    //! [`super::resolve_setup_app_id`], which always returns the
-    //! mint-time `self.app_id`.
+    //! Regression guards for app-scoped replication diagnostics.
 
-    use super::{
-        resolve_drop_abandoned_app_id, resolve_setup_app_id, resolve_watchdog_app_id,
-    };
+    use super::{resolve_drop_abandoned_app_id, resolve_watchdog_app_id};
     use serde_json::json;
-
-    #[test]
-    fn setup_app_id_ignores_string_override() {
-        // App A's wrapper is stamped with "app_a". A malicious JS
-        // caller supplies `{appId: "victim_app"}`. The dispatch MUST
-        // still target "app_a".
-        let opts = json!({"appId": "victim_app"});
-        assert_eq!(resolve_setup_app_id("app_a", &opts), "app_a");
-    }
-
-    #[test]
-    fn setup_app_id_ignores_non_string_override() {
-        // Defence in depth: numbers, booleans, nested objects, arrays,
-        // null — none of these should ever produce a different app_id
-        // from the stamped one.
-        for shape in [
-            json!({"appId": 123}),
-            json!({"appId": true}),
-            json!({"appId": null}),
-            json!({"appId": ["app_b"]}),
-            json!({"appId": {"name": "app_b"}}),
-        ] {
-            assert_eq!(
-                resolve_setup_app_id("app_a", &shape),
-                "app_a",
-                "override shape leaked through: {shape}"
-            );
-        }
-    }
-
-    #[test]
-    fn setup_app_id_empty_opts_uses_stamped() {
-        // Common case: no opts supplied at all.
-        assert_eq!(resolve_setup_app_id("app_a", &json!({})), "app_a");
-        assert_eq!(resolve_setup_app_id("app_a", &json!(null)), "app_a");
-    }
-
-    #[test]
-    fn setup_app_id_preserves_unicode_stamped_id() {
-        // Stamped id is taken verbatim — no normalisation, no
-        // sanitisation at this layer. Callers above already vetted it.
-        let stamped = "app_测试_🛡";
-        assert_eq!(resolve_setup_app_id(stamped, &json!({"appId": "x"})), stamped);
-    }
 
     // -----------------------------------------------------------------
     // Sibling regression guards for the CRITICAL cross-tenant scoping
@@ -270,8 +177,7 @@ mod tests {
     // wide; App A could enumerate co-tenant slot names (info
     // disclosure) or drop co-tenant inactive slots (cross-tenant DoS).
     //
-    // Mirror the `setup_app_id_ignores_*` pattern: the resolver helpers
-    // must always return the mint-time stamp, never reading
+    // The resolver helpers must always return the mint-time stamp, never reading
     // `opts.appId` regardless of shape.
     // -----------------------------------------------------------------
 

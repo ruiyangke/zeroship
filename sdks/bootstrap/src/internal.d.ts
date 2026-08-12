@@ -27,14 +27,6 @@
  */
 interface ZeroshipReplication {
   /**
-   * Idempotently provision the per-app Postgres publication + logical
-   * replication slot. Returns a JSON `SetupOutcome`
-   * (`{publication, slot, created, confirmedFlushLsn}`). Requires
-   * `wal_level=logical` on the server.
-   */
-  setup(opts?: { appId?: string }): Promise<string>;
-
-  /**
    * Run the C1 watchdog query against `pg_replication_slots`. Returns a
    * JSON array of slot health records `[{slot, active, restartLsn,
    * confirmedFlushLsn, lagBytes, walStatus}]`.
@@ -81,13 +73,6 @@ interface ZeroshipDbPlatform {
    * boot from `defineMaskPolicy()`'s pending-slot drain.
    */
   setMaskPolicy(policy: Record<string, string[]>): Promise<Record<string, never>>;
-
-  /**
-   * Auto-spawn the supervised WAL consumer for this app. Idempotent.
-   * Resolves once the publication + slot are durable. Any app-id-shaped
-   * `opts` is ignored (the handle is bound to its own app at mint).
-   */
-  startReplicationConsumer(opts?: string): Promise<string>;
 
   /** Mint (or return the cached) Replication namespace wrapper. */
   replication: ZeroshipReplication;

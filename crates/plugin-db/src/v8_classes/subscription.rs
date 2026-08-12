@@ -8,6 +8,9 @@
 //!
 //! ## JS surface
 //!
+//! - `ready()` -> `Promise<void>` - resolves only after CDC can receive
+//!   changes. Postgres waits through publication/slot provisioning and a
+//!   successful `START_REPLICATION` handshake.
 //! - `next()` → `Promise<SubscriptionEvent | null>` — resolves with
 //!   the next event as a typed object (`change` / `resync` /
 //!   `closed`) or `null` once the subscription has been closed and
@@ -50,6 +53,10 @@ pub struct Subscription {
     /// signature on `Drop` (`Drop` only gets `&mut self`, but the V8
     /// macro stores the Box behind a `*const Self` recovered as `&Self`).
     inner: RefCell<Option<BrokerSubscription>>,
+    /// Process-wide CDC claim paired one-to-one with `inner`. Dropping the
+    /// last claim signals consumer shutdown and worker-slot cleanup.
+    cdc_lease: RefCell<Option<crate::cdc_lifecycle::CdcLease>>,
+    app_id: String,
 }
 
 impl Drop for Subscription {
@@ -62,6 +69,7 @@ impl Drop for Subscription {
         if let Some(sub) = self.inner.borrow_mut().take() {
             sub.close();
         }
+        self.cdc_lease.borrow_mut().take();
     }
 }
 
@@ -82,6 +90,23 @@ impl Subscription {
         Err(OpError::type_error("Illegal constructor"))
     }
 
+    /// Refuse to advertise a healthy live stream until its change source is
+    /// running. This is a first-class open handshake, not a background hint:
+    /// configuration, provisioning, and START_REPLICATION errors reject it.
+    #[v8_async_method]
+    async fn ready(&self) -> Result<(), OpError> {
+        if self.inner.borrow().is_none() {
+            return Err(OpError::coded(
+                "subscription_closed",
+                "db subscription is closed",
+                None::<String>,
+            ));
+        }
+        crate::cdc_lifecycle::ensure_ready(&self.app_id)
+            .await
+            .map_err(crate::error::DbError::to_op_error)
+    }
+
     /// Poll for the next event. Resolves with the typed event object
     /// (`{kind:"change",...}` / `{kind:"resync"}` / `{kind:"closed"}`)
     /// or real JS `null` once the subscription has been closed and
@@ -95,14 +120,19 @@ impl Subscription {
     /// resolve `null` without re-entering the broker.
     #[v8_async_method]
     async fn next(&self) -> Result<JsonValue, OpError> {
-        // Snapshot the broker subscription Rc so `.await` doesn't hold
-        // a `RefCell` borrow. `BrokerSubscription` is `Clone` (it wraps
-        // `Rc<RefCell<Inner>>`) so this is a refcount-only clone.
+        // Snapshot the broker subscription handle so `.await` does not hold
+        // a `RefCell` borrow. `BrokerSubscription` is a cheap Arc clone.
         let sub_opt: Option<BrokerSubscription> = self.inner.borrow().as_ref().cloned();
         let sub = match sub_opt {
             Some(s) => s,
             None => return Ok(JsonValue("null".into())),
         };
+
+        // Direct native callers receive the same fail-loud contract as the
+        // TypeScript wrapper even if they skip the explicit ready() call.
+        crate::cdc_lifecycle::ensure_ready(&self.app_id)
+            .await
+            .map_err(crate::error::DbError::to_op_error)?;
 
         let msg = std::future::poll_fn(|cx| {
             if let Some(m) = sub.pop() {
@@ -122,6 +152,7 @@ impl Subscription {
 
         if matches!(msg, SubscriptionMessage::Closed) {
             self.inner.borrow_mut().take();
+            self.cdc_lease.borrow_mut().take();
         }
 
         Ok(JsonValue(broker::message_to_json(&msg)))
@@ -135,6 +166,7 @@ impl Subscription {
         if let Some(sub) = self.inner.borrow_mut().take() {
             sub.close();
         }
+        self.cdc_lease.borrow_mut().take();
     }
 }
 
@@ -225,7 +257,7 @@ mod mv_refusal_tests {
 /// collection)` pair.
 ///
 /// Allocates the JS object, looks up the class template and prototype,
-/// and only THEN subscribes on the thread-local broker — so a `?`-
+/// and only THEN subscribes on the process-wide broker, so a `?`-
 /// propagated error from any fallible V8 op (`new_instance`,
 /// `get_function`, prototype lookup) returns before a broker entry
 /// exists. If we registered the broker entry first, an error between
@@ -280,9 +312,12 @@ pub fn mint_subscription<'s>(
     // documented as infallible. So no `?` can run between here and the
     // wrapper being live.
     let broker_sub = broker::subscribe(app_id, collection);
+    let cdc_lease = crate::cdc_lifecycle::acquire(app_id);
 
     let state = Subscription {
         inner: RefCell::new(Some(broker_sub)),
+        cdc_lease: RefCell::new(Some(cdc_lease)),
+        app_id: app_id.to_string(),
     };
     let boxed: Box<Subscription> = Box::new(state);
     let raw = Box::into_raw(boxed);
@@ -446,7 +481,7 @@ mod tests {
                 );
             }
             // Force GC so the finalizer reclaims the broker entry —
-            // otherwise the thread-local broker carries an entry into
+            // otherwise the process-wide broker carries an entry into
             // the (short) thread teardown and the cleanup-assertion
             // below would race the finalizer.
             scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
