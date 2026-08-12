@@ -27,8 +27,9 @@ pub use names::{
     BootstrapControl, CanonicalName, CanonicalNameError, CliEnv, CommandControl, CommandEnv,
     ConfigConsumer, ConfigResolveError, ConfigSpec, Consumer, ConsumerToken, DevEnv, EnvKey,
     EnvReadError, ExternalEnv, ExternalEnvFamily, GeneratedConfig, Operational,
-    OverlayLookupError, ReadSite, Secret, Sensitivity, SourceKind, TestEnv, CONFIG_READ_SITES,
-    lookup_overlay, read_typed_env, resolve_operational, resolve_secret_sources,
+    OverlayLookupError, ReadSite, Secret, Sensitivity, SourceKind, SupplyClass, TestEnv,
+    CONFIG_READ_SITES, lookup_overlay, read_typed_env, resolve_control, resolve_operational,
+    resolve_secret_sources,
 };
 pub use zeroship_config_macros::zeroship_config;
 pub use secrets::{

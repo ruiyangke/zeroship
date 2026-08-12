@@ -107,9 +107,14 @@ pub enum CheckValue {
 }
 
 /// Output format for a [`CheckConfigReport`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A `ValueEnum` so the generated `--check-config-format` carrier gets clap's
+/// possible-value list and rejection for free, replacing the hand-written
+/// `value_parser = ["text", "json"]` plus string comparison each binary carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum CheckFormat {
     /// Human-readable `check-config: key = value` lines (default).
+    #[default]
     Text,
     /// One machine-readable JSON object.
     Json,

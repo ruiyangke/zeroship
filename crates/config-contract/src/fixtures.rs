@@ -9,7 +9,11 @@
 //! No process reads these. They name settings from the proposal's worked
 //! examples so the projections under test are the real ones.
 
-use zeroship_core::config::{zeroship_config, Operational, Secret};
+use std::path::PathBuf;
+
+use zeroship_core::config::{
+    zeroship_config, BootstrapControl, CheckFormat, CommandControl, Operational, Secret,
+};
 
 /// A per-component declaration: both settings live under `[control]`.
 #[zeroship_config(binary = "zeroship-fixture-control", scope = "control")]
@@ -33,4 +37,29 @@ pub struct FixtureWorkerConfig {
     /// Platform-global secret: no component prefix, so no scope is stripped.
     #[config(name = "control_key")]
     pub control_key: Secret<String>,
+}
+
+/// The bootstrap/command controls every server binary carries.
+///
+/// Declared on a third fixture binary so the assertions can distinguish a class
+/// with no TOML tier from one that merely happens to have no overlay entry.
+#[zeroship_config(binary = "zeroship-fixture-gate", scope = "gateway")]
+#[derive(Debug)]
+pub struct FixtureControls {
+    /// Overlay selector: read before any overlay exists.
+    #[config(name = "config")]
+    pub config: BootstrapControl<Option<PathBuf>>,
+    /// Discovery suppressor: also read before any overlay exists.
+    #[config(name = "no_config")]
+    pub no_config: BootstrapControl<bool>,
+    /// An action, not a setting.
+    #[config(name = "check_config")]
+    pub check_config: CommandControl<bool>,
+    /// A valued command control, so the class is not only exercised as a flag.
+    #[config(name = "check_config_format", default = CheckFormat::Text)]
+    pub check_config_format: CommandControl<CheckFormat>,
+    /// A safety control: enabling it must require an explicit act at launch,
+    /// never a line someone left in a persisted overlay.
+    #[config(name = "gateway.allow_unsigned_advance")]
+    pub allow_unsigned_advance: BootstrapControl<bool>,
 }

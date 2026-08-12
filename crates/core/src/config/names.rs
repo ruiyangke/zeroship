@@ -167,13 +167,36 @@ const OPERATIONAL_SOURCES: &[SourceKind] =
     &[SourceKind::Cli, SourceKind::Env, SourceKind::Toml];
 const SECRET_SOURCES: &[SourceKind] =
     &[SourceKind::CliFile, SourceKind::Env, SourceKind::Toml];
+const BOOTSTRAP_SOURCES: &[SourceKind] = &[SourceKind::Cli, SourceKind::Env];
+const COMMAND_SOURCES: &[SourceKind] = &[SourceKind::Cli];
+
+/// Which supply set a declaration's wrapper type selects.
+///
+/// This is the type-driven classification from the design. [`Sensitivity`] is
+/// derived from it and answers a different question - whether the resolved value
+/// may be displayed - so the two are deliberately not the same enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SupplyClass {
+    /// `Operational<T>`: flag, env, TOML, compiled default.
+    Operational,
+    /// `Secret<T>`: `-file` flag, env, TOML, no compiled default.
+    Secret,
+    /// `BootstrapControl<T>`: flag and env only.
+    ///
+    /// Either the value is needed BEFORE the overlay can be loaded (the overlay
+    /// selector itself), or it is a safety control that must not be persistable
+    /// in the overlay it would otherwise be read from.
+    Bootstrap,
+    /// `CommandControl<T>`: flag only. An action, not a server setting.
+    Command,
+}
 
 /// One generated setting contract. Projections are computed, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigSpec {
     canonical: CanonicalName<'static>,
     consumers: &'static [Consumer],
-    sensitivity: Sensitivity,
+    class: SupplyClass,
     field: &'static str,
     arg_id: &'static str,
     rust_type: &'static str,
@@ -194,7 +217,7 @@ impl ConfigSpec {
         Self {
             canonical,
             consumers,
-            sensitivity: Sensitivity::Operational,
+            class: SupplyClass::Operational,
             field,
             arg_id,
             rust_type,
@@ -219,12 +242,60 @@ impl ConfigSpec {
         Self {
             canonical,
             consumers,
-            sensitivity: Sensitivity::Secret,
+            class: SupplyClass::Secret,
             field,
             arg_id,
             rust_type,
             default: None,
         }
+    }
+
+    /// Declare a bootstrap control: flag and environment, never TOML.
+    #[must_use]
+    pub const fn bootstrap(
+        canonical: CanonicalName<'static>,
+        consumers: &'static [Consumer],
+        field: &'static str,
+        arg_id: &'static str,
+        rust_type: &'static str,
+        default: Option<&'static str>,
+    ) -> Self {
+        Self {
+            canonical,
+            consumers,
+            class: SupplyClass::Bootstrap,
+            field,
+            arg_id,
+            rust_type,
+            default,
+        }
+    }
+
+    /// Declare a command control: flag only, no environment and no TOML.
+    #[must_use]
+    pub const fn command(
+        canonical: CanonicalName<'static>,
+        consumers: &'static [Consumer],
+        field: &'static str,
+        arg_id: &'static str,
+        rust_type: &'static str,
+        default: Option<&'static str>,
+    ) -> Self {
+        Self {
+            canonical,
+            consumers,
+            class: SupplyClass::Command,
+            field,
+            arg_id,
+            rust_type,
+            default,
+        }
+    }
+
+    /// Wrapper-selected supply class.
+    #[must_use]
+    pub const fn class(self) -> SupplyClass {
+        self.class
     }
 
     /// Canonical identity.
@@ -239,37 +310,59 @@ impl ConfigSpec {
         self.consumers
     }
 
-    /// Supply sensitivity.
+    /// Supply sensitivity. Only `Secret<T>` is secret-classed.
     #[must_use]
     pub const fn sensitivity(self) -> Sensitivity {
-        self.sensitivity
+        match self.class {
+            SupplyClass::Secret => Sensitivity::Secret,
+            SupplyClass::Operational | SupplyClass::Bootstrap | SupplyClass::Command => {
+                Sensitivity::Operational
+            }
+        }
     }
 
     /// Derived sources for this type-driven class.
     #[must_use]
     pub const fn sources(self) -> &'static [SourceKind] {
-        match self.sensitivity {
-            Sensitivity::Operational => OPERATIONAL_SOURCES,
-            Sensitivity::Secret => SECRET_SOURCES,
+        match self.class {
+            SupplyClass::Operational => OPERATIONAL_SOURCES,
+            SupplyClass::Secret => SECRET_SOURCES,
+            SupplyClass::Bootstrap => BOOTSTRAP_SOURCES,
+            SupplyClass::Command => COMMAND_SOURCES,
         }
     }
 
-    /// Canonical environment projection.
+    /// Canonical environment projection, absent for a command control.
     #[must_use]
     pub fn env_name(self) -> Option<String> {
-        Some(self.canonical.env_name())
+        match self.class {
+            SupplyClass::Command => None,
+            SupplyClass::Operational | SupplyClass::Secret | SupplyClass::Bootstrap => {
+                Some(self.canonical.env_name())
+            }
+        }
     }
 
     /// Consumer-local flag projection.
     #[must_use]
     pub fn flag_name(self, consumer: Consumer) -> Option<String> {
-        Some(self.canonical.flag_name(consumer.scope(), self.sensitivity))
+        Some(
+            self.canonical
+                .flag_name(consumer.scope(), self.sensitivity()),
+        )
     }
 
-    /// Canonical TOML path, regardless of sensitivity.
+    /// Canonical TOML path, or `None` when the class has no overlay slot.
+    ///
+    /// Operational and secret settings share one projection: the canonical name
+    /// itself. Bootstrap and command controls have none by construction, so a
+    /// later ops-TOML gate cannot mistake a control for a valid overlay leaf.
     #[must_use]
-    pub const fn toml_path(self) -> &'static str {
-        self.canonical.toml_path()
+    pub const fn toml_path(self) -> Option<&'static str> {
+        match self.class {
+            SupplyClass::Operational | SupplyClass::Secret => Some(self.canonical.toml_path()),
+            SupplyClass::Bootstrap | SupplyClass::Command => None,
+        }
     }
 
     /// Rust field name.
@@ -552,12 +645,69 @@ impl<T> fmt::Debug for Secret<T> {
     }
 }
 
+/// A value needed before the overlay exists, or one the overlay must not carry.
+///
+/// Its supply set is flag and environment. There is no TOML slot: the overlay
+/// selector cannot be read from the overlay it selects, and a safety control
+/// read from a persisted file is a control an operator can forget they left on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapControl<T>(T);
+
+impl<T> BootstrapControl<T> {
+    /// Wrap a resolved bootstrap control.
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the resolved value.
+    #[must_use]
+    pub const fn get(&self) -> &T {
+        &self.0
+    }
+
+    /// Consume the wrapper.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// An action selector such as `--check-config` rather than a server setting.
+///
+/// Its supply set is the flag alone. An environment variable that silently
+/// turned a running server into a config dump would be a foot-gun, and a TOML
+/// key for it would be a setting that outlives the command it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandControl<T>(T);
+
+impl<T> CommandControl<T> {
+    /// Wrap a resolved command control.
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the resolved value.
+    #[must_use]
+    pub const fn get(&self) -> &T {
+        &self.0
+    }
+
+    /// Consume the wrapper.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 /// Vocabulary the later migration steps need, with NO machinery behind it yet.
 ///
-/// The attribute accepts `Operational<T>` and `Secret<T>` only, and rejects
-/// every wrapper below by name. They exist so the classification in the design
-/// has one spelling, not because declaring one does anything today. Do not read
-/// a wrapper's presence as a source policy that is being enforced.
+/// The attribute accepts `Operational<T>`, `Secret<T>`, `BootstrapControl<T>`
+/// and `CommandControl<T>` only, and rejects every wrapper below by name. They
+/// exist so the classification in the design has one spelling, not because
+/// declaring one does anything today. Do not read a wrapper's presence as a
+/// source policy that is being enforced.
 macro_rules! policy_wrapper {
     ($name:ident) => {
         #[doc = concat!(
@@ -569,8 +719,6 @@ macro_rules! policy_wrapper {
     };
 }
 
-policy_wrapper!(BootstrapControl);
-policy_wrapper!(CommandControl);
 policy_wrapper!(CommandEnv);
 policy_wrapper!(CliEnv);
 policy_wrapper!(ExternalEnv);
@@ -659,6 +807,32 @@ where
     }
     default()
         .map(Operational::new)
+        .ok_or(ConfigResolveError::Missing {
+            canonical: name.as_str(),
+        })
+}
+
+/// Resolve one control carrier. There is deliberately no overlay parameter.
+///
+/// Bootstrap and command controls have no TOML slot, so this signature - not a
+/// convention - is what stops a generated resolver reading one from the
+/// overlay. clap has already merged the flag and (for a bootstrap control) the
+/// environment into `carrier`.
+///
+/// # Errors
+///
+/// Returns [`ConfigResolveError::Missing`] when neither the carrier nor a
+/// compiled default supplied a value.
+pub fn resolve_control<T, F>(
+    name: CanonicalName<'static>,
+    carrier: Option<T>,
+    default: F,
+) -> Result<T, ConfigResolveError>
+where
+    F: FnOnce() -> Option<T>,
+{
+    carrier
+        .or_else(default)
         .ok_or(ConfigResolveError::Missing {
             canonical: name.as_str(),
         })
@@ -778,8 +952,8 @@ pub trait GeneratedConfig: Sized {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalName, Consumer, ConfigSpec, Secret, Sensitivity, lookup_overlay,
-        resolve_secret_sources,
+        CanonicalName, Consumer, ConfigSpec, Secret, Sensitivity, SourceKind, SupplyClass,
+        lookup_overlay, resolve_control, resolve_secret_sources,
     };
 
     #[test]
@@ -893,6 +1067,69 @@ database_url = "postgres://operator-mounted-secret"
         );
         assert_eq!(spec.env_name().as_deref(), Some("ZEROSHIP_CONTROL_DATABASE_URL"));
         assert_eq!(spec.flag_name(CONSUMERS[0]).as_deref(), Some("database-url-file"));
-        assert_eq!(spec.toml_path(), "control.database_url");
+        assert_eq!(spec.toml_path(), Some("control.database_url"));
+    }
+
+    #[test]
+    fn control_classes_drop_the_layers_their_type_forbids() {
+        const CONSUMERS: &[Consumer] = &[Consumer::new("zeroship-control", "control")];
+
+        let bootstrap = ConfigSpec::bootstrap(
+            CanonicalName::from_static("config"),
+            CONSUMERS,
+            "config",
+            "config",
+            "Option<PathBuf>",
+            None,
+        );
+        assert_eq!(bootstrap.class(), SupplyClass::Bootstrap);
+        assert_eq!(bootstrap.sensitivity(), Sensitivity::Operational);
+        assert_eq!(bootstrap.sources(), [SourceKind::Cli, SourceKind::Env]);
+        assert_eq!(bootstrap.env_name().as_deref(), Some("ZEROSHIP_CONFIG"));
+        assert_eq!(bootstrap.flag_name(CONSUMERS[0]).as_deref(), Some("config"));
+        assert_eq!(
+            bootstrap.toml_path(),
+            None,
+            "the overlay selector must not be readable from the overlay it selects"
+        );
+
+        let command = ConfigSpec::command(
+            CanonicalName::from_static("check_config"),
+            CONSUMERS,
+            "check_config",
+            "check_config",
+            "bool",
+            None,
+        );
+        assert_eq!(command.sources(), [SourceKind::Cli]);
+        assert_eq!(command.env_name(), None);
+        assert_eq!(
+            command.flag_name(CONSUMERS[0]).as_deref(),
+            Some("check-config")
+        );
+        assert_eq!(command.toml_path(), None);
+
+        // This asserts the SPEC's derived layers. That the generated clap
+        // carrier and resolver agree with it is a separate claim, proved by the
+        // contract crate against the compiled Command and the linked read sites.
+    }
+
+    #[test]
+    fn a_control_resolves_from_its_carrier_then_its_compiled_default() {
+        let name = CanonicalName::from_static("check_config_format");
+        assert_eq!(
+            resolve_control(name, Some("json"), || Some("text")).expect("carrier wins"),
+            "json"
+        );
+        assert_eq!(
+            resolve_control(name, None, || Some("text")).expect("default applies"),
+            "text"
+        );
+        let missing = resolve_control::<&str, _>(name, None, || None)
+            .expect_err("no source and no default is an error");
+        assert!(missing.to_string().contains("check_config_format"));
+
+        // resolve_control takes no overlay argument at all, so "a control never
+        // reads TOML" is a property of the signature rather than of this test.
     }
 }

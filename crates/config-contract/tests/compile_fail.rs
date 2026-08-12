@@ -19,8 +19,8 @@ fn declaration_and_consumer_misuse_does_not_compile() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
         .count();
     assert!(
-        cases >= 4,
-        "expected the four compile-fail fixtures, found {cases}; a moved or \
+        cases >= 6,
+        "expected the six compile-fail fixtures, found {cases}; a moved or \
          renamed directory would otherwise make this test pass at zero"
     );
 

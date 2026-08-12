@@ -21,21 +21,27 @@
 //! attribute registering must be phrased over those kinds, not over "the
 //! registry is non-empty", which path 2 satisfies on its own.
 
-use clap::CommandFactory;
+use clap::{CommandFactory, Parser};
 use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::fixtures::{
-    FixtureControlConfig, FixtureControlConfigSources, FixtureWorkerConfig,
-    FixtureWorkerConfigSources,
+    FixtureControlConfig, FixtureControlConfigSources, FixtureControls, FixtureControlsSources,
+    FixtureWorkerConfig, FixtureWorkerConfigSources,
 };
 use zeroship_core::config::{
-    ConfigSpec, GeneratedConfig, ReadSite, Sensitivity, SourceKind, CONFIG_READ_SITES,
+    CheckFormat, ConfigSpec, GeneratedConfig, ReadSite, Sensitivity, SourceKind,
+    CONFIG_READ_SITES,
 };
 
-const FIXTURE_BINARIES: [&str; 2] = ["zeroship-fixture-control", "zeroship-fixture-worker"];
+const FIXTURE_BINARIES: [&str; 3] = [
+    "zeroship-fixture-control",
+    "zeroship-fixture-gate",
+    "zeroship-fixture-worker",
+];
 
 fn fixture_specs() -> Vec<ConfigSpec> {
     let mut specs = FixtureControlConfig::SPECS.to_vec();
     specs.extend_from_slice(FixtureWorkerConfig::SPECS);
+    specs.extend_from_slice(FixtureControls::SPECS);
     specs
 }
 
@@ -240,6 +246,7 @@ fn the_two_transform_implementations_agree() {
     for (command, specs) in [
         (FixtureControlConfigSources::command(), FixtureControlConfig::SPECS),
         (FixtureWorkerConfigSources::command(), FixtureWorkerConfig::SPECS),
+        (FixtureControlsSources::command(), FixtureControls::SPECS),
     ] {
         for spec in specs {
             let consumer = spec.consumers()[0];
@@ -289,7 +296,7 @@ fn a_secret_projects_to_its_component_table_not_a_secrets_section() {
         .find(|spec| spec.canonical().as_str() == "control.database_url")
         .expect("component-scoped secret");
     assert_eq!(per_component.sensitivity(), Sensitivity::Secret);
-    assert_eq!(per_component.toml_path(), "control.database_url");
+    assert_eq!(per_component.toml_path(), Some("control.database_url"));
 
     let platform_global = fixture_specs()
         .into_iter()
@@ -298,12 +305,82 @@ fn a_secret_projects_to_its_component_table_not_a_secrets_section() {
     assert_eq!(platform_global.sensitivity(), Sensitivity::Secret);
     assert_eq!(
         platform_global.toml_path(),
-        "control_key",
+        Some("control_key"),
         "a platform-global secret is a top-level key, not secrets.control_key"
     );
     assert!(
-        !platform_global.toml_path().starts_with("secrets."),
+        !platform_global
+            .toml_path()
+            .is_some_and(|path| path.starts_with("secrets.")),
         "the reserved `secrets` segment was deliberately deleted from the design"
+    );
+}
+
+#[test]
+fn a_control_has_no_overlay_slot_at_all() {
+    // The complement of the assertion above: a class whose TOML projection is
+    // absent, not merely unused. A later ops-TOML gate walks toml_path(), so
+    // `Some("config")` would make `config = "..."` a valid overlay leaf and
+    // reintroduce reading the overlay selector from the overlay.
+    // Does not cover: what the gate then does with None. No gate is active yet.
+    for canonical in ["config", "no_config", "check_config", "check_config_format"] {
+        let spec = FixtureControls::SPECS
+            .iter()
+            .find(|spec| spec.canonical().as_str() == canonical)
+            .unwrap_or_else(|| panic!("no spec for {canonical}"));
+        assert_eq!(spec.toml_path(), None, "{canonical} has an overlay slot");
+        assert!(
+            !spec.sources().contains(&SourceKind::Toml),
+            "{canonical} declares a TOML source"
+        );
+    }
+
+    let command = FixtureControls::SPECS
+        .iter()
+        .find(|spec| spec.canonical().as_str() == "check_config")
+        .expect("command control");
+    assert_eq!(command.env_name(), None);
+    assert_eq!(command.sources(), [SourceKind::Cli]);
+
+    let bootstrap = FixtureControls::SPECS
+        .iter()
+        .find(|spec| spec.canonical().as_str() == "config")
+        .expect("bootstrap control");
+    assert_eq!(bootstrap.env_name().as_deref(), Some("ZEROSHIP_CONFIG"));
+    assert_eq!(bootstrap.sources(), [SourceKind::Cli, SourceKind::Env]);
+}
+
+#[test]
+fn a_control_resolves_with_no_overlay_and_keeps_clap_precedence() {
+    // Controls are resolved BEFORE any overlay exists, so this passes `None`
+    // where the operational fixtures pass an overlay. It also pins the two
+    // carrier shapes a control needs: a bare `--no-config` flag and a
+    // `--config` whose absence is a value rather than an error.
+    // Does not cover: flag-over-env precedence, which clap owns.
+    let sources = FixtureControlsSources::try_parse_from([
+        "zeroship-fixture-gate",
+        "--no-config",
+        "--check-config-format",
+        "json",
+    ])
+    .expect("controls parse");
+    let resolved = FixtureControls::resolve_config(sources, None).expect("controls resolve");
+
+    assert_eq!(resolved.config.get(), &None);
+    assert!(*resolved.no_config.get());
+    assert!(!*resolved.check_config.get());
+    assert_eq!(resolved.check_config_format.get(), &CheckFormat::Json);
+    assert!(!*resolved.allow_unsigned_advance.get());
+
+    let defaulted = FixtureControls::resolve_config(
+        FixtureControlsSources::try_parse_from(["zeroship-fixture-gate"]).expect("bare parse"),
+        None,
+    )
+    .expect("controls resolve");
+    assert_eq!(
+        defaulted.check_config_format.get(),
+        &CheckFormat::Text,
+        "an absent valued control falls back to its compiled default"
     );
 }
 
