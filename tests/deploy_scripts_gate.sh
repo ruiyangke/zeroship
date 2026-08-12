@@ -510,19 +510,30 @@ case "$ROLL_OUT" in
   *) pass "--rollback does not require --registry" ;;
 esac
 
-# A --registry that IS supplied must not switch the build back on, and the
-# host .env here carries every variable the shipped compose needs, so nothing
-# EARLIER than the build would stop a fall-through.
+# A --registry that IS supplied must not switch the build back on. The host
+# .env here is generated from the shipped compose file's own variable surface,
+# so the required-variable contract PASSES and nothing earlier than the build
+# would stop a fall-through. Verified by mutation: with the `--rollback` branch
+# disabled this case reaches `### docker build`, `### docker push`, `### scp`,
+# `### openssl` and `### docker compose config`, so the negatives here are
+# about a reachable path rather than one that dies of unrelated causes.
+#
+# Two assertions, not one: exit status and command stream fail for different
+# reasons and a compound verdict sends you to investigate the wrong half.
 SB_REG="$FIX/sb_registry"; seed_sandbox "$SB_REG" CURRENT
 compose_vars '' "$REAL_COMPOSE" | sed 's/$/=x/' >"$SB_REG/compose/.env"
 cp -a "$SB_REG/compose/.env" "$SB_REG/compose/.env.bak.20260812010101"
 run_rollback "$SB_REG" --registry ghcr.io/example/zeroship-platform
-if [ "$ROLL_RC" = 0 ] \
-   && ! seen "$CAP" '### docker build' && ! seen "$CAP" '### docker push' && ! seen "$CAP" '### scp'; then
-  pass "--rollback with --registry supplied and a fully populated host .env still builds, pushes and syncs nothing"
-else
-  fail "--rollback with --registry exited $ROLL_RC and/or reached the build path"
-fi
+[ "$ROLL_RC" = 0 ] \
+  && pass "--rollback with --registry supplied exits 0" \
+  || fail "--rollback with --registry exited $ROLL_RC: $ROLL_OUT"
+reg_hit=""
+for tok in '### docker build' '### docker push' '### scp'; do
+  seen "$CAP" "$tok" && reg_hit="$reg_hit [$tok]"
+done
+[ -z "$reg_hit" ] \
+  && pass "--rollback with --registry supplied and a passing variable contract still builds, pushes and syncs nothing" \
+  || fail "--rollback fell through to the deploy path and reached$reg_hit"
 
 # ------------------------------------------------------ preflight still runs
 run_rollback "$FIX/no_such_dir"
@@ -589,9 +600,9 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an
 # outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
 # real-compose block is conditional and deliberately NOT counted in the floor.
-# MEASURED 2026-08-12: 52 unconditional assertions (53 ran with the shipped
+# MEASURED 2026-08-12: 53 unconditional assertions (54 ran with the shipped
 # compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-52}"
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-53}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
