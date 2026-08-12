@@ -129,9 +129,52 @@ async fn version_poll_loop(
     envs: SharedEnvs,
 ) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
+    let mut pending_cdc_deprovision = std::collections::HashSet::new();
     loop {
         match poll_versions(&config).await {
             Ok(versions) => {
+                // A deleted app no longer has a control-plane row to drive a
+                // central database cleanup. Detect the removal in this single
+                // process-wide poller, retry failures on later polls, and let
+                // every worker container run the idempotent cluster teardown.
+                if config.db_url.is_some() {
+                    if let Ok(guard) = shared.read() {
+                        if let Some(previous) = guard.as_ref() {
+                            pending_cdc_deprovision.extend(
+                                previous
+                                    .keys()
+                                    .filter(|app_id| !versions.contains_key(app_id))
+                                    .copied(),
+                            );
+                        }
+                    }
+                }
+                if let Some(db_url) = config.db_url.as_deref() {
+                    let pending: Vec<Uuid> = pending_cdc_deprovision.iter().copied().collect();
+                    for app_id in pending {
+                        match zeroship_plugin_db::deprovision_app_cdc(
+                            db_url,
+                            &app_id.to_string(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                pending_cdc_deprovision.remove(&app_id);
+                                tracing::info!(
+                                    app_id = %app_id,
+                                    "worker-sync: deleted app CDC deprovisioned"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    app_id = %app_id,
+                                    error = %error,
+                                    "worker-sync: deleted app CDC deprovision failed; retrying"
+                                );
+                            }
+                        }
+                    }
+                }
                 // GC SharedEnvs against the latest known-app set BEFORE
                 // swapping the new version map in. Apps deleted from
                 // the control plane drop out of `versions`; their env

@@ -150,17 +150,16 @@ pub async fn drop_namespace(
     crate::broker::drop_app(Some(app_id));
 
     // ---- Step 3: consumer cancel (courtesy) + slot/publication teardown ----
-    // Clear the in-process consumer mark so a racing reload doesn't
-    // re-spawn a consumer mid-drop. §17.6: the slot survives consumer
-    // death, so this is best-effort — the real force is the
-    // `pg_terminate_backend` inside `deprovision`.
-    crate::context::with_mut(|c| c.unmark_consumer_running(app_id));
+    // Refuse new readiness handshakes and signal this process's consumer.
+    // Full deprovision below terminates every worker slot, so app deletion is
+    // correct even when another container has not observed deletion yet.
+    crate::cdc_lifecycle::shutdown_app(app_id).await;
 
     // §17.7 steps 3–5: terminate the slot's backend after the grace,
     // drop the slot, drop the publication. Routed through the
-    // `ChangeStream::deprovision` adapter (PG arm →
-    // `replication::drop_publication_and_slot`). On the SQLite arm this
-    // is the file-unlink path (no slot/publication) — `deprovision`
+    // `ChangeStream::deprovision` adapter (PG arm routes to
+    // `replication::drop_publication_and_slots`). On the SQLite arm this
+    // is the file-unlink path (no slot/publication); `deprovision`
     // there is the SQLite teardown. A `LockContention` here means "retry
     // from step 3" per §17.7.
     deprovision_change_stream(backend, app_id).await?;
@@ -201,7 +200,7 @@ async fn deprovision_change_stream(
     if let Some(sq) = backend.as_change_stream_sqlite() {
         return sq.deprovision(app_id).await;
     }
-    // No CDC arm (shouldn't happen for a configured backend) — nothing
+    // No CDC arm (should not happen for a configured backend); nothing
     // to deprovision.
     Ok(())
 }

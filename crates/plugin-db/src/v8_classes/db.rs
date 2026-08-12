@@ -18,7 +18,7 @@
 //!
 //! ## Platform-internal surface (behind `__platform`)
 //!
-//! `registerModel`, `setMaskPolicy`, `startReplicationConsumer`, and the
+//! `registerModel`, `setMaskPolicy`, and the
 //! `replication` namespace moved off `env.db` to the
 //! [`super::db_platform::DbPlatform`] capability handle. That handle is
 //! set on this `Db` object under the `ZS_PLATFORM` private symbol in
@@ -203,11 +203,10 @@ impl Db {
         Ok(transaction_dispatch(scope, user_fn, isolation, self.app_id.clone()).into())
     }
 
-    // `db.startReplicationConsumer`, `db.setMaskPolicy`, and the
+    // `db.setMaskPolicy` and the
     // `db.replication` getter moved to `DbPlatform` (reached via the
     // `__platform` capability handle, not `env.db`). Their dispatch
-    // pipelines (`start_replication_consumer_dispatch`,
-    // `dispatch_set_mask_policy_field`, `mint_replication`) are
+    // pipelines (`dispatch_set_mask_policy_field`, `mint_replication`) are
     // unchanged — only the JS carrier relocated.
     //
     // `db.unmaskField` / `db.bulkUnmaskFields` moved to
@@ -257,37 +256,6 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
     else { "value" }
 }
 
-/// Resolve the app_id used by `startReplicationConsumer` for dispatch.
-///
-/// Returns `stamped` verbatim, ignoring any JS-supplied `opts`. Lifted
-/// out of the `#[v8_method]` body (a) so the security-critical
-/// resolution policy is unit-testable without V8 plumbing and (b) so
-/// a future contributor restoring caller-controlled overrides has to
-/// delete this helper (and its tests) — making the regression visible
-/// in review.
-///
-/// `startReplicationConsumer` moved to
-/// [`super::db_platform::DbPlatform`]; this helper stays here (its
-/// `consumer_app_id_*` unit tests live in this module) and is called by
-/// `DbPlatform::start_replication_consumer` via
-/// `super::db::resolve_consumer_app_id`.
-///
-/// The `_scope` and `_opts` parameters mirror the v8_method signature
-/// so future forward-compat fields can be plumbed through without
-/// touching the security-critical app-id path.
-#[inline]
-pub(crate) fn resolve_consumer_app_id(
-    stamped: &str,
-    _scope: &mut v8::PinScope<'_, '_>,
-    _opts: v8::Local<v8::Value>,
-) -> String {
-    // INVARIANT: never derive the app_id from `_opts`. The v8_class
-    // executes inside the tenant isolate; any caller-supplied override
-    // is a cross-app hijack vector (App A spawning a WAL consumer on
-    // App B's stream). See method doc-comment.
-    stamped.to_string()
-}
-
 /// Normalise a JS-supplied isolation-level identifier into the SQL
 /// form Postgres expects. Accepts both camelCase (`"readCommitted"`)
 /// and the literal SQL string (`"read committed"`). Rejects anything
@@ -333,7 +301,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// capability handle scoped to the same `app_id` and stashes it on the
 /// `Db` object under the `ZS_PLATFORM` private symbol. The handle
 /// holds the platform-internal callables (`registerModel`,
-/// `setMaskPolicy`, `startReplicationConsumer`, `migrations`,
+/// `setMaskPolicy`, `migrations`,
 /// `replication`); it is unreachable from creator JS (a `v8::Private`
 /// slot is invisible to every JS reflection path and cannot be keyed
 /// from JS) and is read only by Rust and the bootstrap runtime-entry
@@ -415,24 +383,9 @@ pub fn mint_db<'s>(
 
 #[cfg(test)]
 mod tests {
-    //! Regression guards for the cross-app replication-consumer
-    //! hijack fix. Prior to the fix,
-    //! `Db::start_replication_consumer` accepted a string `opts`
-    //! argument and used it as an app-id override, letting App A
-    //! spawn a WAL consumer reading any victim app's WAL stream. The
-    //! fix routes app-id resolution through
-    //! [`super::resolve_consumer_app_id`], which always returns the
-    //! mint-time `self.app_id`.
-    //!
-    //! Tests construct a V8 scope (cheap — no isolate snapshots, no
-    //! contexts beyond the bare minimum) and feed varied `opts` shapes
-    //! through `resolve_consumer_app_id`. The assertion is the same
-    //! across every shape: the resolved id equals the stamped id,
-    //! never the override.
     #![allow(unsafe_code)]
 
-    use super::{normalize_isolation_level, resolve_consumer_app_id};
-    use zeroship_runtime::init_v8;
+    use super::normalize_isolation_level;
 
     /// The rejection message is the one artefact a creator reads at the moment
     /// they get the spelling wrong, so it must not omit a value the very same
@@ -468,53 +421,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn consumer_app_id_ignores_string_override() {
-        init_v8();
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        v8::scope!(let handle_scope, &mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        // The legacy bug: `opts` typed as a JS string. App A passes
-        // "victim_app" expecting the dispatch to target it.
-        let victim = v8::String::new(scope, "victim_app").unwrap();
-        let resolved = resolve_consumer_app_id("app_a", scope, victim.into());
-        assert_eq!(resolved, "app_a", "string override leaked through");
-    }
-
-    #[test]
-    fn consumer_app_id_ignores_object_override() {
-        init_v8();
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        v8::scope!(let handle_scope, &mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        // Object-shaped opts ({appId: "victim_app"}) — symmetric with
-        // the `Replication::setup` exploit shape. Must not leak.
-        let obj = v8::Object::new(scope);
-        let key = v8::String::new(scope, "appId").unwrap();
-        let val = v8::String::new(scope, "victim_app").unwrap();
-        obj.set(scope, key.into(), val.into());
-        let resolved = resolve_consumer_app_id("app_a", scope, obj.into());
-        assert_eq!(resolved, "app_a", "object override leaked through");
-    }
-
-    #[test]
-    fn consumer_app_id_undefined_opts_uses_stamped() {
-        init_v8();
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        v8::scope!(let handle_scope, &mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        let undef = v8::undefined(scope);
-        let resolved = resolve_consumer_app_id("app_a", scope, undef.into());
-        assert_eq!(resolved, "app_a");
-
-        let null = v8::null(scope);
-        let resolved = resolve_consumer_app_id("app_a", scope, null.into());
-        assert_eq!(resolved, "app_a");
-    }
 }

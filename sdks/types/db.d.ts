@@ -429,7 +429,6 @@ interface ZeroshipDb {
   // private symbol; §8). Removed from this published surface:
   //   - `registerModel`         → `__platform.registerModel`
   //   - `setMaskPolicy`         → `__platform.setMaskPolicy`
-  //   - `startReplicationConsumer` → `__platform.startReplicationConsumer`
   //   - `migrations` (getter)   → `__platform.migrations`
   //   - `replication` (getter)  → `__platform.replication`
   // Their type declarations live in `@zeroship/bootstrap`'s
@@ -487,7 +486,7 @@ interface ZeroshipDb {
     },
   ): Promise<R>;
 
-  // `migrations`, `startReplicationConsumer`, and
+  // `migrations` and
   // `replication` moved to the `__platform` capability handle (see the
   // note at the top of this interface and `ZeroshipDbPlatform` in
   // `@zeroship/bootstrap`'s `internal.d.ts`). They are no longer on the

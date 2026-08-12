@@ -229,12 +229,6 @@ pub struct IsolateDbContext {
     /// that app.
     pending_emits: HashMap<String, Vec<ChangeEvent>>,
 
-    /// Per-thread "is the consumer already running for this app?"
-    /// guard. Keyed by app_id (a single worker may host multiple
-    /// apps over its lifetime via the LRU cache, but only one
-    /// consumer per app at a time).
-    running_consumers: HashSet<String>,
-
     /// Per-isolate, per-`(app_id, collection)` schema
     /// cache. Populated by `register_model_dispatch` on successful
     /// register; consulted by the CRUD encryption pass (`crud::dispatch_*`)
@@ -354,7 +348,6 @@ impl IsolateDbContext {
             tx_waiters: HashMap::new(),
             savepoint_depths: HashMap::new(),
             pending_emits: HashMap::new(),
-            running_consumers: HashSet::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
             deploy_tokens: HashMap::new(),
@@ -828,48 +821,6 @@ impl IsolateDbContext {
         self.pending_emits.remove(app_id);
     }
 
-    // ----- RUNNING_CONSUMERS -----------------------------------------
-
-    /// True iff a replication consumer is already running for this
-    /// app on this isolate.
-    pub(crate) fn is_consumer_running(&self, app_id: &str) -> bool {
-        self.running_consumers.contains(app_id)
-    }
-
-    /// Mark a replication consumer as running for this app -- test-only.
-    ///
-    /// Production code uses [`Self::try_mark_consumer_running`]
-    /// (atomic check-and-set; returns whether the caller won the
-    /// race). This unconditional variant is retained for test
-    /// fixtures that need to mark without caring whether the slot was
-    /// already taken; it is dead in production builds and would
-    /// footgun a contributor picking it over the atomic variant.
-    #[cfg(test)]
-    pub(crate) fn mark_consumer_running(&mut self, app_id: &str) {
-        self.running_consumers.insert(app_id.to_string());
-    }
-
-    /// Atomically check-and-mark: returns `true` if the caller won the
-    /// mark (was not previously running), `false` if another caller
-    /// already marked this app. Used by the spawned consumer task to
-    /// close the race between dispatch's idempotent gate and the
-    /// task's first poll.
-    pub(crate) fn try_mark_consumer_running(&mut self, app_id: &str) -> bool {
-        self.running_consumers.insert(app_id.to_string())
-    }
-
-    /// Mark a replication consumer as no-longer-running.
-    pub(crate) fn unmark_consumer_running(&mut self, app_id: &str) {
-        self.running_consumers.remove(app_id);
-    }
-
-    /// Clear every entry from the consumer registry (test-only —
-    /// production code should rely on the supervised task's exit path
-    /// to call [`Self::unmark_consumer_running`]).
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn clear_consumer_registry(&mut self) {
-        self.running_consumers.clear();
-    }
 }
 
 impl Default for IsolateDbContext {
@@ -965,9 +916,8 @@ mod tests {
         // pending_emits starts empty (each app's queue is allocated
         // lazily on first push).
         assert!(ctx.pending_emits.is_empty());
-        // Both registries empty.
+        // Model registry empty.
         assert!(!ctx.is_model_registered("a", "c"));
-        assert!(!ctx.is_consumer_running("a"));
     }
 
     #[test]
@@ -1204,63 +1154,6 @@ mod tests {
         ctx.clear_pending_emits_for("app_t");
         ctx.clear_pending_emits_for("app_t");
         assert!(ctx.pending_emits.is_empty());
-    }
-
-    // ----- RUNNING_CONSUMERS state machine -------------------------------
-
-    #[test]
-    fn consumer_running_round_trip() {
-        let mut ctx = IsolateDbContext::new();
-        assert!(!ctx.is_consumer_running("app_a"));
-        ctx.mark_consumer_running("app_a");
-        assert!(ctx.is_consumer_running("app_a"));
-        ctx.unmark_consumer_running("app_a");
-        assert!(!ctx.is_consumer_running("app_a"));
-    }
-
-    #[test]
-    fn consumer_running_is_per_app() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.mark_consumer_running("app_a");
-        assert!(ctx.is_consumer_running("app_a"));
-        assert!(!ctx.is_consumer_running("app_b"));
-        ctx.mark_consumer_running("app_b");
-        assert!(ctx.is_consumer_running("app_a"));
-        assert!(ctx.is_consumer_running("app_b"));
-    }
-
-    #[test]
-    fn mark_consumer_running_is_idempotent() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.mark_consumer_running("app_a");
-        ctx.mark_consumer_running("app_a");
-        assert!(ctx.is_consumer_running("app_a"));
-        assert_eq!(ctx.running_consumers.len(), 1);
-    }
-
-    #[test]
-    fn unmark_consumer_running_is_idempotent_on_unknown() {
-        let mut ctx = IsolateDbContext::new();
-        // Never marked; unmark must be silent.
-        ctx.unmark_consumer_running("app_a");
-        assert!(!ctx.is_consumer_running("app_a"));
-        // Mark, unmark twice — second unmark is silent.
-        ctx.mark_consumer_running("app_b");
-        ctx.unmark_consumer_running("app_b");
-        ctx.unmark_consumer_running("app_b");
-        assert!(!ctx.is_consumer_running("app_b"));
-    }
-
-    #[test]
-    fn clear_consumer_registry_drops_all_entries() {
-        let mut ctx = IsolateDbContext::new();
-        ctx.mark_consumer_running("a");
-        ctx.mark_consumer_running("b");
-        ctx.mark_consumer_running("c");
-        assert_eq!(ctx.running_consumers.len(), 3);
-        ctx.clear_consumer_registry();
-        assert_eq!(ctx.running_consumers.len(), 0);
-        assert!(!ctx.is_consumer_running("a"));
     }
 
     // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots

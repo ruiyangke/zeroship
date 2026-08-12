@@ -172,6 +172,9 @@ harness = false
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
 test-helpers = []
+# Live logical-decoding coverage is separate from the broader helper-gated
+# integration suite because it requires the compose Postgres on port 5440.
+live-db-tests = ["test-helpers"]
 
 [[test]]
 name = "integration"
@@ -195,6 +198,11 @@ required-features = ["test-helpers"]
 name = "native_transaction"
 path = "tests/native_transaction.rs"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "distributed_live"
+path = "tests/distributed_live.rs"
+required-features = ["live-db-tests"]
 
 [lints]
 workspace = true

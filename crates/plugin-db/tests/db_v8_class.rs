@@ -242,7 +242,7 @@ fn db_begin_transaction_is_not_exposed() {
 // ---------------------------------------------------------------------------
 //
 // The platform-internal callables (`registerModel`, `setMaskPolicy`,
-// `startReplicationConsumer`, `migrations`, `replication`) moved off the
+// `migrations`, `replication`) moved off the
 // `Db` v8_class to a `DbPlatform` handle stashed under a V8 private
 // symbol. These tests prove the fence holds: creator JS cannot reach the
 // handle through any reflection path, the moved names are gone from
@@ -287,7 +287,6 @@ fn db_platform_internals_removed_from_env_db() {
     for name in [
         "registerModel",
         "setMaskPolicy",
-        "startReplicationConsumer",
         "migrations",
         "replication",
     ] {
@@ -469,7 +468,7 @@ fn db_platform_handle_reachable_via_private_symbol() {
     let handle_obj: v8::Local<v8::Object> = handle.try_into().unwrap();
 
     // The handle carries the moved platform callables.
-    for name in ["registerModel", "setMaskPolicy", "startReplicationConsumer"] {
+    for name in ["registerModel", "setMaskPolicy"] {
         let key = v8::String::new(scope, name).unwrap();
         let v = handle_obj.get(scope, key.into()).expect("get");
         assert!(

@@ -6,7 +6,7 @@
 //! - [`db`] — `Db` backs `env.db`. Exposes `.collection(name)`
 //!   returning a `Collection` v8_class wrapper, plus the native
 //!   `transaction(fn)` orchestrator. The platform-internal entry points
-//!   (`registerModel`, `setMaskPolicy`, `startReplicationConsumer`,
+//!   (`registerModel`, `setMaskPolicy`,
 //!   `replication`) moved to [`db_platform`].
 //! - [`db_platform`] — `DbPlatform`, the capability handle
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the

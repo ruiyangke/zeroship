@@ -739,14 +739,6 @@ impl SqliteChangeStream {
 impl ChangeStream for SqliteChangeStream {
     type ConsumerHandle = SqliteConsumerHandle;
 
-    /// No-op. The dispatcher is installed at backend construction;
-    /// `provision` would re-arm an already-armed connection, which is
-    /// harmless on the engine side but adds no value. Per-app
-    /// `Command::CdcSuppress` admin commands would belong here.
-    async fn provision(&self, _app_id: &str) -> Result<(), DbError> {
-        Ok(())
-    }
-
     /// No-op. Disarming hooks for a session whose app is being torn
     /// down is not implemented.
     async fn deprovision(&self, _app_id: &str) -> Result<(), DbError> {
@@ -756,7 +748,11 @@ impl ChangeStream for SqliteChangeStream {
     /// Returns a unit handle. The publisher task is already running
     /// (spawned at `SqliteBackend::new`); there is no per-app
     /// consumer to spawn on the SQLite arm.
-    async fn spawn_consumer(&self, _app_id: &str) -> Result<Self::ConsumerHandle, DbError> {
+    async fn spawn_consumer(
+        &self,
+        _app_id: &str,
+        _worker_id: &str,
+    ) -> Result<Self::ConsumerHandle, DbError> {
         Ok(SqliteConsumerHandle)
     }
 

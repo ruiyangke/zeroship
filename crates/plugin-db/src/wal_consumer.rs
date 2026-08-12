@@ -42,7 +42,7 @@ use std::time::Duration;
 use futures::FutureExt;
 
 use compio_postgres::replication::{
-    self as repl, IdentifySystem, ReplicationMessage, ReplicationStream, StartReplicationOptions,
+    self as repl, ReplicationMessage, ReplicationStream, StartReplicationOptions,
     pgoutput::{self, PgOutputMessage, TupleColumn, TupleData},
 };
 
@@ -167,14 +167,14 @@ pub fn emit_local(
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors raised by [`WalConsumer::run`].
+/// Errors raised by one controlled WAL-consumer attempt.
 ///
 /// Note: pre-flight failures from [`WalConsumer::new`] do NOT flow
 /// through this enum — they are surfaced as [`crate::error::DbError`]
 /// directly so the SDK can branch on `.code` (e.g. `invalid_app_id`
 /// vs `not_provisioned`). See the doc comment on `WalConsumer::new`.
 #[derive(Debug)]
-pub enum ConsumerError {
+enum ConsumerError {
     /// Establishing the replication connection failed.
     Connect(String),
     /// An I/O error on the wire (the supervising task should
@@ -278,7 +278,7 @@ impl RelationEntry {
 /// `Clone` is cheap (three short strings) — the supervisor clones one
 /// descriptor per reconnect attempt because [`WalConsumer::run`]
 /// consumes `self`.
-pub struct WalConsumer {
+pub(crate) struct WalConsumer {
     app_id: String,
     db_url: String,
     slot_name: String,
@@ -290,8 +290,8 @@ pub struct WalConsumer {
 }
 
 impl WalConsumer {
-    /// Build a consumer descriptor. Spinning up the connection
-    /// happens in [`Self::run`].
+    /// Build a consumer descriptor. The controlled supervisor opens
+    /// the connection after provisioning finishes.
     ///
     /// # Errors
     ///
@@ -309,7 +309,7 @@ impl WalConsumer {
     /// `invalid_app_id` is a developer/deploy error; a missing
     /// `db_url` is an operator/configuration error. The SDK branches
     /// on `.code` to surface the right remediation.
-    pub fn new(app_id: &str, worker_id: &str, db_url: &str) -> Result<Self, DbError> {
+    pub(crate) fn new(app_id: &str, worker_id: &str, db_url: &str) -> Result<Self, DbError> {
         if db_url.is_empty() {
             return Err(DbError::Configuration {
                 code: "not_provisioned",
@@ -337,59 +337,17 @@ impl WalConsumer {
         })
     }
 
-    /// Resume from a specific LSN on next [`Self::run`]. Pass the value
+    /// Resume from a specific LSN on the controlled consumer. Pass the value
     /// returned by [`crate::replication::ensure_publication_and_worker_slot`].
-    pub fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
+    pub(crate) fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
         self.start_lsn = lsn.into();
         self
     }
 
     /// App id this consumer is bound to. Exposed so the supervisor can
     /// log it without cloning the whole consumer.
-    pub fn app_id(&self) -> &str {
+    pub(crate) fn app_id(&self) -> &str {
         &self.app_id
-    }
-
-    /// Run the consumer loop. Returns on the first wire error (the
-    /// caller restarts with backoff via [`run_supervised`]).
-    ///
-    /// While running, the per-app suppression entry for this consumer's
-    /// `app_id` is set on the current thread — local-emit becomes a
-    /// no-op for that app (and only that app). The Drop guard ensures
-    /// the entry is cleared even if the connection task panics.
-    pub async fn run(self) -> Result<(), ConsumerError> {
-        let url = ensure_replication_param(&self.db_url);
-        let config = url
-            .parse::<compio_postgres::Config>()
-            .map_err(|e| ConsumerError::Connect(e.to_string()))?;
-
-        let mut conn = repl::connect_replication(compio_postgres::NoTls, &config)
-            .await
-            .map_err(|e| ConsumerError::Connect(e.to_string()))?;
-
-        // IDENTIFY_SYSTEM is a useful sanity-check (we don't actually
-        // need its result for logical replication — the slot already
-        // tracks resume position — but a successful response confirms
-        // the connection entered walsender mode).
-        let _identify: IdentifySystem = conn
-            .identify_system()
-            .await
-            .map_err(|e| ConsumerError::Io(e.to_string()))?;
-
-        let opts = StartReplicationOptions {
-            slot_name: &self.slot_name,
-            start_lsn: &self.start_lsn,
-            proto_version: 1,
-            publication_names: &self.publication_name,
-        };
-        let stream = conn
-            .start_logical_replication(opts)
-            .await
-            .map_err(|e| ConsumerError::Io(e.to_string()))?;
-
-        // RAII suppression — cleared on Drop, including panic-unwind.
-        let _guard = SuppressGuard::activate(&self.app_id);
-        self.consume(stream).await
     }
 
     async fn run_controlled_once(
@@ -498,64 +456,6 @@ impl WalConsumer {
                             .await
                             .map_err(|e| ConsumerError::Io(e.to_string()))?;
                     } else {
-                        stream.advance_lsn(wal_end);
-                    }
-                }
-            }
-        }
-    }
-
-    /// The actual decode + publish loop. Separated from `run` so
-    /// tests can drive it with a synthetic stream-source.
-    async fn consume<S, T>(
-        self,
-        mut stream: ReplicationStream<S, T>,
-    ) -> Result<(), ConsumerError>
-    where
-        S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
-        T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
-    {
-        let mut relations: HashMap<u32, RelationEntry> = HashMap::new();
-
-        loop {
-            let msg = stream
-                .next()
-                .await
-                .map_err(|e| ConsumerError::Io(e.to_string()))?;
-            let Some(msg) = msg else {
-                // Server sent CopyDone. The consumer terminates.
-                return Ok(());
-            };
-
-            match msg {
-                ReplicationMessage::PrimaryKeepalive {
-                    wal_end,
-                    reply_requested,
-                    ..
-                } => {
-                    stream.advance_lsn(wal_end);
-                    if reply_requested {
-                        stream
-                            .send_standby_status_update(false)
-                            .await
-                            .map_err(|e| ConsumerError::Io(e.to_string()))?;
-                    }
-                }
-                ReplicationMessage::XLogData { wal_end, body, .. } => {
-                    let decoded = pgoutput::decode(&body)
-                        .map_err(|e| ConsumerError::Decode(e.to_string()))?;
-                    self.dispatch(&mut relations, &decoded);
-
-                    // On Commit, advance the slot.
-                    if let PgOutputMessage::Commit { end_lsn, .. } = &decoded {
-                        stream.advance_lsn(*end_lsn);
-                        stream
-                            .send_standby_status_update(false)
-                            .await
-                            .map_err(|e| ConsumerError::Io(e.to_string()))?;
-                    } else {
-                        // Track wal_end for inter-commit progress so a
-                        // keepalive reply still reflects the truth.
                         stream.advance_lsn(wal_end);
                     }
                 }
@@ -782,7 +682,7 @@ pub(crate) const STABILITY_THRESHOLD: Duration = Duration::from_secs(30);
 /// (Pre-flight `invalid_app_id` validation failures do not flow
 /// through this function — they are caught at construction time in
 /// [`WalConsumer::new`] as a typed [`DbError`].)
-pub fn is_fatal(err: &ConsumerError) -> bool {
+fn is_fatal(err: &ConsumerError) -> bool {
     match err {
         ConsumerError::Io(s) | ConsumerError::Connect(s) | ConsumerError::Decode(s) => {
             // SQLSTATE 58P01 (undefined_object) — slot/pub dropped.
@@ -801,71 +701,6 @@ pub fn is_fatal(err: &ConsumerError) -> bool {
     }
 }
 
-/// Run a [`WalConsumer`] forever, reconnecting with exponential backoff
-/// on transient failure.
-///
-/// Schedule: 1s → 2s → 4s → 8s → 16s → 30s (cap). The cap holds for
-/// every subsequent attempt until the consumer stays connected for
-/// `STABILITY_THRESHOLD` — then the next failure resets the backoff
-/// to `INITIAL_BACKOFF`.
-///
-/// Exits when:
-///   - The consumer returns `Ok(())` (graceful CopyDone — server
-///     terminated streaming intentionally, e.g. shutdown).
-///   - The consumer returns an error that [`is_fatal`] classifies as
-///     non-retryable (slot invalidated, malformed app id, etc.).
-///
-/// `tracing::warn!` is used for transient failures; `tracing::error!`
-/// for fatal exits. Both carry the `app_id` field for log correlation.
-pub async fn run_supervised(consumer: WalConsumer) {
-    let app_id = consumer.app_id().to_string();
-    let mut backoff = INITIAL_BACKOFF;
-
-    loop {
-        let attempt_started = std::time::Instant::now();
-        let attempt = consumer.clone();
-        match attempt.run().await {
-            Ok(()) => {
-                tracing::info!(
-                    app_id = %app_id,
-                    "wal consumer: graceful shutdown (CopyDone), supervisor exits"
-                );
-                return;
-            }
-            Err(e) if is_fatal(&e) => {
-                tracing::error!(
-                    app_id = %app_id,
-                    error = %e,
-                    "wal consumer: fatal error, supervisor exits — \
-                     slot/publication likely invalidated; rerun \
-                     replicationSetup() to reprovision"
-                );
-                return;
-            }
-            Err(e) => {
-                let ran_for = attempt_started.elapsed();
-                let stable = ran_for >= STABILITY_THRESHOLD;
-                tracing::warn!(
-                    app_id = %app_id,
-                    ran_for_ms = ran_for.as_millis() as u64,
-                    backoff_ms = backoff.as_millis() as u64,
-                    error = %e,
-                    "wal consumer: exited, reconnecting"
-                );
-                compio::time::sleep(backoff).await;
-                backoff = if stable {
-                    // The previous attempt streamed long enough to
-                    // count as "healthy". Reset the schedule so a
-                    // single later blip doesn't start at the cap.
-                    INITIAL_BACKOFF
-                } else {
-                    (backoff * 2).min(MAX_BACKOFF)
-                };
-            }
-        }
-    }
-}
-
 /// Run a supervised consumer with an explicit startup and shutdown
 /// contract.
 ///
@@ -875,7 +710,7 @@ pub async fn run_supervised(consumer: WalConsumer) {
 /// healthy with only its initial snapshot. After startup, transient
 /// failures reconnect with the standard backoff schedule. `shutdown`
 /// interrupts both streaming and backoff waits.
-pub async fn run_supervised_controlled(
+pub(crate) async fn run_supervised_controlled(
     consumer: WalConsumer,
     startup: flume::Sender<Result<(), DbError>>,
     shutdown: flume::Receiver<()>,
@@ -962,7 +797,7 @@ mod tests {
     // -------- emit_local --------
 
     #[test]
-    fn emit_local_reaches_thread_local_broker() {
+    fn emit_local_reaches_process_broker() {
         // Clean the process-wide broker before observing.
         crate::broker::drop_app(None);
         let sub = crate::broker::subscribe("xapp", "messages");
@@ -1505,10 +1340,9 @@ mod tests {
 
     // -------- Supervisor behaviour (no real wire) --------
     //
-    // We can't easily drive `run_supervised` against a real WalConsumer
-    // without Postgres, so these tests target the constants + the
-    // backoff math. The integration tests (`p8a2_supervised_consumer_*`)
-    // in `tests/integration.rs` exercise the full reconnect path.
+    // Unit tests target constants and backoff math. The integration
+    // test `p8a2_supervised_consumer_reconnects_after_kill` exercises
+    // the production controlled owner against Postgres.
 
     #[test]
     fn supervisor_backoff_constants_sane() {

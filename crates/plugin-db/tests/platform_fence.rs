@@ -141,7 +141,6 @@ function probe() {
     const report = {
         registerModel: typeof db.registerModel,
         setMaskPolicy: typeof db.setMaskPolicy,
-        startReplicationConsumer: typeof db.startReplicationConsumer,
         migrations: typeof db.migrations,
         replication: typeof db.replication,
         collection: typeof db.collection,
@@ -169,7 +168,6 @@ const _procedures = { probe };
     for name in [
         "registerModel",
         "setMaskPolicy",
-        "startReplicationConsumer",
         "migrations",
         "replication",
     ] {

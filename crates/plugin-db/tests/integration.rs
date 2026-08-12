@@ -6,6 +6,9 @@
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use zeroship_plugin_db::backend::ChangeStream;
+
+const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
 #[path = "parity/mod.rs"]
 mod parity;
@@ -2247,8 +2250,8 @@ async fn b2_adding_fk_to_existing_data_validates() {
 // Replication slot + publication setup, watchdog, broker plumbing.
 //
 // These tests exercise the Rust-side primitives that the V8 layer
-// exposes as `zeroship.db.replicationSetup` / `replicationWatchdog` /
-// `replicationDropAbandoned` and the in-process broker.
+// exposes through the CDC lifecycle, replication watchdog maintenance,
+// abandoned-slot cleanup, and the process-wide broker.
 //
 // Tests that need `wal_level=logical` skip themselves when the
 // running Postgres is `replica`. The runbook
@@ -2303,7 +2306,7 @@ async fn pg_has_logical_wal(pool: &Pool) -> bool {
 /// tests run with `--test-threads=1` so the global sweep is safe.
 async fn c1_cleanup(pool: &Pool, app: &str) {
     let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
-    let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let _ = pool
         .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{pub_name}""#), &[])
         .await;
@@ -2361,15 +2364,21 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
         .unwrap();
 
     // First call creates.
-    let first = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    let first = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
-    assert_eq!(first.slot, format!("__zs_slot_{app}"));
-    assert_eq!(first.publication, format!("__zs_pub_{app}"));
+    assert_eq!(
+        first.slot,
+        zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+    );
+    assert_eq!(
+        first.publication,
+        zeroship_plugin_db::replication::publication_name(app).unwrap()
+    );
 
     // Second call must observe the existing slot and return created=false.
-    let second = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    let second = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(!second.created);
@@ -2393,7 +2402,7 @@ async fn c1_watchdog_reports_new_slot() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
 
@@ -2402,7 +2411,7 @@ async fn c1_watchdog_reports_new_slot() {
         .unwrap();
     let me = slots
         .iter()
-        .find(|s| s.slot_name == format!("__zs_slot_{app}"));
+        .find(|s| s.slot_name == zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap());
     assert!(me.is_some(), "watchdog must report our slot");
     let me = me.unwrap();
     // Newly created slot — not yet attached, so `active=false`.
@@ -2432,7 +2441,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    let setup = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(setup.created);
@@ -2443,7 +2452,9 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
         .await
         .unwrap();
     assert!(
-        dropped.contains(&format!("__zs_slot_{app}")),
+        dropped.contains(
+            &zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+        ),
         "expected to reap our slot, got: {dropped:?}"
     );
 
@@ -2475,7 +2486,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
         .await
         .unwrap();
 
-    let first = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    let first = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
@@ -2484,7 +2495,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     // Simulate worker restart by dropping the pool and opening a new one.
     drop(pool);
     let pool2 = Pool::connect(&url, 2).await.unwrap();
-    let resumed = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool2, app)
+    let resumed = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool2, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(!resumed.created, "second call after 'restart' must observe existing slot");
@@ -2691,14 +2702,11 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 //
 // These tests prove the streaming-replication path:
 //
-//   write on "worker A"  → Postgres WAL  → consumer task  → broker  → "worker B"
+//   write on "worker A" -> Postgres WAL -> consumer task -> broker -> "worker B"
 //
-// The broker is thread-local, so the test simulates "different
-// workers" by running the writer over a regular Pool while the
-// consumer runs in a separate compio task on the same thread,
-// publishing into the same broker. From the consumer's perspective
-// it's the WAL fanout that drives event delivery — local-emit is
-// suppressed for the consumer's app via the EmitMode toggle.
+// The writer uses a regular pool and never calls local emit. Delivery
+// therefore proves that the production CDC owner decoded the change
+// from WAL and published it through the process-wide broker.
 
 /// End-to-end: write a row via the regular pool, the WAL consumer
 /// running concurrently picks it up and the broker delivers the event.
@@ -2734,48 +2742,22 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     .await
     .unwrap();
 
-    // Provision publication + slot.
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
-        .await
-        .unwrap();
-    assert!(setup.created);
-
     // Clean broker; subscribe to the collection we're about to insert
     // into.
     zeroship_plugin_db::broker::drop_app(None);
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
-    // Start the consumer in the background. It will:
-    //  1. open a replication=database connection,
-    //  2. issue START_REPLICATION,
-    //  3. decode pgoutput frames, and
-    //  4. publish ChangeEvent into the thread-local broker.
-    //
-    // Because the consumer task lives on the same thread as the test
-    // (compio is single-threaded per runtime), it publishes into the
-    // SAME thread-local broker our `sub` is registered against.
-    let consumer = zeroship_plugin_db::wal_consumer::WalConsumer::new(app, &url)
-        .unwrap()
-        .with_start_lsn(setup.confirmed_flush_lsn.clone());
-
-    let consumer_handle = compio::runtime::spawn(async move {
-        let _ = consumer.run().await;
-    });
-
-    // Give the consumer a beat to issue START_REPLICATION. We use a
-    // small sleep instead of a more elaborate handshake-confirmation
-    // primitive because:
-    //  - The current ReplicationStream API doesn't expose a
-    //    "started" signal; START_REPLICATION returning successfully
-    //    is implicit (the consumer enters its decode loop).
-    //  - This sleep is the cushion that gives `pgoutput` time to
-    //    emit the first Relation message — the consumer needs to
-    //    have built its relation cache before our INSERT, otherwise
-    //    it would silently drop the event (per the documented
-    //    cache-miss behavior).
-    //  - Test runtime stays bounded: the consumer's first
-    //    XLogData arrives well within this window in CI.
-    compio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The production adapter provisions, spawns, and returns only
+    // after Postgres accepts START_REPLICATION.
+    let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+    ));
+    let consumer = backend
+        .as_change_stream_pg()
+        .expect("Postgres backend must expose CDC")
+        .spawn_consumer(app, CDC_TEST_WORKER_ID)
+        .await
+        .expect("CDC must reach START_REPLICATION");
 
     // Write a row via the regular pool. This represents "worker A".
     pool.execute(
@@ -2808,7 +2790,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     }
 
     // Stop the consumer + clean up.
-    consumer_handle.cancel().await;
+    consumer.shutdown().await.unwrap();
     zeroship_plugin_db::broker::drop_app(None);
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
@@ -3747,7 +3729,7 @@ async fn b8c_consumer_runs_under_platform_role_grants() {
 }
 
 // ===========================================================================
-// Supervisor reconnect, fatal-error exit, per-app emit.
+// Controlled-supervisor reconnect and per-app emit.
 // ===========================================================================
 
 /// The supervised consumer recovers when its replication connection is
@@ -3786,24 +3768,20 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     .await
     .unwrap();
 
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
-        .await
-        .unwrap();
-    assert!(setup.created);
-
     zeroship_plugin_db::broker::drop_app(None);
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
-    let consumer = zeroship_plugin_db::wal_consumer::WalConsumer::new(app, &url)
-        .unwrap()
-        .with_start_lsn(setup.confirmed_flush_lsn.clone());
-    // Spawn the SUPERVISED variant — reconnects on failure.
-    let sup_handle = compio::runtime::spawn(async move {
-        zeroship_plugin_db::wal_consumer::run_supervised(consumer).await;
-    });
-
-    // Let the supervisor enter its first run.
-    compio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+    ));
+    let consumer = backend
+        .as_change_stream_pg()
+        .expect("Postgres backend must expose CDC")
+        .spawn_consumer(app, CDC_TEST_WORKER_ID)
+        .await
+        .expect("CDC must reach START_REPLICATION");
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID)
+        .unwrap();
 
     // First insert reaches the broker.
     pool.execute(
@@ -3830,14 +3808,14 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
             "SELECT pg_terminate_backend(active_pid)
              FROM pg_replication_slots
              WHERE slot_name = $1 AND active_pid IS NOT NULL",
-            &[&setup.slot],
+            &[&slot],
         )
         .await;
 
     // Wait at least one backoff cycle (initial = 1s).
     compio::time::sleep(std::time::Duration::from_millis(2_000)).await;
 
-    // Second insert — the supervisor must have reconnected and the
+    // Second insert: the supervisor must have reconnected and the
     // event must reach the broker.
     pool.execute(
         &format!(r#"INSERT INTO "{app}"."events" (title) VALUES ('second')"#),
@@ -3862,110 +3840,8 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
         "supervised consumer must reconnect and deliver post-kill event"
     );
 
-    sup_handle.cancel().await;
+    consumer.shutdown().await.unwrap();
     zeroship_plugin_db::broker::drop_app(None);
-    c1_cleanup(&pool, app).await;
-    release_pg(pool).await;
-}
-
-/// The supervisor exits cleanly when the slot is externally
-/// invalidated (operator drops it). Without the fatal-error
-/// classification this would busy-loop forever on
-/// `START_REPLICATION ... → slot does not exist`.
-// IGNORED: depends on PG returning a distinguishable error message
-// when START_REPLICATION targets a dropped slot. On this driver/PG
-// combo the slot-dropped error and the mid-stream-disconnect error
-// both surface as `Io("error communicating with the server")`, so
-// `is_fatal()` cannot classify the slot-dropped case without
-// regressing `p8a2_supervised_consumer_reconnects_after_kill`. The
-// production codepath (watchdog reaper → reprovision) still works;
-// the test's distinguishing probe doesn't. Re-enable once the driver
-// surfaces SQLSTATE 58P01 directly, then teach `is_fatal()` about it.
-#[ignore]
-#[compio::test]
-async fn p8a2_supervised_consumer_exits_on_slot_invalidated() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
-
-    let app = "p8a2_sup_inval";
-    c1_cleanup(&pool, app).await;
-
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
-        .await
-        .unwrap();
-    assert!(setup.created);
-
-    // Build a consumer that points at a slot we're about to drop. The
-    // start_lsn comes from the just-created slot — that part is
-    // irrelevant once we drop it.
-    let consumer = zeroship_plugin_db::wal_consumer::WalConsumer::new(app, &url)
-        .unwrap()
-        .with_start_lsn(setup.confirmed_flush_lsn.clone());
-
-    // Drop the slot before the supervisor starts its first run. We
-    // need the slot to be missing so START_REPLICATION fails with the
-    // 58P01 SQLSTATE that `is_fatal` classifies as terminal.
-    let _ = pool
-        .query_text_params(
-            "SELECT pg_drop_replication_slot($1) FROM pg_replication_slots WHERE slot_name = $1",
-            &[&setup.slot],
-        )
-        .await;
-
-    // Sanity probe: confirm a direct run() returns a fatal-classified
-    // error. Useful for the next operator who has to debug a SQLSTATE
-    // change in a future PG version.
-    let probe = consumer.clone().run().await;
-    eprintln!("direct run() against missing slot returned: {probe:?}");
-    match &probe {
-        Err(e) => {
-            assert!(
-                zeroship_plugin_db::wal_consumer::is_fatal(e),
-                "the actual error for a dropped slot must classify as fatal; \
-                 got: {e:?}. Update is_fatal() if PG changed the wording."
-            );
-        }
-        Ok(_) => panic!("expected START_REPLICATION to fail with the slot gone"),
-    }
-
-    let started = std::time::Instant::now();
-    let sup_handle = compio::runtime::spawn(async move {
-        zeroship_plugin_db::wal_consumer::run_supervised(consumer).await;
-    });
-
-    // Wait up to 10s for the supervisor to exit. The first run hits
-    // 58P01 on START_REPLICATION; the supervisor classifies that as
-    // fatal and returns.
-    let mut exited = false;
-    for _ in 0..50 {
-        if sup_handle.is_finished() {
-            exited = true;
-            break;
-        }
-        compio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-    let elapsed = started.elapsed();
-
-    if !exited {
-        sup_handle.cancel().await;
-        panic!("supervisor must exit when slot is invalidated; \
-                still running after {:?}", elapsed);
-    }
-    // Sanity: it really did exit, not just hang on a cancel.
-    let _ = sup_handle.await;
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "supervisor must exit promptly on fatal error, took {:?}",
-        elapsed
-    );
-
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -4017,124 +3893,6 @@ fn p8a2_per_app_emit_suppression_integration() {
 
     unsuppress_app("multi_a");
     zeroship_plugin_db::broker::drop_app(None);
-}
-
-/// The auto-spawn callback (`startReplicationConsumer`) is idempotent:
-/// the second call returns `alreadyRunning: true` without spawning a
-/// second task. We exercise the inner state machine directly because
-/// the V8 surface is exercised by the runtime/JS tests; what we own
-/// here is the registry contract.
-#[compio::test]
-async fn p8a2_auto_spawn_is_idempotent_via_registry() {
-    use zeroship_plugin_db::replication_ops::{
-        clear_consumer_registry_for_tests, is_consumer_registered_for_tests,
-    };
-
-    let app = "p8a2_idem_app";
-    clear_consumer_registry_for_tests();
-    assert!(!is_consumer_registered_for_tests(app));
-
-    // Simulate the callback's "mark before spawn" step.
-    zeroship_plugin_db::broker::drop_app(None);
-    // Use the test-only setter (no Postgres required) to flip the
-    // registry — the production callback does this between the
-    // `ensure_publication_and_slot` await and the `spawn` call.
-    {
-        // Tap directly through the test helper: register, observe,
-        // clear, and verify back to false.
-        clear_consumer_registry_for_tests();
-        assert!(!is_consumer_registered_for_tests(app));
-        // The production callback uses RUNNING_CONSUMERS internally.
-        // We can drive the public surface by checking that a second
-        // call to the registry probe returns true ONLY after our test
-        // helper toggle (which is sufficient to prove the
-        // short-circuit contract — the actual spawn-twice protection
-        // is exercised end-to-end in
-        // `p8a2_auto_spawn_via_callback_short_circuits` once a PG is
-        // available).
-    }
-
-    // No-op end — this test enforces the registry contract; the full
-    // PG-driven path is the next test.
-    let _ = app;
-}
-
-/// End-to-end: the auto-spawn callback provisions and starts the
-/// supervised consumer; a subsequent insert reaches the broker. Then
-/// re-invoking the callback returns `alreadyRunning: true`.
-///
-/// We exercise the callback's async logic directly (the v8 surface is
-/// covered by other tests). What we assert here:
-///   - first call spawns a running supervisor (broker delivers an event)
-///   - second call short-circuits with the alreadyRunning marker
-#[compio::test]
-async fn p8a2_auto_spawn_via_callback_short_circuits() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
-
-    let app = "p8a2_auto_app";
-    c1_cleanup(&pool, app).await;
-    zeroship_plugin_db::replication_ops::clear_consumer_registry_for_tests();
-
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            r#"CREATE TABLE "{app}"."events" (
-                id BIGSERIAL PRIMARY KEY,
-                title TEXT NOT NULL
-            )"#
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    // Provision + supervised-start, then prove the supervisor
-    // delivers an insert. This mirrors the callback's inner flow.
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
-        .await
-        .unwrap();
-    let consumer = zeroship_plugin_db::wal_consumer::WalConsumer::new(app, &url)
-        .unwrap()
-        .with_start_lsn(setup.confirmed_flush_lsn.clone());
-    // Mark registered + spawn — the production callback does this.
-    // We don't have direct access to the RUNNING_CONSUMERS thread-local
-    // from outside the crate, but the public registry probe is enough
-    // for the idempotency check.
-    zeroship_plugin_db::broker::drop_app(None);
-    let sub = zeroship_plugin_db::broker::subscribe(app, "events");
-    let sup_handle = compio::runtime::spawn(async move {
-        zeroship_plugin_db::wal_consumer::run_supervised(consumer).await;
-    });
-
-    compio::time::sleep(std::time::Duration::from_millis(500)).await;
-    pool.execute(
-        &format!(r#"INSERT INTO "{app}"."events" (title) VALUES ('a')"#),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let mut delivered = false;
-    for _ in 0..40 {
-        if let Some(_) = sub.pop() {
-            delivered = true;
-            break;
-        }
-        compio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(delivered, "auto-spawned supervisor must deliver insert event");
-
-    sup_handle.cancel().await;
-    zeroship_plugin_db::broker::drop_app(None);
-    c1_cleanup(&pool, app).await;
-    release_pg(pool).await;
 }
 
 /// Hex-encode bytes — duplicated locally to avoid pulling in the
@@ -7403,7 +7161,7 @@ fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
 }
 
 async fn slot_exists(pool: &Pool, app: &str) -> bool {
-    let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let rows = pool
         .query_text_params(
             "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
@@ -7529,7 +7287,7 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     // Provision slot + publication.
-    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .expect("provision slot + publication");
     assert!(slot_exists(&pool, app).await, "slot provisioned");
@@ -7623,7 +7381,7 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
@@ -7678,7 +7436,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
@@ -7687,7 +7445,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
 
     // Simulate a crash AFTER step 3 (slot+publication dropped) but BEFORE
     // steps 6-7 (schema + role still present).
-    zeroship_plugin_db::replication::drop_publication_and_slot(&pool, app)
+    zeroship_plugin_db::replication::drop_publication_and_slots(&pool, app)
         .await
         .expect("partial: drop slot+publication");
     assert!(!slot_exists(&pool, app).await, "slot gone after partial");
