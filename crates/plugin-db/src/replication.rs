@@ -652,9 +652,9 @@ pub async fn drop_worker_slot(
 
 /// Drop every worker slot for an app, then its shared publication.
 ///
-/// This is the app-deletion path. The exact `__` delimiter before the
-/// wildcard ensures one app token cannot prefix-match another app's
-/// slots.
+/// This is the app-deletion path. The exact `__` delimiter and
+/// `left(...)=...` comparison ensure one app token cannot prefix-match
+/// another app's slots.
 pub async fn drop_publication_and_slots(pool: &Pool, app_id: &str) -> Result<(), DbError> {
     let pub_name = publication_name(app_id)?;
     let slot_prefix = worker_slot_name_prefix(app_id)?;
@@ -729,6 +729,35 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
         }
     }
     // A missing slot is an idempotent success.
+
+    // `pg_terminate_backend` acknowledges delivery of the termination
+    // signal, not completion of backend teardown. Wait up to the
+    // documented five-second grace for the slot to become inactive.
+    // This closes the common race where an immediate DROP reports
+    // object_in_use and leaves a slot behind after the last subscriber.
+    if !active_rows.is_empty() {
+        for _ in 0..100 {
+            let rows = pool
+                .query_text_params(
+                    "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+                    &[&slot],
+                )
+                .await
+                .map_err(|e| {
+                    let mut err = DbError::from_pg(&e);
+                    prefix_message(&mut err, "replication: drop: await slot inactive: ");
+                    err
+                })?;
+            let still_active = rows
+                .first()
+                .and_then(|row| row.try_get::<_, bool>("active").ok())
+                .unwrap_or(false);
+            if !still_active {
+                break;
+            }
+            compio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 
     // 2. Drop the slot (now inactive). `pg_drop_replication_slot` errors
     //    if the slot doesn't exist, so guard on the probe above: only
