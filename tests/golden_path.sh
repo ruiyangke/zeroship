@@ -4160,10 +4160,14 @@ gp_close_step
 # ticketed set as before (#260 x6, #236 x2, #332/#333 x3, #331 x4) -- the new
 # step added no red and disturbed none.
 #
-# 111 -> 112, a DELTA again: step 7e gained a fourth arm (a masked client frame
-# round-trips and the server answers a well-formed unmasked frame). Standalone
-# 4 passed / 0 failed, and mutation-proven by deleting the app's message
-# listener: 3/1, only the frame arm red. NOT yet confirmed by a full run.
+# 111 -> 112, raised as a delta for step 7e's fourth arm (a masked client frame
+# round-trips and the server answers a well-formed unmasked frame) and MEASURED
+# the same day:
+#   golden path: 112 passed, 15 failed (floor 112)
+#   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
+# Second consecutive raise where the delta and the run agree to the assertion.
+# Mutation-proven before the run by deleting the app's message listener: 3/1,
+# only the frame arm red.
 GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-112}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
