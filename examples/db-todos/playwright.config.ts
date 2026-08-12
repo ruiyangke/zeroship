@@ -2,6 +2,21 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 
+// Point the suite at an already-running deployment instead of a local dev
+// server: ZEROSHIP_E2E_BASE_URL=https://db-todos.zeroship.co pnpm e2e
+//
+// WHY THIS EXISTS, 2026-08-12. Verifying a deploy meant hand-editing
+// `baseURL` below, which is not repeatable and does not survive a `git
+// checkout`. The live check that matters (does the SSE subscription carry a
+// write from another client) is exactly the one that cannot be answered by
+// curling the SPA: the deployed HTML renders identically whether or not the
+// CDC path works.
+//
+// Setting it MUST also suppress `webServer`. Otherwise Playwright boots a
+// local `pnpm dev` that the tests never talk to, and a green run would say
+// nothing about the deployment while looking like it did.
+const liveBaseUrl = process.env.ZEROSHIP_E2E_BASE_URL;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -12,7 +27,7 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: liveBaseUrl ?? "http://localhost:5173",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -30,7 +45,10 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: {
+  // Omitted entirely when targeting a live deployment: booting a local dev
+  // server the tests never reach would make a green run look like a verified
+  // deploy.
+  webServer: liveBaseUrl ? undefined : {
     command: "pnpm dev",
     url: "http://localhost:5173",
     reuseExistingServer: true,
