@@ -10,7 +10,6 @@ import {
 import { ALL_BUG_COLUMNS, BugResultsTable, type BugColumnKey } from "../components/BugResultsTable";
 import { AsyncSection, ErrorState, Loading } from "../components/StateViews";
 import { errorMessage, isUnauthenticated, toPromise, useAsync } from "../components/rpc";
-import { useBugLookups } from "../components/useBugLookups";
 import type { Bug } from "../components/types";
 
 const RESULT_COLUMNS: BugColumnKey[] = ["id", "status", "resolution", "severity", "priority", "summary", "updated"];
@@ -61,7 +60,7 @@ function newCondition(): Condition {
   return { id: ++conditionSeq, field: "summary", operator: "contains", value: "" };
 }
 
-function QuickSearchBox({ lookups }: { lookups: ReturnType<typeof useBugLookups> }) {
+function QuickSearchBox() {
   const [text, setText] = useState("");
   const [result, setResult] = useState<
     | { status: "idle" }
@@ -113,7 +112,7 @@ function QuickSearchBox({ lookups }: { lookups: ReturnType<typeof useBugLookups>
           {result.data.bugs.length === 0 ? (
             <p className="state-hint small">No bugs match.</p>
           ) : (
-            <BugResultsTable bugs={result.data.bugs} columns={RESULT_COLUMNS} {...lookups} />
+            <BugResultsTable bugs={result.data.bugs} columns={RESULT_COLUMNS} />
           )}
         </>
       ) : null}
@@ -298,8 +297,6 @@ function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }
 
 export function AdvancedSearchPage() {
   const [results, setResults] = useState<Bug[] | null>(null);
-  // One fetch for both result tables on this page.
-  const lookups = useBugLookups();
   const usersQ = useAsync(() => toPromise(listUsers({ limit: 1 })).catch(() => []), []);
 
   const authGate = usersQ.state.status === "error" && isUnauthenticated(usersQ.state.error);
@@ -307,7 +304,7 @@ export function AdvancedSearchPage() {
   return (
     <div className="page advanced-search-page">
       <h1>Advanced search</h1>
-      <QuickSearchBox lookups={lookups} />
+      <QuickSearchBox />
       {authGate ? (
         <p className="state-hint">Sign in to use the structured field builder and saved searches.</p>
       ) : (
@@ -322,7 +319,6 @@ export function AdvancedSearchPage() {
                 <BugResultsTable
                   bugs={results}
                   columns={ALL_BUG_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter")}
-                  {...lookups}
                 />
               )}
             </section>

@@ -7,7 +7,6 @@ import {
 } from "../components/BugResultsTable";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
-import { useBugLookups } from "../components/useBugLookups";
 import type { Bug } from "../components/types";
 import { BUG_STATUSES, type BugStatus } from "../lib/workflow";
 import { BUG_PRIORITIES, BUG_SEVERITIES } from "../lib/quicksearch";
@@ -74,7 +73,6 @@ export function BugListPage() {
     [text, status, severity, priority, productId, sortBy, sortDirection, offset],
   );
 
-  const { productsById, usersById } = useBugLookups();
 
   const toggleColumn = (key: BugColumnKey) => {
     setColumns((prev) => {
@@ -226,8 +224,6 @@ export function BugListPage() {
             <BugResultsTable
               bugs={bugs}
               columns={columns}
-              productsById={productsById}
-              usersById={usersById}
               allowInlineStatus
               onStatusChanged={reload}
             />

@@ -90,6 +90,7 @@ export default defineApp({
     // If you copy this app for real use, gate these with `requireAdmin`.
     "rpc:products.list": { auth: "anon", publiclyAccessible: true },
     "rpc:products.get": { auth: "user" },
+    "rpc:products.resolve": { auth: "anon", publiclyAccessible: true },
     "rpc:products.create": { auth: "user" },
     "rpc:products.update": { auth: "user" },
     "rpc:components.list": { auth: "user" },
@@ -111,6 +112,7 @@ export default defineApp({
     "rpc:users.me": { auth: "user" },
     "rpc:users.list": { auth: "user" },
     "rpc:users.get": { auth: "user" },
+    "rpc:users.resolve": { auth: "user" },
     "rpc:users.updatePrefs": { auth: "user" },
     "rpc:notifications.list": { auth: "user" },
     "rpc:notifications.markRead": { auth: "user" },

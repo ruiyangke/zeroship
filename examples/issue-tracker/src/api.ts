@@ -83,6 +83,8 @@ export {
   createFlagType,
   createGroup,
   listFlagTypes,
+  resolveProducts,
+  resolveUsers,
   listGroups,
   addGroupMember,
   removeGroupMember,

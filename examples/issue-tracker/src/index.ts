@@ -2645,6 +2645,75 @@ export const listProducts = query(
   { id: "products.list" },
 );
 
+/**
+ * The number of ids one resolve call will look up.
+ *
+ * A page of bugs is 100 rows and each names one product and one assignee, so
+ * 200 covers a full page with room to spare while keeping the request bounded.
+ * Callers that need more are paging anyway.
+ */
+const MAX_RESOLVE_IDS = 200;
+
+function resolveIds(ids: readonly string[] | undefined, noun: string): string[] {
+  const unique = [...new Set((ids ?? []).filter((id) => typeof id === "string" && id.length > 0))];
+  if (unique.length > MAX_RESOLVE_IDS) {
+    invalid(`at most ${MAX_RESOLVE_IDS} ${noun} ids may be resolved at once`);
+  }
+  return unique;
+}
+
+/**
+ * Names for a specific set of product ids.
+ *
+ * The counterpart to `products.list`, and the thing that makes paginating it
+ * possible. Every bug table renders a product column by looking the id up in a
+ * map, and that map was built by fetching the ENTIRE product list -- so a limit
+ * on the list would have silently turned rows past the limit back into
+ * `prod_034607nk...`, which is the defect the map exists to prevent.
+ *
+ * Keyed by the ids actually on screen, so the cost tracks the page rather than
+ * the database.
+ */
+export const resolveProducts = query(
+  async ({ ids }: { ids?: string[] }) => {
+    const wanted = resolveIds(ids, "product");
+    if (wanted.length === 0) return [];
+    const identity = optionalIdentity();
+    // Filtered by visibility, not just fetched: a product name is a
+    // disclosure, and an id the caller guessed must not come back named.
+    const visible = await visibleProductIds(identity, false);
+    const rows = await readByIds(
+      db.products,
+      wanted.filter((id) => visible.has(id)),
+    );
+    return rows.map((row) => ({ id: row.id, name: row.name }));
+  },
+  { id: "products.resolve" },
+);
+
+/**
+ * Handles for a specific set of user ids.
+ *
+ * `users.list` caps at 100 rows, so the map every bug table built from it was
+ * already wrong on a tracker with more than 100 people: bugs assigned to the
+ * hundred-and-first rendered a raw `user_...` id. This is not a scale worry,
+ * it is a live bug at an ordinary size.
+ *
+ * Returns handles only -- no email, matching `users.list`, which deliberately
+ * matches on address without returning it so the endpoint cannot enumerate
+ * addresses.
+ */
+export const resolveUsers = query(
+  async ({ ids }: { ids?: string[] }) => {
+    const wanted = resolveIds(ids, "user");
+    if (wanted.length === 0) return [];
+    requireIdentity();
+    const rows = await readByIds(db.users, wanted);
+    return rows.map((row) => ({ id: row.id, handle: row.handle, name: row.name }));
+  },
+  { id: "users.resolve" },
+);
+
 export const getProduct = query(
   async ({ id }: { id: string }) => {
     const identity = requireIdentity();

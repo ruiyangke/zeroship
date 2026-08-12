@@ -4,22 +4,13 @@ import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable"
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { AsyncSection } from "../components/StateViews";
 import { toPromise, useAsync } from "../components/rpc";
-import { useBugLookups } from "../components/useBugLookups";
 import type { Bug, BugDetail, FlagRequestEntry } from "../components/types";
 
 type DashboardBug = BugDetail["bug"];
 
 const COLUMNS = ALL_BUG_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
-function BugSection({
-  title,
-  bugs,
-  lookups,
-}: {
-  title: string;
-  bugs: Bug[];
-  lookups: ReturnType<typeof useBugLookups>;
-}) {
+function BugSection({ title, bugs }: { title: string; bugs: Bug[] }) {
   return (
     <section className="dashboard-section">
       <h2>
@@ -28,7 +19,7 @@ function BugSection({
       {bugs.length === 0 ? (
         <p className="state-hint small">Nothing here.</p>
       ) : (
-        <BugResultsTable bugs={bugs} columns={COLUMNS} {...lookups} />
+        <BugResultsTable bugs={bugs} columns={COLUMNS} />
       )}
     </section>
   );
@@ -92,9 +83,6 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
 }
 
 export function DashboardPage() {
-  // Resolved once for the whole page. The three bug tables below would
-  // otherwise each fetch products and users for themselves.
-  const lookups = useBugLookups();
   const { state: userState } = useAsync(() => currentUser({}), []);
   const meId = userState.status === "ready" ? userState.data.id : null;
 
@@ -132,11 +120,11 @@ export function DashboardPage() {
       ) : null}
 
       <AsyncSection state={assignedQ.state} onRetry={assignedQ.reload} loadingLabel="Loading assigned bugs...">
-        {(bugs) => <BugSection title="Assigned to me" bugs={bugs} lookups={lookups} />}
+        {(bugs) => <BugSection title="Assigned to me" bugs={bugs} />}
       </AsyncSection>
 
       <AsyncSection state={reportedQ.state} onRetry={reportedQ.reload} loadingLabel="Loading reported bugs...">
-        {(bugs) => <BugSection title="Reported by me" bugs={bugs} lookups={lookups} />}
+        {(bugs) => <BugSection title="Reported by me" bugs={bugs} />}
       </AsyncSection>
 
       <section className="dashboard-section">
@@ -153,7 +141,7 @@ export function DashboardPage() {
           The index did exist (bugCc.userId); what was missing was a procedure
           reading it, which cc.listMine now is. */}
       <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd bugs...">
-        {(bugs) => <BugSection title="Bugs I'm CC'd on" bugs={bugs} lookups={lookups} />}
+        {(bugs) => <BugSection title="Bugs I'm CC'd on" bugs={bugs} />}
       </AsyncSection>
     </div>
   );

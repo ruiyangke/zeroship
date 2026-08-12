@@ -2,6 +2,7 @@
 // and the "my dashboard" sections. Presentation only -- callers own data
 // fetching, filtering, and (for the bug list) which columns are visible.
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
+import { useBugLookups } from "./useBugLookups";
 import { InlineStatusEdit } from "./InlineStatusEdit";
 import type { Bug } from "./types";
 
@@ -76,24 +77,20 @@ function formatDate(ms: number): string {
 export function BugResultsTable({
   bugs,
   columns,
-  productsById,
-  usersById,
   allowInlineStatus = false,
   onStatusChanged,
 }: {
   bugs: readonly Bug[];
   columns: readonly BugColumnKey[];
-  // Required, not optional. These were optional, and three of the four call
-  // sites simply left them out -- the table then rendered `prod_034607nk...`
-  // and `user_0345pl8p...` in the product and assignee columns with nothing
-  // failing. An omitted lookup is indistinguishable from an unresolved one at
-  // runtime, so the compiler is the only thing that can tell them apart.
-  // `useBugLookups()` supplies both.
-  productsById: Record<string, string>;
-  usersById: Record<string, string>;
   allowInlineStatus?: boolean;
   onStatusChanged?: (bug: Bug) => void;
 }) {
+  // Resolved HERE rather than passed in. These were props, and three of the
+  // four call sites left them out, so those tables printed raw ids with
+  // nothing failing. Making them required only moved the problem: the pages
+  // call the hook where the rows are not loaded yet. The table is the one
+  // place that always knows which ids are on screen.
+  const { productsById, usersById } = useBugLookups(bugs);
   return (
     <div className="table-wrap">
       <table className="bug-table">
@@ -123,15 +120,15 @@ export function BugResultsTable({
                   {key === "resolution" && <ResolutionBadge resolution={bug.resolution ?? null} />}
                   {key === "severity" && <SeverityBadge severity={bug.severity} />}
                   {key === "priority" && <PriorityBadge priority={bug.priority} />}
-                  {key === "product" && (productsById?.[bug.productId] ?? bug.productId)}
+                  {key === "product" && (productsById[bug.productId] ?? bug.productId)}
                   {key === "summary" && (
                     <a href={`#/bugs/${bug.id}`} className="bug-summary-link">
                       {bug.summary}
                     </a>
                   )}
                   {key === "assignee" &&
-                    (bug.assigneeId ? usersById?.[bug.assigneeId] ?? bug.assigneeId : "--")}
-                  {key === "reporter" && (usersById?.[bug.reporterId] ?? bug.reporterId)}
+                    (bug.assigneeId ? usersById[bug.assigneeId] ?? bug.assigneeId : "--")}
+                  {key === "reporter" && (usersById[bug.reporterId] ?? bug.reporterId)}
                   {key === "updated" && formatDate(bug.updated_at)}
                 </td>
               ))}
