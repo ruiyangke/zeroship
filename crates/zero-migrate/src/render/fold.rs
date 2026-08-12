@@ -589,7 +589,7 @@ fn push_fold_op<'a>(
 /// answer would report `false` at the one moment the answer carries weight.
 ///
 /// A TOP-LEVEL scan is complete because a leg cannot itself hold a wrapper: nesting
-/// is refused by the validator, and [`push_fold_op`] returns
+/// is refused by the validator, and `push_fold_op` returns
 /// `FoldError::Unsupported("nested dialectal op reached fold")` if one ever reaches
 /// here. So an op stream that survives validation carries its wrappers at depth one.
 ///

@@ -186,7 +186,7 @@ fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
 
 /// Every table name `ops` creates, descending into `Op::Dialectal` legs.
 ///
-/// The aggregate form of [`collect_created_tables`], for callers that need the whole
+/// The aggregate form of `collect_created_tables`, for callers that need the whole
 /// stream's creations rather than one op's. Use this rather than mapping
 /// [`op_created_table`] over `ops`: that helper answers for a SINGLE op and returns
 /// `None` for a wrapper, so a create authored inside `dialect({ ... })` disappears.

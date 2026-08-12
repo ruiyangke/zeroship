@@ -224,7 +224,7 @@ fn record_plain_index(
 /// and index lifecycle (create/drop, column drop/rename) are all tracked so the
 /// metadata stays in lock-step with the folded field map.
 ///
-/// Takes the `dialect` and expands through [`flatten_dialectal_ops`] for the same
+/// Takes the `dialect` and expands through `flatten_dialectal_ops` for the same
 /// reason its siblings do: an index or runtime option authored inside a `dialect()`
 /// leg belongs to the table the target actually gets. Walking the raw list let the
 /// `Op::Dialectal` wrapper fall through the catch-all arm, so the field map (which

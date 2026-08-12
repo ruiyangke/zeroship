@@ -52,10 +52,10 @@
 //! (`validate_single_select`, `pg_query::parse` — "is this a safe single
 //! SELECT?") and the EVALUATION ([`evaluate`], `information_schema` catalog reads +
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
-//! BEHIND the [`MigrationBackend`](crate::apply::backend::MigrationBackend) seam: the
+//! BEHIND the [`MigrationBackend`] seam: the
 //! generic apply path calls
 //! [`backend.evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions),
-//! and only [`PostgresBackend`](crate::apply::backend::PostgresBackend) routes into this
+//! and only [`PostgresBackend`] routes into this
 //! module (via `evaluate_all`, which folds the per-check verdict loop). The
 //! SQLite backend validates/evaluates in its own dialect (descriptor migrations
 //! carry no preconditions, so it fails closed on a declared one). No `pg_query` /
