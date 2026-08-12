@@ -1806,6 +1806,7 @@ mod tests {
             Some("set null"),
             true,
             true,
+            false,
             SqlDialect::Sqlite,
         );
         assert_eq!(

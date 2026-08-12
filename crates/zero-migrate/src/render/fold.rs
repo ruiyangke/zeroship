@@ -2305,11 +2305,28 @@ pub fn fold_ops_onto(
                     snap.indexes.retain(|i| &i.name != name);
                 }
             }
-            Op::ValidateConstraint { .. } => {
-                // Validating a previously NOT VALID constraint changes no structural
-                // schema state — the constraint already exists in the folded snapshot
-                // (added by its `ADD CONSTRAINT … NOT VALID`); VALIDATE only strengthens
-                // it. Fold-invisible (see the addConstraint NOT VALID note).
+            Op::ValidateConstraint { table, name, .. } => {
+                // VALIDATE flips `convalidated` to true, and `pg_get_constraintdef`
+                // stops rendering the ` NOT VALID` tail the moment it does. The folded
+                // body has to lose the same tail or the fold would report an
+                // unvalidated constraint against a catalog that has just validated it -
+                // the mirror image of the drift the recorded tail exists to remove.
+                //
+                // An absent constraint stays a no-op rather than an error, unlike
+                // `DropConstraint`. This op does not need the constraint in the folded
+                // set to have been a legal migration: validating one an earlier
+                // artifact added is ordinary, and a fold over a partial op list would
+                // otherwise fail on a history the server accepted. Nothing to strip is
+                // equally the case for a CHECK, whose fold never carries the tail.
+                let snap = table_mut(&mut tables, table)?;
+                if let Some(constraint) = snap.constraints.iter_mut().find(|c| &c.name == name) {
+                    if let Some(validated) = constraint
+                        .definition
+                        .strip_suffix(crate::render::declarative::NOT_VALID_DEFINITION_SUFFIX)
+                    {
+                        constraint.definition = validated.to_string();
+                    }
+                }
             }
             Op::CreateIndex {
                 table,
@@ -3399,6 +3416,11 @@ fn fold_create_table_specs(
                     on_update.map(RefAction::as_token),
                     deferrable.unwrap_or(false),
                     initially_deferred.unwrap_or(false),
+                    // Measured against PostgreSQL 18: a CREATE TABLE foreign key
+                    // spelled ` NOT VALID` is accepted and stored `convalidated =
+                    // true`, and the catalog reports a plain body. Recording the tail
+                    // here would phantom-diff a constraint the server considers valid.
+                    false,
                     dialect,
                 );
                 table_foreign_keys.push((fk.name.clone(), columns.clone()));
@@ -3769,10 +3791,13 @@ fn add_constraint_snapshot(
             on_update,
             deferrable,
             initially_deferred,
-            // NOT VALID is fold-invisible: the folded DESIRED schema is the
-            // eventual-validated constraint (a later VALIDATE CONSTRAINT is a
-            // fold no-op), matching the live catalog after validation.
-            not_valid: _,
+            // NOT VALID is recorded, because `pg_get_constraintdef` renders the tail
+            // for as long as `convalidated` is false. Folding the eventual-validated
+            // body instead made every unvalidated constraint report drift over the
+            // whole window the facet exists to open - and the declarative differ
+            // refuses a foreign-key body change outright, so it also refused the next
+            // deploy. `Op::ValidateConstraint` removes the tail again.
+            not_valid,
         } => {
             if columns.is_empty() {
                 return Err(FoldError::Unsupported(
@@ -3791,6 +3816,7 @@ fn add_constraint_snapshot(
                     on_update.map(RefAction::as_token),
                     deferrable.unwrap_or(false),
                     initially_deferred.unwrap_or(false),
+                    *not_valid == Some(true),
                     dialect,
                 )),
                 index: None,

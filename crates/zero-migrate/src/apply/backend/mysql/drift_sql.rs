@@ -576,6 +576,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             Some(&parts.update_rule),
             false,
             false,
+            false,
             crate::schema::query::SqlDialect::Mysql,
         );
         let table = tables

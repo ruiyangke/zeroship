@@ -3531,6 +3531,7 @@ fn build_table_snapshot_impl(
                     f.on_update.as_deref(),
                     f.deferrable.unwrap_or(false),
                     true,
+                    false,
                     dialect,
                 ),
                 comment: None,
@@ -4121,6 +4122,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     on_update: Option<&str>,
     deferrable: bool,
     initially_deferred: bool,
+    not_valid: bool,
     dialect: SqlDialect,
 ) -> ConstraintSnapshot {
     let name = explicit_name
@@ -4135,6 +4137,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         on_update,
         deferrable,
         initially_deferred,
+        not_valid,
         dialect,
     );
     ConstraintSnapshot {
@@ -4526,6 +4529,7 @@ fn fk_definition_for_dialect(
     on_update: Option<&str>,
     deferrable: bool,
     initially_deferred: bool,
+    not_valid: bool,
     dialect: SqlDialect,
 ) -> String {
     use std::fmt::Write as _;
@@ -4583,8 +4587,22 @@ fn fk_definition_for_dialect(
             def.push_str(" INITIALLY DEFERRED");
         }
     }
+    // `pg_get_constraintdef` appends ` NOT VALID` for as long as `convalidated` is
+    // false, so a desired body that omits it phantom-diffs every unvalidated
+    // constraint against the catalog. PostgreSQL-only: `NOT VALID` is refused off
+    // that dialect at validate, so the flag can never arrive here on another leg,
+    // and gating on the dialect keeps a SQLite rebuild from splicing the token into
+    // a `CREATE TABLE` clause it would not parse.
+    if not_valid && matches!(dialect, SqlDialect::Postgres) {
+        def.push_str(NOT_VALID_DEFINITION_SUFFIX);
+    }
     def
 }
+
+/// The trailing token `pg_get_constraintdef` renders while a constraint's
+/// `convalidated` is false, and the exact substring a `VALIDATE CONSTRAINT` fold
+/// removes again.
+pub(crate) const NOT_VALID_DEFINITION_SUFFIX: &str = " NOT VALID";
 
 #[cfg(test)]
 fn fk_definition_pg(
@@ -4607,6 +4625,7 @@ fn fk_definition_pg(
         on_update,
         deferrable,
         initially_deferred,
+        false,
         SqlDialect::Postgres,
     )
 }

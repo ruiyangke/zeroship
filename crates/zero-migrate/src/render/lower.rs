@@ -6927,6 +6927,11 @@ impl IrAuthor {
                         on_update.map(RefAction::as_token),
                         deferrable.unwrap_or(false),
                         initially_deferred.unwrap_or(false),
+                        // A createTable-inline foreign key is never unvalidated:
+                        // PostgreSQL accepts the token in CREATE TABLE and stores
+                        // `convalidated = true` anyway, so recording it here would
+                        // phantom-diff against a catalog that reports a plain body.
+                        false,
                         self.dialect,
                     );
                     table_foreign_keys.push((fk.name.clone(), columns.clone()));
@@ -7762,6 +7767,7 @@ impl IrAuthor {
             on_update.map(RefAction::as_token),
             deferrable.unwrap_or(false),
             initially_deferred.unwrap_or(false),
+            false,
             self.dialect,
         );
         let mut desired = live_table.clone();
@@ -7852,7 +7858,14 @@ impl IrAuthor {
                 // **C1** — thread the referential actions into the snapshot so the
                 // imperative `addConstraint(fk)` path renders `ON DELETE …` /
                 // `ON UPDATE …` (parity with the declarative `ref` path).
-                let mut fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                // Online constraint adoption: the ` NOT VALID` tail asks PostgreSQL
+                // not to scan existing rows at add time. It is spelled by the shared
+                // definition builder rather than glued on here, so the body this
+                // renderer emits and the body the fold records stay one string; a
+                // second copy of the spelling is what let the fold omit it and
+                // phantom-diff every unvalidated foreign key. `fk_policy_tail` carries
+                // the tail into the rendered `ADD CONSTRAINT … FOREIGN KEY … NOT VALID`.
+                let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
                     eff_schema,
                     table,
                     name,
@@ -7863,16 +7876,9 @@ impl IrAuthor {
                     on_update.map(RefAction::as_token),
                     deferrable.unwrap_or(false),
                     initially_deferred.unwrap_or(false),
+                    not_valid == &Some(true),
                     self.dialect,
                 );
-                if not_valid == &Some(true) {
-                    // Online constraint adoption: append ` NOT VALID` to the FK body
-                    // so existing rows are not scanned at add time. The clause lives
-                    // at the tail of the constraint definition (after the policy
-                    // clauses), where `fk_policy_tail` carries it into the rendered
-                    // `ADD CONSTRAINT … FOREIGN KEY … NOT VALID` (PG only).
-                    fk.definition.push_str(" NOT VALID");
-                }
                 if columns.len() > 1 {
                     let mut units = Vec::new();
                     if let Some(live_table) = live_table {
@@ -10366,6 +10372,7 @@ fn ir_constraint_name_and_kind(
                 references_columns,
                 None,
                 None,
+                false,
                 false,
                 false,
                 dialect,

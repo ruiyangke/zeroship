@@ -12,8 +12,15 @@
 //! `IndexSnapshot` equality excludes `opclass` and `nulls_not_distinct`. It does
 //! compare `only`, while PostgreSQL introspection hardcodes `only: false`, so a case
 //! that authors `only: true` would be a guaranteed false red. This file does not
-//! claim `fold_ops == snapshot_schema`, and it does not cover index facets outside
-//! the three primary-key naming cases below.
+//! claim `fold_ops == snapshot_schema`.
+//!
+//! The lifecycle cases cover the index facets equality does compare (a partial
+//! predicate, an expression key, an INCLUDE payload, a DESC unique key), catalog
+//! comments, a table rename, a structured view, and the constraint facets
+//! `pg_get_constraintdef` spells - referential actions, deferrability, and the
+//! NOT VALID state a later validateConstraint clears. The last of those found a
+//! defect: the fold omitted the ` NOT VALID` tail the catalog renders, so an
+//! unvalidated foreign key reported drift for as long as it stayed unvalidated.
 
 mod support;
 
@@ -793,6 +800,219 @@ async fn detach_partition_lifecycle() {
             ("detach partition", 3),
         ],
         lifecycle_policy,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn index_facet_lifecycle() {
+    // Exercise the index facets `diff_snapshots` compares: a partial predicate, an
+    // expression key, an INCLUDE payload, and a UNIQUE key with a DESC element. This
+    // does not cover `opclass` or `nulls_not_distinct`, which index equality excludes.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "index_facet_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"index_facets","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"a","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true},
+          {"name":"tag","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"index_facets","name":"index_facets_partial_key",
+         "columns":[{"kind":"column","name":"note"}],
+         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                  "rhs":{"node":"literal","value":0}}},
+        {"op":"createIndex","table":"index_facets","name":"index_facets_expr_key",
+         "columns":[{"kind":"expr","expr":{"node":"binOp","op":"add",
+           "lhs":{"node":"colRef","name":"a"},"rhs":{"node":"literal","value":1}}}]},
+        {"op":"createIndex","table":"index_facets","name":"index_facets_include_key",
+         "columns":[{"kind":"column","name":"note"}],"include":["tag"]},
+        {"op":"createIndex","table":"index_facets","name":"index_facets_desc_key",
+         "columns":[{"kind":"column","name":"tag","order":"desc"}],"unique":true},
+        {"op":"dropIndex","table":"index_facets","name":"index_facets_partial_key"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "index facet lifecycle",
+        source,
+        &[
+            ("create table", 1),
+            ("create partial index", 2),
+            ("create expression index", 3),
+            ("create covering index", 4),
+            ("create descending unique index", 5),
+            ("drop partial index", 6),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn comment_lifecycle() {
+    // Exercise the catalog comments `TableSnapshot` and `IndexSnapshot` compare, and
+    // the clearing form that renders `IS NULL`. This does not cover constraint or
+    // view comments, which structural equality does not carry.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "comment_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"commented","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"commented","name":"commented_note_key",
+         "columns":[{"kind":"column","name":"note"}]},
+        {"op":"comment","target":{"kind":"table","name":"commented"},
+         "comment":"rows a reader may annotate"},
+        {"op":"comment","target":{"kind":"column","table":"commented","name":"note"},
+         "comment":"free-form note"},
+        {"op":"comment","target":{"kind":"index","name":"commented_note_key"},
+         "comment":"lookup by note"},
+        {"op":"comment","target":{"kind":"table","name":"commented"}}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "comment lifecycle",
+        source,
+        &[
+            ("create table", 1),
+            ("create index", 2),
+            ("comment on table", 3),
+            ("comment on column", 4),
+            ("comment on index", 5),
+            ("clear the table comment", 6),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn rename_lifecycle() {
+    // Exercise renameTable, whose folded result must name the relation PostgreSQL
+    // renamed and carry the index that followed it. renameColumn is deliberately
+    // absent: it is refused unless it is the only operation targeting its table in a
+    // migration, so it cannot share this envelope with the createTable it needs.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "rename_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"rename_source","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"rename_source","name":"rename_source_note_key",
+         "columns":[{"kind":"column","name":"note"}]},
+        {"op":"renameTable","table":"rename_source","to":"rename_target"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "rename lifecycle",
+        source,
+        &[
+            ("create table", 1),
+            ("create index", 2),
+            ("rename table", 3),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn view_lifecycle() {
+    // Exercise a structured view through create and drop. This does not cover a
+    // materialized view or CREATE OR REPLACE over a changed projection.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "view_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"view_rows","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"name","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createView","name":"named_rows",
+         "query":{"kind":"structured","select":{"from":{"name":"view_rows"},
+           "projection":[{"kind":"colRef","name":"id"},{"kind":"colRef","name":"name"}],
+           "where":{"node":"unaryOp","op":"isNotNull",
+                    "operand":{"node":"colRef","name":"name"}}}}},
+        {"op":"dropView","name":"named_rows"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "view lifecycle",
+        source,
+        &[("create table", 1), ("create view", 2), ("drop view", 3)],
+        support::no_inject,
+    )
+    .await;
+}
+
+#[compio::test]
+async fn constraint_facet_lifecycle() {
+    // Exercise the constraint facets `pg_get_constraintdef` spells and
+    // `ConstraintSnapshot` compares: referential actions, deferrability, and the
+    // NOT VALID state a later validateConstraint clears. A CHECK body is exempted
+    // from the comparison by the differ, so the NOT VALID leg here is a foreign key,
+    // whose whole definition text is compared.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "constraint_facet_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"facet_parent","columns":[
+          {"name":"id","type":"int","nullable":false}
+        ],"primaryKey":["id"]},
+        {"op":"createTable","name":"facet_child","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"cascade_id","type":"int","nullable":true},
+          {"name":"deferred_id","type":"int","nullable":true},
+          {"name":"adopted_id","type":"int","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"addConstraint","table":"facet_child","constraint":{
+          "name":"facet_child_cascade_fkey",
+          "kind":{"kind":"fk","columns":["cascade_id"],
+            "referencesTable":"facet_parent","referencesColumns":["id"],
+            "onDelete":"cascade","onUpdate":"setNull"}
+        }},
+        {"op":"addConstraint","table":"facet_child","constraint":{
+          "name":"facet_child_deferred_fkey",
+          "kind":{"kind":"fk","columns":["deferred_id"],
+            "referencesTable":"facet_parent","referencesColumns":["id"],
+            "deferrable":true,"initiallyDeferred":true}
+        }},
+        {"op":"addConstraint","table":"facet_child","constraint":{
+          "name":"facet_child_adopted_fkey",
+          "kind":{"kind":"fk","columns":["adopted_id"],
+            "referencesTable":"facet_parent","referencesColumns":["id"],
+            "notValid":true}
+        }},
+        {"op":"validateConstraint","table":"facet_child",
+         "name":"facet_child_adopted_fkey"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "constraint facet lifecycle",
+        source,
+        &[
+            ("create constraint tables", 2),
+            ("add foreign key with referential actions", 3),
+            ("add deferrable foreign key", 4),
+            ("add NOT VALID foreign key", 5),
+            ("validate the adopted foreign key", 6),
+        ],
+        support::no_inject,
     )
     .await;
 }

@@ -270,4 +270,55 @@ async fn fold_equals_introspect_sqlite() {
     ]}"#;
     all_ops.extend(apply_doc(&be, drop_idx, &full, &live_tables, Approval::None).await);
     assert_matches_live(&be, &all_ops, "drop index").await;
+
+    // (5) A case-insensitive text column. SQLite carries the facet as an inline
+    // `COLLATE NOCASE` on the column type, and introspection recovers it by reading
+    // the stored CREATE TABLE text back, so this stage compares a facet that only
+    // round-trips if the emitter and the recovery agree on one spelling.
+    let folded = r#"{"ir_version":1,"name":"create_folded","ops":[
+        {"op":"createTable","name":"folded","columns":[
+            {"name":"email","type":"text","nullable":false,"caseSensitive":false},
+            {"name":"handle","type":"text","nullable":true},
+            {"name":"rank","type":"int","nullable":true}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, folded, &registry(&[]), &live_tables, Approval::None).await);
+    live_tables.insert("folded".to_string());
+    assert_matches_live(&be, &all_ops, "create table with a case-insensitive column").await;
+
+    let both = registry(&[("notes", APP), ("folded", APP)]);
+
+    // (6) The index facets SQLite stores in its own CREATE INDEX text: UNIQUE, a
+    // partial predicate, an expression key, and a DESC element. Each is compared
+    // before the next runs.
+    let unique_idx = r#"{"ir_version":1,"name":"unique_idx","ops":[
+        {"op":"createIndex","table":"folded","name":"folded_email_key",
+         "columns":[{"kind":"column","name":"email"}],"unique":true}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, unique_idx, &both, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create unique index").await;
+
+    let partial_idx = r#"{"ir_version":1,"name":"partial_idx","ops":[
+        {"op":"createIndex","table":"folded","name":"folded_handle_partial_idx",
+         "columns":[{"kind":"column","name":"handle"}],
+         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"rank"},
+                  "rhs":{"node":"literal","value":0}}}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, partial_idx, &both, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create partial index").await;
+
+    let expr_idx = r#"{"ir_version":1,"name":"expr_idx","ops":[
+        {"op":"createIndex","table":"folded","name":"folded_rank_expr_idx",
+         "columns":[{"kind":"expr","expr":{"node":"binOp","op":"add",
+           "lhs":{"node":"colRef","name":"rank"},"rhs":{"node":"literal","value":1}}}]}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, expr_idx, &both, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create expression index").await;
+
+    let desc_idx = r#"{"ir_version":1,"name":"desc_idx","ops":[
+        {"op":"createIndex","table":"folded","name":"folded_handle_desc_idx",
+         "columns":[{"kind":"column","name":"handle","order":"desc"}]}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, desc_idx, &both, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create descending index").await;
 }
