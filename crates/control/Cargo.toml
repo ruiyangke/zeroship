@@ -103,6 +103,7 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
+toml = { workspace = true }
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
 # feeds it through `zeroship_bundle::ingest`. The runtime path no longer
 # depends on these crates — only the test packer does.
