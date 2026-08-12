@@ -33,6 +33,82 @@ fn trivial_module() -> Vec<ModuleEntry> {
     }]
 }
 
+/// The COMPLEMENT of the test below, and the mechanism under e2e scenario 22
+/// (the creator redeploys while end users are mid-request).
+///
+/// `worker/src/cache.rs` keys isolates by app_id ALONE, so a redeploy replaces
+/// the entry an in-flight request is running on, and `evict_app` does an
+/// unconditional `remove` with no lease check -- unlike `evict_lru`, which has
+/// `evict_lru_never_evicts_leased_isolate`. That asymmetry reads as a defect.
+/// It is not one, and this test is what says so by RUNNING rather than by
+/// reading the types: `cache::get_runtime` hands out a CLONE, so a dispatch in
+/// flight holds its own strong `Rc`. Dropping the cache's handle must therefore
+/// leave the isolate alive until the request finishes.
+///
+/// TWO ARMS, differing in ONE variable -- whether a second handle exists:
+///   A. cache handle dropped, in-flight handle alive  -> strong_count >= 1
+///   B. then the in-flight handle dropped too         -> strong_count == 0
+/// Arm B is the control. Without it, arm A would also pass if the probe were
+/// simply incapable of reaching 0 here (a leaked pump would do exactly that),
+/// which is the failure the sibling test below was written for.
+///
+/// WHAT THIS DOES NOT CATCH: it proves the isolate OUTLIVES the eviction, not
+/// that the end user receives a correct response. Whether an in-flight request
+/// completes cleanly through gateway and worker across a real redeploy is
+/// scenario 22 and is still unwalked; nothing here measures a status code.
+#[test]
+fn eviction_with_live_request_handle_keeps_isolate_alive() {
+    init_v8();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let rt = Runtime::builder()
+            .modules(trivial_module())
+            .idle_gc_after_ms(0)
+            .build();
+        rt.exit_isolate();
+        rt.start_pump();
+        compio::time::sleep(Duration::from_millis(20)).await;
+
+        // The handle an in-flight dispatch holds. `cache::get_runtime` returns
+        // exactly this: a clone, not a borrow of the map entry.
+        let in_flight = rt.clone();
+
+        // The cache drops ITS handle. This is `evict_app`'s unconditional
+        // `isolates.remove(app_id)` on the redeploy path.
+        let probe = rt.into_inner_probe_for_test();
+
+        // ARM A. Give the pump every chance to observe the drop and tear down,
+        // the same window the sibling test uses to observe the opposite. If the
+        // isolate died here, an in-flight request would be running on freed
+        // state.
+        for _ in 0..20 {
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let during = probe.strong_count();
+        assert!(
+            during >= 1,
+            "isolate died while a request handle was still live: \
+             strong_count = {during} (a redeploy would cut in-flight requests)"
+        );
+
+        // ARM B, the control: the request finishes and drops its handle. Now
+        // nothing holds the isolate and the count must reach 0 -- proving arm
+        // A measured the extra handle rather than an unfalsifiable probe.
+        drop(in_flight);
+        let mut after = probe.strong_count();
+        for _ in 0..50 {
+            if after == 0 {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+            after = probe.strong_count();
+        }
+        assert_eq!(
+            after, 0,
+            "isolate leaked after the last handle dropped: strong_count = {after}"
+        );
+    });
+}
+
 #[test]
 fn eviction_drops_isolate_after_pump_started() {
     init_v8();
