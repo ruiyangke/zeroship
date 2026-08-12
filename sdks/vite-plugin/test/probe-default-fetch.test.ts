@@ -127,3 +127,50 @@ describe("probeUserDefaultExport", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: the object-literal scan must stop at the literal's OWN closing
+// brace.
+//
+// The probe used a greedy `/export\s+default\s+(\{[\s\S]*\})/`, which captured
+// from the literal's `{` to the LAST `}` in the file. MEASURED 2026-08-11 on
+// examples/db-todos (`export default { schema: dbSchema };`): the capture was
+// 18506 chars and matched ` fetch(` from an `await fetch(webhookUrl, ...)` in
+// an unrelated action, so the probe said "user owns routing", the .zship got a
+// Worker(SSR) catch-all instead of the `["$path", "/index.html"]` SPA fallback,
+// and the DEPLOYED app 404ed `/` and `/index.html` while /assets/* served 200.
+//
+// WHAT THESE DO NOT COVER: the probe is still not a parser. A `}` inside a
+// regex literal in the entry ends the scan early. That fails toward a shorter
+// block and so toward the conservative `true`, but it is untested here.
+describe("probeUserDefaultExport — brace matching", () => {
+  test("a fetch() CALL after the default object does not count as a fetch handler", () => {
+    // This is the db-todos shape, minimised. Greedy capture => true (wrong).
+    const src = [
+      `export default { schema: dbSchema };`,
+      ``,
+      `export const share = action(async ({ url }) => {`,
+      `  const resp = await fetch(url, { method: "POST" });`,
+      `  return resp.ok;`,
+      `});`,
+    ].join("\n");
+    assert.equal(probeUserDefaultExport(src), false);
+  });
+
+  test("a NESTED brace before the real top-level fetch still resolves to true", () => {
+    // The case a lazy `[\s\S]*?` would break: it stops at the first `}` and
+    // never reaches `fetch`, serving a stale shell on a real SSR route.
+    assert.equal(
+      probeUserDefaultExport(`export default { opts: { a: 1 }, fetch: handler };`),
+      true,
+    );
+  });
+
+  test("a fetch key inside a NESTED object is not a top-level handler", () => {
+    const src = [
+      `export default { rpc: { helpers: { fetch: internalFetch } } };`,
+      `export const x = 1;`,
+    ].join("\n");
+    assert.equal(probeUserDefaultExport(src), false);
+  });
+});

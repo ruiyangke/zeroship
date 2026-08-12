@@ -241,6 +241,87 @@ export function stripUseServer(bundle: string): string {
  * unwanted Worker(SSR) 404s; an unwanted Static catch-all serves stale
  * shell on intended SSR routes).
  */
+/**
+ * Return the source text of an `export default { ... }` object literal,
+ * brace-matched from its opening `{` to its true closing `}`, or null when the
+ * default export is not an object literal.
+ *
+ * Quote- and template-aware, because a `}` inside a string is not a closing
+ * brace. Not a parser: it does not track regex literals, and a `}` inside one
+ * would end the scan early. That is a narrower failure than the greedy regex it
+ * replaces (which was wrong for every multi-statement entry) and it fails
+ * toward a SHORTER block, i.e. toward the conservative `return true` below.
+ */
+/**
+ * Replace everything nested deeper than the outermost object's own level with
+ * spaces, preserving length and the outer braces. Lets a flat key regex run
+ * against depth-1 keys only. Quote-aware for the same reason as the matcher.
+ */
+function blankNestedLevels(block: string): string {
+  const out = block.split("");
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < block.length; i++) {
+    const ch = block[i];
+    if (quote) {
+      if (ch === "\\") {
+        if (depth > 1) out[i] = out[i + 1] = " ";
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      if (depth > 1) out[i] = " ";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      if (depth > 1) out[i] = " ";
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      depth++;
+      if (depth > 1) out[i] = " ";
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      if (depth > 1) out[i] = " ";
+      depth--;
+      continue;
+    }
+    if (depth > 1) out[i] = " ";
+  }
+  return out.join("");
+}
+
+function matchDefaultObjectLiteral(stripped: string): string | null {
+  const m = /export\s+default\s+\{/.exec(stripped);
+  if (!m) return null;
+  const open = stripped.indexOf("{", m.index);
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return stripped.slice(open, i + 1);
+    }
+  }
+  // Unbalanced (truncated source): treat as not-an-object-literal so the
+  // caller falls through to its conservative arms rather than reading a
+  // half-object.
+  return null;
+}
+
 export function probeUserDefaultExport(source: string): boolean {
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -259,13 +340,37 @@ export function probeUserDefaultExport(source: string): boolean {
   }
 
   // `export default { ... }` — look for a `fetch:` or `fetch(...)` key
-  // somewhere inside the object literal. We don't try to brace-match
-  // perfectly; the false-positive cost (Worker(SSR) instead of Static
-  // when the user has a NESTED `fetch` key but no top-level one) is
-  // negligible.
-  const defaultBlock = stripped.match(/export\s+default\s+(\{[\s\S]*\})/);
+  // inside the object literal.
+  //
+  // THIS BRACE-MATCHES, and it must. This was
+  // `stripped.match(/export\s+default\s+(\{[\s\S]*\})/)` under a comment
+  // calling the false-positive cost "negligible". It was not negligible, and
+  // the greedy `[\s\S]*` never matched the object literal at all — it ran to
+  // the LAST `}` in the file.
+  //
+  // MEASURED 2026-08-11 while deploying examples/db-todos, whose entry is
+  // `export default { schema: dbSchema };` — 20 characters, no fetch. The
+  // greedy capture was 18506 characters and matched ` fetch(` from
+  // `await fetch(webhookUrl, ...)` inside the `todos.shareToWebhook` ACTION,
+  // an unrelated outbound HTTP call hundreds of lines away. The probe therefore
+  // reported "user owns routing", the `.zship` got a Worker(SSR) catch-all
+  // instead of the static `["$path", "/index.html"]` SPA fallback, and the
+  // DEPLOYED app 404ed `/` and `/index.html` while its `/assets/*` served 200.
+  // Any entry that calls `fetch()` anywhere hit this.
+  //
+  // Lazy (`[\s\S]*?`) is NOT the fix: it stops at the FIRST `}`, so
+  // `export default { a: { b: 1 }, fetch: h }` would miss the real top-level
+  // `fetch` and serve a stale shell on a genuine SSR route — precisely the
+  // failure the conservative default exists to avoid.
+  const defaultBlock = matchDefaultObjectLiteral(stripped);
   if (defaultBlock) {
-    const block = defaultBlock[1];
+    // Depth-1 projection: nested object/array bodies are blanked out so the
+    // key regex below can only ever see the literal's OWN keys. The old code
+    // ran that regex over the raw block, which the original comment described
+    // as a "negligible" false positive for a NESTED `fetch` key. It is cheap
+    // to remove now that the block is brace-matched, and `rpc: { helpers: {
+    // fetch } }` is a realistic shape to route wrongly.
+    const block = blankNestedLevels(defaultBlock);
     // Top-level keys: `fetch:` (property), `fetch(` (method shorthand),
     // `fetch,` / `fetch}` (shorthand from a binding), or `"fetch":`.
     if (/(?:^|[,{\s])(?:fetch|["']fetch["'])\s*[:(,}]/.test(block)) return true;
