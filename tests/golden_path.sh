@@ -624,6 +624,28 @@ chmod 600 "$GATE_BROKER_SECRET"
 # revocation paths would measure the db-is-None 401 rather than the real
 # behaviour, and would pass while proving nothing. Give the gateway a DSN first
 # if you need those, and check that both tiers actually reach the database.
+# `--db` is the SECOND half of the same prerequisite, and the key alone is inert
+# without it. The gateway with no DSN sets `db: None` (main.rs:630-642), logs
+# that session validation is disabled, and then 401s every auth-gated request -
+# the SAME observable as no signing key, as a malformed `pws_` subject, and as
+# the wrong cookie name. Four distinct causes, one symptom; that is why each was
+# cleared separately rather than together. Fail-CLOSED, not a hole.
+#
+# PASS IT EXPLICITLY EVEN THOUGH THE ARG HAS AN ENV FALLBACK, which is the part
+# worth knowing. main.rs:78 declares `#[arg(long = "db", env = "DATABASE_URL")]`,
+# so an ambient DATABASE_URL configures the gateway just as well - and this
+# harness never sets that variable (line 64 only READS it as a default for
+# $DB_URL). So before this flag, whether the gateway could validate a session
+# depended on the operator's shell. MEASURED 2026-08-12, three arms one variable
+# apart, `zeroship-gate` under ZEROSHIP_DEV_INSECURE=1:
+#     no --db, DATABASE_URL unset  -> "session validation disabled"
+#     --db "$DB_URL"               -> "pg connection pool configured"
+#     no --db, DATABASE_URL set    -> "pg connection pool configured"
+# The third arm is why "the flag is required" would have been too strong: the
+# flag makes the DSN deterministic and equal to the one this harness itself
+# uses, rather than inherited from the environment. Ticket #327 names the same
+# prerequisite as "a gateway arm still needs a DSN first".
+#
 # `--signing-key-file` shares the SAME ed25519 key control and migrated already
 # use ($GP_SIGNING_KEY). Without it the gateway has no key to verify an app
 # session cookie against, so every authenticated request is anonymous and any
@@ -641,7 +663,7 @@ chmod 600 "$GATE_BROKER_SECRET"
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles \
   --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
+  --signing-key-file "$GP_SIGNING_KEY" --db "$DB_URL" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
