@@ -24,6 +24,7 @@ type SubEvent =
   | { kind: "closed" };
 
 interface FakeSub {
+  ready(): Promise<void>;
   next(): Promise<SubEvent | null>;
   close(): void;
   emit(ev: SubEvent): void;
@@ -34,6 +35,7 @@ function makeFakeSub(): FakeSub {
   let pending: ((ev: SubEvent | null) => void) | null = null;
   let closed = false;
   return {
+    async ready() {},
     async next(): Promise<SubEvent | null> {
       if (closed) return null;
       if (queue.length > 0) return queue.shift()!;
@@ -112,10 +114,12 @@ describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", (
     let innerLive: LiveQuery<AnyRec> | null = null;
     const outer = db.live(async () => {
       const rows = await db.todos.find({});
-      innerLive = db.live(
-        () => db.users.find({}),
-        { tables: ["users"] },
-      );
+      if (innerLive === null) {
+        innerLive = db.live(
+          () => db.users.find({}),
+          { tables: ["users"] },
+        );
+      }
       return rows;
     });
 

@@ -301,6 +301,15 @@ export function createLive<R>(
     }
   }
 
+  function fail(error: unknown): void {
+    if (closed) return;
+    pump({
+      kind: "error",
+      error: error instanceof Error ? error : new Error(String(error)),
+    });
+    doClose();
+  }
+
   // Drive each subscription on a background async task. The native
   // wrapper's `next()` resolves one event at a time; we loop until it
   // signals `closed` (or our own `doClose` runs).
@@ -311,11 +320,18 @@ export function createLive<R>(
         let ev: IteratorResult<SubscriptionEvent>;
         try {
           ev = await iter.next();
-        } catch {
-          break;
+        } catch (error) {
+          fail(error);
+          return;
         }
-        if (ev.done) break;
-        if (ev.value.kind === "closed") break;
+        if (closed) return;
+        if (ev.done || ev.value.kind === "closed") {
+          fail(Object.assign(
+            new Error("@zeroship/db: live subscription closed before the live query was closed"),
+            { code: "LIVE_SUBSCRIPTION_CLOSED" as const },
+          ));
+          return;
+        }
         // Both `change` and `resync` trigger a rerun. A resync means
         // the broker dropped events; the safest response is a full
         // refetch, which is exactly what `rerun()` already does.
@@ -324,29 +340,33 @@ export function createLive<R>(
     })();
   }
 
-  // Kick off the first run; on success, yield the initial result and
-  // open one subscription per detected table. On failure, surface the
-  // error via the iterator's next() and terminate.
+  // The discovery run identifies the tables but is not emitted. Open and
+  // arm every subscription first, then rerun the query and emit that fresh
+  // snapshot. This closes the read/register race and ensures a caller never
+  // receives an apparently-live initial value before CDC is healthy.
   void (async () => {
     try {
       const { rows, tables } = await firstRun();
       if (closed) return;
-      pump({ kind: "value", value: rows });
+      if (tables.size === 0) {
+        pump({ kind: "value", value: rows });
+        return;
+      }
       for (const name of tables) {
         if (closed) break;
         const sub = subscribe(name);
         subscriptions.push(sub);
+      }
+      await Promise.all(subscriptions.map((sub) => sub.ready()));
+      if (closed) return;
+      const initialRows = await unwrapQueryFnResult<R>(queryFn());
+      if (closed) return;
+      pump({ kind: "value", value: initialRows });
+      for (const sub of subscriptions) {
         driveSubscription(sub);
       }
-      // If no tables were detected, the live query is effectively
-      // static — it yields the initial result and then stalls. We
-      // don't auto-close because the caller may still call `close()`
-      // explicitly; surfacing the empty-tables case as a one-shot
-      // result matches the behaviour of `for await (const x of [v])`.
     } catch (e) {
-      if (closed) return;
-      pump({ kind: "error", error: e instanceof Error ? e : new Error(String(e)) });
-      doClose();
+      fail(e);
     }
   })();
 
