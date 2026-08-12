@@ -11,8 +11,9 @@
 //! `if_exists` field. Reading it the other way would classify `ifExists` as
 //! unguarded and re-create an extension that may never have been dropped.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`. Assertions read the live catalog
-//! through `snapshot_schema`, which introspects `pg_extension`.
+//! The live rollback cases are gated behind `ZERO_MIGRATE_TEST_PG_URL` and read
+//! the catalog through `snapshot_schema`, which introspects `pg_extension`. The
+//! focused lowering controls run without a database.
 
 mod support;
 
@@ -34,6 +35,7 @@ use zero_migrate::{
 };
 
 const OWNER: &str = "app_drop_extension_rollback_pg";
+const PROJECT_SCHEMA: &str = "zero_migrate";
 /// Extension names are unique per DATABASE, not per schema, so the two tests here
 /// cannot share one: `pg_extension_name_index` rejects the second creator with
 /// "duplicate key value violates unique constraint". Per-schema isolation, which
@@ -157,6 +159,116 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
         policy(&cfg.project_schema),
         SqlDialect::Postgres,
     ))
+}
+
+fn create_extension_op(schema: Option<&str>) -> Op {
+    Op::CreateExtension {
+        name: EXT.to_string(),
+        if_not_exists: None,
+        schema: schema.map(str::to_string),
+    }
+}
+
+fn lower_drop_from_history(history: &[Op], if_exists: Option<bool>) -> Migration {
+    let dialect = SqlDialect::Postgres;
+    let pol = policy(PROJECT_SCHEMA);
+    let folded =
+        fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the extension history must fold");
+    let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
+    let mut drop = serde_json::json!({"op": "dropExtension", "name": EXT});
+    if let Some(if_exists) = if_exists {
+        drop["ifExists"] = serde_json::json!(if_exists);
+    }
+    let document = serde_json::json!({
+        "ir_version": 1,
+        "name": "drop_citext",
+        "owner_app": OWNER,
+        "ops": [drop]
+    })
+    .to_string();
+    let guard = GuardConfig::from_policy(pol.clone(), dialect);
+    let artifact = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &pol)
+        .load_and_lower_guarded(&document, OWNER, &BTreeMap::new(), &live, &guard)
+        .expect("the extension drop must lower");
+    let [PlanStep::Ddl(migration)] = artifact.plan.steps.as_slice() else {
+        panic!("expected one extension DDL step")
+    };
+    migration.clone()
+}
+
+#[compio::test]
+async fn unguarded_drop_extension_from_folded_history_has_create_inverse() {
+    let migration = lower_drop_from_history(&[create_extension_op(Some("public"))], None);
+
+    assert_eq!(
+        migration.down.as_deref(),
+        Some(r#"CREATE EXTENSION "citext" WITH SCHEMA "public""#)
+    );
+    guard_for(&GuardConfig::from_policy(
+        policy(PROJECT_SCHEMA),
+        SqlDialect::Postgres,
+    ))
+    .as_ref()
+    .check(migration.down.as_deref().expect("the inverse exists"))
+    .expect("the synthesised inverse must pass the configured guard");
+}
+
+#[compio::test]
+async fn guarded_drop_extension_from_folded_history_has_no_inverse() {
+    let migration = lower_drop_from_history(&[create_extension_op(Some("public"))], Some(true));
+
+    assert_eq!(migration.up, r#"DROP EXTENSION IF EXISTS "citext""#);
+    assert_eq!(migration.down, None);
+}
+
+#[compio::test]
+async fn unguarded_drop_extension_absent_from_history_has_no_inverse() {
+    let migration = lower_drop_from_history(&[], None);
+
+    assert_eq!(migration.down, None);
+}
+
+#[compio::test]
+async fn explicit_false_drop_extension_is_eligible_for_an_inverse() {
+    let migration = lower_drop_from_history(&[create_extension_op(Some("public"))], Some(false));
+
+    assert_eq!(migration.up, r#"DROP EXTENSION "citext""#);
+    assert_eq!(
+        migration.down.as_deref(),
+        Some(r#"CREATE EXTENSION "citext" WITH SCHEMA "public""#)
+    );
+}
+
+#[compio::test]
+async fn drop_extension_inverse_uses_only_the_recorded_schema() {
+    let with_schema = [create_extension_op(Some("public"))];
+    let without_schema = [create_extension_op(None)];
+    let pol = policy(PROJECT_SCHEMA);
+    let recorded = fold_ops(&with_schema, SqlDialect::Postgres, PROJECT_SCHEMA, &pol)
+        .expect("the extension history must fold");
+    let recorded_without_schema =
+        fold_ops(&without_schema, SqlDialect::Postgres, PROJECT_SCHEMA, &pol)
+            .expect("the extension history without a schema must fold");
+
+    assert_eq!(
+        recorded.extensions.get(EXT),
+        Some(&ExtensionSnapshot {
+            schema: Some("public".to_string())
+        })
+    );
+    assert_eq!(
+        recorded_without_schema.extensions.get(EXT),
+        Some(&ExtensionSnapshot { schema: None })
+    );
+    assert_eq!(
+        lower_drop_from_history(&with_schema, None).down.as_deref(),
+        Some(r#"CREATE EXTENSION "citext" WITH SCHEMA "public""#)
+    );
+    let down = lower_drop_from_history(&without_schema, None)
+        .down
+        .expect("an unguarded recorded extension must have an inverse");
+    assert_eq!(down, r#"CREATE EXTENSION "citext""#);
+    assert!(!down.contains("WITH SCHEMA"));
 }
 
 #[compio::test]
