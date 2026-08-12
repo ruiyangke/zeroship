@@ -162,7 +162,9 @@ Notes:
 - Absent an explicit `--config`/`ZEROSHIP_CONFIG`, the binaries auto-discover the
   fixed well-known path `/etc/zeroship/zeroship.toml` (the only auto-discovered
   location — no CWD/env redirect). Pass `--no-config` to disable discovery and
-  use compiled defaults even if that file exists. A missing well-known file is
+  use compiled defaults even if that file exists (`ZEROSHIP_NO_CONFIG=1` does the
+  same). All five server binaries answer `--check-config`, including
+  `zeroship-migrated`. A missing well-known file is
   fine (defaults apply); a present-but-broken one is a hard startup error. Dev
   usually just passes `--config deploy/ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
   rather than installing into `/etc`.
