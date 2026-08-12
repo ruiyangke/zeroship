@@ -13,7 +13,7 @@ use zeroship_core::config::{zeroship_config, CommandEnv};
 
 #[zeroship_config(binary = "zeroship-fixture-bad", scope = "bad")]
 struct EnvBackedCommandConfig {
-    #[config(name = "check_config")]
+    #[config(shared = CHECK_CONFIG)]
     check_config: CommandEnv<bool>,
 }
 

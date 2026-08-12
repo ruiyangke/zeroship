@@ -1,5 +1,5 @@
 error: a bool control defaults to false and an Option<T> control defaults to None; remove the `default`
  --> tests/ui/control_default.rs
   |
-  |     #[config(name = "no_config", default = true)]
+  |     #[config(shared = NO_CONFIG, default = true)]
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

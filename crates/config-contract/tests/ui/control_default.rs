@@ -11,9 +11,9 @@ use zeroship_core::config::{zeroship_config, BootstrapControl};
 
 #[zeroship_config(binary = "zeroship-fixture-bad", scope = "bad")]
 struct DefaultedControlConfig {
-    #[config(name = "no_config", default = true)]
+    #[config(shared = NO_CONFIG, default = true)]
     no_config: BootstrapControl<bool>,
-    #[config(name = "config")]
+    #[config(shared = CONFIG)]
     config: BootstrapControl<Option<PathBuf>>,
 }
 

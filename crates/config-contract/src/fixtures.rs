@@ -47,16 +47,16 @@ pub struct FixtureWorkerConfig {
 #[derive(Debug)]
 pub struct FixtureControls {
     /// Overlay selector: read before any overlay exists.
-    #[config(name = "config")]
+    #[config(shared = CONFIG)]
     pub config: BootstrapControl<Option<PathBuf>>,
     /// Discovery suppressor: also read before any overlay exists.
-    #[config(name = "no_config")]
+    #[config(shared = NO_CONFIG)]
     pub no_config: BootstrapControl<bool>,
     /// An action, not a setting.
-    #[config(name = "check_config")]
+    #[config(shared = CHECK_CONFIG)]
     pub check_config: CommandControl<bool>,
     /// A valued command control, so the class is not only exercised as a flag.
-    #[config(name = "check_config_format", default = CheckFormat::Text)]
+    #[config(shared = CHECK_CONFIG_FORMAT, default = CheckFormat::Text)]
     pub check_config_format: CommandControl<CheckFormat>,
     /// A safety control: enabling it must require an explicit act at launch,
     /// never a line someone left in a persisted overlay.
