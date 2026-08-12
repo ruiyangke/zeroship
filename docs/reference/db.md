@@ -939,9 +939,10 @@ broker subscription primitive exists for framework-internal consumers;
 app code should use `db.live(...)`, not `openSubscription()`.
 
 `db.live(queryFn)` wraps the raw subscription stream into a
-query-shaped reactive primitive: it runs the `queryFn` once, yields the
-result, subscribes to the relevant table(s), and yields a fresh result
-array whenever a watched table changes.
+query-shaped reactive primitive. It first runs `queryFn` only to discover
+the watched tables. It then opens and arms those subscriptions, reruns the
+query, and yields that fresh result. Later changes yield fresh result arrays.
+The discovery result is never exposed as an apparently live snapshot.
 
 ```ts
 const live = db.live(() => db.todos.find({ userId: "x" }));
@@ -982,6 +983,36 @@ live query before (or after) the tx.
 subscription. The iterator's `return()` (invoked by `for await ...
 break` or an early `throw`) also calls `close()` automatically.
 
+### Distributed delivery and lifecycle
+
+Postgres live queries use logical decoding. Each app has one shared
+publication and one logical slot for each worker process that currently has
+local subscribers. A process-wide broker routes the decoded event to matching
+subscriptions in every isolate thread in that worker. Separate worker
+containers each consume their own slot, so a write handled by any isolate or
+container reaches every subscribing container.
+
+The first local subscription starts CDC lazily. `Subscription.ready()` does
+not resolve until publication and worker-slot provisioning succeeds and
+Postgres accepts `START_REPLICATION`. `db.live` waits for that handshake before
+it emits its initial result. A missing logical-WAL configuration, connection
+failure, or invalid replication object therefore rejects the live query; it
+cannot silently degrade to a static one-shot result. If a running consumer
+later exits, the worker logs one app-scoped error and closes that app's local
+subscriptions.
+
+Lazy startup is deliberate. Deploy-time provisioning would reserve a logical
+slot and a replication connection in every worker for every deployed app,
+including apps that never call `db.live`. With lazy startup, apps without live
+queries pay no CDC connection, slot, WAL-retention, or decode cost. The tradeoff
+is that the first live query pays the provisioning and startup latency.
+
+Closing the last subscription in a worker stops its consumer and drops that
+worker's slot. Other workers keep their independent slots and the shared
+publication. App deletion stops local consumers, drops every slot with that
+app's exact prefix, and then drops the publication; workers retry this
+idempotent teardown when a control-plane removal poll fails.
+
 ## Errors
 
 Errors carry a `.code` property where applicable:
@@ -1017,7 +1048,7 @@ Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
 
 **Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
 
-`registerModel`, `setMaskPolicy`, `startReplicationConsumer`, and the
+`registerModel`, `setMaskPolicy`, and the
 `migrations` / `replication` namespaces are **not** properties of
 `env.db`. They live on a `DbPlatform` capability handle the runtime sets
 on `env.db` under a **V8 private symbol** and hands only to
