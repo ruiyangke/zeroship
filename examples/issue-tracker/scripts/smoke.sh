@@ -25,12 +25,20 @@
 # (collation, isolation, partial indexes) is out of scope; see
 # docs/reference/sqlite-divergences.md.
 #
-# It DOES run two identities, so bug-level restriction is verified as an actual
-# denial rather than assumed from reading the code -- with a control proving the
-# second user could read the bug before it was restricted. What is still NOT
-# covered by a second identity: PRIVATE COMMENTS (comments.list filters them,
-# and no test drives that path as another user) and PRODUCT-level restriction
-# via productGroups, which now has RPCs but no assertion here.
+# It DOES run two identities, so all three access controls are verified as
+# actual DENIALS rather than assumed from reading the code: bug-level groups,
+# product-level groups, and private comments. Every one is paired with a
+# control showing the second user could see the thing BEFORE it was restricted
+# -- without that, "Bob cannot see it" is equally consistent with Bob never
+# having been able to, and the assertion proves nothing.
+#
+# Bob is also asserted to be a non-admin, because an admin bypasses every
+# restriction below and would make the whole section vacuous while still
+# printing green.
+#
+# What a second identity still does NOT cover here: attachment visibility, and
+# whether a restricted bug leaks through reports.* aggregates (the counts are
+# computed from a search that does filter, but no assertion pins that).
 set -uo pipefail
 
 URL="${ZEROSHIP_URL:-http://localhost:3007}"
@@ -227,6 +235,51 @@ BOB_SEES="$(bob bugs.search "{\"text\":\"Secret $STAMP\"}" | grep -c "$SECRET_BU
 # Alice must still see it, or the restriction is just breakage.
 [ "$(code bugs.get "{\"id\":\"$SECRET_BUG\"}")" = "200" ] \
   && pass "Alice still reads the bug she restricted" || fail "Alice lost access to her own restricted bug"
+
+# Private comments. comments.list filters on isPrivate for anyone but the
+# author, and until now no test drove that path as a different user -- the
+# filter was code that read correctly and was never observed working.
+PRIV_BUG="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Private notes $STAMP\",\"description\":\"public description\"}" | jget 'json.id')"
+call comments.add "{\"bugId\":\"$PRIV_BUG\",\"body\":\"PUBLIC-$STAMP\"}" >/dev/null
+call comments.add "{\"bugId\":\"$PRIV_BUG\",\"body\":\"SECRET-$STAMP\",\"isPrivate\":true}" >/dev/null
+
+# Control first: Bob must see the public comment, or "Bob cannot see the
+# private one" would just mean Bob sees nothing at all.
+BOB_COMMENTS="$(bob comments.list "{\"bugId\":\"$PRIV_BUG\"}")"
+echo "$BOB_COMMENTS" | grep -q "PUBLIC-$STAMP" \
+  && pass "control: Bob sees the public comment on that bug" \
+  || fail "control failed: Bob sees no comments at all, so the private check below is vacuous"
+
+echo "$BOB_COMMENTS" | grep -q "SECRET-$STAMP" \
+  && fail "a private comment LEAKS to another user through comments.list" \
+  || pass "the private comment is withheld from Bob"
+
+# Alice authored it, so she must still see it -- otherwise "private" would just
+# mean "lost".
+call comments.list "{\"bugId\":\"$PRIV_BUG\"}" | grep -q "SECRET-$STAMP" \
+  && pass "the author still sees her own private comment" \
+  || fail "the author cannot see her own private comment"
+
+# Product-level restriction (productGroups). Distinct from the bug-level check
+# above: this hides an entire product's bugs, and it is the older of the two
+# mechanisms -- it had RPCs after the last commit but no assertion.
+PROD2="$(call products.create "{\"name\":\"Locked $STAMP\",\"description\":\"restricted product\"}" | jget 'json.id')"
+COMP2="$(call components.create "{\"productId\":\"$PROD2\",\"name\":\"Core\",\"description\":\"core\"}" | jget 'json.id')"
+VER2="$(call versions.create "{\"productId\":\"$PROD2\",\"name\":\"1.0\"}" | jget 'json.id')"
+LOCKED_BUG="$(call bugs.create "{\"productId\":\"$PROD2\",\"componentId\":\"$COMP2\",\"versionId\":\"$VER2\",\"summary\":\"Locked $STAMP\",\"description\":\"in a restricted product\"}" | jget 'json.id')"
+
+[ "$(bobc bugs.get "{\"id\":\"$LOCKED_BUG\"}")" = "200" ] \
+  && pass "control: Bob reads the bug before the product is restricted" \
+  || fail "control failed: Bob could not read the bug even unrestricted"
+
+call products.restrict "{\"productId\":\"$PROD2\",\"groupId\":\"$GROUP\"}" >/dev/null
+[ "$(bobc bugs.get "{\"id\":\"$LOCKED_BUG\"}")" = "403" ] \
+  && pass "Bob is refused a bug in a restricted product (403)" \
+  || fail "product restriction does not deny" "http=$(bobc bugs.get "{\"id\":\"$LOCKED_BUG\"}")"
+
+bob products.list | grep -q "$PROD2" \
+  && fail "the restricted product still appears in Bob's products.list" \
+  || pass "the restricted product is absent from Bob's product list"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \
