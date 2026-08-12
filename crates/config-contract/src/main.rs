@@ -104,8 +104,12 @@ fn inventory(args: &[String]) {
         }
     };
     match scan_sources(&sources, &overlay) {
-        Ok((rows, summary)) => {
-            print!("{}", format_tsv(&rows));
+        Ok(report) => {
+            // Rows first, findings after. A mid-conversion tree will have
+            // findings; printing the checklist anyway is the whole point of
+            // this being usable DURING the conversion it measures.
+            print!("{}", format_tsv(&report.rows));
+            let summary = report.summary;
             eprintln!(
                 "config inventory: {} files, {} command structs, {} rows \
                  ({} converted, {} unconverted)",
@@ -115,6 +119,16 @@ fn inventory(args: &[String]) {
                 summary.converted,
                 summary.unconverted
             );
+            for finding in &report.findings {
+                eprintln!("config inventory: {finding}");
+            }
+            if !report.findings.is_empty() {
+                eprintln!(
+                    "config inventory: {} finding(s); rows above are still complete",
+                    report.findings.len()
+                );
+                std::process::exit(1);
+            }
         }
         Err(errors) => {
             for error in errors {

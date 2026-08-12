@@ -10,7 +10,7 @@ use zeroship_core::config::{
     bootstrap_or_exit, CheckConfigReport, CheckValue,
 };
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
-use zeroship_migrated::config::{MigratedCli, MigratedControls, DEFAULT_LOG_FILTER};
+use zeroship_migrated::config::{MigratedCli, MigratedSettings, DEFAULT_LOG_FILTER};
 use zeroship_migrated::policy::ManagedPolicyConfig;
 use zeroship_migrated::MigrationServiceState;
 
@@ -19,14 +19,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = MigratedCli::parse();
-    let (controls, boot) =
-        bootstrap_or_exit::<MigratedControls>(cli.controls, DEFAULT_LOG_FILTER, "migrated");
-    let check_config = *controls.check_config.get();
-
-    let tmp_dir = cli
-        .tmp_dir
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join("zeroship-migrated"));
+    let (settings, boot) =
+        bootstrap_or_exit::<MigratedSettings>(cli.settings, DEFAULT_LOG_FILTER, "migrated");
+    let check_config = *settings.check_config.get();
+    let tmp_dir = settings.tmp_dir.get().clone();
 
     // A read-only dry run: report what was configured and exit BEFORE the tmp
     // directory is created, before the control DSN is dialled, and before a
@@ -34,8 +30,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // have, and each of them used to run unconditionally here.
     if check_config {
         let mut report = CheckConfigReport::new();
-        report.field("bind", CheckValue::Plain(cli.bind.clone()));
-        report.field("port", CheckValue::Count(usize::from(cli.port)));
+        report.field("bind", CheckValue::Plain(settings.bind.get().clone()));
+        report.field("port", CheckValue::Count(usize::from(*settings.port.get())));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -62,18 +58,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field(
             "policy_ceiling_version",
-            CheckValue::Count(usize::try_from(cli.policy_ceiling_version).unwrap_or(usize::MAX)),
+            CheckValue::Count(
+                usize::try_from(*settings.policy_ceiling_version.get()).unwrap_or(usize::MAX),
+            ),
         );
-        report.field("oauth_audience", CheckValue::Plain(cli.oauth_audience.clone()));
+        report.field(
+            "oauth_audience",
+            CheckValue::Plain(settings.oauth_audience.get().clone()),
+        );
         report.field(
             "auth_platform_issuer",
-            CheckValue::Plain(cli.auth_platform_issuer.clone()),
+            CheckValue::Plain(settings.auth_platform_issuer.get().clone()),
         );
         report.field(
             "auth_platform_jwks_url",
-            CheckValue::Plain(cli.auth_platform_jwks_url.clone()),
+            CheckValue::Plain(settings.auth_platform_jwks_url.get().clone()),
         );
-        report.emit(*controls.check_config_format.get());
+        report.emit(*settings.check_config_format.get());
         return Ok(());
     }
 
@@ -88,8 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let control_key_present = !cli.control_key.is_empty();
     tracing::info!(
-        bind = %cli.bind,
-        port = cli.port,
+        bind = %settings.bind.get(),
+        port = *settings.port.get(),
         control_key_present,
         tmp_dir = %tmp_dir.display(),
         "starting zeroship-migrated"
@@ -107,8 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let auth_provider = match build_auth_provider(
-        &cli.auth_platform_issuer,
-        &cli.auth_platform_jwks_url,
+        settings.auth_platform_issuer.get(),
+        settings.auth_platform_jwks_url.get(),
     ) {
         Ok(provider) => Arc::new(provider),
         Err(message) => {
@@ -123,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let policy_config = match build_policy_config(
         &cli.policy_seal_key,
-        cli.policy_ceiling_version,
+        *settings.policy_ceiling_version.get(),
     ) {
         Ok(config) => config,
         Err(message) => {
@@ -158,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&control_pg),
                 Arc::clone(&auth_provider),
                 zeroship_core::auth::default_trusted_oauth_clients(),
-                cli.oauth_audience,
+                settings.oauth_audience.get().clone(),
             );
             let authenticator = Arc::new(ControlPlaneAuthenticator::new(
                 control_pg,
@@ -174,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 authenticator,
                 policy_config,
             ));
-            let bind_addr = format!("{}:{}", cli.bind, cli.port);
+            let bind_addr = format!("{}:{}", settings.bind.get(), settings.port.get());
             tracing::info!(bind = %bind_addr, "zeroship-migrated listening");
             web::server(async move || {
                 web::App::new()

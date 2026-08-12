@@ -29,7 +29,7 @@
 //! generates clap attributes other than `zeroship_config`; there is none today,
 //! and one added later would appear as a struct with no rows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -177,6 +177,37 @@ pub enum InventoryError {
         /// Symbol written in the declaration.
         symbol: String,
     },
+    /// A shared identity has exactly one declaring consumer.
+    ///
+    /// `shared = SYMBOL` exists to stop an identity declared in SEVERAL
+    /// binaries from de-sharing on a typo. With one consumer it buys nothing
+    /// and costs the thing the design is most wary of: the canonical name moves
+    /// out of the declaration and into the proc-macro crate's table.
+    #[error("shared identity {canonical} has one consumer ({consumer}); declare it with `name`")]
+    SingleConsumerShared {
+        /// Canonical identity.
+        canonical: String,
+        /// Its only consumer.
+        consumer: String,
+    },
+}
+
+/// A scan result: the rows, the counts, and every non-fatal finding.
+///
+/// Findings do NOT suppress the rows. The proposal's use for this command is
+/// "the before/after output becomes the per-PR migration checklist", and a
+/// checklist that prints nothing the moment one declaration is mid-edit is
+/// unusable for exactly the window it exists to serve. Fatal problems - an
+/// empty file set, a file that will not parse - still abort, because those make
+/// the ROW SET itself untrustworthy rather than one row wrong.
+#[derive(Debug, Clone)]
+pub struct InventoryReport {
+    /// Every enumerated row, sorted.
+    pub rows: Vec<InventoryRow>,
+    /// Counts across the whole scan.
+    pub summary: InventorySummary,
+    /// Non-fatal problems found while enumerating.
+    pub findings: Vec<InventoryError>,
 }
 
 /// Every current overlay leaf, for the heuristic TOML join.
@@ -287,19 +318,20 @@ fn section_type(ty: &Type) -> Option<String> {
 pub fn scan_sources(
     sources: &[(String, String)],
     overlay: &OverlayLeaves,
-) -> Result<(Vec<InventoryRow>, InventorySummary), Vec<InventoryError>> {
+) -> Result<InventoryReport, Vec<InventoryError>> {
     if sources.is_empty() {
         return Err(vec![InventoryError::EmptyScan]);
     }
     let mut rows = Vec::new();
-    let mut errors = Vec::new();
+    let mut fatal = Vec::new();
+    let mut findings = Vec::new();
     let mut structs = 0usize;
 
     for (path, source) in sources {
         let file = match syn::parse_file(source) {
             Ok(file) => file,
             Err(error) => {
-                errors.push(InventoryError::Parse {
+                fatal.push(InventoryError::Parse {
                     path: path.clone(),
                     message: error.to_string(),
                 });
@@ -317,7 +349,7 @@ pub fn scan_sources(
             structs += 1;
             match kind {
                 StructKind::Generated { binary } => {
-                    generated_rows(item_struct, path, &package, &binary, &mut rows, &mut errors);
+                    generated_rows(item_struct, path, &package, &binary, &mut rows, &mut findings);
                 }
                 StructKind::Clap { consumer } => {
                     clap_rows(item_struct, path, &package, &consumer, overlay, &mut rows);
@@ -326,13 +358,16 @@ pub fn scan_sources(
         }
     }
 
-    if !errors.is_empty() {
-        return Err(errors);
+    if !fatal.is_empty() {
+        return Err(fatal);
     }
     if structs == 0 {
         return Err(vec![InventoryError::NoCommandStructs(sources.len())]);
     }
     rows.sort();
+    findings.extend(single_consumer_shared(&rows));
+    findings.sort_by_key(ToString::to_string);
+    findings.dedup();
     let converted = rows.iter().filter(|row| row.class.is_converted()).count();
     let summary = InventorySummary {
         files: sources.len(),
@@ -341,7 +376,43 @@ pub fn scan_sources(
         converted,
         unconverted: rows.len() - converted,
     };
-    Ok((rows, summary))
+    Ok(InventoryReport {
+        rows,
+        summary,
+        findings,
+    })
+}
+
+/// Report every shared-table identity that exactly one binary declares.
+///
+/// This is the check the shared table cannot make about itself: a proc macro
+/// sees one declaration at a time and has no idea how many binaries name the
+/// same symbol. The whole-tree scan does.
+fn single_consumer_shared(rows: &[InventoryRow]) -> Vec<InventoryError> {
+    let mut consumers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for row in rows.iter().filter(|row| row.class.is_converted()) {
+        if shared_table::by_canonical(&row.canonical).is_some() {
+            consumers
+                .entry(row.canonical.as_str())
+                .or_default()
+                .insert(row.consumer.as_str());
+        }
+    }
+    consumers
+        .into_iter()
+        .filter_map(|(canonical, targets)| {
+            let only = targets.iter().copied().next()?;
+            // Fixture declarations are not real consumers and must not make a
+            // genuinely shared identity look shared, nor a single-consumer one
+            // look multi-consumer.
+            (targets.len() == 1 && !only.starts_with("zeroship-fixture-")).then(|| {
+                InventoryError::SingleConsumerShared {
+                    canonical: canonical.to_owned(),
+                    consumer: (*only).to_owned(),
+                }
+            })
+        })
+        .collect()
 }
 
 enum StructKind {
@@ -430,7 +501,7 @@ fn generated_rows(
     package: &str,
     binary: &str,
     rows: &mut Vec<InventoryRow>,
-    errors: &mut Vec<InventoryError>,
+    findings: &mut Vec<InventoryError>,
 ) {
     let Fields::Named(named) = &item.fields else {
         return;
@@ -450,11 +521,13 @@ fn generated_rows(
             ConfigIdentity::Shared(symbol) => match shared_table::by_symbol(&symbol) {
                 Some(identity) => (identity.canonical.to_owned(), class),
                 None => {
-                    errors.push(InventoryError::UnknownShared {
+                    // A FINDING, not an abort: the row is still real and still
+                    // belongs in the checklist, it just cannot be projected.
+                    findings.push(InventoryError::UnknownShared {
                         location: where_.clone(),
-                        symbol,
+                        symbol: symbol.clone(),
                     });
-                    continue;
+                    (format!("<unknown-shared:{symbol}>"), RowClass::Unconverted)
                 }
             },
             ConfigIdentity::Missing => ("-".to_owned(), RowClass::Unconverted),
@@ -817,8 +890,10 @@ struct DemoCli {
     controls: DemoControlsSources,
 }
 "#;
-        let (rows, summary) =
+        let report =
             scan_sources(&source("crates/demo/src/main.rs", body), &no_overlay()).expect("scan");
+        let (rows, summary) = (&report.rows, report.summary);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(summary.rows, 2, "the flattened container must not be a row");
         assert_eq!(summary.unconverted, 2);
 
@@ -854,8 +929,9 @@ struct DemoControls {
     pub allow_unsigned: BootstrapControl<bool>,
 }
 "#;
-        let (rows, summary) =
+        let report =
             scan_sources(&source("crates/demo/src/config.rs", body), &no_overlay()).expect("scan");
+        let (rows, summary) = (&report.rows, report.summary);
         assert_eq!(summary.converted, 4);
         assert_eq!(summary.unconverted, 0);
 
@@ -892,15 +968,57 @@ struct DemoControls {
     pub log_filter: Operational<String>,
 }
 "#;
-        let errors = scan_sources(&source("crates/demo/src/config.rs", body), &no_overlay())
-            .expect_err("unknown symbol");
+        let report = scan_sources(&source("crates/demo/src/config.rs", body), &no_overlay())
+            .expect("an unknown symbol is a finding, not a fatal error");
         assert_eq!(
-            errors,
+            report.findings,
             vec![InventoryError::UnknownShared {
                 location: "crates/demo/src/config.rs:4".to_owned(),
                 symbol: "OBSERVABILITY_LOG_FILTR".to_owned(),
             }]
         );
+        // The row survives: a checklist that drops the line it cannot project
+        // is a checklist that under-reports exactly when it matters most.
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.rows[0].canonical, "<unknown-shared:OBSERVABILITY_LOG_FILTR>");
+    }
+
+    #[test]
+    fn a_shared_identity_with_one_consumer_is_reported() {
+        // `shared = SYMBOL` earns its cost only when SEVERAL binaries declare
+        // the identity; with one it just moves the canonical name out of the
+        // declaration and into the proc-macro crate. No single declaration can
+        // see this - only the whole-tree scan can.
+        let one = r"
+#[zeroship_config(binary = 'zeroship-alpha', scope = 'alpha')]
+struct AlphaSettings {
+    #[config(shared = BLOB_STORE, default = String::new())]
+    pub blob_store: Operational<String>,
+}
+"
+        .replace('\'', "\"");
+        let report = scan_sources(&source("crates/alpha/src/config.rs", &one), &no_overlay())
+            .expect("scan");
+        assert_eq!(
+            report.findings,
+            vec![InventoryError::SingleConsumerShared {
+                canonical: "blob_store".to_owned(),
+                consumer: "zeroship-alpha".to_owned(),
+            }]
+        );
+
+        // The one-variable control: the SAME declaration plus a second
+        // consumer. Only this separates "the check fires on shared symbols"
+        // from "the check fires on everything".
+        let two = format!(
+            "{one}\n{}",
+            one.replace("zeroship-alpha", "zeroship-beta")
+                .replace("alpha", "beta")
+                .replace("AlphaSettings", "BetaSettings")
+        );
+        let shared = scan_sources(&source("crates/alpha/src/config.rs", &two), &no_overlay())
+            .expect("scan");
+        assert!(shared.findings.is_empty(), "{:?}", shared.findings);
     }
 
     #[test]
@@ -940,7 +1058,8 @@ struct DemoCli {
     control_key: String,
 }
 "#;
-        let (rows, _) = scan_sources(&source("crates/demo/src/main.rs", body), &leaves).expect("scan");
+        let report = scan_sources(&source("crates/demo/src/main.rs", body), &leaves).expect("scan");
+        let rows = &report.rows;
         assert_eq!(rows[0].toml, "secrets.control_key");
         assert_eq!(
             rows[0].toml_evidence,
@@ -959,8 +1078,8 @@ struct DemoCli {
     port: u16,
 }
 "#;
-        let (rows, _) = scan_sources(&source("crates/demo/src/main.rs", body), &no_overlay()).expect("scan");
-        let rendered = format_tsv(&rows);
+        let report = scan_sources(&source("crates/demo/src/main.rs", body), &no_overlay()).expect("scan");
+        let rendered = format_tsv(&report.rows);
         let mut lines = rendered.lines();
         let header = lines.next().expect("header");
         let row = lines.next().expect("row");

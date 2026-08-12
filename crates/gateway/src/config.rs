@@ -105,8 +105,13 @@ pub struct GateSettings {
     pub origin_scheme: Operational<OriginScheme>,
 
     /// Additional exact origins accepted by same-origin guards.
+    ///
+    /// Named here rather than in the shared table because the gateway is its
+    /// only consumer. `shared = SYMBOL` exists to stop an identity declared in
+    /// SEVERAL binaries from de-sharing on a typo; for one consumer it buys
+    /// nothing and moves the canonical name away from the field it describes.
     #[arg(value_delimiter = ',')]
-    #[config(shared = TRUSTED_ORIGINS, default = Vec::new())]
+    #[config(name = "trusted_origins", default = Vec::new())]
     pub trusted_origins: Operational<Vec<TrustedOrigin>>,
 
     /// Trust `X-Forwarded-For` from an upstream proxy.
