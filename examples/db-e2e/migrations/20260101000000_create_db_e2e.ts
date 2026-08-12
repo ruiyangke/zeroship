@@ -56,9 +56,25 @@ export default {
         // `t.encrypted()` takes only `of`, and `keyId` appears ZERO times in
         // the whole of sdks/migrate/src. The vendored engine says so itself, by
         // design and fail-closed rather than silently wrong -- see the comment
-        // and test at third_party/zero-migrate/.../render/fold.rs:7930
-        // ("op.* can author ONLY a DEFAULT-mode encrypted column ... there is
-        // no IR surface for a non-default mode/keyId").
+        // and test in third_party/zero-migrate/.../render/fold.rs, anchored on
+        // the text "op.* can author ONLY a DEFAULT-mode encrypted column ...
+        // there is no IR surface for a non-default mode/keyId" (quote the text,
+        // not a line number: it has already moved once upstream).
+        //
+        // THE VALUE IS OVERWRITTEN, NOT DROPPED, which is the sharper and more
+        // useful statement -- established 2026-08-12 with zero-migrate over
+        // ZEROSHIP-2026-08-12-251/252 and confirmed by my own read of the
+        // vendored tree. The op lane DOES build the encrypted facet:
+        //
+        //     fold.rs `fold_create_column_to_field`
+        //       -> lower.rs `ir_column_to_field_resolved_create`
+        //         -> lower.rs `ir_column_to_field`, whose ColType::Encrypted arm
+        //            emits a literal `{ mode: "randomised", keyId: "default",
+        //            wraps: <inner> }`
+        //
+        // so the descriptor comes out WITH a keyId that the creator never chose,
+        // rather than with the facet missing. That is why the failure below is
+        // "key 'default' not configured" and not "no encryption configured".
         //
         // The OBSERVABLE consequence, measured 2026-08-12: the generated
         // descriptor comes out carrying `keyId: "default"`, so the running app
