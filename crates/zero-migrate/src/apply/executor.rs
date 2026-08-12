@@ -471,15 +471,11 @@ pub enum ApplyError {
         #[source]
         source: BackendError,
     },
-    /// A guarded migration's `ifNotExists` existence guard found
-    /// the target object ALREADY PRESENT with a shape that DIVERGES from (or cannot
-    /// be proven equal to) the declared one. This is a fail-closed drift error — the
-    /// catalog probe ran under the held advisory lock + open txn and
-    /// [`decide`](crate::render::existence_probe::decide) returned
-    /// [`FailDrift`](crate::render::existence_probe::GuardVerdict::FailDrift); the transaction
-    /// was rolled back and NOTHING was applied or journaled. Never a silent skip
-    /// over a divergence (the whole point of the guard). Surfaces to the deploy
-    /// path's creator-facing error like any other [`ApplyError`].
+    /// A guarded migration's existence probe found a shape that diverges from, or
+    /// cannot be proven equal to, the declared object. This is a fail-closed drift
+    /// error. The backend reads the catalog under its held apply lock and returns
+    /// this error before the guarded SQL or completion journal entry runs. It also
+    /// carries backend-specific refusals where proving equality is not implemented.
     #[error(
         "existence-guard drift on migration {version}: {object} field `{field}` \
          declared {expected} but the live database has {actual} — the guarded op \

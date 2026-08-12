@@ -1103,6 +1103,7 @@ mod render_tests {
         ValueFormat, CURRENT_IR_VERSION,
     };
     use crate::model::migration::{Checksum, MigrationFlags};
+    use crate::model::probe::{GuardDir, GuardProbe};
     use crate::model::snapshot::IdDefaultSnapshot;
     use serde_json::json;
     use std::cell::RefCell;
@@ -1605,6 +1606,28 @@ mod render_tests {
             preconditions: Vec::new(),
             existence_guard: None,
         }
+    }
+
+    fn guarded_migration(up: &str, probe: GuardProbe) -> Migration {
+        let mut migration = trivial_migration();
+        migration.name = "guarded object".into();
+        migration.up = up.into();
+        migration.down = None;
+        migration.checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: &migration.up,
+            down: migration.down.as_deref(),
+            flags: &migration.flags,
+            owner_app: &migration.owner_app,
+            depends_on: &migration.depends_on,
+            supersedes: &migration.supersedes,
+            preconditions: &migration.preconditions,
+        });
+        migration.existence_guard = Some(probe);
+        migration
+    }
+
+    fn catalog_table(table: &str) -> Row {
+        Row::new(vec!["table_name".into()], vec![Value::Text(table.into())])
     }
 
     fn step_checksum(label: &str) -> Checksum {
@@ -4551,6 +4574,453 @@ mod render_tests {
             !all.contains("$1") && !all.contains("$2") && !all.contains("$3"),
             "no Postgres $N placeholders leak onto the MySQL apply path: {all}"
         );
+    }
+
+    #[compio::test]
+    async fn guarded_create_against_absent_mysql_object_runs_after_the_probe() {
+        let rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            vec![catalog_column(
+                "users",
+                "email",
+                "varchar(191)",
+                Some("utf8mb4"),
+                Some("utf8mb4_bin"),
+                false,
+                1,
+            )],
+            Vec::new(),
+            Vec::new(),
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let effective = crate::test_fixtures::operator_with_data_security(
+            &["proj_x", "reporting"],
+            &[],
+            false,
+            crate::model::policy::DestructiveOps::Allow,
+        );
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
+        let up = "CREATE INDEX users_email_idx ON reporting.users (email)";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Index {
+                schema: "reporting".into(),
+                table: "users".into(),
+                name: "users_email_idx".into(),
+                direction: GuardDir::IfNotExists,
+                expect: Some((false, vec!["email".into()])),
+                ownership_only: false,
+            },
+        );
+
+        backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await
+            .expect("an absent guarded object must run the create");
+
+        let log = rec.log.borrow();
+        let snapshot = log
+            .iter()
+            .position(|entry| entry.contains("SELECT VERSION() AS server_version"))
+            .expect("the MySQL existence probe must snapshot the live schema");
+        let started = log
+            .iter()
+            .position(|entry| {
+                entry.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight")
+            })
+            .expect("the running create must arm its inflight marker");
+        let ddl = log
+            .iter()
+            .position(|entry| entry == &format!("batch: {up}"))
+            .expect("the absent object must let the create run");
+        assert!(snapshot < started && started < ddl, "{log:?}");
+        assert!(
+            rec.binds
+                .borrow()
+                .iter()
+                .any(|binds| binds == &[Bind::Text("reporting".into())]),
+            "the allowed cross-schema probe must snapshot reporting"
+        );
+    }
+
+    #[compio::test]
+    async fn guarded_create_against_present_mysql_object_noops_and_skips_ddl() {
+        let rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            vec![catalog_column(
+                "users",
+                "email",
+                "varchar(191)",
+                Some("utf8mb4"),
+                Some("utf8mb4_bin"),
+                false,
+                1,
+            )],
+            vec![catalog_index_part(
+                "users",
+                "users_email_idx",
+                1,
+                1,
+                Some("email"),
+                None,
+                Some("A"),
+                None,
+            )],
+            Vec::new(),
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "CREATE INDEX users_email_idx ON proj_x.users (email)";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Index {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                name: "users_email_idx".into(),
+                direction: GuardDir::IfNotExists,
+                expect: Some((false, vec!["email".into()])),
+                ownership_only: false,
+            },
+        );
+
+        backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await
+            .expect("a matching present object must resolve as satisfied");
+
+        let all = rec.log.borrow().join("\n");
+        assert!(all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
+        assert!(
+            !all.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight"),
+            "a satisfied no-op must not arm an inflight DDL marker: {all}"
+        );
+        assert!(
+            all.contains("'applied', ?, ?, ?, ?, ?, 'completed', 'success', ?"),
+            "a satisfied no-op must still journal completion: {all}"
+        );
+    }
+
+    #[compio::test]
+    async fn guarded_drop_against_present_mysql_object_runs_after_the_probe() {
+        let rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "DROP TABLE proj_x.users";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Table {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                direction: GuardDir::IfExists,
+                expect_columns: Vec::new(),
+            },
+        );
+
+        backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await
+            .expect("a present guarded object must run the drop");
+
+        let log = rec.log.borrow();
+        let snapshot = log
+            .iter()
+            .position(|entry| entry.contains("SELECT VERSION() AS server_version"))
+            .expect("the MySQL existence probe must snapshot the live schema");
+        let ddl = log
+            .iter()
+            .position(|entry| entry == &format!("batch: {up}"))
+            .expect("the present object must let the drop run");
+        assert!(snapshot < ddl, "{log:?}");
+    }
+
+    #[compio::test]
+    async fn guarded_drop_against_absent_mysql_object_noops_and_skips_ddl() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "DROP TABLE proj_x.users";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Table {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                direction: GuardDir::IfExists,
+                expect_columns: Vec::new(),
+            },
+        );
+
+        backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await
+            .expect("an absent guarded object must resolve as satisfied");
+
+        let all = rec.log.borrow().join("\n");
+        assert!(all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
+        assert!(
+            !all.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight"),
+            "a satisfied no-op must not arm an inflight DDL marker: {all}"
+        );
+        assert!(
+            all.contains("'applied', ?, ?, ?, ?, ?, 'completed', 'success', ?"),
+            "a satisfied no-op must still journal completion: {all}"
+        );
+    }
+
+    #[compio::test]
+    async fn mysql_existence_probe_outside_policy_scope_is_refused_before_snapshot() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "DROP TABLE forbidden.users";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Table {
+                schema: "forbidden".into(),
+                table: "users".into(),
+                direction: GuardDir::IfExists,
+                expect_columns: Vec::new(),
+            },
+        );
+        let expected_version = migration.version.as_str().to_string();
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await;
+
+        match result {
+            Err(ApplyError::ExistenceGuardSchemaOutOfScope {
+                version,
+                probe_schema,
+            }) => {
+                assert_eq!(version, expected_version);
+                assert_eq!(probe_schema, "forbidden");
+            }
+            other => {
+                panic!("expected ExistenceGuardSchemaOutOfScope for the MySQL probe, got {other:?}")
+            }
+        }
+        let all = rec.log.borrow().join("\n");
+        assert!(!all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
+    }
+
+    #[compio::test]
+    async fn mysql_guard_refuses_a_decision_that_needs_column_type_equality() {
+        let rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            vec![catalog_column(
+                "users",
+                "email",
+                "varchar(64)",
+                Some("utf8mb4"),
+                Some("utf8mb4_bin"),
+                false,
+                1,
+            )],
+            Vec::new(),
+            Vec::new(),
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "ALTER TABLE proj_x.users ADD COLUMN email VARCHAR(255) NOT NULL";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Column {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                column: "email".into(),
+                direction: GuardDir::IfNotExists,
+                expect: Some(("character varying(255)".into(), false)),
+            },
+        );
+        let expected_version = migration.version.as_str().to_string();
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await;
+
+        match result {
+            Err(ApplyError::ExistenceGuardDrift {
+                version,
+                object,
+                field,
+                actual,
+                ..
+            }) => {
+                assert_eq!(version, expected_version);
+                assert_eq!(object, "column users.email");
+                assert_eq!(field, "data_type");
+                assert_eq!(
+                    actual,
+                    "<unknown: MySQL column-type equality is not implemented yet>"
+                );
+            }
+            other => panic!("expected a typed MySQL column-type refusal, got {other:?}"),
+        }
+        let all = rec.log.borrow().join("\n");
+        assert!(all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(
+            !all.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight"),
+            "the refusal must happen before record_started: {all}"
+        );
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
+
+        let table_rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            vec![catalog_column(
+                "users",
+                "email",
+                "varchar(64)",
+                Some("utf8mb4"),
+                Some("utf8mb4_bin"),
+                false,
+                1,
+            )],
+            Vec::new(),
+            Vec::new(),
+        );
+        let table_backend = MysqlBackend::new_generic(&table_rec);
+        let table_up = "CREATE TABLE proj_x.users (email VARCHAR(255) NOT NULL)";
+        let table_migration = guarded_migration(
+            table_up,
+            GuardProbe::Table {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                direction: GuardDir::IfNotExists,
+                expect_columns: vec![crate::model::probe::ExpectColumn {
+                    name: "email".into(),
+                    data_type: "character varying(255)".into(),
+                    nullable: false,
+                }],
+            },
+        );
+        let table_version = table_migration.version.as_str().to_string();
+
+        let table_result = table_backend
+            .apply_one(&cfg, &table_migration, "tester", false, &[], "apply")
+            .await;
+
+        match table_result {
+            Err(ApplyError::ExistenceGuardDrift {
+                version,
+                object,
+                field,
+                actual,
+                ..
+            }) => {
+                assert_eq!(version, table_version);
+                assert_eq!(object, "table users");
+                assert_eq!(field, "data_type");
+                assert_eq!(
+                    actual,
+                    "<unknown: MySQL column-type equality is not implemented yet>"
+                );
+            }
+            other => panic!("expected a typed MySQL table-type refusal, got {other:?}"),
+        }
+        let table_log = table_rec.log.borrow().join("\n");
+        assert!(
+            table_log.contains("SELECT VERSION() AS server_version"),
+            "{table_log}"
+        );
+        assert!(
+            !table_log.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight"),
+            "the refusal must happen before record_started: {table_log}"
+        );
+        assert!(
+            !table_log.contains(&format!("batch: {table_up}")),
+            "{table_log}"
+        );
+    }
+
+    #[compio::test]
+    async fn mysql_guard_carries_an_unresolved_constraint_refusal_to_the_operator() {
+        let rec = RecordingSession::with_catalog(
+            vec![catalog_table("users")],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "ALTER TABLE proj_x.users DROP CHECK users_age_check";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Constraint {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                name: "users_age_check".into(),
+                direction: GuardDir::IfExists,
+                expect_kind: None,
+                expect_definition: None,
+            },
+        );
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", false, &[], "apply")
+            .await;
+
+        match result {
+            Err(ApplyError::ExistenceGuardDrift {
+                object,
+                field,
+                expected,
+                actual,
+                ..
+            }) => {
+                assert_eq!(object, "constraint users_age_check");
+                assert_eq!(field, "presence");
+                assert_eq!(expected, "<absent>");
+                assert!(
+                    actual.contains("retains no CHECK constraint identity"),
+                    "{actual}"
+                );
+            }
+            other => panic!("expected the unresolved MySQL constraint refusal, got {other:?}"),
+        }
+        let all = rec.log.borrow().join("\n");
+        assert!(all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(
+            !all.contains("INSERT INTO `proj_x_migrations`.schema_migrations_inflight"),
+            "the refusal must happen before record_started: {all}"
+        );
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
+    }
+
+    #[compio::test]
+    async fn mysql_inflight_refusal_precedes_the_existence_probe() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let up = "DROP TABLE proj_x.users";
+        let migration = guarded_migration(
+            up,
+            GuardProbe::Table {
+                schema: "proj_x".into(),
+                table: "users".into(),
+                direction: GuardDir::IfExists,
+                expect_columns: Vec::new(),
+            },
+        );
+
+        let result = backend
+            .apply_one(&cfg, &migration, "tester", true, &[], "apply")
+            .await;
+
+        assert!(
+            matches!(result, Err(ApplyError::Backend(ref message)) if message.contains("inflight marker")),
+            "{result:?}"
+        );
+        let all = rec.log.borrow().join("\n");
+        assert!(!all.contains("SELECT VERSION() AS server_version"), "{all}");
+        assert!(!all.contains(&format!("batch: {up}")), "{all}");
     }
 
     /// MySQL reads `max_execution_time = 0` and `innodb_lock_wait_timeout = 0` as

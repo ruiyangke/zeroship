@@ -45,12 +45,13 @@ use std::time::Instant;
 
 use crate::apply::backend::mysql::journal_sql;
 use crate::apply::backend::ProjectLockHolder;
-use crate::apply::executor::{ApplyError, RollbackError};
+use crate::apply::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
 use crate::apply::journal::{self, CompletedRecord};
 use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, SqlSession};
 use crate::model::migration::{Checksum, Migration};
+use crate::model::probe::{GuardDir, GuardProbe};
 use crate::render::step::BindValue;
 
 use super::MysqlSessionSnapshot;
@@ -783,9 +784,10 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 ///
 /// 1. Refuse an unmatched inflight marker. Auto-committing MySQL DDL may already
 ///    have landed, and generated `CREATE`/`ALTER` SQL cannot be blindly replayed.
-/// 2. Write the `started` marker (`INSERT IGNORE`).
-/// 3. Run the migration's `up` (auto-commits).
-/// 4. Atomically append the immutable `completed` row, append every squash edge,
+/// 2. Resolve an authorized existence guard against a live catalog snapshot.
+/// 3. Write the `started` marker.
+/// 4. Run the migration's `up` (auto-commits).
+/// 5. Atomically append the immutable `completed` row, append every squash edge,
 ///    and clear the marker in one InnoDB transaction. The caller-supplied journal
 ///    kind is preserved so repeatable checksums remain discoverable.
 ///
@@ -797,7 +799,8 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 ///
 /// # Errors
 /// [`ApplyError::MigrationFailed`] if the `up` failed; [`ApplyError::Db`] /
-/// [`ApplyError::Journal`] on infrastructure failure.
+/// [`ApplyError::Journal`] on infrastructure failure; an existence-guard error
+/// when its schema is unauthorized or its live target cannot be safely resolved.
 pub(crate) async fn apply_two_phase<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -863,6 +866,88 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
             )));
         }
     };
+
+    if let Some(probe) = &m.existence_guard {
+        authorize_existence_guard_schema(cfg, m, probe.schema())?;
+        let probe_started = Instant::now();
+        let live = super::drift_sql::snapshot_schema_for(conn, probe.schema())
+            .await
+            .map_err(|error| match error {
+                crate::apply::drift::DriftError::Db(error) => ApplyError::Db(error),
+                crate::apply::drift::DriftError::Journal(error) => ApplyError::Journal(error),
+                crate::apply::drift::DriftError::Snapshot(error)
+                | crate::apply::drift::DriftError::Backend(error) => ApplyError::Backend(error),
+            })?;
+
+        // Refuse a present table or column create before `decide` can fold the
+        // lossy canonical type. The probe does not yet carry the modifier-bearing
+        // MySQL contract needed to prove column-type equality.
+        let type_equality_refusal = match probe {
+            GuardProbe::Table {
+                table,
+                direction: GuardDir::IfNotExists,
+                ..
+            } if live.tables.contains_key(table) => Some((
+                format!("table {table}"),
+                "<declared MySQL table column types>".to_string(),
+            )),
+            GuardProbe::Column {
+                table,
+                column,
+                direction: GuardDir::IfNotExists,
+                expect,
+                ..
+            } if live.tables.get(table).is_some_and(|snapshot| {
+                snapshot
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+            }) =>
+            {
+                Some((
+                    format!("column {table}.{column}"),
+                    expect
+                        .as_ref()
+                        .map_or("<declared MySQL column type>", |(data_type, _)| data_type)
+                        .to_string(),
+                ))
+            }
+            _ => None,
+        };
+        if let Some((object, expected)) = type_equality_refusal {
+            return Err(ApplyError::ExistenceGuardDrift {
+                version: version.to_string(),
+                object,
+                field: "data_type".to_string(),
+                expected,
+                actual: "<unknown: MySQL column-type equality is not implemented yet>".to_string(),
+            });
+        }
+
+        match crate::render::existence_probe::decide(
+            probe,
+            &live,
+            crate::schema::query::SqlDialect::Mysql,
+        ) {
+            crate::render::existence_probe::GuardVerdict::RunBare => {}
+            crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
+                let exec_ms =
+                    i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                finalize_two_phase(conn, cfg, m, applied_by, exec_ms, supersedes, kind).await?;
+                return Ok(false);
+            }
+            crate::render::existence_probe::GuardVerdict::FailDrift(divergence) => {
+                return Err(ApplyError::ExistenceGuardDrift {
+                    version: version.to_string(),
+                    object: divergence.object,
+                    field: divergence.field,
+                    expected: divergence.expected,
+                    actual: divergence.actual,
+                });
+            }
+        }
+    }
+
     // Arm the started marker before the `up` runs.
     journal_sql::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by)
         .await?;
