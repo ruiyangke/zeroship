@@ -75,3 +75,31 @@ describe("SPEC.md against the implementation", () => {
     ).toEqual([]);
   });
 });
+
+describe("README.md against the implementation", () => {
+  const index = readFileSync(resolve(process.cwd(), "src/index.ts"), "utf8");
+  const readme = readFileSync(resolve(process.cwd(), "README.md"), "utf8");
+  const config = readFileSync(resolve(process.cwd(), "src/server/config.ts"), "utf8");
+
+  /**
+   * Only the two counts that MISLEAD when stale are gated, not every number in
+   * the file. "82 procedures" and "nine are anonymous" are what a reader uses
+   * to judge the size and the exposure of the app; a wrong anonymous count in
+   * particular understates the public surface.
+   */
+  it("states the real procedure count", () => {
+    const claimed = readme.match(/\*\*(\d+) explicitly named RPC procedures\*\*/)?.[1];
+    expect(claimed, "README.md no longer states a procedure count in the expected form").toBeDefined();
+    const actual = index.match(
+      /^export const [A-Za-z0-9_]+ = (?:query|mutation|action|stream)\(/gm,
+    )?.length;
+    expect(Number(claimed)).toBe(actual);
+  });
+
+  it("states the real anonymous count", () => {
+    const claimed = readme.match(/Nine are anonymous/i) ? 9 : null;
+    expect(claimed, "README.md no longer states the anonymous count as a word").not.toBeNull();
+    const actual = (config.match(/"rpc:[^"]+":\s*\{[^}]*auth:\s*"anon"/g) ?? []).length;
+    expect(claimed).toBe(actual);
+  });
+});
