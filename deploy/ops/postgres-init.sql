@@ -1,22 +1,22 @@
--- ops/postgres-init.sql — runs ONCE on a fresh postgres data dir
+-- ops/postgres-init.sql - runs ONCE on a fresh postgres data dir
 -- (mounted into /docker-entrypoint-initdb.d/).
 --
 -- The whole platform shares ONE database with a single `zeroship` schema for
 -- all system tables. Most queries are fully qualified
 -- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
--- `crates/control/src/admin_handlers.rs` `UPDATE apps …`), so every connection
+-- `crates/control/src/admin_handlers.rs` `UPDATE apps ...`), so every connection
 -- needs `zeroship` on its search_path. Postgres's default role search_path
 -- ("$user", public) omits it, which makes those queries fail with
 -- `relation "apps" does not exist`.
 --
 -- Setting the role default here (it's allowed to list a schema that doesn't
--- exist yet — it's created by the platform migration runner on first
+-- exist yet - it's created by the platform migration runner on first
 -- boot) gives every connection the right resolution order.
 --
--- This covers `postgres` only — the role the `migrate` service
+-- This covers `postgres` only - the role the `migrate` service
 -- (and the worker's plugin-db PROVISIONING connection) connects as. The
 -- per-service login roles (zeroship_{auth,control,gateway}; sandbox_{app,
--- audit,gdpr}) get their OWN `ALTER ROLE … SET search_path = zeroship, public`
+-- audit,gdpr}) get their OWN `ALTER ROLE ... SET search_path = zeroship, public`
 -- inside migrations V0025/V0026, since those roles do not exist yet at
 -- initdb time (the platform migration runner creates them on first boot).
 ALTER ROLE postgres SET search_path = zeroship, public;

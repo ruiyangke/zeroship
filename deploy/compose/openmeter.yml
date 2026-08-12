@@ -1,10 +1,10 @@
 # ============================================================================
-# deploy/compose/openmeter.yml — a DEDICATED, opt-in OpenMeter stack for the
+# deploy/compose/openmeter.yml - a DEDICATED, opt-in OpenMeter stack for the
 # zeroship metering-export FAITHFUL e2e (tests/e2e_openmeter_export.sh).
 #
-# ⚠️  This is OPT-IN and ISOLATED on purpose. It is a SEPARATE compose project
+# WARNING:  This is OPT-IN and ISOLATED on purpose. It is a SEPARATE compose project
 #     (`name: zeroship-openmeter`) with its OWN network + volumes and its OWN
-#     127.0.0.1-bound port band — it shares NOTHING with the main
+#     127.0.0.1-bound port band - it shares NOTHING with the main
 #     deploy/compose/docker-compose.yml stack. In particular its internal Postgres is OpenMeter
 #     metadata only and is NOT published on :5440 (the zeroship billing PG the
 #     cargo integration tests use). Bringing this up does NOT touch the main
@@ -14,7 +14,7 @@
 # Kafka, a sink-worker drains Kafka into ClickHouse (the aggregate store), Redis
 # backs CloudEvent (source,id) dedup, and Postgres holds meter/namespace
 # metadata. The aggregate the zeroship C2 reconcile reads is therefore
-# EVENTUALLY consistent (ingest 204 → kafka → sink-worker → clickhouse), which
+# EVENTUALLY consistent (ingest 204 -> kafka -> sink-worker -> clickhouse), which
 # the e2e accounts for by polling the query.
 #
 # Pinned images mirror OpenMeter's upstream quickstart (digests included so the
@@ -27,7 +27,7 @@
 #   OpenMeter API:  http://127.0.0.1:48888  (ingest POST /api/v1/events,
 #                                            query GET /api/v1/meters/<slug>/query)
 #
-# DEV ONLY — weak passwords + insecure portal token, see deploy/ops/openmeter-config.yaml.
+# DEV ONLY - weak passwords + insecure portal token, see deploy/ops/openmeter-config.yaml.
 # ============================================================================
 name: zeroship-openmeter
 
@@ -97,7 +97,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_HOST_AUTH_METHOD: md5
     command: ["postgres", "-c", "wal_level=logical"]
-    # OpenMeter metadata ONLY. Deliberately NOT published on :5440 — that is the
+    # OpenMeter metadata ONLY. Deliberately NOT published on :5440 - that is the
     # zeroship billing PG. No host port at all (internal to this project net).
     healthcheck:
       test: ["CMD", "pg_isready", "-d", "postgres", "-U", "postgres"]
@@ -105,7 +105,7 @@ services:
       timeout: 5s
       retries: 30
 
-  # The OpenMeter API — serves CloudEvents ingest (POST /api/v1/events) and the
+  # The OpenMeter API - serves CloudEvents ingest (POST /api/v1/events) and the
   # meter aggregate query (GET /api/v1/meters/<slug>/query). zeroship's
   # OpenMeterClient (--openmeter-url http://127.0.0.1:48888) hits THIS.
   openmeter:
@@ -130,8 +130,8 @@ services:
       timeout: 3s
       retries: 40
 
-  # Drains Kafka → ClickHouse. WITHOUT this the aggregate /query stays empty even
-  # after a 204 ingest — this is the source of the eventual-consistency lag the
+  # Drains Kafka -> ClickHouse. WITHOUT this the aggregate /query stays empty even
+  # after a 204 ingest - this is the source of the eventual-consistency lag the
   # e2e polls for (the key real-API divergence from the synchronous mock).
   sink-worker:
     image: ghcr.io/openmeterio/openmeter:latest

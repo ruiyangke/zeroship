@@ -15,7 +15,7 @@ uplinks:
     url: https://registry.npmjs.org/
 
 # Reads stay open; publish/unpublish are restricted to the named
-# operator-provisioned publisher account (SEC-8) — never $authenticated,
+# operator-provisioned publisher account (SEC-8) - never $authenticated,
 # which any self-registered or sandbox-held token would satisfy.
 packages:
   '@zeroship/*':

@@ -1,4 +1,4 @@
-// Self-service creator baseline — every authenticated User, regardless of
+// Self-service creator baseline - every authenticated User, regardless of
 // platform role (including the zero-privilege DEFAULT_PLATFORM_ROLE "none"),
 // may manage their OWN account and operate the platform-level, self-scoped
 // surfaces:
@@ -9,7 +9,7 @@
 //                  list/create surface, never a concrete foreign App)
 //   - account:read / account:write  view + revoke their own OAuth grants
 //
-// CRITICAL: this is scoped to `resource is Resource` — the synthetic
+// CRITICAL: this is scoped to `resource is Resource` - the synthetic
 // `Resource::"*"` entity that backs `Resource::Any`. It does NOT match a
 // concrete `App` resource, so it grants ZERO authority over any specific app
 // (foreign or owned). Per-app authority still flows exclusively through the
