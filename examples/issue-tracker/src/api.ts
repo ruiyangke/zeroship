@@ -78,4 +78,23 @@ export {
   reportByAssignee,
   reportTrend,
   reportTimeToResolve,
+
+  // Access control -- groups, and product- and bug-level restriction
+  createGroup,
+  listGroups,
+  addGroupMember,
+  removeGroupMember,
+  restrictProduct,
+  unrestrictProduct,
+  restrictBug,
+  unrestrictBug,
+
+  // Voting
+  castVote,
+  listMyVotes,
+
+  // Watching
+  addWatcher,
+  removeWatcher,
+  listWatchers,
 } from "./index";
