@@ -1885,7 +1885,21 @@ fi
 
 DB9_APP="dbtodos9"
 DB9_READY=0
-if ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos9-build.log 2>&1 && [ -f "$TODOS/dist/app.zship" ]; then
+# The build and the artifact check are SEPARATE conditions, deliberately. They
+# were one `&&` chain, and the else-arm said "does not build" for both - so an
+# app that built fine but left no artifact reported a build failure, sending the
+# reader to the wrong half. MEASURED 2026-08-12: a run failed here with a
+# ZERO-BYTE build log, which left the printed message empty after the colon and
+# nothing to tell the two apart; `pnpm --filter db-todos build` by hand
+# immediately afterwards succeeded, so the failure was not persistent and its
+# cause is still unidentified. That is the situation this split exists to stop
+# recurring: capture the exit code, say which half failed, and report the log
+# SIZE even when it is empty (an empty log is itself a datum - it means the
+# command produced no output at all, which a successful vite build never does).
+( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos9-build.log 2>&1
+DB9_BUILD_RC=$?
+DB9_BUILD_BYTES=$(wc -c </tmp/gp-dbtodos9-build.log 2>/dev/null | tr -d ' ')
+if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   pass "db-todos builds through the real vite-plugin for the deployed leg ($(du -k "$TODOS/dist/app.zship" | cut -f1)KB)"
 
   DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
@@ -1933,7 +1947,14 @@ NODE
     fi
   fi
 else
-  fail "db-todos does not build for the deployed leg: $(tail -5 /tmp/gp-dbtodos9-build.log | tr '\n' ' ')"
+  if [ "$DB9_BUILD_RC" != "0" ]; then
+    fail "db-todos BUILD FAILED for the deployed leg (exit=$DB9_BUILD_RC, log=${DB9_BUILD_BYTES:-0} bytes): $(tail -5 /tmp/gp-dbtodos9-build.log | tr '\n' ' ')
+      A ZERO-byte log here means the command produced no output at all, which a
+      successful vite build never does - suspect the subshell being killed or
+      \`cd $TODOS\` failing, NOT a compile error."
+  else
+    fail "db-todos BUILT (exit=0) but left no $TODOS/dist/app.zship - the artifact, not the build, is what is missing"
+  fi
 fi
 
 DB9_BASE="http://localhost:$GATE_PORT/apps/$DB9_APP"
