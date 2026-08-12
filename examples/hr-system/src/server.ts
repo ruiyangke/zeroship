@@ -307,7 +307,12 @@ export const dbSchema = {
   policies: {
     title:         t.string().required(),
     content:       t.string(),
-    version:       t.string(),
+    // RENAMED from `version`, which is one of the seven RESERVED system-column
+    // names (docs/reference/db.md). The platform injects its own `version`
+    // optimistic-concurrency counter, so a creator column of that name is
+    // refused at gen-types: `createTable "policies" declares column
+    // "version", which collides with an injected system column`.
+    policyVersion: t.string(),
     effectiveDate: t.number(),
     category:      t.string().enum("handbook", "conduct", "safety", "privacy").required(),
   },

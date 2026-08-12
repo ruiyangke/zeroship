@@ -1,0 +1,2301 @@
+{
+  "version": 1,
+  "collections": {
+    "applicants": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "jobPostingId": {
+          "type": "number",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "email": {
+          "type": "string",
+          "required": true
+        },
+        "phone": {
+          "type": "string"
+        },
+        "resumeUrl": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string",
+          "required": true,
+          "default": "applied"
+        },
+        "rating": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "appliedDate": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "applicants_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "applicants_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "applicants_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "auditLog": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "actorId": {
+          "type": "number",
+          "required": true
+        },
+        "action": {
+          "type": "string",
+          "required": true
+        },
+        "entityType": {
+          "type": "string",
+          "required": true
+        },
+        "entityId": {
+          "type": "number",
+          "required": true
+        },
+        "changesJson": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "auditLog_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "auditLog_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "auditLog_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "benefitsEnrollments": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "planId": {
+          "type": "number",
+          "required": true
+        },
+        "startDate": {
+          "type": "number",
+          "required": true
+        },
+        "endDate": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "active"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "benefitsEnrollments_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "benefitsEnrollments_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "benefitsEnrollments_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "benefitsPlans": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": true
+        },
+        "provider": {
+          "type": "string"
+        },
+        "monthlyCostEmployee": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "monthlyCostEmployer": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "benefitsPlans_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "benefitsPlans_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "benefitsPlans_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "certifications": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "issueDate": {
+          "type": "number"
+        },
+        "expiryDate": {
+          "type": "number"
+        },
+        "credentialUrl": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "certifications_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "certifications_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "certifications_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "compensationHistory": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "effectiveDate": {
+          "type": "number",
+          "required": true
+        },
+        "salary": {
+          "type": "number",
+          "required": true
+        },
+        "changeType": {
+          "type": "string",
+          "required": true
+        },
+        "changeReason": {
+          "type": "string"
+        },
+        "approvedBy": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "compensationHistory_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "compensationHistory_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "compensationHistory_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "courses": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "durationHours": {
+          "type": "number"
+        },
+        "isMandatory": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "maxParticipants": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "courses_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "courses_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "courses_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "departments": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "code": {
+          "type": "string",
+          "required": true
+        },
+        "managerId": {
+          "type": "number"
+        },
+        "budget": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "headcount": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "parentDepartmentId": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "departments_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "departments_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "departments_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "documents": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "fileUrl": {
+          "type": "string",
+          "required": true
+        },
+        "uploadedAt": {
+          "type": "number"
+        },
+        "expiresAt": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "documents_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "documents_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "documents_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "employees": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "firstName": {
+          "type": "string",
+          "required": true
+        },
+        "lastName": {
+          "type": "string",
+          "required": true
+        },
+        "email": {
+          "type": "string",
+          "required": true
+        },
+        "phone": {
+          "type": "string"
+        },
+        "departmentId": {
+          "type": "number"
+        },
+        "positionId": {
+          "type": "number"
+        },
+        "managerId": {
+          "type": "number"
+        },
+        "hireDate": {
+          "type": "number"
+        },
+        "salary": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "active"
+        },
+        "skills": {
+          "type": "json"
+        },
+        "avatarUrl": {
+          "type": "string"
+        },
+        "emergencyContactName": {
+          "type": "string"
+        },
+        "emergencyContactPhone": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "dateOfBirth": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "employees_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "employees_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "employees_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "enrollments": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "courseId": {
+          "type": "number",
+          "required": true
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "enrolled"
+        },
+        "enrolledAt": {
+          "type": "number"
+        },
+        "completedAt": {
+          "type": "number"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "enrollments_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "enrollments_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "enrollments_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "expenseClaims": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": true
+        },
+        "amount": {
+          "type": "number",
+          "required": true
+        },
+        "category": {
+          "type": "string",
+          "required": true
+        },
+        "receiptUrl": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "submitted"
+        },
+        "submittedAt": {
+          "type": "number"
+        },
+        "approvedBy": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "expenseClaims_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "expenseClaims_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "expenseClaims_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "feedback": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "fromEmployeeId": {
+          "type": "number",
+          "required": true
+        },
+        "toEmployeeId": {
+          "type": "number",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "required": true
+        },
+        "isAnonymous": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "feedback_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "feedback_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "feedback_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "goals": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "targetDate": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "active"
+        },
+        "progress": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "category": {
+          "type": "string",
+          "required": true,
+          "default": "performance"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "goals_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "goals_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "goals_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "holidays": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "date": {
+          "type": "number",
+          "required": true
+        },
+        "isRecurring": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "holidays_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "holidays_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "holidays_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "interviews": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "applicantId": {
+          "type": "number",
+          "required": true
+        },
+        "interviewerId": {
+          "type": "number",
+          "required": true
+        },
+        "scheduledAt": {
+          "type": "number",
+          "required": true
+        },
+        "durationMinutes": {
+          "type": "number",
+          "required": true,
+          "default": 60
+        },
+        "type": {
+          "type": "string",
+          "required": true,
+          "default": "video"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "scheduled"
+        },
+        "feedback": {
+          "type": "string"
+        },
+        "rating": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "interviews_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "interviews_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "interviews_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "jobPostings": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "positionId": {
+          "type": "number",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string"
+        },
+        "requirements": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "draft"
+        },
+        "postedDate": {
+          "type": "number"
+        },
+        "closingDate": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "jobPostings_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "jobPostings_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "jobPostings_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "leaveBalances": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "year": {
+          "type": "number",
+          "required": true
+        },
+        "vacationTotal": {
+          "type": "number",
+          "required": true,
+          "default": 20
+        },
+        "vacationUsed": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "sickTotal": {
+          "type": "number",
+          "required": true,
+          "default": 10
+        },
+        "sickUsed": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "personalTotal": {
+          "type": "number",
+          "required": true,
+          "default": 5
+        },
+        "personalUsed": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "leaveBalances_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "leaveBalances_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "leaveBalances_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "leaveRequests": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": true
+        },
+        "startDate": {
+          "type": "number",
+          "required": true
+        },
+        "endDate": {
+          "type": "number",
+          "required": true
+        },
+        "days": {
+          "type": "number",
+          "required": true
+        },
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "pending"
+        },
+        "approvedBy": {
+          "type": "number"
+        },
+        "approvedAt": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "leaveRequests_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "leaveRequests_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "leaveRequests_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "notifications": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "message": {
+          "type": "string"
+        },
+        "isRead": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "link": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "notifications_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "notifications_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "notifications_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "payrollRuns": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "period": {
+          "type": "string",
+          "required": true
+        },
+        "runDate": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "draft"
+        },
+        "totalGross": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "totalNet": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "totalDeductions": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "processedBy": {
+          "type": "number"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "payrollRuns_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "payrollRuns_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "payrollRuns_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "payslips": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "payrollRunId": {
+          "type": "number",
+          "required": true
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "baseSalary": {
+          "type": "number",
+          "required": true
+        },
+        "overtimePay": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "bonus": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "deductionsTax": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "deductionsBenefits": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "deductionsOther": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "netPay": {
+          "type": "number",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "pending"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "payslips_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "payslips_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "payslips_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "policies": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "content": {
+          "type": "string"
+        },
+        "policyVersion": {
+          "type": "string"
+        },
+        "effectiveDate": {
+          "type": "number"
+        },
+        "category": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "policies_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "policies_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "policies_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "positions": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "departmentId": {
+          "type": "number",
+          "required": true
+        },
+        "level": {
+          "type": "string"
+        },
+        "salaryMin": {
+          "type": "number"
+        },
+        "salaryMax": {
+          "type": "number"
+        },
+        "isOpen": {
+          "type": "boolean",
+          "required": true,
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "positions_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "positions_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "positions_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "reviews": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "reviewerId": {
+          "type": "number",
+          "required": true
+        },
+        "period": {
+          "type": "string",
+          "required": true
+        },
+        "cycle": {
+          "type": "string",
+          "required": true,
+          "default": "annual"
+        },
+        "rating": {
+          "type": "number"
+        },
+        "strengths": {
+          "type": "string"
+        },
+        "improvements": {
+          "type": "string"
+        },
+        "goals": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "draft"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "reviews_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "reviews_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "reviews_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "timesheets": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "date": {
+          "type": "number",
+          "required": true
+        },
+        "clockIn": {
+          "type": "number"
+        },
+        "clockOut": {
+          "type": "number"
+        },
+        "hoursWorked": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "overtimeHours": {
+          "type": "number",
+          "required": true,
+          "default": 0
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "draft"
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "timesheets_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "timesheets_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "timesheets_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "workSchedules": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "employeeId": {
+          "type": "number",
+          "required": true
+        },
+        "dayOfWeek": {
+          "type": "number",
+          "required": true
+        },
+        "startTime": {
+          "type": "string",
+          "required": true
+        },
+        "endTime": {
+          "type": "string",
+          "required": true
+        },
+        "isRemote": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "workSchedules_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "workSchedules_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "workSchedules_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}
