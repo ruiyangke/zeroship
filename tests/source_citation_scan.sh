@@ -186,15 +186,38 @@ found=0
 allowed=0
 missing=0
 
+# WHY A RESOLVED CITATION IS ALSO WORTH RECORDING. This gate reads the WORKING
+# TREE, and a developer's working tree has been built. CI's has not: the `rust`
+# job is checkout + toolchain + `cargo check`, with no pnpm install and no pnpm
+# build, and `dist/` is not tracked. So a citation to a build output resolves
+# here and CANNOT resolve there - the gate reports green on every machine and
+# red in the only place it is enforced.
+#
+# That is not hypothetical. The gate was wired 2026-08-08 genuinely green (no
+# build-output citations existed at that commit). Around 2026-08-10 the first
+# `dist/` citations landed and it went red in CI, invisibly, because everyone
+# who ran it locally ran it after a build.
+#
+# So every path that RESOLVES is recorded here, and at the end the ones git does
+# not track are named. Tracked-ness is the exact question - a fresh checkout has
+# exactly the tracked files - so this asks git rather than guessing from the
+# path shape.
+RESOLVED_LIST="$(mktemp)"
+trap 'rm -f "$RESOLVED_LIST"' EXIT
+
 while IFS= read -r line; do
   src="${line%%:*}"
   cite="${line#*:}"
   [ -n "$cite" ] || continue
   found=$((found + 1))
 
-  [ -e "$cite" ] && continue
+  if [ -e "$cite" ]; then printf '%s\n' "$cite" >> "$RESOLVED_LIST"; continue; fi
   base="$(pkg_root "$src")"
-  [ -e "$base/$cite" ] && continue
+  # "$base/$cite" verbatim, matching the -e test on the line above. An earlier
+  # draft wrote "${base#./}$cite" and silently dropped the separator, turning
+  # crates/auth + tests/x.rs into crates/authtests/x.rs - 101 tracked files
+  # reported as untracked. The join has to be the same string the test used.
+  if [ -e "$base/$cite" ]; then printf '%s\n' "$base/$cite" | sed 's|^\./||' >> "$RESOLVED_LIST"; continue; fi
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
     allowed=$((allowed + 1))
@@ -218,6 +241,7 @@ done < <(grep -roP "$PAT" \
 echo "source citations checked: $found across $ROOTS (allowed: $allowed, unresolvable: $missing)"
 src_missing=$missing
 
+
 # --- The doc half: arrows that START in a doc and point at source. -----------
 
 doc_found=0
@@ -235,9 +259,19 @@ while IFS= read -r line; do
   # A `../` citation is resolved against the doc that wrote it, not the repo
   # root: that is what the prefix means, and it is what makes the link work.
   # A bare one is repo-relative - a doc has no package to be relative to.
+  # Same build-state recording as the source pass above, and for the same
+  # reason: AGENTS.md and CONTRIBUTING.md both cite sdks/db/dist/internal.js,
+  # which only a built tree has.
   case "$cite" in
-    ../*) [ -e "$(dirname "$src")/$cite" ] && continue ;;
-    *)    [ -e "$cite" ] && continue ;;
+    # realpath -m, because a doc-relative hit is recorded as
+    # `docs/architecture/../../crates/x.rs` and `git ls-files` only ever lists
+    # NORMALISED paths - so the unnormalised form matches nothing and every one
+    # of the 79 doc hits reported as untracked. Comparing against git means
+    # spelling the path the way git spells it.
+    ../*) if [ -e "$(dirname "$src")/$cite" ]; then
+            realpath -m --relative-to=. "$(dirname "$src")/$cite" >> "$RESOLVED_LIST"; continue
+          fi ;;
+    *)    if [ -e "$cite" ]; then printf '%s\n' "$cite" >> "$RESOLVED_LIST"; continue; fi ;;
   esac
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
@@ -258,6 +292,23 @@ done < <( { grep -roP "$DOC_PAT" --include='*.md' \
   } | sort -u )
 
 echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC_EXCLUDED and dated records (allowed: $doc_allowed, unresolvable: $((missing - src_missing)))"
+# The build-state report. Deliberately a WARNING and not a failure: whether a
+# citation to a build output should count as a source citation is a contract
+# question, and this check's job is to stop a local green being mistaken for a
+# CI green, not to answer it.
+if [ -s "$RESOLVED_LIST" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+  sort -u "$RESOLVED_LIST" > "$RESOLVED_LIST.s"
+  git ls-files | sort -u > "$RESOLVED_LIST.t"
+  untracked_hits="$(comm -23 "$RESOLVED_LIST.s" "$RESOLVED_LIST.t")"
+  rm -f "$RESOLVED_LIST.s" "$RESOLVED_LIST.t"
+  if [ -n "$untracked_hits" ]; then
+    n="$(printf '%s\n' "$untracked_hits" | wc -l | tr -d ' ')"
+    echo "::warning::$n citation target(s) resolved here ONLY because this tree is built."
+    echo "  git does not track them, so a fresh checkout - which is what CI has - reports"
+    echo "  them UNRESOLVABLE. This run is therefore NOT CI-representative:"
+    printf '%s\n' "$untracked_hits" | sed 's/^/    /'
+  fi
+fi
 
 # The degenerate-case guard, one per corpus. This step counts what is MISSING
 # and passes at zero, so a pattern that stopped matching, a wrong root list, or
