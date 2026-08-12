@@ -8,11 +8,9 @@
 //! It differs from the view case in two ways that both matter.
 //!
 //! It was NEVER guarded by accident. The view defect was unreachable across deploys until
-//! a1fe1047 removed the fold's duplicate-name check; functions have no such check because
-//! the fold does not model them at all (`render/fold.rs:2497` treats `Op::CreateFunction`
-//! as a structural no-op, and `SchemaSnapshot` carries no functions map). So an
-//! across-deploys function replace has always applied, and its rollback has always been
-//! destructive.
+//! a1fe1047 removed the fold's duplicate-name check; functions have no duplicate-name
+//! refusal because overloads share names and differ by input signature. So an across-deploys
+//! function replace has always applied, and its rollback has always been destructive.
 //!
 //! And it must be measured HERE rather than on SQLite, where the cheaper view harness
 //! lives. `createFunction` is PostgreSQL-only - `dialect-table.ts:47` marks it

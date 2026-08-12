@@ -318,6 +318,15 @@ pub struct LiveSchema {
     /// the effective schema of the DROP says nothing about where the extension
     /// lived. Only the recorded `CREATE` knows.
     pub extensions: std::collections::BTreeMap<String, crate::model::snapshot::ExtensionSnapshot>,
+    /// Functions already present in the folded live schema, keyed by schema,
+    /// name, and ordered input argument types so overloads coexist.
+    ///
+    /// Catalog snapshots leave this empty. A `dropFunction` can recover an
+    /// inverse only from an authored definition retained by the history fold.
+    pub functions: std::collections::BTreeMap<
+        crate::model::snapshot::FunctionKey,
+        crate::model::snapshot::FunctionSnapshot,
+    >,
     /// Schemas already present in the folded live schema, with the AUTHORIZATION each
     /// was created with. A non-cascading `dropSchema` renders its own inverse from
     /// this; a cascading one never does, because the snapshot records the namespace
@@ -363,6 +372,7 @@ impl LiveSchema {
             views: live.views,
             sequences: live.sequences,
             extensions: live.extensions,
+            functions: live.functions,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
@@ -384,6 +394,7 @@ impl LiveSchema {
             views: std::collections::BTreeMap::new(),
             sequences: std::collections::BTreeMap::new(),
             extensions: std::collections::BTreeMap::new(),
+            functions: std::collections::BTreeMap::new(),
             schemas: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
@@ -469,6 +480,7 @@ impl LiveSchema {
             views: desired.snapshot.views,
             sequences: desired.snapshot.sequences,
             extensions: desired.snapshot.extensions,
+            functions: desired.snapshot.functions,
             schemas: desired.snapshot.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
@@ -552,6 +564,7 @@ impl LiveSchema {
             views: live.views,
             sequences: live.sequences,
             extensions: live.extensions,
+            functions: live.functions,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
@@ -5606,7 +5619,7 @@ impl IrAuthor {
                 }
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 let stmts = crate::render::vendor::render_vendor_op(op, &eff_schema)?;
-                let history_down = vendor_inverse_from_history(op, live_schema);
+                let history_down = vendor_inverse_from_history(op, live_schema, &eff_schema);
                 stmts
                     .into_iter()
                     .map(|s| {
@@ -8022,7 +8035,11 @@ fn render_sequence_create_from_snapshot(
 /// is a native `IF EXISTS` clause, not the catalog-probe mechanism - so reading it
 /// would report every guarded drop as unguarded and re-create an object that may
 /// never have been dropped.
-fn vendor_inverse_from_history(op: &Op, live_schema: &LiveSchema) -> Option<String> {
+fn vendor_inverse_from_history(
+    op: &Op,
+    live_schema: &LiveSchema,
+    eff_schema: &str,
+) -> Option<String> {
     match op {
         Op::DropExtension { name, if_exists } if !if_exists.unwrap_or(false) => {
             let snapshot = live_schema.extensions.get(name)?;
@@ -8037,6 +8054,41 @@ fn vendor_inverse_from_history(op: &Op, live_schema: &LiveSchema) -> Option<Stri
                 sql.push_str(&crate::render::dml::quote_ident_checked(schema).ok()?);
             }
             Some(sql)
+        }
+        Op::DropFunction {
+            name,
+            schema,
+            arg_types,
+            if_exists,
+        } if !if_exists.unwrap_or(false) => {
+            let key = crate::model::snapshot::FunctionKey::from_drop(
+                name,
+                schema.as_deref(),
+                arg_types.as_deref(),
+                eff_schema,
+            );
+            let snapshot = live_schema.functions.get(&key)?;
+            let create = Op::CreateFunction {
+                name: name.clone(),
+                // Qualify the resolved placement even when the authored CREATE
+                // omitted its schema. Rollback must restore the recorded object,
+                // independent of the connection's current search path.
+                schema: Some(key.schema.clone()),
+                args: snapshot.args.clone(),
+                returns: snapshot.returns.clone(),
+                language: snapshot.language,
+                replace: None,
+                volatility: snapshot.volatility,
+                body: snapshot.body.clone(),
+            };
+            let mut statements = crate::render::vendor::render_vendor_op(&create, eff_schema)
+                .ok()?
+                .into_iter();
+            let statement = statements.next()?;
+            if statements.next().is_some() {
+                return None;
+            }
+            Some(statement.up)
         }
         // A CASCADING schema drop is never reversed, and that is the one refusal
         // this family needs beyond the two above. `DROP SCHEMA ... CASCADE`

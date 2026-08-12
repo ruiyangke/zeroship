@@ -41,9 +41,12 @@
 //! it. What follows from that is a comparison contract, stated on
 //! [`diff_snapshots`](crate::apply::drift::diff_snapshots), not a change here.
 //!
-//! Partitions is the ONLY class where this bites. Named types are the near miss that
-//! shows the shape: `createEnum` and `createDomain` are portable on MySQL, so the
-//! engine authors them there, but the insert below is gated on
+//! Partitions are the only structurally compared class where this bites. Function
+//! definitions are also history-only, but `SchemaSnapshot` excludes that rollback
+//! metadata from equality and drift just as `ViewSnapshot` excludes its authored
+//! query. Named types are the near miss that shows the shape: `createEnum` and
+//! `createDomain` are portable on MySQL, so the engine authors them there, but the
+//! insert below is gated on
 //! `Capability::MaterializedEnumType`, false off PostgreSQL, so both sides carry
 //! nothing and agree. Sequences, roles, schemas and extensions are PostgreSQL-only
 //! and cannot appear in a MySQL or SQLite history at all.
@@ -62,13 +65,13 @@
 //!
 //! # Schema qualifier / existence guard are fold-irrelevant
 //!
-//! An op's `schema` qualifier governs WHICH schema the DDL renders into (cross-
-//! schema confinement, an apply-time concern) and its `existence_guard` governs
-//! apply-time presence; neither changes the final FOLDED logical shape. A folded
-//! snapshot that already applied is coherent, so the fold ignores both. FK
-//! definitions DO embed the `project_schema` (`REFERENCES <schema>.<target>(id)`),
-//! so the caller passes the schema the live DB is introspected under (the oracle
-//! passes `cfg.project_schema`) for the FK `definition` to compare equal.
+//! An op's `schema` qualifier normally governs only where the DDL renders. Function
+//! rollback history is the exception: its overload key resolves an omitted schema
+//! to `project_schema` so definitions in different schemas cannot collide. An
+//! `existence_guard` still governs only apply-time presence and does not change the
+//! final folded logical shape. FK definitions also embed `project_schema`
+//! (`REFERENCES <schema>.<target>(id)`), so the caller passes the schema the live DB
+//! is introspected under for both uses.
 
 use std::collections::BTreeMap;
 
@@ -79,9 +82,10 @@ use crate::model::ir::{
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
-    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
-    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, FunctionSnapshot,
+    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
+    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 #[cfg(test)]
@@ -1072,6 +1076,7 @@ pub fn fold_ops_onto(
     let mut roles: BTreeMap<String, RoleSnapshot> = base.roles.clone();
     let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = base.schemas.clone();
     let mut extensions: BTreeMap<String, ExtensionSnapshot> = base.extensions.clone();
+    let mut functions: BTreeMap<FunctionKey, FunctionSnapshot> = base.functions.clone();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
     for op in replay_ops {
@@ -2508,9 +2513,73 @@ pub fn fold_ops_onto(
             Op::DropRole { name, .. } => {
                 roles.remove(name);
             }
+            Op::CreateFunction {
+                name,
+                schema,
+                args,
+                returns,
+                language,
+                replace,
+                volatility,
+                body,
+            } => {
+                let key = FunctionKey::from_create(
+                    name,
+                    schema.as_deref(),
+                    args.as_deref(),
+                    project_schema,
+                );
+                if replace.unwrap_or(false) && !functions.contains_key(&key) {
+                    // PostgreSQL resolves aliases and discards type modifiers when
+                    // identifying a function, while the offline IR has only the
+                    // authored spellings. An alias-spelled OR REPLACE may therefore
+                    // target an existing same-arity key that is not textually equal.
+                    // Invalidate those candidates before recording the new body so
+                    // no later drop can recover the stale pre-replace definition.
+                    functions.retain(|existing, _| {
+                        existing.schema != key.schema
+                            || existing.name != key.name
+                            || existing.arg_types.len() != key.arg_types.len()
+                    });
+                }
+                functions.insert(
+                    key,
+                    FunctionSnapshot {
+                        schema: schema.clone(),
+                        args: args.clone(),
+                        returns: returns.clone(),
+                        language: *language,
+                        volatility: *volatility,
+                        body: body.clone(),
+                    },
+                );
+            }
+            Op::DropFunction {
+                name,
+                schema,
+                arg_types,
+                ..
+            } => {
+                let key = FunctionKey::from_drop(
+                    name,
+                    schema.as_deref(),
+                    arg_types.as_deref(),
+                    project_schema,
+                );
+                if functions.remove(&key).is_none() {
+                    // A non-textual type alias or an all-arguments DROP signature
+                    // can still identify a recorded function. Without catalog type
+                    // resolution the exact overload is unknowable, so discard every
+                    // same-name candidate rather than leave a definition that may
+                    // already have been dropped.
+                    functions.retain(|existing, _| {
+                        existing.schema != key.schema || existing.name != key.name
+                    });
+                }
+            }
             // Remaining vendor ops either change unmodeled facets (role settings,
-            // grants/RLS/policies/triggers/functions) or are raw statements, so
-            // they do not contribute to this structural snapshot.
+            // grants/RLS/policies/triggers) or are raw statements, so they do not
+            // contribute to this structural snapshot.
             Op::AlterRole { .. }
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
@@ -2520,8 +2589,6 @@ pub fn fold_ops_onto(
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }
             | Op::DropTrigger { .. }
-            | Op::CreateFunction { .. }
-            | Op::DropFunction { .. }
             | Op::PgRaw { .. } => {}
             Op::Dialectal { .. } => {}
         }
@@ -2542,6 +2609,7 @@ pub fn fold_ops_onto(
         roles,
         schemas,
         extensions,
+        functions,
     })
 }
 

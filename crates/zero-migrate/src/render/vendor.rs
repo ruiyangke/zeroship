@@ -699,10 +699,10 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             // Rolling one back used to do exactly that and report success - the function
             // was gone from `pg_proc` with nothing recorded as skipped.
             //
-            // The faithful inverse is the PREVIOUS body, and nothing here holds it: the
-            // fold treats CreateFunction as a structural no-op and `SchemaSnapshot` carries
-            // no functions map, so the prior source is not recoverable at render time.
-            // Until that state exists, a replace is IRREVERSIBLE rather than destructive.
+            // The faithful inverse is the PREVIOUS body, and this pure renderer sees only
+            // the replacement op. The history fold retains function definitions for a later
+            // DROP, but it is deliberately unavailable at this render-from-the-op-alone
+            // seam. A replace therefore stays IRREVERSIBLE rather than destructive.
             //
             // Irreversible is a refusal an operator sees, not a silent skip: the rollback
             // planner returns `RollbackError::Irreversible` naming the version

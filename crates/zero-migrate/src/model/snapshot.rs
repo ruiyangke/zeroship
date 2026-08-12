@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec,
-    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions, ValueFormat,
+    ColType, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol, IndexSortOrder,
+    IndexStorageParams, PartitionBounds, PartitionSpec, SafeI64, SafeU64, SequenceOwnedBy,
+    TableRuntimeOptions, ValueFormat,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
@@ -1433,6 +1434,77 @@ pub struct ExtensionSnapshot {
     pub schema: Option<String>,
 }
 
+/// Offline identity key for one authored PostgreSQL function overload.
+///
+/// PostgreSQL permits functions with the same schema and name when their ordered
+/// input argument types differ. Argument names and `OUT` arguments therefore do
+/// not participate in this key; `INOUT` arguments do. The type vector retains
+/// authored spellings because the pure fold has no catalog OIDs. Non-exact drops
+/// and replacements invalidate possible matches rather than selecting by guess.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FunctionKey {
+    /// Resolved schema containing the function.
+    pub schema: String,
+    /// Function name.
+    pub name: String,
+    /// Ordered input argument type names.
+    pub arg_types: Vec<String>,
+}
+
+impl FunctionKey {
+    pub(crate) fn from_create(
+        name: &str,
+        schema: Option<&str>,
+        args: Option<&[FuncArg]>,
+        default_schema: &str,
+    ) -> Self {
+        let arg_types = args
+            .unwrap_or_default()
+            .iter()
+            .filter(|arg| !matches!(arg.mode, Some(FuncArgMode::Out)))
+            .map(|arg| arg.ty.clone())
+            .collect();
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            name: name.to_string(),
+            arg_types,
+        }
+    }
+
+    pub(crate) fn from_drop(
+        name: &str,
+        schema: Option<&str>,
+        arg_types: Option<&[String]>,
+        default_schema: &str,
+    ) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            name: name.to_string(),
+            arg_types: arg_types.unwrap_or_default().to_vec(),
+        }
+    }
+}
+
+/// The authored definition needed to restore a dropped PostgreSQL function.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSnapshot {
+    /// Authored schema qualifier, or `None` when the create was unqualified.
+    pub schema: Option<String>,
+    /// Authored argument declarations, including names and modes.
+    pub args: Option<Vec<FuncArg>>,
+    /// Authored return type.
+    pub returns: String,
+    /// Authored function language.
+    pub language: FuncLanguage,
+    /// Authored volatility declaration.
+    pub volatility: Option<FuncVolatility>,
+    /// Authored raw function body.
+    pub body: String,
+}
+
 /// A deterministic snapshot of one child partition relation.
 ///
 /// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
@@ -1448,7 +1520,7 @@ pub struct PartitionSnapshot {
 }
 
 /// A deterministic snapshot of a project schema's structure.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct SchemaSnapshot {
     /// Tables in the schema, keyed + ordered by name.
     pub tables: BTreeMap<String, TableSnapshot>,
@@ -1466,7 +1538,27 @@ pub struct SchemaSnapshot {
     pub schemas: BTreeMap<String, SchemaObjectSnapshot>,
     /// Postgres extensions intentionally managed by vendor migrations.
     pub extensions: BTreeMap<String, ExtensionSnapshot>,
+    /// Authored PostgreSQL functions, keyed by overload identity.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality.
+    pub functions: BTreeMap<FunctionKey, FunctionSnapshot>,
 }
+
+impl PartialEq for SchemaSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+            && self.partitions == other.partitions
+            && self.views == other.views
+            && self.named_types == other.named_types
+            && self.sequences == other.sequences
+            && self.roles == other.roles
+            && self.schemas == other.schemas
+            && self.extensions == other.extensions
+    }
+}
+
+impl Eq for SchemaSnapshot {}
 
 /// A schema-level named type. The engine only needs the object class for drift and
 /// guard probes; enum labels/domain predicates are modeled by the neutral IR and

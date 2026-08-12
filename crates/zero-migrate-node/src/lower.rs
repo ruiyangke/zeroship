@@ -424,7 +424,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
 /// Replay the executed history from nothing and lend the live schema the object definitions
 /// the catalog can no longer show, so a drop's inverse can be rendered from what created it.
 ///
-/// Only objects the live schema does NOT already carry are filled in, and only the four
+/// Only objects the live schema does NOT already carry are filled in, and only the five
 /// definition-bearing kinds. Tables are deliberately untouched: the catalog is authoritative
 /// for them, and replaying creates over it is what made the first attempt at this fail with
 /// `fold: table \`notes\` already exists`.
@@ -455,6 +455,9 @@ fn merge_recovered_definitions(
     }
     for (name, extension) in recovered.extensions {
         live.extensions.entry(name).or_insert(extension);
+    }
+    for (key, function) in recovered.functions {
+        live.functions.entry(key).or_insert(function);
     }
     for (name, schema) in recovered.schemas {
         live.schemas.entry(name).or_insert(schema);
@@ -507,10 +510,9 @@ fn executed_history_ops(
 /// Whether an operation could have been journaled `completed` without running.
 ///
 /// `Op::existence_guard()` answers this for the core ops and for the DROP side of view and
-/// sequence, but it returns `None` for every vendor CREATE - the guard there is a native
-/// `IF NOT EXISTS` clause on the op's own field, not the catalog-probe mechanism. Asking only
-/// `existence_guard()` would be a constant `false` for exactly the creates whose definitions
-/// the synthesised inverses are built from.
+/// sequence, but it returns `None` for every vendor op. Native `IF [NOT] EXISTS` clauses must
+/// be read from each vendor op's own field. Asking only `existence_guard()` would treat a
+/// guarded function drop as proven execution and corrupt the definitions later inverses use.
 fn op_may_have_been_skipped(op: &Op) -> bool {
     if op.existence_guard().is_some() {
         return true;
@@ -527,6 +529,9 @@ fn op_may_have_been_skipped(op: &Op) -> bool {
             if_exists: Some(true),
             ..
         } | Op::DropExtension {
+            if_exists: Some(true),
+            ..
+        } | Op::DropFunction {
             if_exists: Some(true),
             ..
         }
@@ -1723,8 +1728,126 @@ value = "allow"
 scope = "all"
 "#;
 
+    const FUNCTION_CHARTER_TOML: &str = r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+"#;
+
     fn no_inject_policy(schema: &str) -> zero_migrate::EffectivePolicy {
         no_inject(schema)
+    }
+
+    #[test]
+    fn native_function_drop_guard_is_not_execution_evidence() {
+        let drop = |if_exists| Op::DropFunction {
+            name: "format_value".to_string(),
+            schema: None,
+            arg_types: Some(vec!["integer".to_string()]),
+            if_exists,
+        };
+
+        assert!(op_may_have_been_skipped(&drop(Some(true))));
+        assert!(!op_may_have_been_skipped(&drop(Some(false))));
+        assert!(!op_may_have_been_skipped(&drop(None)));
+    }
+
+    #[test]
+    fn rollback_replay_recovers_a_dropped_function_definition() {
+        let owner = "app_function_history";
+        let create = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "create_format_value",
+            "ops": [{
+                "op": "createFunction",
+                "name": "format_value",
+                "args": [{ "name": "value", "type": "integer" }],
+                "returns": "text",
+                "language": "sql",
+                "volatility": "immutable",
+                "body": "SELECT (value + 1)::text"
+            }]
+        })
+        .to_string();
+        let drop = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "drop_format_value",
+            "ops": [{
+                "op": "dropFunction",
+                "name": "format_value",
+                "argTypes": ["integer"]
+            }]
+        })
+        .to_string();
+        let charter = &[FUNCTION_CHARTER_TOML];
+        let create_artifact =
+            lower_envelope_to_plan(&create, owner, owner, "postgres", "{}", charter)
+                .expect("the function create lowers");
+        let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
+        let effective =
+            effective_policy_from_charter_layers(charter).expect("the function charter composes");
+        let history =
+            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, owner, &effective)
+                .expect("the function create folds");
+        let drop_artifact = lower_envelope_to_plan_with_live(
+            &drop,
+            owner,
+            owner,
+            "postgres",
+            "{}",
+            charter,
+            &LiveSchema::from_catalog_snapshot(history, owner),
+        )
+        .expect("the function drop lowers from folded history");
+        let journal_entries = [&create_artifact, &drop_artifact]
+            .into_iter()
+            .flat_map(|artifact| artifact.plan.steps.iter())
+            .filter_map(|step| match step {
+                PlanStep::Ddl(migration) => Some(AppliedEntry {
+                    version: migration.version.as_str().to_string(),
+                    checksum: migration.checksum.as_str().to_string(),
+                    phase: Phase::Completed,
+                    kind: Some(zero_migrate::apply::journal::JournaledKind::Apply),
+                    event_seq: 0,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let replay = lower_ordered_envelopes_to_plans_for_rollback(
+            &[create, drop],
+            owner,
+            owner,
+            "postgres",
+            "{}",
+            charter,
+            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            &journal_entries,
+            &[],
+        )
+        .expect("the completed function history replays for rollback");
+        let [PlanStep::Ddl(drop_migration)] = replay[1].plan.steps.as_slice() else {
+            panic!("expected one dropFunction DDL step")
+        };
+        assert_eq!(
+            drop_migration.down.as_deref(),
+            Some(
+                "CREATE FUNCTION \"app_function_history\".\"format_value\"(\"value\" integer) \
+                 RETURNS text LANGUAGE sql IMMUTABLE AS $zsfn$\nSELECT (value + 1)::text\n$zsfn$"
+            )
+        );
     }
 
     // A minimal create-first envelope: one `createTable` op. Mirrors what the pure-JS
