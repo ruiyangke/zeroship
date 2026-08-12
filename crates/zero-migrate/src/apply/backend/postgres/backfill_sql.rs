@@ -373,10 +373,26 @@ fn build_batch_sql(
         .map(|index| format!("_bf_key_{index} DESC"))
         .collect::<Vec<_>>()
         .join(", ");
+    // The inner `::text` MUST carry an alias that cannot collide with the key it
+    // is cast from. PostgreSQL names a bare cast expression after its underlying
+    // column, so `SELECT _bf_key_0::text ... ORDER BY _bf_key_0 DESC` produces an
+    // OUTPUT column also called `_bf_key_0` - and `ORDER BY` resolves an output
+    // name in preference to an input one, so it sorted by TEXT.
+    //
+    // That made each batch checkpoint at the TEXT-maximum of its window. A window
+    // holding 9 and 10 checkpointed at '9', so the saved cursor moved BACKWARDS,
+    // the next batch re-selected row 10, and a non-idempotent transform ran on it
+    // twice - silently, with the migration reporting success. The same disagreement
+    // occurs at every decade boundary (99/100, 999/1000) and for any pair like
+    // 2/10.
+    //
+    // `build_end_cursor_sql` above already aliases its cast (`AS _bf_end_{index}`)
+    // and was never affected; this is that same convention, and the reason to keep
+    // it is that the bug is invisible without it.
     let returned_cursor = (0..cursor.arity())
         .map(|index| {
             format!(
-                "(SELECT _bf_key_{index}::text FROM _bf_window \
+                "(SELECT _bf_key_{index}::text AS _bf_cursor_text_{index} FROM _bf_window \
                   ORDER BY {reverse_window_order} LIMIT 1) AS _bf_cursor_{index}"
             )
         })
