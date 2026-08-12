@@ -435,6 +435,15 @@ run_rollback() { # $1 sandbox, rest: extra argv. Sets ROLL_RC and CAP.
 
 # The scanner. `seen` is asserted BOTH ways below so that "not seen" is a
 # statement about the stream and not about a scanner that never matches.
+#
+# `### <prog>` lines are RECORDED INVOCATIONS: that program's stub actually
+# ran. Everything else in the capture is the TEXT of a command sent over ssh,
+# which is a far weaker fact -- the rollback body contains the literal string
+# `docker compose up -d` inside a branch it may never reach, so matching that
+# text proves the body was composed, not that anything ran. The first draft of
+# this section asserted on the unprefixed string and duly reported a stack
+# restart in the one case where the script had refused and restarted nothing.
+# Prefix the token with `### ` unless you really do mean the sent text.
 seen() { grep -qF -- "$2" "$1"; }
 
 SB="$FIX/sb_main"; seed_sandbox "$SB" CURRENT
@@ -468,14 +477,14 @@ for f in $ROLL_FILES; do
   fi
 done
 
-seen "$CAP" 'docker compose up -d --remove-orphans' \
-  && pass "--rollback restarts the whole stack (docker compose up -d --remove-orphans)" \
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && pass "--rollback restarts the whole stack (docker compose up -d --remove-orphans RAN)" \
   || fail "--rollback never reached 'docker compose up -d --remove-orphans'; it restored files and left the stack on the old ones"
 
 # THE SHORT-CIRCUIT. This is what makes --rollback safe to run in a panic: it
 # must not build, must not push, must not overwrite host config, and must not
 # provision anything.
-for tok in 'docker build' 'docker push' '### scp' '### openssl' 'ZEROSHIP_IMAGE=' 'docker compose config'; do
+for tok in '### docker build' '### docker push' '### scp' '### openssl' '### docker compose config' 'ZEROSHIP_IMAGE='; do
   seen "$CAP" "$tok" \
     && fail "--rollback reached '$tok'; it is not a short-circuit and is not safe to run blind" \
     || pass "--rollback never reaches '$tok'"
@@ -483,9 +492,9 @@ done
 
 # CONTROL for the six negatives above. Without it, a scanner that matches
 # nothing would report all six as clean.
-printf 'docker build --target runtime\ndocker push x\n### scp a b\n### openssl rand -hex 32\nZEROSHIP_IMAGE=x\ndocker compose config -q\n' >"$FIX/synthetic"
+printf '### docker build --target runtime\n### docker push x\n### scp a b\n### openssl rand -hex 32\n### docker compose config -q\nZEROSHIP_IMAGE=x\n' >"$FIX/synthetic"
 ctl_missed=""
-for tok in 'docker build' 'docker push' '### scp' '### openssl' 'ZEROSHIP_IMAGE=' 'docker compose config'; do
+for tok in '### docker build' '### docker push' '### scp' '### openssl' '### docker compose config' 'ZEROSHIP_IMAGE='; do
   seen "$FIX/synthetic" "$tok" || ctl_missed="$ctl_missed [$tok]"
 done
 [ -z "$ctl_missed" ] \
@@ -509,7 +518,7 @@ compose_vars '' "$REAL_COMPOSE" | sed 's/$/=x/' >"$SB_REG/compose/.env"
 cp -a "$SB_REG/compose/.env" "$SB_REG/compose/.env.bak.20260812010101"
 run_rollback "$SB_REG" --registry ghcr.io/example/zeroship-platform
 if [ "$ROLL_RC" = 0 ] \
-   && ! seen "$CAP" 'docker build' && ! seen "$CAP" 'docker push' && ! seen "$CAP" '### scp'; then
+   && ! seen "$CAP" '### docker build' && ! seen "$CAP" '### docker push' && ! seen "$CAP" '### scp'; then
   pass "--rollback with --registry supplied and a fully populated host .env still builds, pushes and syncs nothing"
 else
   fail "--rollback with --registry exited $ROLL_RC and/or reached the build path"
@@ -520,6 +529,31 @@ run_rollback "$FIX/no_such_dir"
 [ "$ROLL_RC" != 0 ] && [[ "$ROLL_OUT" == *"does not exist on"* ]] \
   && pass "--rollback runs preflight first and refuses a remote dir that is not there" \
   || fail "--rollback did not preflight the remote dir (rc=$ROLL_RC): $ROLL_OUT"
+
+# ---------------------------------------------------------- a missing backup
+#
+# The script REFUSES rather than restoring what it can. The argument, and the
+# counter-argument, are in the comment above the scan in deploy-remote.sh; the
+# assertions here are what stop it quietly reverting to a partial restore.
+SB_MISS="$FIX/sb_missing"; seed_sandbox "$SB_MISS" CURRENT
+rm -f "$SB_MISS"/ops/Caddyfile.bak.*
+run_rollback "$SB_MISS"
+
+[ "$ROLL_RC" != 0 ] \
+  && pass "a missing backup for one file makes --rollback exit non-zero" \
+  || fail "--rollback exited 0 with no backup for ops/Caddyfile; a partial recovery reported as success"
+[[ "$ROLL_OUT" == *"ops/Caddyfile"* ]] \
+  && pass "the refusal names the file that has no backup" \
+  || fail "the refusal never names ops/Caddyfile: $ROLL_OUT"
+if [ "$(cat "$SB_MISS/compose/.env")" = "CURRENT" ] \
+   && [ "$(cat "$SB_MISS/compose/docker-compose.yml")" = "CURRENT" ]; then
+  pass "the two files that DO have backups are left untouched (no half-restored configuration)"
+else
+  fail "--rollback restored some files and not others; the host is now on a mixed configuration"
+fi
+seen "$CAP" '### docker compose up -d' \
+  && fail "--rollback restarted the stack on a half-restored configuration" \
+  || pass "--rollback does not restart the stack when it refuses"
 
 # --------------------------------------------- selection edge cases, pinned
 #
@@ -555,9 +589,9 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an
 # outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
 # real-compose block is conditional and deliberately NOT counted in the floor.
-# MEASURED 2026-08-12: 48 unconditional assertions (49 ran with the shipped
+# MEASURED 2026-08-12: 52 unconditional assertions (53 ran with the shipped
 # compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-48}"
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-52}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
