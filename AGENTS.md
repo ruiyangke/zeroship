@@ -274,6 +274,9 @@ Stable contracts, live in `docs/reference/`:
 - `runtime-limits.md` — per-app `AppRuntimeLimits` vs runtime-side `RuntimeLimits` (CPU, wall timeout, heap), plus idle-GC knobs
 - `sqlite-divergences.md` — intentional Postgres↔SQLite differences in vector/full-text/spatial search, transaction isolation, locking, and text ordering
 - `zerobench.md` — the HTTP/SSE/WS benchmark tool
+- `env-vars.md` — every environment variable the tree reads, by service; the
+  `ZEROSHIP_*` overlay vs bare CLI-flag naming families; the compose `.env`
+  surface and which values are literals that ignore it
 
 ---
 
