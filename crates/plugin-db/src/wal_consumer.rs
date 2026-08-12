@@ -4,8 +4,8 @@
 //! logical-decoding output (`pgoutput` over the streaming-replication
 //! protocol) into the in-process [`crate::broker`]. It is the
 //! cross-worker leg of reactive queries: a row written on worker A
-//! reaches a subscriber on worker B because both workers consume the
-//! same WAL slot.
+//! reaches a subscriber on worker B because every worker consumes the
+//! same app publication through its own logical slot.
 //!
 //! ## Design
 //!
@@ -22,58 +22,24 @@
 //!    [`compio_postgres::replication::connect_replication`]), issues
 //!    `START_REPLICATION SLOT ... LOGICAL ...`, decodes pgoutput
 //!    frames, and publishes [`ChangeEvent`]s into the broker.
-//! 2. [`emit_local`] gains an `EmitMode` selector. When the
-//!    consumer is active on this thread the mode is
-//!    `EmitMode::Suppressed` and local-emit becomes a no-op; the
-//!    WAL path is the sole source of truth. Otherwise (no consumer
-//!    yet started, or the consumer crashed and the watchdog hasn't
-//!    re-spawned) local-emit fires as before.
+//! 2. [`emit_local`] consults a process-wide, per-app suppression
+//!    count. While a consumer is active, WAL is the sole source of
+//!    truth in every isolate thread in the worker process.
 //! 3. A relation cache (`rel_id -> (namespace, table, columns)`)
 //!    populated from pgoutput `Relation` messages. Required to map a
 //!    `Insert { rel_id, tuple }` back to a `(collection, pk,
 //!    changed_columns)` broker event.
 //!
-//! ## Known limitations
 //!
-//! - **Per-subscription LSN tracking** — when the consumer is
-//!   suppressed (i.e. fast-path local-emit is firing) AND the
-//!   consumer is also active, a single mutation produces TWO events.
-//!   The current implementation chooses one OR the other via the
-//!   thread-local mode toggle. A future change can add per-event
-//!   `wal_lsn` + per-subscription `seen_local_lsn` dedup so that BOTH
-//!   paths can fire concurrently with the broker filtering duplicates.
-//!   The design accepts the cleaner-but-slower (WAL-only) semantics
-//!   for now; the dual-path optimisation is future work.
-//! - **Boot-time auto-spawn** — the consumer struct is exposed and
-//!   tested, but the V8 callback that spawns it is opt-in:
-//!   apps call `db.startReplicationConsumer()` (the `#[v8_method]`
-//!   on the `Db` v8_class — see `v8_classes/db.rs::start_replication_consumer`)
-//!   to enable cross-worker propagation. Spawning automatically on
-//!   isolate boot would just inline the same dispatch helper in the
-//!   isolate init path; left out so the first ship of this code doesn't
-//!   change the boot path for apps that have never enabled cross-worker
-//!   propagation.
-//! - **Reconnection / fault-tolerance** — the consumer's `run` loop
-//!   returns on first I/O error. A supervising task (`watchdog.rs` in
-//!   a future commit) restarts it with exponential backoff. Until then
-//!   the caller is responsible for re-spawning. The slot's WAL
-//!   retention is the safety net: even if the consumer is offline for
-//!   minutes, no events are lost.
-//!
-//! ## Why the thread-local mode toggle
-//!
-//! The mutation callbacks already call [`emit_local`] from the same
-//! thread as the WAL consumer (compio runs both on one OS thread per
-//! worker). A thread-local cell is the cheapest signal — no Mutex, no
-//! atomic. The toggle is set when the consumer starts and cleared
-//! when it stops; if a callback fires between those events with the
-//! WAL consumer briefly down, local-emit takes over with one-off
-//! "same-worker delivery only" semantics that the watchdog will fix
-//! on the next consumer reconnect.
+//! [`run_supervised_controlled`] adds a readiness boundary, explicit
+//! shutdown, and reconnect backoff. It reports ready only after
+//! `START_REPLICATION` succeeds.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+
+use futures::FutureExt;
 
 use compio_postgres::replication::{
     self as repl, IdentifySystem, ReplicationMessage, ReplicationStream, StartReplicationOptions,
@@ -87,45 +53,52 @@ use crate::error::DbError;
 // Per-app emit-suppression
 // ---------------------------------------------------------------------------
 //
-// When a WAL consumer is active for app A on this thread, local-emit
+// When a WAL consumer is active for app A in this process, local-emit
 // for app A must become a no-op — the consumer publishes the same
 // event on the cross-worker path and emitting locally too would
 // double-deliver. Other apps on the same thread must continue to use
 // local-emit; a coarse thread-wide flag would silence their events as
 // well.
 //
-// The set is tracked per-thread (the compio runtime is single-thread
-// per worker, every callback that emits runs on the same isolate
-// thread). Insert/remove is cheap: small set, no locking.
+// Counts are process-wide because consumer and mutation tasks can run
+// on different isolate threads.
 
-thread_local! {
-    /// App ids whose local-emit path is suppressed because a consumer
-    /// is running. Populated by [`WalConsumer::run`] for the lifetime
-    /// of the consumer loop via a Drop guard so panics also clean up.
-    static SUPPRESSED_APPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+/// Process-wide suppression counts keyed by app id.
+///
+/// A WAL consumer and mutations for the same app can run on different
+/// compio threads. Process scope is therefore required for the local
+/// fast path to see that WAL is authoritative. Counts, rather than a
+/// set, prevent one overlapping guard from unsuppressing another.
+static SUPPRESSED_APPS: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn suppressed_apps() -> std::sync::MutexGuard<'static, HashMap<String, usize>> {
+    SUPPRESSED_APPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Suppress local-emit for `app_id` on this thread. Mutation callbacks
+/// Suppress local-emit for `app_id` in this process. Mutation callbacks
 /// that produce events for this app will become no-ops until
 /// [`unsuppress_app`] is called (typically via the Drop guard returned
 /// by [`SuppressGuard::activate`]).
 pub fn suppress_app(app_id: &str) {
-    SUPPRESSED_APPS.with(|s| {
-        s.borrow_mut().insert(app_id.to_string());
-    });
+    *suppressed_apps().entry(app_id.to_string()).or_default() += 1;
 }
 
 /// Inverse of [`suppress_app`]. Idempotent.
 pub fn unsuppress_app(app_id: &str) {
-    SUPPRESSED_APPS.with(|s| {
-        s.borrow_mut().remove(app_id);
-    });
+    let mut apps = suppressed_apps();
+    if let Some(count) = apps.get_mut(app_id) {
+        *count -= 1;
+        if *count == 0 {
+            apps.remove(app_id);
+        }
+    }
 }
 
 /// True when the given app's local-emit path is suppressed on this
 /// thread (i.e. a [`WalConsumer`] is running for that app).
 pub fn is_app_suppressed(app_id: &str) -> bool {
-    SUPPRESSED_APPS.with(|s| s.borrow().contains(app_id))
+    suppressed_apps().contains_key(app_id)
 }
 
 /// RAII guard: suppresses local-emit for one app on construction,
@@ -154,35 +127,6 @@ impl Drop for SuppressGuard {
     }
 }
 
-// --- Back-compat shims for the prior thread-wide API. The single-app
-//     case used a thread-wide bool; tests against that surface keep
-//     working by mapping it onto the per-app set under a stable
-//     "sentinel" key. New callers should use the per-app API above.
-
-#[doc(hidden)]
-const LEGACY_SUPPRESSION_KEY: &str = "__legacy_thread_wide__";
-
-/// Legacy compatibility: set/clear the thread-wide suppression flag.
-/// Internally maps to a sentinel entry in [`SUPPRESSED_APPS`] so the
-/// new per-app check still covers callers that drive this surface.
-#[doc(hidden)]
-#[cfg(test)]
-pub(crate) fn set_local_emit_suppressed(v: bool) {
-    if v {
-        suppress_app(LEGACY_SUPPRESSION_KEY);
-    } else {
-        unsuppress_app(LEGACY_SUPPRESSION_KEY);
-    }
-}
-
-/// Legacy compatibility: true when the thread-wide flag was set via
-/// [`set_local_emit_suppressed`]. Production code should use
-/// [`is_app_suppressed`] with a concrete app id.
-#[doc(hidden)]
-pub(crate) fn local_emit_suppressed() -> bool {
-    is_app_suppressed(LEGACY_SUPPRESSION_KEY)
-}
-
 /// Emit a local change event into the in-process broker.
 ///
 /// Called from the mutation callbacks (`insert`, `update_one`,
@@ -205,12 +149,7 @@ pub fn emit_local(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    // Per-app suppression: only suppress when THIS app has an active
-    // consumer. The legacy thread-wide flag is also honoured (it maps
-    // onto a sentinel entry in the suppressed set) so older callers
-    // keep their semantics. Tests that rely on the multi-app case must
-    // call `suppress_app(app_id)` directly.
-    if is_app_suppressed(app_id) || local_emit_suppressed() {
+    if is_app_suppressed(app_id) {
         return;
     }
     publish(&ChangeEvent {
@@ -257,6 +196,38 @@ impl std::fmt::Display for ConsumerError {
 }
 
 impl std::error::Error for ConsumerError {}
+
+#[derive(Debug)]
+enum ControlledAttempt {
+    Shutdown,
+    StreamEnd,
+    StartupFailed(DbError),
+    RuntimeFailed(ConsumerError),
+}
+
+fn consumer_error_to_db(error: &ConsumerError) -> DbError {
+    match error {
+        ConsumerError::Connect(message) | ConsumerError::Io(message) => DbError::Transient {
+            message: format!("wal consumer: {message}"),
+        },
+        ConsumerError::Decode(message) => DbError::Internal {
+            message: format!("wal consumer: pgoutput decode: {message}"),
+        },
+    }
+}
+
+fn startup_failure(
+    startup: Option<&flume::Sender<Result<(), DbError>>>,
+    error: ConsumerError,
+) -> ControlledAttempt {
+    if let Some(startup) = startup {
+        let db_error = consumer_error_to_db(&error);
+        let _ = startup.send(Err(db_error.clone()));
+        ControlledAttempt::StartupFailed(db_error)
+    } else {
+        ControlledAttempt::RuntimeFailed(error)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Relation cache
@@ -339,7 +310,7 @@ impl WalConsumer {
     /// `invalid_app_id` is a developer/deploy error; a missing
     /// `db_url` is an operator/configuration error. The SDK branches
     /// on `.code` to surface the right remediation.
-    pub fn new(app_id: &str, db_url: &str) -> Result<Self, DbError> {
+    pub fn new(app_id: &str, worker_id: &str, db_url: &str) -> Result<Self, DbError> {
         if db_url.is_empty() {
             return Err(DbError::Configuration {
                 code: "not_provisioned",
@@ -356,7 +327,7 @@ impl WalConsumer {
         // DbError> — propagate the typed error so the SDK sees
         // `.code = "invalid_app_id"` for sanitise failures and not
         // an opaque `"not_provisioned"` re-stamp.
-        let slot_name = crate::replication::slot_name(app_id)?;
+        let slot_name = crate::replication::worker_slot_name(app_id, worker_id)?;
         let publication_name = crate::replication::publication_name(app_id)?;
         Ok(Self {
             app_id: app_id.to_string(),
@@ -420,6 +391,120 @@ impl WalConsumer {
         // RAII suppression — cleared on Drop, including panic-unwind.
         let _guard = SuppressGuard::activate(&self.app_id);
         self.consume(stream).await
+    }
+
+    async fn run_controlled_once(
+        self,
+        shutdown: &flume::Receiver<()>,
+        startup: Option<&flume::Sender<Result<(), DbError>>>,
+    ) -> ControlledAttempt {
+        let url = ensure_replication_param(&self.db_url);
+        let config = match url.parse::<compio_postgres::Config>() {
+            Ok(config) => config,
+            Err(e) => {
+                return startup_failure(
+                    startup,
+                    ConsumerError::Connect(e.to_string()),
+                );
+            }
+        };
+        let mut conn = match repl::connect_replication(compio_postgres::NoTls, &config).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                return startup_failure(
+                    startup,
+                    ConsumerError::Connect(e.to_string()),
+                );
+            }
+        };
+        if let Err(e) = conn.identify_system().await {
+            return startup_failure(startup, ConsumerError::Io(e.to_string()));
+        }
+        let opts = StartReplicationOptions {
+            slot_name: &self.slot_name,
+            start_lsn: &self.start_lsn,
+            proto_version: 1,
+            publication_names: &self.publication_name,
+        };
+        let stream = match conn.start_logical_replication(opts).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                return startup_failure(startup, ConsumerError::Io(e.to_string()));
+            }
+        };
+
+        if let Some(startup) = startup {
+            if startup.send(Ok(())).is_err() {
+                return ControlledAttempt::Shutdown;
+            }
+        }
+
+        let _guard = SuppressGuard::activate(&self.app_id);
+        match self.consume_until_shutdown(stream, shutdown).await {
+            Ok(ControlledAttempt::Shutdown) => ControlledAttempt::Shutdown,
+            Ok(ControlledAttempt::StreamEnd) => ControlledAttempt::StreamEnd,
+            Ok(other) => other,
+            Err(error) => ControlledAttempt::RuntimeFailed(error),
+        }
+    }
+
+    async fn consume_until_shutdown<S, T>(
+        self,
+        mut stream: ReplicationStream<S, T>,
+        shutdown: &flume::Receiver<()>,
+    ) -> Result<ControlledAttempt, ConsumerError>
+    where
+        S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+        T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+    {
+        let mut relations: HashMap<u32, RelationEntry> = HashMap::new();
+        loop {
+            let message = {
+                let next = stream.next().fuse();
+                let stop = shutdown.recv_async().fuse();
+                futures::pin_mut!(next, stop);
+                futures::select! {
+                    message = next => Some(message),
+                    _ = stop => None,
+                }
+            };
+            let Some(message) = message else {
+                return Ok(ControlledAttempt::Shutdown);
+            };
+            let Some(message) = message.map_err(|e| ConsumerError::Io(e.to_string()))? else {
+                return Ok(ControlledAttempt::StreamEnd);
+            };
+
+            match message {
+                ReplicationMessage::PrimaryKeepalive {
+                    wal_end,
+                    reply_requested,
+                    ..
+                } => {
+                    stream.advance_lsn(wal_end);
+                    if reply_requested {
+                        stream
+                            .send_standby_status_update(false)
+                            .await
+                            .map_err(|e| ConsumerError::Io(e.to_string()))?;
+                    }
+                }
+                ReplicationMessage::XLogData { wal_end, body, .. } => {
+                    let decoded = pgoutput::decode(&body)
+                        .map_err(|e| ConsumerError::Decode(e.to_string()))?;
+                    self.dispatch(&mut relations, &decoded);
+                    if let PgOutputMessage::Commit { end_lsn, .. } = &decoded {
+                        stream.advance_lsn(*end_lsn);
+                        stream
+                            .send_standby_status_update(false)
+                            .await
+                            .map_err(|e| ConsumerError::Io(e.to_string()))?;
+                    } else {
+                        stream.advance_lsn(wal_end);
+                    }
+                }
+            }
+        }
     }
 
     /// The actual decode + publish loop. Separated from `run` so
@@ -784,6 +869,84 @@ pub async fn run_supervised(consumer: WalConsumer) {
     }
 }
 
+/// Run a supervised consumer with an explicit startup and shutdown
+/// contract.
+///
+/// `startup` receives success only after Postgres accepts
+/// `START_REPLICATION`. A connection, slot, or publication failure is
+/// returned immediately instead of leaving a subscription looking
+/// healthy with only its initial snapshot. After startup, transient
+/// failures reconnect with the standard backoff schedule. `shutdown`
+/// interrupts both streaming and backoff waits.
+pub async fn run_supervised_controlled(
+    consumer: WalConsumer,
+    startup: flume::Sender<Result<(), DbError>>,
+    shutdown: flume::Receiver<()>,
+) -> Result<(), DbError> {
+    let app_id = consumer.app_id().to_string();
+    let mut first_attempt = true;
+    let mut backoff = INITIAL_BACKOFF;
+
+    loop {
+        let attempt_started = std::time::Instant::now();
+        let attempt = consumer.clone();
+        let outcome = attempt
+            .run_controlled_once(
+                &shutdown,
+                if first_attempt { Some(&startup) } else { None },
+            )
+            .await;
+        first_attempt = false;
+
+        match outcome {
+            ControlledAttempt::Shutdown => return Ok(()),
+            ControlledAttempt::StreamEnd => {
+                return Err(DbError::Transient {
+                    message: format!(
+                        "wal consumer for app {app_id} stopped before shutdown was requested"
+                    ),
+                });
+            }
+            ControlledAttempt::StartupFailed(error) => return Err(error),
+            ControlledAttempt::RuntimeFailed(error) if is_fatal(&error) => {
+                tracing::error!(
+                    app_id = %app_id,
+                    error = %error,
+                    "wal consumer: fatal error, controlled supervisor exits"
+                );
+                return Err(consumer_error_to_db(&error));
+            }
+            ControlledAttempt::RuntimeFailed(error) => {
+                let ran_for = attempt_started.elapsed();
+                let stable = ran_for >= STABILITY_THRESHOLD;
+                tracing::warn!(
+                    app_id = %app_id,
+                    ran_for_ms = ran_for.as_millis() as u64,
+                    backoff_ms = backoff.as_millis() as u64,
+                    error = %error,
+                    "wal consumer: exited, reconnecting"
+                );
+
+                let sleep = compio::time::sleep(backoff).fuse();
+                let stop = shutdown.recv_async().fuse();
+                futures::pin_mut!(sleep, stop);
+                let stopped = futures::select! {
+                    _ = sleep => false,
+                    _ = stop => true,
+                };
+                if stopped {
+                    return Ok(());
+                }
+                backoff = if stable {
+                    INITIAL_BACKOFF
+                } else {
+                    (backoff * 2).min(MAX_BACKOFF)
+                };
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -869,37 +1032,6 @@ mod tests {
         crate::broker::drop_app(None);
     }
 
-    #[test]
-    fn emit_local_legacy_thread_wide_flag_still_works() {
-        // Back-compat shim: callers that drive the old
-        // `set_local_emit_suppressed(true/false)` surface still suppress
-        // every emit on the thread, regardless of app id.
-        crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("legacy_app", "m");
-        set_local_emit_suppressed(true);
-        emit_local(
-            "legacy_app",
-            "m",
-            ChangeOp::Insert,
-            Some("1".to_string()),
-            vec![],
-            HashMap::new(),
-        );
-        assert!(sub.pop().is_none(), "legacy thread-wide flag must suppress");
-        set_local_emit_suppressed(false);
-        // Drain the sentinel and confirm following emits go through.
-        emit_local(
-            "legacy_app",
-            "m",
-            ChangeOp::Insert,
-            Some("2".to_string()),
-            vec![],
-            HashMap::new(),
-        );
-        assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
-        crate::broker::drop_app(None);
-    }
-
     // -------- ensure_replication_param --------
 
     #[test]
@@ -930,16 +1062,22 @@ mod tests {
 
     #[test]
     fn wal_consumer_new_computes_slot_and_publication() {
-        let c = WalConsumer::new("alpha", "postgres://localhost/db").unwrap();
+        let c = WalConsumer::new("alpha", "worker-a", "postgres://localhost/db").unwrap();
         assert_eq!(c.app_id, "alpha");
-        assert_eq!(c.slot_name, "__zs_slot_alpha");
-        assert_eq!(c.publication_name, "__zs_pub_alpha");
+        assert_eq!(
+            c.slot_name,
+            crate::replication::worker_slot_name("alpha", "worker-a").unwrap()
+        );
+        assert_eq!(
+            c.publication_name,
+            crate::replication::publication_name("alpha").unwrap()
+        );
         assert_eq!(c.start_lsn, "0/0");
     }
 
     #[test]
     fn wal_consumer_with_start_lsn() {
-        let c = WalConsumer::new("alpha", "postgres://localhost/db")
+        let c = WalConsumer::new("alpha", "worker-a", "postgres://localhost/db")
             .unwrap()
             .with_start_lsn("0/16B3750");
         assert_eq!(c.start_lsn, "0/16B3750");
@@ -947,7 +1085,7 @@ mod tests {
 
     #[test]
     fn wal_consumer_rejects_invalid_app_id() {
-        let err = WalConsumer::new("has space", "postgres://localhost/db").unwrap_err();
+        let err = WalConsumer::new("has\0nul", "worker-a", "postgres://localhost/db").unwrap_err();
         assert!(matches!(
             err,
             DbError::ValidationFailed { code: "invalid_app_id", .. }
@@ -963,12 +1101,12 @@ mod tests {
     fn wal_consumer_new_invalid_app_id_returns_typed_error() {
         // A '%' character fails [`crate::replication::sanitise_app_id`]
         // — only `[A-Za-z0-9_]` is permitted.
-        let err = WalConsumer::new("bad%id", "postgres://localhost/db").unwrap_err();
+        let err = WalConsumer::new("bad\0id", "worker-a", "postgres://localhost/db").unwrap_err();
         match err {
             DbError::ValidationFailed { code, message, hint } => {
                 assert_eq!(code, "invalid_app_id");
                 assert!(
-                    message.contains("invalid character"),
+                    message.contains("must not contain NUL"),
                     "message must explain the rejection: {message}"
                 );
                 assert!(hint.is_none(), "validation errors from sanitise_app_id carry no hint");
@@ -984,7 +1122,7 @@ mod tests {
     /// classes.
     #[test]
     fn wal_consumer_new_missing_db_url_returns_configuration() {
-        let err = WalConsumer::new("alpha", "").unwrap_err();
+        let err = WalConsumer::new("alpha", "worker-a", "").unwrap_err();
         match err {
             DbError::Configuration { code, message, hint } => {
                 assert_eq!(code, "not_provisioned");
@@ -1001,7 +1139,7 @@ mod tests {
     // -------- dispatch (pure logic, no I/O) --------
 
     fn make_consumer(app_id: &str) -> WalConsumer {
-        WalConsumer::new(app_id, "postgres://localhost/db").unwrap()
+        WalConsumer::new(app_id, "worker-a", "postgres://localhost/db").unwrap()
     }
 
     fn make_relation_msg(
@@ -1231,8 +1369,6 @@ mod tests {
     #[test]
     fn p8a2_per_app_emit_suppression_app_a_only() {
         crate::broker::drop_app(None);
-        // Clean any sentinel left by other tests.
-        unsuppress_app(LEGACY_SUPPRESSION_KEY);
         unsuppress_app("app_a");
         unsuppress_app("app_b");
 
@@ -1307,6 +1443,21 @@ mod tests {
         assert!(is_app_suppressed("gb"));
         drop(g_b);
         assert!(!is_app_suppressed("gb"));
+    }
+
+    #[test]
+    fn suppression_is_visible_across_threads_and_reference_counted() {
+        const APP: &str = "suppression_cross_thread_refcount";
+        unsuppress_app(APP);
+        let first = SuppressGuard::activate(APP);
+        let second = SuppressGuard::activate(APP);
+        std::thread::spawn(|| assert!(is_app_suppressed(APP)))
+            .join()
+            .unwrap();
+        drop(first);
+        assert!(is_app_suppressed(APP));
+        drop(second);
+        assert!(!is_app_suppressed(APP));
     }
 
     // -------- is_fatal classification --------

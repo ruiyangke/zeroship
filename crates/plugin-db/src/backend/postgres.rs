@@ -107,7 +107,6 @@ impl PostgresBackend {
     }
 
     /// Borrow the configured URL.
-    #[cfg(feature = "test-helpers")]
     pub fn url(&self) -> &str {
         &self.url
     }

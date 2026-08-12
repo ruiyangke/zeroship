@@ -84,6 +84,7 @@ zeroize = { version = "1", features = ["alloc", "derive"] }
 #   single-threaded; the actor runs under `spawn_blocking`).
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
 flume = { workspace = true }
+futures = { workspace = true }
 # **P4 PR 7** — `sqlite-vec` statically compiles the `vec0` C extension
 # into the binary and hooks every rusqlite Connection via
 # `sqlite3_auto_extension`. Unconditional now that the SQLite arm is

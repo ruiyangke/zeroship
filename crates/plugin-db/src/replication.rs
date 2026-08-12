@@ -1,53 +1,39 @@
-//! Replication slot + publication lifecycle — foundation for C1
-//! (reactive queries via Postgres WAL fanout) of the @zeroship/db
-//! proposal (docs/archive/zeroship-db.md, section C1).
+//! Postgres publication and replication-slot lifecycle for reactive
+//! queries.
 //!
 //! This module ships a reduced scope: it provisions and
 //! manages the Postgres-side objects that the broker depends on — the
-//! per-app `PUBLICATION` and the per-app logical-decoding `REPLICATION
-//! SLOT` — and the operational sweepers (watchdog + abandoned-slot GC).
+//! per-app `PUBLICATION` and per-worker logical-decoding `REPLICATION
+//! SLOT`, plus the operational sweepers (watchdog + abandoned-slot GC).
 //! All of these are regular SQL: `CREATE PUBLICATION`,
 //! `pg_create_logical_replication_slot()`, `pg_replication_slots`,
 //! `pg_drop_replication_slot()`.
 //!
-//! The streaming-protocol WAL consumer (CopyBoth, XLogData, pgoutput
-//! frame parser) is **deferred** — it requires
-//! `compio-postgres` to learn the streaming-replication protocol
-//! handshake (`replication=database` startup parameter,
-//! `START_REPLICATION` command, CopyBoth message framing). See the
-//! module-level docs in [`crate::wal_consumer`] for the blocker
-//! analysis and the recommended driver-level extension.
-//!
 //! ## Naming convention
 //!
-//! Per the proposal, both the slot and the publication carry a
-//! stable `__zs_*` prefix so the watchdog can find them with a single
-//! `LIKE '__zs_%'` predicate without parsing app_id out of the name.
+//! Object names carry a stable `__zs_*` prefix and deterministic
+//! SHA-256 tokens. Hashing accepts real UUID and typed-id inputs while
+//! preserving case sensitivity and staying below Postgres's 63-byte
+//! identifier limit.
 //!
-//! - Publication: `__zs_pub_<app_id>`
-//! - Slot:        `__zs_slot_<app_id>`
+//! - Publication: `__zs_pub_<app-token>`
+//! - Slot: `__zs_slot_<app-token>__<worker-token>`
 //!
-//! `app_id` is sanitised at the call boundary: anything that isn't
-//! `[A-Za-z0-9_]` is rejected (Postgres slot names allow only
-//! lowercase alphanumeric + underscore; we accept upper-case here and
-//! lower-case before emitting the SQL — see [`sanitise_app_id`]).
+//! Each worker needs an independent slot because Postgres permits only
+//! one active consumer per logical slot. All workers share the app's
+//! publication, so each receives the same WAL changes.
 //!
-//! ## What this module does NOT do
+//! ## What this module does not do
 //!
-//! - It does not consume WAL. The `pg_logical_slot_*_changes` SQL
-//!   functions DO exist on a regular connection (no replication-mode
-//!   handshake needed), but polling them via SELECT is an order of
-//!   magnitude slower than streaming and reorders concurrency in a way
-//!   that's awkward for a broker driving thousands of subscriptions.
-//!   We defer the consumer rather than ship a degraded mode.
+//! - WAL consumption lives in [`crate::wal_consumer`].
 //! - It does not GRANT the slot's owner role. The proposal's
 //!   security-hardening (SECURITY DEFINER trust anchor for the slot
 //!   owner role, HMAC-signed session init) is deferred.
-//! - It does not co-ordinate slot creation across multiple control-plane
-//!   replicas. This module assumes a single writer; the leader-election guard
-//!   belongs in the control plane and has not been built.
+//! - It does not coordinate slot creation through a leader. Creation is
+//!   idempotent and tolerates concurrent workers.
 
 use compio_postgres::Pool;
+use sha2::{Digest, Sha256};
 
 use crate::error::{first_row_or_internal, prefix_message, DbError};
 
@@ -61,77 +47,81 @@ pub(crate) const OBJECT_PREFIX: &str = "__zs_";
 // Naming
 // ---------------------------------------------------------------------------
 
-/// Validate + normalise an `app_id` for use as part of a Postgres
-/// object name.
+/// Validate an application id before using it as a schema selector.
 ///
-/// Postgres identifiers are case-folded to lowercase unless quoted;
-/// since slot names cannot be quoted (they live in `pg_replication_slots`
-/// as-stored), we lower-case here so two callers spelling the same app
-/// in different cases resolve to the same slot.
-///
-/// Rejects anything outside `[A-Za-z0-9_]` because:
-/// 1. `CREATE_REPLICATION_SLOT` rejects non-identifier characters at
-///    parse time, so a bogus value would surface as a confusing
-///    server-side error.
-/// 2. Even if Postgres accepted it, the LIKE predicate the watchdog
-///    uses would no longer be a safe prefix match.
-///
-/// On reject, returns a typed [`DbError::ValidationFailed`] with a
-/// stable `.code` (`invalid_app_id`) the SDK can branch on.
-pub fn sanitise_app_id(app_id: &str) -> Result<String, DbError> {
+/// Object names do not embed the id directly. They use a SHA-256
+/// token so production UUIDs with hyphens, typed ids, and other
+/// case-sensitive ids all map to legal lowercase Postgres names
+/// without a lossy normalisation step.
+fn validate_app_id(app_id: &str) -> Result<(), DbError> {
     if app_id.is_empty() {
         return Err(DbError::validation(
             "invalid_app_id",
             "replication: app_id must not be empty",
         ));
     }
-    // DB-17: REJECT uppercase rather than silently lowercasing. PG replication
-    // slot/publication names must be lowercase, but schema names (quote_ident)
-    // preserve case and typed_ids are case-SENSITIVE base62 — so lowercasing
-    // here would map two distinct app_ids that differ only in case onto the
-    // SAME slot/publication while they keep DIFFERENT schemas: a latent
-    // cross-tenant CDC mix-up. Rejecting keeps the slot-name namespace
-    // injective over app_ids (production app_ids are lowercase UUIDs, so this
-    // never fires in practice — it is a guard against a future case-sensitive
-    // APP_ID stamp).
-    for c in app_id.chars() {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-            return Err(DbError::validation(
-                "invalid_app_id",
-                format!(
-                    "replication: app_id contains invalid character {c:?} \
-                     — only lowercase [a-z0-9_] permitted (slot-name injectivity)"
-                ),
-            ));
-        }
+    if app_id.contains('\0') {
+        return Err(DbError::validation(
+            "invalid_app_id",
+            "replication: app_id must not contain NUL",
+        ));
     }
-    Ok(app_id.to_string())
+    Ok(())
 }
 
-/// Compose the per-app publication name. Wraps [`sanitise_app_id`].
+fn validate_worker_id(worker_id: &str) -> Result<(), DbError> {
+    if worker_id.is_empty() {
+        return Err(DbError::validation(
+            "invalid_worker_id",
+            "replication: worker_id must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Return the first `bytes` of SHA-256 as lowercase hexadecimal.
+fn stable_token(value: &str, bytes: usize) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut token = String::with_capacity(bytes * 2);
+    for byte in &digest[..bytes] {
+        use std::fmt::Write as _;
+        write!(&mut token, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    token
+}
+
+/// Compose the shared per-app publication name.
 pub fn publication_name(app_id: &str) -> Result<String, DbError> {
-    Ok(format!("{OBJECT_PREFIX}pub_{}", sanitise_app_id(app_id)?))
+    validate_app_id(app_id)?;
+    Ok(format!("{OBJECT_PREFIX}pub_{}", stable_token(app_id, 14)))
 }
 
-/// Compose the per-app replication-slot name.
-pub fn slot_name(app_id: &str) -> Result<String, DbError> {
-    Ok(format!("{OBJECT_PREFIX}slot_{}", sanitise_app_id(app_id)?))
+/// Compose the per-worker replication slot for an app.
+///
+/// The app and worker components use 112-bit and 80-bit tokens,
+/// respectively. Including both keeps every worker container on an
+/// independent logical slot, which is required because a logical slot
+/// can have only one active consumer. The resulting name is 60 bytes,
+/// below Postgres's 63-byte identifier limit.
+pub fn worker_slot_name(app_id: &str, worker_id: &str) -> Result<String, DbError> {
+    validate_app_id(app_id)?;
+    validate_worker_id(worker_id)?;
+    Ok(format!(
+        "{OBJECT_PREFIX}slot_{}__{}",
+        stable_token(app_id, 14),
+        stable_token(worker_id, 10)
+    ))
 }
 
-/// Compose the SQL `LIKE` pattern used to scope cluster-wide queries
-/// against `pg_replication_slots` to a single app (`watchdog_query`,
-/// `drop_abandoned_slots`).
-///
-/// Returns `slot_name(app_id) + '%'` so the filter matches the
-/// canonical per-app slot **plus** any future suffixed shard slot
-/// (`__zs_slot_<app>_<shard>`). The result is always passed via a
-/// parameter bind (`$1`), never string-interpolated into SQL.
-///
-/// Pulled out as a named helper so the per-app scoping invariant has
-/// a single, unit-testable source — see the
-/// `*_filters_by_app_id` regression guards in this module.
-pub(crate) fn slot_name_like_prefix(app_id: &str) -> Result<String, DbError> {
-    Ok(format!("{}%", slot_name(app_id)?))
+/// Compose the exact leading substring shared by an app's worker slots.
+/// Queries compare it with `left(slot_name, length($1)) = $1`, so no
+/// app-controlled wildcard can broaden the match.
+pub(crate) fn worker_slot_name_prefix(app_id: &str) -> Result<String, DbError> {
+    validate_app_id(app_id)?;
+    Ok(format!(
+        "{OBJECT_PREFIX}slot_{}__",
+        stable_token(app_id, 14)
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -172,20 +162,15 @@ pub(crate) fn slot_name_like_prefix(app_id: &str) -> Result<String, DbError> {
 /// `pg_class JOIN pg_namespace`. We target Postgres 15+ and surface a
 /// `replication: server too old` error otherwise — the proposal
 /// version-pins at 16+.
-pub async fn ensure_publication_and_slot(
+pub async fn ensure_publication_and_worker_slot(
     pool: &Pool,
     app_id: &str,
+    worker_id: &str,
 ) -> Result<SetupOutcome, DbError> {
     let pub_name = publication_name(app_id)?;
-    let slot = slot_name(app_id)?;
-    // `sanitise_app_id` lowercases (required for slot/publication object names —
-    // Postgres stores them as-is and folds unquoted identifiers to lowercase).
-    // However, the schema was created by `build_create_schema` using the
-    // *original* app_id via `quote_ident`, so `FOR TABLES IN SCHEMA` must
-    // reference it with the same original-case quoted identifier. Using the
-    // lowercased form here silently produces an empty publication for any
-    // app_id with uppercase characters — a silent WAL delivery failure.
-    // `quote_ident` double-quotes the name so Postgres preserves case.
+    let slot = worker_slot_name(app_id, worker_id)?;
+    // Object names use hash tokens, but the schema itself uses the
+    // original app id. Quote it to preserve case and punctuation.
     let schema_ref = crate::query::quote_ident(app_id);
 
     // ---- 1. publication ----
@@ -325,7 +310,7 @@ pub async fn ensure_publication_and_slot(
     })
 }
 
-/// Result of [`ensure_publication_and_slot`].
+/// Result of [`ensure_publication_and_worker_slot`].
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
     /// Final publication name (after sanitisation).
@@ -407,7 +392,7 @@ pub async fn watchdog_query(
 ) -> Result<Vec<SlotHealth>, DbError> {
     // Per-app slot prefix — `slot_name(app_id) + '%'`. See
     // [`slot_name_like_prefix`]; bound via `$1` below.
-    let slot_prefix = slot_name_like_prefix(app_id)?;
+    let slot_prefix = worker_slot_name_prefix(app_id)?;
     let sql = r"SELECT
             slot_name,
             active,
@@ -418,7 +403,7 @@ pub async fn watchdog_query(
             END                        AS lag_bytes,
             wal_status
          FROM pg_replication_slots
-         WHERE slot_name LIKE $1";
+         WHERE left(slot_name, length($1)) = $1";
     let rows = pool
         .query_text_params(sql, &[&slot_prefix])
         .await
@@ -495,7 +480,7 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 /// the slot itself. An app whose subscribers all disconnected for a
 /// week should not retain a slot that consumes Postgres's per-slot
 /// metadata; full drop is correct. The app's first reconnect after
-/// drop re-runs [`ensure_publication_and_slot`] and gets a fresh slot
+/// drop re-runs [`ensure_publication_and_worker_slot`] and gets a fresh slot
 /// at the current WAL head.
 ///
 /// ## `inactive_seconds` policy
@@ -545,14 +530,14 @@ pub async fn drop_abandoned_slots(
     // tenant `dropAbandoned` only ever GCs its own slots (sibling fix
     // to the cross-app `setup` hijack closed at 309ed52f). Cluster-wide
     // cross-tenant DROP from inside a tenant isolate is a DoS vector.
-    let slot_prefix = slot_name_like_prefix(app_id)?;
+    let slot_prefix = worker_slot_name_prefix(app_id)?;
 
     // We SELECT first, then DROP per-row, because
     // `pg_drop_replication_slot()` doesn't return the slot name and a
     // CTE-with-LATERAL gets awkward across pgsql versions.
     let candidates_sql = r"SELECT slot_name
           FROM pg_replication_slots
-          WHERE slot_name LIKE $1
+          WHERE left(slot_name, length($1)) = $1
             AND active = false
             AND (
                   restart_lsn IS NULL
@@ -651,12 +636,61 @@ pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 ///
 /// Runs under the platform-role `pool` (§17.5) — the only role that may
 /// terminate a replication backend and drop a slot.
-pub async fn drop_publication_and_slot(pool: &Pool, app_id: &str) -> Result<(), DbError> {
-    let pub_name = publication_name(app_id)?;
-    let slot = slot_name(app_id)?;
+/// Drop one worker's slot while retaining the app publication.
+///
+/// This is the normal last-local-subscriber teardown. Other worker
+/// containers may still have subscribers and continue decoding the
+/// shared publication through their own slots.
+pub async fn drop_worker_slot(
+    pool: &Pool,
+    app_id: &str,
+    worker_id: &str,
+) -> Result<(), DbError> {
+    let slot = worker_slot_name(app_id, worker_id)?;
+    drop_slot(pool, &slot).await
+}
 
-    // 1. If the slot exists AND is still active, terminate its backend.
-    //    `active_pid` is NULL when no consumer is attached.
+/// Drop every worker slot for an app, then its shared publication.
+///
+/// This is the app-deletion path. The exact `__` delimiter before the
+/// wildcard ensures one app token cannot prefix-match another app's
+/// slots.
+pub async fn drop_publication_and_slots(pool: &Pool, app_id: &str) -> Result<(), DbError> {
+    let pub_name = publication_name(app_id)?;
+    let slot_prefix = worker_slot_name_prefix(app_id)?;
+    let rows = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots
+             WHERE left(slot_name, length($1)) = $1",
+            &[&slot_prefix],
+        )
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: drop: enumerate worker slots: ");
+            err
+        })?;
+
+    for row in rows {
+        let slot: String = row.get("slot_name");
+        drop_slot(pool, &slot).await?;
+    }
+
+    pool.query_text_params(&format!("DROP PUBLICATION IF EXISTS {pub_name}"), &[])
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(
+                &mut err,
+                &format!("replication: drop: DROP PUBLICATION {pub_name}: "),
+            );
+            err
+        })?;
+
+    Ok(())
+}
+
+async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
     let active_rows = pool
         .query_text_params(
             "SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = $1",
@@ -694,7 +728,7 @@ pub async fn drop_publication_and_slot(pool: &Pool, app_id: &str) -> Result<(), 
             }
         }
     }
-    // else: slot already gone — idempotent skip to the publication drop.
+    // A missing slot is an idempotent success.
 
     // 2. Drop the slot (now inactive). `pg_drop_replication_slot` errors
     //    if the slot doesn't exist, so guard on the probe above: only
@@ -735,24 +769,12 @@ pub async fn drop_publication_and_slot(pool: &Pool, app_id: &str) -> Result<(), 
         }
     }
 
-    // 3. Drop the publication. `DROP PUBLICATION IF EXISTS` is idempotent.
-    pool.query_text_params(&format!("DROP PUBLICATION IF EXISTS {pub_name}"), &[])
-        .await
-        .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
-            prefix_message(
-                &mut err,
-                &format!("replication: drop: DROP PUBLICATION {pub_name}: "),
-            );
-            err
-        })?;
-
     Ok(())
 }
 
 /// True if the PG error is SQLSTATE 42704 (undefined_object) — e.g.
 /// `pg_drop_replication_slot` on a slot a concurrent dropper already
-/// removed. Treated as benign (idempotent) by [`drop_publication_and_slot`].
+/// removed. Treated as benign (idempotent) by [`drop_slot`].
 fn err_is_undefined_object(e: &compio_postgres::Error) -> bool {
     use compio_postgres::error::SqlState;
     e.code() == Some(&SqlState::UNDEFINED_OBJECT)
@@ -767,32 +789,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitise_app_id_rejects_special_chars() {
-        assert!(sanitise_app_id("ok_123").is_ok());
-        assert!(sanitise_app_id("").is_err());
-        assert!(sanitise_app_id("has space").is_err());
-        assert!(sanitise_app_id("has-dash").is_err());
-        assert!(sanitise_app_id("dot.app").is_err());
-        assert!(sanitise_app_id("quote\"app").is_err());
+    fn app_id_validation_accepts_production_uuid() {
+        assert!(publication_name("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_ok());
+        assert!(publication_name("typed_app-id").is_ok());
+        assert!(publication_name("").is_err());
+        assert!(publication_name("nul\0app").is_err());
     }
 
     #[test]
-    fn sanitise_app_id_rejects_uppercase_for_slot_injectivity_db17() {
-        // DB-17: uppercase must be REJECTED, not lowercased — otherwise two
-        // case-distinct app_ids would collide onto one slot/publication while
-        // keeping different (case-preserving) schemas. Lowercase passes through
-        // unchanged (no lossy transform).
-        assert!(sanitise_app_id("MyApp").is_err());
-        assert!(sanitise_app_id("UPPER").is_err());
-        assert_eq!(sanitise_app_id("myapp").unwrap(), "myapp");
-        // A canonical lowercase-hex UUID app_id (production shape) is accepted.
-        assert!(sanitise_app_id("0191e7a2b3c44d5e8f90123456789abc").is_ok());
+    fn case_distinct_app_ids_have_distinct_names() {
+        assert_ne!(publication_name("MyApp").unwrap(), publication_name("myapp").unwrap());
     }
 
     #[test]
     fn names_use_stable_prefix() {
-        assert_eq!(publication_name("alpha").unwrap(), "__zs_pub_alpha");
-        assert_eq!(slot_name("alpha").unwrap(), "__zs_slot_alpha");
+        let publication = publication_name("alpha").unwrap();
+        let slot = worker_slot_name("alpha", "worker-a").unwrap();
+        assert!(publication.starts_with("__zs_pub_"));
+        assert!(slot.starts_with("__zs_slot_"));
+        assert!(slot.contains("__"));
+        assert!(slot.len() <= 63);
+        assert_ne!(slot, worker_slot_name("alpha", "worker-b").unwrap());
     }
 
     #[test]
@@ -810,19 +827,13 @@ mod tests {
     /// failure.
     #[test]
     fn publication_sql_uses_quoted_original_case_schema() {
-        // DB-17: a mixed-case app_id is now REJECTED at sanitise_app_id, so the
-        // lowercased-slot-vs-case-preserving-schema mismatch this guard
-        // protects against can no longer arise (the stronger fix supersedes the
-        // original lowercasing path). A lowercase (production-shape) app_id is
-        // accepted and flows through to the slot/publication names unchanged.
-        assert!(publication_name("MyApp").is_err());
-        assert!(slot_name("MyApp").is_err());
-        assert_eq!(publication_name("myapp").unwrap(), "__zs_pub_myapp");
-        assert_eq!(slot_name("myapp").unwrap(), "__zs_slot_myapp");
+        assert!(publication_name("MyApp").is_ok());
+        assert!(worker_slot_name("MyApp", "worker-a").is_ok());
+        assert_ne!(publication_name("MyApp").unwrap(), publication_name("myapp").unwrap());
 
         // The schema reference still preserves original case via quote_ident
         // (the same function build_create_schema uses) — defense-in-depth.
-        assert_eq!(crate::query::quote_ident("myapp"), "\"myapp\"");
+        assert_eq!(crate::query::quote_ident("MyApp"), "\"MyApp\"");
     }
 
     #[test]
@@ -951,8 +962,8 @@ mod tests {
     /// the stable `.code = "invalid_app_id"` so the SDK can refuse the
     /// request without parsing the message body.
     #[test]
-    fn sanitise_app_id_empty_returns_validation_failed() {
-        let err = sanitise_app_id("").unwrap_err();
+    fn publication_name_empty_returns_validation_failed() {
+        let err = publication_name("").unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_app_id");
@@ -965,8 +976,8 @@ mod tests {
     /// one branch for all input refusals so the SDK has a single
     /// constant to branch on.
     #[test]
-    fn sanitise_app_id_invalid_char_returns_validation_failed_with_code() {
-        let err = sanitise_app_id("bad-app").unwrap_err();
+    fn app_id_with_nul_returns_validation_failed_with_code() {
+        let err = publication_name("bad\0app").unwrap_err();
         let op = err.to_op_error();
         match op.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
@@ -982,8 +993,8 @@ mod tests {
     /// `Result<_, String>` → `DbError::Internal` flattening at the
     /// dispatch boundary).
     #[test]
-    fn publication_and_slot_name_propagate_typed_error_code() {
-        for app in ["", "has space"] {
+    fn publication_and_worker_slot_name_propagate_typed_error_code() {
+        for app in ["", "has\0nul"] {
             let pub_err = publication_name(app).unwrap_err();
             assert!(
                 matches!(
@@ -992,13 +1003,13 @@ mod tests {
                 ),
                 "publication_name({app:?}) — wrong variant: {pub_err:?}"
             );
-            let slot_err = slot_name(app).unwrap_err();
+            let slot_err = worker_slot_name(app, "worker-a").unwrap_err();
             assert!(
                 matches!(
                     &slot_err,
                     DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"
                 ),
-                "slot_name({app:?}) — wrong variant: {slot_err:?}"
+                "worker_slot_name({app:?}) - wrong variant: {slot_err:?}"
             );
         }
     }
@@ -1035,27 +1046,26 @@ mod tests {
         // `app_a`'s per-app prefix must be the canonical slot name
         // terminated with `%`. The dispatcher passes this exact value
         // as the `$1` bind.
-        let p = slot_name_like_prefix("app_a").unwrap();
-        assert_eq!(p, "__zs_slot_app_a%");
+        let p = worker_slot_name_prefix("app_a").unwrap();
+        assert!(p.starts_with("__zs_slot_"));
+        assert!(p.ends_with("__"));
 
         // Different apps produce different prefixes — App A's bind
         // value cannot match App B's slot.
-        let p_b = slot_name_like_prefix("app_b").unwrap();
+        let p_b = worker_slot_name_prefix("app_b").unwrap();
         assert_ne!(p, p_b);
-        assert_eq!(p_b, "__zs_slot_app_b%");
 
         // DB-17: a mixed-case app_id is rejected (not lowercased), so the
         // slot-name prefix stays injective over app_ids. A lowercase id passes.
-        assert!(slot_name_like_prefix("MyApp").is_err());
-        assert_eq!(
-            slot_name_like_prefix("myapp").unwrap(),
-            "__zs_slot_myapp%"
+        assert_ne!(
+            worker_slot_name_prefix("MyApp").unwrap(),
+            worker_slot_name_prefix("myapp").unwrap()
         );
 
         // Empty / invalid app_id propagates the validation error
         // (`invalid_app_id`) instead of producing the cluster-wide
         // `%` wildcard that would re-introduce the vulnerability.
-        let err = slot_name_like_prefix("").unwrap_err();
+        let err = worker_slot_name_prefix("").unwrap_err();
         assert!(
             matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
             "empty app_id must reject, not silently broaden the filter: got {err:?}"
@@ -1064,11 +1074,8 @@ mod tests {
         // wildcard-injection vector, but `sanitise_app_id` already
         // rejects non-`[A-Za-z0-9_]` characters — confirm the rejection
         // flows through.
-        let err = slot_name_like_prefix("%").unwrap_err();
-        assert!(
-            matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
-            "wildcard char must reject, not leak into LIKE: got {err:?}"
-        );
+        let wildcard = worker_slot_name_prefix("%").unwrap();
+        assert!(!wildcard.contains('%'));
     }
 
     /// `drop_abandoned_slots` uses the same `slot_name_like_prefix`
@@ -1079,16 +1086,16 @@ mod tests {
         // The candidate-enumeration CTE binds `slot_name LIKE $1` with
         // the per-app prefix. Same helper as `watchdog_query` — pinning
         // both call sites against one canonical value catches any drift.
-        let p = slot_name_like_prefix("app_a").unwrap();
-        assert_eq!(p, "__zs_slot_app_a%");
+        let p = worker_slot_name_prefix("app_a").unwrap();
+        assert!(p.ends_with("__"));
 
         // App A's bind cannot reap App B's slot.
-        let p_b = slot_name_like_prefix("app_b").unwrap();
+        let p_b = worker_slot_name_prefix("app_b").unwrap();
         assert_ne!(p, p_b);
 
         // Validation-failure path also pins for dropAbandoned, since a
         // silent fallback to `%` here is the higher-severity DoS case.
-        let err = slot_name_like_prefix("").unwrap_err();
+        let err = worker_slot_name_prefix("").unwrap_err();
         assert!(
             matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
             "empty app_id must reject, not silently broaden the DROP filter: got {err:?}"
