@@ -204,11 +204,11 @@ pub fn ir_created_tables(ops: &[Op]) -> Vec<&str> {
     out
 }
 
-/// The single target table of an [`Op`] for the ownership check. Every op the IR
-/// admits operates on exactly one table (the closed `Op` enum carries a `name`
-/// for `createTable`, a `table` for every alter/DML op, and `DropIndex` carries
-/// an optional owning-table hint). A `DropIndex` with no `table` hint has no
-/// ownership-checkable target and returns `None`.
+/// The primary target table of an [`Op`] for ownership checking. Most table-scoped
+/// ops have one target. Partition lifecycle ops have a second target;
+/// [`collect_target_tables`] collects their parent first and then their child. A
+/// `DropIndex` with no `table` hint has no ownership-checkable target and returns
+/// `None`.
 ///
 /// **A bare-name `DropIndex` (`table: None`) is REJECTED UPSTREAM fail-closed**
 /// by `validate_op` (a name-only index drop is not
@@ -307,6 +307,15 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
                 collect_target_tables(inner, out);
             }
         }
+    } else if let Op::CreatePartition {
+        of: parent, name, ..
+    }
+    | Op::AttachPartition { parent, name, .. }
+    | Op::DetachPartition { parent, name, .. }
+    | Op::DropPartition { parent, name, .. } = op
+    {
+        out.push(parent);
+        out.push(name);
     } else if let Op::CreateView {
         query: ViewQuery::Structured { select },
         ..
@@ -547,7 +556,143 @@ pub fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AlterPrimaryKeyAction, IrFlagsOverride, CURRENT_IR_VERSION};
+    use crate::ir::{AlterPrimaryKeyAction, IrFlagsOverride, PartitionBounds, CURRENT_IR_VERSION};
+
+    fn partition_ir(op: Op) -> MigrationIr {
+        MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "partition ownership".to_string(),
+            owner_app: "untrusted-wire-hint".to_string(),
+            ops: vec![op],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
+    fn not_table_owner(table: &str, owner: &str, deploying_app: &str) -> IrLoadError {
+        IrLoadError::NotTableOwner {
+            op_index: 0,
+            table: table.to_string(),
+            owner: owner.to_string(),
+            deploying_app: deploying_app.to_string(),
+        }
+    }
+
+    fn assert_partition_ownership_matrix(op_name: &str, op: Op) {
+        let ir = partition_ir(op);
+        let split_owners = BTreeMap::from([
+            ("parent_tbl".to_string(), "app_a".to_string()),
+            ("child_tbl".to_string(), "app_b".to_string()),
+        ]);
+        let both_owned_by_app_a = BTreeMap::from([
+            ("parent_tbl".to_string(), "app_a".to_string()),
+            ("child_tbl".to_string(), "app_a".to_string()),
+        ]);
+
+        let actual = [
+            enforce_ir_ownership(&ir, "app_a", &split_owners),
+            enforce_ir_ownership(&ir, "app_b", &split_owners),
+            enforce_ir_ownership(&ir, "app_c", &split_owners),
+            enforce_ir_ownership(&ir, "app_a", &both_owned_by_app_a),
+        ];
+        let expected = [
+            Err(not_table_owner("child_tbl", "app_b", "app_a")),
+            Err(not_table_owner("parent_tbl", "app_a", "app_b")),
+            Err(not_table_owner("parent_tbl", "app_a", "app_c")),
+            Ok(()),
+        ];
+
+        assert_eq!(actual, expected, "{op_name} ownership matrix");
+    }
+
+    #[test]
+    fn partition_ownership_create_partition_checks_parent_then_child() {
+        assert_partition_ownership_matrix(
+            "CreatePartition",
+            Op::CreatePartition {
+                name: "child_tbl".to_string(),
+                of: "parent_tbl".to_string(),
+                bounds: PartitionBounds::Default,
+                schema: None,
+                existence_guard: None,
+            },
+        );
+    }
+
+    #[test]
+    fn partition_ownership_attach_partition_checks_parent_then_child() {
+        assert_partition_ownership_matrix(
+            "AttachPartition",
+            Op::AttachPartition {
+                parent: "parent_tbl".to_string(),
+                name: "child_tbl".to_string(),
+                bound: PartitionBounds::Default,
+                schema: None,
+            },
+        );
+    }
+
+    #[test]
+    fn partition_ownership_detach_partition_checks_parent_then_child() {
+        assert_partition_ownership_matrix(
+            "DetachPartition",
+            Op::DetachPartition {
+                parent: "parent_tbl".to_string(),
+                name: "child_tbl".to_string(),
+                schema: None,
+                concurrently: None,
+            },
+        );
+    }
+
+    #[test]
+    fn partition_ownership_drop_partition_checks_parent_then_child() {
+        assert_partition_ownership_matrix(
+            "DropPartition",
+            Op::DropPartition {
+                parent: "parent_tbl".to_string(),
+                name: "child_tbl".to_string(),
+                schema: None,
+                existence_guard: None,
+                cascade: None,
+            },
+        );
+    }
+
+    #[test]
+    fn partition_ownership_create_partition_allows_fresh_child_but_refuses_collision() {
+        let fresh = partition_ir(Op::CreatePartition {
+            name: "fresh_child".to_string(),
+            of: "parent_tbl".to_string(),
+            bounds: PartitionBounds::Default,
+            schema: None,
+            existence_guard: None,
+        });
+        let collision = partition_ir(Op::CreatePartition {
+            name: "child_tbl".to_string(),
+            of: "parent_tbl".to_string(),
+            bounds: PartitionBounds::Default,
+            schema: None,
+            existence_guard: None,
+        });
+        let parent_owned_by_deployer =
+            BTreeMap::from([("parent_tbl".to_string(), "app_a".to_string())]);
+        let foreign_child_collision = BTreeMap::from([
+            ("parent_tbl".to_string(), "app_a".to_string()),
+            ("child_tbl".to_string(), "app_b".to_string()),
+        ]);
+
+        let actual = [
+            enforce_ir_ownership(&fresh, "app_a", &parent_owned_by_deployer),
+            enforce_ir_ownership(&collision, "app_a", &foreign_child_collision),
+        ];
+        let expected = [Ok(()), Err(not_table_owner("child_tbl", "app_b", "app_a"))];
+
+        assert_eq!(actual, expected, "CreatePartition fresh/collision split");
+    }
 
     fn alter_primary_key_ir() -> MigrationIr {
         MigrationIr {
