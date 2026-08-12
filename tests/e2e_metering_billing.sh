@@ -702,8 +702,8 @@ RPERIOD="$(echo "$RECON" | jget '.period_start')"
 # Assert the mock recorded EXACTLY ONE invoice-item create for this creator,
 # plus the invoice create + finalize (both POST /v1/invoices…).
 MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
-# process.stdout.write(String(n)), NOT console.log(n). console.log routes a
-# NUMBER through util.inspect, which colours it when colour is forced -- and
+# process.stdout.write(String(n)), NOT console.log(n). console.log routes ANY
+# NON-STRING through util.inspect, which colours it when colour is forced -- and
 # FORCE_COLOR is set in plenty of developer shells. The comparisons below are
 # string equality, so `1` arrives as ESC[33m1ESC[39m and every one of them
 # fails while the platform is behaving. MEASURED 2026-08-11 on this machine
@@ -712,6 +712,18 @@ MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
 # Same fix as cee243ec4 (#211), which cleared the JSON-extractor sites and did
 # not reach the shell harnesses. `jget` in this same file already writes raw,
 # which is why .billed and .period_start were never affected.
+#
+# THIS COMMENT SAID "a NUMBER" UNTIL 2026-08-12, and that wording cost a whole
+# extra round. Booleans colourise identically: e2e_app_primitives_kv_storage.sh
+# compared `.deleted` and `.found` and got ESC[33mtrueESC[39m /
+# ESC[33mfalseESC[39m, so the storage-delete assertion reported a failure over
+# correct behaviour. I had swept for the class the day before and declared it
+# closed -- but I grepped for NUMERIC shapes, because this comment framed the
+# rule numerically. The rule is ANY non-string; strings are the only safe arg.
+# Also worth knowing for the next sweep: every one of these extractors carries a
+# `console.log("")` in its catch arm, so a LINE-BASED `grep -v 'console.log("'`
+# deletes exactly the lines you are hunting. Match `console.log(JSON.parse`
+# positively instead of excluding.
 count_path() { echo "$MOCK_REQS" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   const arr=JSON.parse(s);
