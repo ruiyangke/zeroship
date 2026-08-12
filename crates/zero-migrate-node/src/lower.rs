@@ -424,7 +424,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
 /// Replay the executed history from nothing and lend the live schema the object definitions
 /// the catalog can no longer show, so a drop's inverse can be rendered from what created it.
 ///
-/// Only objects the live schema does NOT already carry are filled in, and only the five
+/// Only objects the live schema does NOT already carry are filled in, and only the six
 /// definition-bearing kinds. Tables are deliberately untouched: the catalog is authoritative
 /// for them, and replaying creates over it is what made the first attempt at this fail with
 /// `fold: table \`notes\` already exists`.
@@ -458,6 +458,9 @@ fn merge_recovered_definitions(
     }
     for (key, function) in recovered.functions {
         live.functions.entry(key).or_insert(function);
+    }
+    for (key, trigger) in recovered.triggers {
+        live.triggers.entry(key).or_insert(trigger);
     }
     for (name, schema) in recovered.schemas {
         live.schemas.entry(name).or_insert(schema);
@@ -509,10 +512,11 @@ fn executed_history_ops(
 
 /// Whether an operation could have been journaled `completed` without running.
 ///
-/// `Op::existence_guard()` answers this for the core ops and for the DROP side of view and
-/// sequence, but it returns `None` for every vendor op. Native `IF [NOT] EXISTS` clauses must
-/// be read from each vendor op's own field. Asking only `existence_guard()` would treat a
-/// guarded function drop as proven execution and corrupt the definitions later inverses use.
+/// `Op::existence_guard()` answers this for core catalog-probe guards and for the DROP side of
+/// view and sequence, but it returns `None` for ops whose guard is a native `IF [NOT] EXISTS`
+/// clause. Those clauses must be read from each op's own field. Asking only
+/// `existence_guard()` would treat a guarded drop as proven execution and corrupt the
+/// definitions later inverses use.
 fn op_may_have_been_skipped(op: &Op) -> bool {
     if op.existence_guard().is_some() {
         return true;
@@ -532,6 +536,9 @@ fn op_may_have_been_skipped(op: &Op) -> bool {
             if_exists: Some(true),
             ..
         } | Op::DropFunction {
+            if_exists: Some(true),
+            ..
+        } | Op::DropTrigger {
             if_exists: Some(true),
             ..
         }
@@ -1765,6 +1772,20 @@ scope = "all"
     }
 
     #[test]
+    fn native_trigger_drop_guard_is_not_execution_evidence() {
+        let drop = |if_exists| Op::DropTrigger {
+            name: "audit".to_string(),
+            table: "events".to_string(),
+            schema: None,
+            if_exists,
+        };
+
+        assert!(op_may_have_been_skipped(&drop(Some(true))));
+        assert!(!op_may_have_been_skipped(&drop(Some(false))));
+        assert!(!op_may_have_been_skipped(&drop(None)));
+    }
+
+    #[test]
     fn rollback_replay_recovers_a_dropped_function_definition() {
         let owner = "app_function_history";
         let create = serde_json::json!({
@@ -1846,6 +1867,93 @@ scope = "all"
             Some(
                 "CREATE FUNCTION \"app_function_history\".\"format_value\"(\"value\" integer) \
                  RETURNS text LANGUAGE sql IMMUTABLE AS $zsfn$\nSELECT (value + 1)::text\n$zsfn$"
+            )
+        );
+    }
+
+    #[test]
+    fn rollback_replay_recovers_a_dropped_trigger_definition() {
+        let owner = "app_trigger_history";
+        let create = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "create_audit_trigger",
+            "ops": [{
+                "op": "createTrigger",
+                "name": "audit",
+                "table": "events",
+                "timing": "after",
+                "events": ["insert"],
+                "forEach": "row",
+                "action": { "kind": "executeFunction", "name": "audit_events" }
+            }]
+        })
+        .to_string();
+        let drop = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "drop_audit_trigger",
+            "ops": [{
+                "op": "dropTrigger",
+                "name": "audit",
+                "table": "events"
+            }]
+        })
+        .to_string();
+        let charter = &[NO_INJECT_CHARTER_TOML];
+        let registry = r#"{"events":"app_trigger_history"}"#;
+        let create_artifact =
+            lower_envelope_to_plan(&create, owner, owner, "postgres", registry, charter)
+                .expect("the trigger create lowers");
+        let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
+        let effective =
+            effective_policy_from_charter_layers(charter).expect("the trigger charter composes");
+        let history =
+            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, owner, &effective)
+                .expect("the trigger create folds");
+        let drop_artifact = lower_envelope_to_plan_with_live(
+            &drop,
+            owner,
+            owner,
+            "postgres",
+            registry,
+            charter,
+            &LiveSchema::from_catalog_snapshot(history, owner),
+        )
+        .expect("the trigger drop lowers from folded history");
+        let journal_entries = [&create_artifact, &drop_artifact]
+            .into_iter()
+            .flat_map(|artifact| artifact.plan.steps.iter())
+            .filter_map(|step| match step {
+                PlanStep::Ddl(migration) => Some(AppliedEntry {
+                    version: migration.version.as_str().to_string(),
+                    checksum: migration.checksum.as_str().to_string(),
+                    phase: Phase::Completed,
+                    kind: Some(zero_migrate::apply::journal::JournaledKind::Apply),
+                    event_seq: 0,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let replay = lower_ordered_envelopes_to_plans_for_rollback(
+            &[create, drop],
+            owner,
+            owner,
+            "postgres",
+            registry,
+            charter,
+            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            &journal_entries,
+            &[],
+        )
+        .expect("the completed trigger history replays for rollback");
+        let [PlanStep::Ddl(drop_migration)] = replay[1].plan.steps.as_slice() else {
+            panic!("expected one dropTrigger DDL step")
+        };
+        assert_eq!(
+            drop_migration.down.as_deref(),
+            Some(
+                "CREATE TRIGGER \"audit\" AFTER INSERT ON \"app_trigger_history\".\"events\" \
+                 FOR EACH ROW EXECUTE FUNCTION \"app_trigger_history\".\"audit_events\"()"
             )
         );
     }

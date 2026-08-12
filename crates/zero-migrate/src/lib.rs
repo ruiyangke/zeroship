@@ -266,7 +266,7 @@ pub use model::snapshot::{
     FunctionSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot, IndexSnapshot,
     MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, ViewSnapshot,
+    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,

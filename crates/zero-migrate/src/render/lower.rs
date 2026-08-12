@@ -327,6 +327,15 @@ pub struct LiveSchema {
         crate::model::snapshot::FunctionKey,
         crate::model::snapshot::FunctionSnapshot,
     >,
+    /// Triggers already present in the folded live schema, keyed by resolved
+    /// schema, table, and name.
+    ///
+    /// Catalog snapshots leave this empty. A `dropTrigger` can recover an inverse
+    /// only from an authored definition retained by the history fold.
+    pub triggers: std::collections::BTreeMap<
+        crate::model::snapshot::TriggerKey,
+        crate::model::snapshot::TriggerSnapshot,
+    >,
     /// Schemas already present in the folded live schema, with the AUTHORIZATION each
     /// was created with. A non-cascading `dropSchema` renders its own inverse from
     /// this; a cascading one never does, because the snapshot records the namespace
@@ -373,6 +382,7 @@ impl LiveSchema {
             sequences: live.sequences,
             extensions: live.extensions,
             functions: live.functions,
+            triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
@@ -395,6 +405,7 @@ impl LiveSchema {
             sequences: std::collections::BTreeMap::new(),
             extensions: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeMap::new(),
+            triggers: std::collections::BTreeMap::new(),
             schemas: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         }
@@ -481,6 +492,7 @@ impl LiveSchema {
             sequences: desired.snapshot.sequences,
             extensions: desired.snapshot.extensions,
             functions: desired.snapshot.functions,
+            triggers: desired.snapshot.triggers,
             schemas: desired.snapshot.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
@@ -565,6 +577,7 @@ impl LiveSchema {
             sequences: live.sequences,
             extensions: live.extensions,
             functions: live.functions,
+            triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
         })
@@ -5586,7 +5599,7 @@ impl IrAuthor {
             // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
             // capability; unsupported pieces are refused per dialect/action/facet.
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
-                self.lower_trigger_op(op, &eff_schema, &decl)?
+                self.lower_trigger_op(op, &eff_schema, &decl, live_schema)?
             }
             // VENDOR (`zero-migrate`) — render the privileged primitive to
             // its Postgres DDL. Every vendor op is `PgOnly`: a
@@ -5890,12 +5903,21 @@ impl IrAuthor {
         op: &Op,
         eff_schema: &str,
         decl: &DeclarativeAuthor,
+        live_schema: &LiveSchema,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         let stmts =
             crate::render::renderer::renderer(self.dialect).render_trigger_op(op, eff_schema)?;
+        let history_down = trigger_inverse_from_history(op, live_schema, eff_schema, self.dialect);
         Ok(stmts
             .into_iter()
-            .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
+            .map(|s| {
+                // Trigger renderers are pure by contract. An inverse that needs
+                // migration history attaches here, where the folded live schema is
+                // already in scope, and the rendered string still passes through
+                // the normal guarded lowering seam.
+                let down = s.down.or_else(|| history_down.clone());
+                decl.lower_vendor_statement(&s.name, s.up, down)
+            })
             .collect())
     }
 
@@ -8021,6 +8043,56 @@ fn render_sequence_create_from_snapshot(
         eff_schema,
     )?);
     Ok(sql)
+}
+
+/// The `down` a trigger drop can recover from migration history, or `None` when
+/// the drop is not reversible.
+///
+/// Trigger renderers are pure and see the op alone, so history lookup happens at
+/// the lowering seam. Eligibility reads `DropTrigger::if_exists` directly rather
+/// than `Op::existence_guard()`: the latter returns `None` for this native
+/// `IF EXISTS` clause, and `Some(false)` is an explicitly unguarded drop.
+fn trigger_inverse_from_history(
+    op: &Op,
+    live_schema: &LiveSchema,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Option<String> {
+    match op {
+        Op::DropTrigger {
+            name,
+            table,
+            schema,
+            if_exists,
+        } if !if_exists.unwrap_or(false) => {
+            let key =
+                crate::model::snapshot::TriggerKey::new(name, table, schema.as_deref(), eff_schema);
+            let snapshot = live_schema.triggers.get(&key)?;
+            let create = Op::CreateTrigger {
+                name: key.name.clone(),
+                table: key.table.clone(),
+                // Qualify the recorded placement even when the authored CREATE
+                // omitted its schema. Rollback must not depend on the current
+                // effective schema.
+                schema: Some(key.schema.clone()),
+                timing: snapshot.timing,
+                events: snapshot.events.clone(),
+                for_each: snapshot.for_each,
+                action: snapshot.action.clone(),
+                when: snapshot.when.clone(),
+            };
+            let mut statements = crate::render::renderer::renderer(dialect)
+                .render_trigger_op(&create, &key.schema)
+                .ok()?
+                .into_iter();
+            let statement = statements.next()?;
+            if statements.next().is_some() {
+                return None;
+            }
+            Some(statement.up)
+        }
+        _ => None,
+    }
 }
 
 /// The `down` a vendor drop can recover from the migration history, or `None` when

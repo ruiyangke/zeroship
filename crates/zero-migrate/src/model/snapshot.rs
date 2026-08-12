@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::model::expr::Expr;
 use crate::model::ir::{
-    ColType, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol, IndexSortOrder,
-    IndexStorageParams, PartitionBounds, PartitionSpec, SafeI64, SafeU64, SequenceOwnedBy,
-    TableRuntimeOptions, ValueFormat,
+    ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
+    IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, SafeI64, SafeU64,
+    SequenceOwnedBy, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
@@ -1505,6 +1506,50 @@ pub struct FunctionSnapshot {
     pub body: String,
 }
 
+/// Offline identity key for one authored trigger.
+///
+/// PostgreSQL scopes a trigger name to its table, so schema, table, and name all
+/// participate. SQLite requires trigger names to be unique across the schema,
+/// which is stricter: a valid SQLite history cannot contain two keys that differ
+/// only by table, while retaining the table keeps PostgreSQL histories lossless.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TriggerKey {
+    /// Resolved schema containing the trigger's table.
+    pub schema: String,
+    /// Table the trigger belongs to.
+    pub table: String,
+    /// Trigger name.
+    pub name: String,
+}
+
+impl TriggerKey {
+    pub(crate) fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            table: table.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
+/// The authored definition needed to restore a dropped trigger.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerSnapshot {
+    /// Authored trigger timing.
+    pub timing: TriggerTiming,
+    /// Authored trigger events in their original order.
+    pub events: Vec<TriggerEvent>,
+    /// Authored row- or statement-level placement.
+    pub for_each: ForEach,
+    /// Authored per-dialect trigger action.
+    pub action: TriggerAction,
+    /// Authored optional trigger predicate.
+    pub when: Option<Expr>,
+}
+
 /// A deterministic snapshot of one child partition relation.
 ///
 /// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
@@ -1543,6 +1588,11 @@ pub struct SchemaSnapshot {
     /// This rollback-only history is absent from catalog snapshots and excluded
     /// from structural equality.
     pub functions: BTreeMap<FunctionKey, FunctionSnapshot>,
+    /// Authored triggers, keyed by resolved schema, table, and name.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality.
+    pub triggers: BTreeMap<TriggerKey, TriggerSnapshot>,
 }
 
 impl PartialEq for SchemaSnapshot {

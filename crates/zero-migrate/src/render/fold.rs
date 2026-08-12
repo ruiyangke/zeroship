@@ -42,11 +42,11 @@
 //! [`diff_snapshots`](crate::apply::drift::diff_snapshots), not a change here.
 //!
 //! Partitions are the only structurally compared class where this bites. Function
-//! definitions are also history-only, but `SchemaSnapshot` excludes that rollback
-//! metadata from equality and drift just as `ViewSnapshot` excludes its authored
-//! query. Named types are the near miss that shows the shape: `createEnum` and
-//! `createDomain` are portable on MySQL, so the engine authors them there, but the
-//! insert below is gated on
+//! and trigger definitions are also history-only, but `SchemaSnapshot` excludes
+//! that rollback metadata from equality and drift just as `ViewSnapshot` excludes
+//! its authored query. Named types are the near miss that shows the shape:
+//! `createEnum` and `createDomain` are portable on MySQL, so the engine authors
+//! them there, but the insert below is gated on
 //! `Capability::MaterializedEnumType`, false off PostgreSQL, so both sides carry
 //! nothing and agree. Sequences, roles, schemas and extensions are PostgreSQL-only
 //! and cannot appear in a MySQL or SQLite history at all.
@@ -66,12 +66,12 @@
 //! # Schema qualifier / existence guard are fold-irrelevant
 //!
 //! An op's `schema` qualifier normally governs only where the DDL renders. Function
-//! rollback history is the exception: its overload key resolves an omitted schema
-//! to `project_schema` so definitions in different schemas cannot collide. An
-//! `existence_guard` still governs only apply-time presence and does not change the
-//! final folded logical shape. FK definitions also embed `project_schema`
-//! (`REFERENCES <schema>.<target>(id)`), so the caller passes the schema the live DB
-//! is introspected under for both uses.
+//! and trigger rollback histories are the exceptions: their keys resolve an
+//! omitted schema to `project_schema` so definitions in different schemas cannot
+//! collide. An `existence_guard` still governs only apply-time presence and does
+//! not change the final folded logical shape. FK definitions also embed
+//! `project_schema` (`REFERENCES <schema>.<target>(id)`), so the caller passes the
+//! schema the live DB is introspected under for both uses.
 
 use std::collections::BTreeMap;
 
@@ -85,7 +85,7 @@ use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, FunctionSnapshot,
     IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, ViewSnapshot,
+    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 #[cfg(test)]
@@ -1077,6 +1077,7 @@ pub fn fold_ops_onto(
     let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = base.schemas.clone();
     let mut extensions: BTreeMap<String, ExtensionSnapshot> = base.extensions.clone();
     let mut functions: BTreeMap<FunctionKey, FunctionSnapshot> = base.functions.clone();
+    let mut triggers: BTreeMap<TriggerKey, TriggerSnapshot> = base.triggers.clone();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
     for op in replay_ops {
@@ -2577,8 +2578,39 @@ pub fn fold_ops_onto(
                     });
                 }
             }
+            Op::CreateTrigger {
+                name,
+                table,
+                schema,
+                timing,
+                events,
+                for_each,
+                action,
+                when,
+            } => {
+                let key = TriggerKey::new(name, table, schema.as_deref(), project_schema);
+                triggers.insert(
+                    key,
+                    TriggerSnapshot {
+                        timing: *timing,
+                        events: events.clone(),
+                        for_each: *for_each,
+                        action: action.clone(),
+                        when: when.clone(),
+                    },
+                );
+            }
+            Op::DropTrigger {
+                name,
+                table,
+                schema,
+                ..
+            } => {
+                let key = TriggerKey::new(name, table, schema.as_deref(), project_schema);
+                triggers.remove(&key);
+            }
             // Remaining vendor ops either change unmodeled facets (role settings,
-            // grants/RLS/policies/triggers) or are raw statements, so they do not
+            // grants/RLS/policies) or are raw statements, so they do not
             // contribute to this structural snapshot.
             Op::AlterRole { .. }
             | Op::DropOwnedBy { .. }
@@ -2587,8 +2619,6 @@ pub fn fold_ops_onto(
             | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
-            | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. }
             | Op::PgRaw { .. } => {}
             Op::Dialectal { .. } => {}
         }
@@ -2610,6 +2640,7 @@ pub fn fold_ops_onto(
         schemas,
         extensions,
         functions,
+        triggers,
     })
 }
 

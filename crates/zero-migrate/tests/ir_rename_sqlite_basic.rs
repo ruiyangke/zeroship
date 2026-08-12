@@ -106,6 +106,7 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         sequences: desired.snapshot.sequences.clone(),
         extensions: desired.snapshot.extensions.clone(),
         functions: desired.snapshot.functions.clone(),
+        triggers: desired.snapshot.triggers.clone(),
         schemas: desired.snapshot.schemas.clone(),
         sqlite_schemas: desired.sqlite_schemas,
         table_ownership,
