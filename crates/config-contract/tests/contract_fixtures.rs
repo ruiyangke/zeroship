@@ -156,6 +156,97 @@ fn a_wrong_consumer_is_both_unread_and_undeclared() {
 }
 
 #[test]
+fn two_consumers_of_one_identity_may_differ_only_in_their_default() {
+    // THE 2026-08-12 AMENDMENT to Section 4.1. The original coalescing rule
+    // demanded that consumers agree on the DEFAULT as well, which would have
+    // rejected the five `observability.log_filter` declarations already in the
+    // tree: each defaults to a tracing directive naming its own crate, so no
+    // single value is correct for all of them.
+    //
+    // This is the positive control for the two failures below: the specs are
+    // identical apart from the one property the rule must NOT compare.
+    let specs = [
+        ConfigSpec::operational(
+            CanonicalName::from_static("observability.log_filter"),
+            CONTROL_ONLY,
+            "log_filter",
+            "log_filter",
+            "String",
+            Some("info,zeroship_control=debug"),
+        ),
+        ConfigSpec::operational(
+            CanonicalName::from_static("observability.log_filter"),
+            WORKER_ONLY,
+            "log_filter",
+            "log_filter",
+            "String",
+            Some("info,zeroship_worker=debug"),
+        ),
+    ];
+    validate_contract(&specs, &sites(&specs))
+        .expect("a per-binary default is a legitimate configuration, not a violation");
+}
+
+#[test]
+fn two_consumers_of_one_identity_may_not_differ_in_class_or_type() {
+    // The other half of the amended rule, one variable at a time against the
+    // positive control above. Both mutations keep one canonical name, so the
+    // operator still sees exactly one ZEROSHIP_OBSERVABILITY_LOG_FILTER; what
+    // differs is what that one variable MEANS to each process.
+    //
+    // Does not cover: the same divergence written through the attribute. That
+    // cannot be expressed - `#[config(shared = ...)]` reads the class and type
+    // from one table - and the refusal is asserted in config-macros.
+    let retyped = [
+        ConfigSpec::operational(
+            CanonicalName::from_static("observability.log_filter"),
+            CONTROL_ONLY,
+            "log_filter",
+            "log_filter",
+            "String",
+            None,
+        ),
+        ConfigSpec::operational(
+            CanonicalName::from_static("observability.log_filter"),
+            WORKER_ONLY,
+            "log_filter",
+            "log_filter",
+            "PathBuf",
+            None,
+        ),
+    ];
+    let errors =
+        validate_contract(&retyped, &sites(&retyped)).expect_err("a retyped identity must fail");
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ContractError::SharedIdentityDisagreement { property: "type", canonical, .. }
+                if canonical == "observability.log_filter"
+        )),
+        "{errors:?}"
+    );
+
+    let reclassed = [
+        operational("observability.log_filter", CONTROL_ONLY),
+        secret("observability.log_filter", WORKER_ONLY),
+    ];
+    let errors = validate_contract(&reclassed, &sites(&reclassed))
+        .expect_err("a reclassed identity must fail");
+    // A class change also moves the supply set, so both properties are reported;
+    // asserting on `class` alone would pass if only the supply set had drifted.
+    for property in ["class", "supply set"] {
+        assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                ContractError::SharedIdentityDisagreement { property: reported, .. }
+                    if *reported == property
+            )),
+            "no {property} disagreement reported: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn empty_contract_extraction_fails_in_both_directions() {
     // Mutation: neither declaration nor read-site extraction finds anything.
     // Does not cover: Cargo binary extraction, which has a distinct metadata

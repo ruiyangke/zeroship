@@ -46,6 +46,28 @@ pub enum ContractError {
         /// Declared source.
         kind: SourceKind,
     },
+    /// Two consumers of one canonical identity disagree about what it IS.
+    ///
+    /// The `default` is deliberately not one of the compared properties; see
+    /// [`validate_contract`].
+    #[error(
+        "consumers of {canonical} disagree about {property}: {first} declares \
+         {first_value}, {second} declares {second_value}"
+    )]
+    SharedIdentityDisagreement {
+        /// Canonical identity declared more than once.
+        canonical: String,
+        /// The property that differs, such as `class` or `type`.
+        property: &'static str,
+        /// First consumer, in sorted order.
+        first: String,
+        /// First consumer's value.
+        first_value: String,
+        /// Second consumer.
+        second: String,
+        /// Second consumer's value.
+        second_value: String,
+    },
     /// A linked reader has no matching declaration for its exact consumer.
     #[error("read site has no declaration: {canonical} for {consumer} via {kind:?}")]
     UndeclaredReadSite {
@@ -65,12 +87,38 @@ struct Tuple {
     source: SourceKind,
 }
 
-/// Validate projections and bidirectional declaration/read-site equality.
+/// Compare the properties on which consumers of one identity must agree.
+///
+/// The DEFAULT is not among them, and its absence is the point. Section 4.1 of
+/// `docs/proposals/2026-08-11-config-name-alignment.md` first required default
+/// agreement too; the 2026-08-12 amendment removed that clause because
+/// `observability.log_filter` defaults to a directive naming the declaring
+/// crate, so requiring agreement would have rejected a correct configuration
+/// with no conforming alternative.
+///
+/// Everything compared here is something an OPERATOR would be misled by: one
+/// `ZEROSHIP_*` spelling and one overlay path must mean one class, one type and
+/// one supply set. The default is invisible from outside the process.
+fn shared_properties(spec: &ConfigSpec) -> [(&'static str, String); 4] {
+    [
+        ("class", format!("{:?}", spec.class())),
+        ("type", spec.rust_type().to_owned()),
+        (
+            "environment source",
+            spec.env_name().unwrap_or_else(|| "none".to_owned()),
+        ),
+        ("supply set", format!("{:?}", spec.sources())),
+    ]
+}
+
+/// Validate projections, shared-identity agreement, and bidirectional
+/// declaration/read-site equality.
 ///
 /// # Errors
 ///
-/// Returns explicit anti-vacuity, collision, set-but-unread, and undeclared
-/// reader errors. Every diagnostic contains names only, never values.
+/// Returns explicit anti-vacuity, collision, shared-identity, set-but-unread,
+/// and undeclared reader errors. Every diagnostic contains names only, never
+/// values.
 pub fn validate_contract(
     specs: &[ConfigSpec],
     read_sites: &[ReadSite],
@@ -113,6 +161,48 @@ pub fn validate_contract(
                             second: canonical.clone(),
                         });
                     }
+                }
+            }
+        }
+    }
+
+    // Group by canonical identity. The declaration attribute already makes the
+    // NAME, class and type of a shared identity unforgeable by reading them
+    // from one table, so this is defence in depth for a hand-written
+    // `ConfigSpec` and for whatever the registry grows next.
+    let mut by_identity: BTreeMap<&str, Vec<&ConfigSpec>> = BTreeMap::new();
+    for spec in specs {
+        by_identity
+            .entry(spec.canonical().as_str())
+            .or_default()
+            .push(spec);
+    }
+    for (canonical, group) in &by_identity {
+        let Some((first, rest)) = group.split_first() else {
+            continue;
+        };
+        let first_properties = shared_properties(first);
+        let first_consumer = first
+            .consumers()
+            .first()
+            .map_or("<none>", |consumer| consumer.target())
+            .to_owned();
+        for spec in rest {
+            let second_consumer = spec
+                .consumers()
+                .first()
+                .map_or("<none>", |consumer| consumer.target())
+                .to_owned();
+            for (expected, actual) in first_properties.iter().zip(shared_properties(spec)) {
+                if expected.1 != actual.1 {
+                    errors.push(ContractError::SharedIdentityDisagreement {
+                        canonical: (*canonical).to_owned(),
+                        property: expected.0,
+                        first: first_consumer.clone(),
+                        first_value: expected.1.clone(),
+                        second: second_consumer.clone(),
+                        second_value: actual.1,
+                    });
                 }
             }
         }
