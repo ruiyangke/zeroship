@@ -617,6 +617,50 @@ echo "$BOB_SEARCH" | grep -q "alice@localhost" \
 call users.me | grep -q "alice@localhost" \
   && pass "users.me still returns the caller's own email" \
   || fail "users.me stopped returning the caller's own email"
+
+# The mask that stops a public row NAMING a restricted bug was applied in
+# dupes.list only, while bugs.get and bugs.search -- both ANONYMOUS -- returned
+# duplicateOfId untouched. A confidential bug exists to hide its existence, and
+# its id leaked through the two most-used read paths.
+MASK_PUB="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Mask probe $STAMP\",\"description\":\"d\"}" | jget 'json.id')"
+call bugs.markDuplicate "{\"id\":\"$MASK_PUB\",\"duplicateOfId\":\"$SECRET_BUG\"}" >/dev/null
+
+# Control: Alice CAN see the link, so its absence for others is a mask and not
+# a failed write.
+[ "$(call bugs.get "{\"id\":\"$MASK_PUB\"}" | jget 'json.bug.duplicateOfId')" = "$SECRET_BUG" ] \
+  && pass "control: the duplicate link is visible to someone who can read both" \
+  || fail "control failed: even Alice cannot see the duplicate link"
+
+anon_body() { curl -sS -m 25 -X POST -H 'content-type: application/json' "$RPC/$1" -d "{\"json\":$(_body "${2-}")}"; }
+anon_body bugs.get "{\"id\":\"$MASK_PUB\"}" | grep -q "$SECRET_BUG" \
+  && fail "bugs.get discloses a restricted bug id to an anonymous caller" \
+  || pass "bugs.get masks the restricted duplicate link for anonymous callers"
+
+anon_body bugs.search "{\"text\":\"Mask probe $STAMP\"}" | grep -q "$SECRET_BUG" \
+  && fail "bugs.search discloses a restricted bug id to an anonymous caller" \
+  || pass "bugs.search masks the restricted duplicate link"
+
+# The activity stream is permanent and carries the same id in its VALUES, so an
+# unfiltered history re-leaks what the row-level mask withholds.
+#
+# Asserted on the activities array specifically. An earlier version grepped the
+# whole response for the string "duplicateOfId" -- which is a legitimate FIELD
+# NAME on every bug row -- and so reported a leak that was not there.
+if anon_body bugs.get "{\"id\":\"$MASK_PUB\"}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).json?.activities??[];process.exit(a.some((r)=>[r.oldValue,r.newValue].includes(process.argv[1]))?1:0)})' "$SECRET_BUG"; then
+  pass "the activity history withholds the restricted reference"
+else
+  fail "an activity row still carries the restricted bug id in its value"
+fi
+
+# Marking a duplicate is a closure like bugs.resolve, and was the one closure
+# that notified nobody.
+DUP_NOTIFY_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
+DUP_SRC="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Dup notify $STAMP\",\"description\":\"d\"}" | jget 'json.id')"
+call cc.add "{\"bugId\":\"$DUP_SRC\",\"userId\":\"$BOB_ID\"}" >/dev/null
+call bugs.markDuplicate "{\"id\":\"$DUP_SRC\",\"duplicateOfId\":\"$BUG\"}" >/dev/null
+[ "$(bob notifications.unreadCount | jget 'json.count')" -gt "$DUP_NOTIFY_BEFORE" ] 2>/dev/null \
+  && pass "marking a duplicate notifies the CC'd user" \
+  || fail "bugs.markDuplicate closed a bug and told nobody"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.

@@ -29,6 +29,7 @@ import {
   BUG_STATUSES,
   isBugResolution,
   isBugStatus,
+  isOpenBugStatus,
   markDuplicateBugState,
   reopenBugState,
   resolveBugState,
@@ -740,6 +741,32 @@ function bugState(row: BugRow): BugState {
  * row that still names the restricted bug in `duplicateOfId` confirms it
  * exists, which is what a confidential bug is hiding.
  */
+/**
+ * Should this history row be withheld from the viewer?
+ *
+ * Activity rows are permanent, and several carry ANOTHER bug.s id as their
+ * value: `dependsOn` and `duplicateOfId` both do. The write that created the
+ * row required access to both bugs at the time, but the row survives a later
+ * restriction, so replaying history re-leaks what the graph and duplicate
+ * endpoints withhold.
+ *
+ * `bug_group` rows go further and are dropped whenever anything is hidden from
+ * this viewer: which groups a bug is restricted to is itself the shape of the
+ * security model.
+ */
+const BUG_REFERENCE_FIELDS = new Set(["dependsOn", "duplicateOfId", "blocks"]);
+
+function hidesRestrictedReference(
+  activity: ActivityRow,
+  hidden: ReadonlySet<string>,
+): boolean {
+  if (activity.fieldName === "bug_group") return hidden.size > 0;
+  if (!BUG_REFERENCE_FIELDS.has(activity.fieldName)) return false;
+  return [activity.oldValue, activity.newValue].some(
+    (value) => typeof value === "string" && hidden.has(value),
+  );
+}
+
 function maskHiddenBugLinks(row: BugRow, hidden: ReadonlySet<string>): BugRow {
   if (!row.duplicateOfId || !hidden.has(row.duplicateOfId)) return row;
   return { ...row, duplicateOfId: null };
@@ -849,7 +876,9 @@ async function updateBugWithHistory(
 
   // Fanout lives HERE rather than at each call site, because putting it at
   // call sites is exactly how it ended up on two of the ten mutations that
-  // change a bug. bugs.reassign was silent, so a new assignee was never told
+  // change a bug. It covers the EIGHT that route through this helper;
+  // bugs.markDuplicate runs its own transaction for cycle detection and
+  // notifies itself, and bugs.create deliberately does not notify at all. bugs.reassign was silent, so a new assignee was never told
   // they had been given a bug -- the single most useful notification a tracker
   // sends.
   //
@@ -1069,8 +1098,13 @@ export const createBug = mutation(
 export const getBug = query(
   async ({ id }: { id: string }) => {
     const storedBug = await getRequired(db.bugs, id, "Bug");
-    await assertBugVisible(storedBug, optionalIdentity());
-    const bug = normalizeBugRow(storedBug);
+    // Resolved once and reused: bugs.get is anonymous, so `optionalIdentity()`
+    // is frequently null and `appUserForIdentity(null)` is the anonymous case
+    // rather than an error.
+    const identity = optionalIdentity();
+    await assertBugVisible(storedBug, identity);
+    const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
+    const bug = maskHiddenBugLinks(normalizeBugRow(storedBug), hidden);
     const [activityRows, product, component] = await Promise.all([
       readAll(db.activities, { bugId: bug.id }),
       db.products.get(bug.productId),
@@ -1080,8 +1114,16 @@ export const getBug = query(
       bug,
       product: must(product),
       component: must(component),
+      // The history is filtered too. Several activity rows carry ANOTHER
+      // bug's id in their value -- `dependsOn` and `duplicateOfId` both do --
+      // so an unfiltered stream re-leaks exactly what the graph and duplicate
+      // endpoints were hardened to withhold. The write required access at the
+      // time; the row outlives that. `bug_group` rows are dropped for
+      // non-privileged viewers outright: which groups a bug is restricted to
+      // is itself security information.
       activities: activityRows
         .sort((left, right) => left.created_at - right.created_at)
+        .filter((activity) => !hidesRestrictedReference(activity, hidden))
         .map((activity) => ({
           fieldName: activity.fieldName,
           oldValue: activity.oldValue ?? null,
@@ -1192,13 +1234,18 @@ async function searchBugsInternal(
   const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
   const sortBy = input.sortBy ?? "updated_at";
   const direction = input.sortDirection ?? -1;
+  // The same `hidden` set that built the $nin above also masks outward links.
+  // Excluding restricted ROWS is not the whole job: a public bug that is a
+  // duplicate of a restricted one still NAMES it in duplicateOfId, and
+  // bugs.search is anonymous.
+  const hiddenSet = new Set(hidden);
   return must(
     await db.bugs
       .find(filter)
       .sort({ [sortBy]: direction })
       .skip(clampOffset(input.offset))
       .limit(clampLimit(input.limit)),
-  ).map(normalizeBugRow);
+  ).map((row) => maskHiddenBugLinks(normalizeBugRow(row), hiddenSet));
 }
 
 export const searchBugs = query(
@@ -1322,11 +1369,28 @@ export const changeBugStatus = mutation(
       actor.id,
       (before) => {
         const next = transitionBugState(bugState(before), { status, resolution });
+        // `resolvedAt` is maintained HERE too, not only in bugs.resolve /
+        // markDuplicate / reopen. This path performs the same transitions --
+        // it can move a bug into RESOLVED and back out to CONFIRMED -- and it
+        // was leaving the stamp untouched in both directions:
+        //   - resolving through here left resolvedAt null, so
+        //     reports.timeToResolve never counted the bug while
+        //     reports.trend (which mines status history) did, and the two
+        //     reports disagreed about the same bug;
+        //   - reopening through here left a stale stamp, so timeToResolve
+        //     counted a currently-OPEN bug as resolved, with a duration
+        //     measured to a resolution that had been undone.
+        const wasResolved = !isOpenBugStatus(bugState(before).status);
+        const isResolved = !isOpenBugStatus(next.status);
         return {
           status: next.status,
           resolution: next.resolution,
           isConfirmed: next.status !== "UNCONFIRMED",
           ...(next.resolution !== "DUPLICATE" ? { duplicateOfId: null } : {}),
+          ...(isResolved && !wasResolved
+            ? { resolvedAt: portableTimestamp(Date.now()) }
+            : {}),
+          ...(!isResolved && wasResolved ? { resolvedAt: null } : {}),
         };
       },
       ["status", "resolution", "isConfirmed", "duplicateOfId"],
@@ -1438,7 +1502,15 @@ export const markBugDuplicate = mutation(
       },
       { isolationLevel: "serializable" },
     );
-    return must(result);
+    const marked = must(result);
+    // Notified explicitly, because this handler runs its OWN transaction for
+    // cycle detection and never goes through updateBugWithHistory -- where the
+    // central fanout lives. Marking a duplicate is a real closure, exactly
+    // like bugs.resolve, and it was the one closure that told nobody. The
+    // comment on the central fanout claimed it covered every bug mutation; it
+    // covers the eight that route through that helper.
+    await notifyBugChange(marked, actor.id, `${marked.summary} was closed as a duplicate`);
+    return marked;
   },
   { id: "bugs.markDuplicate" },
 );
