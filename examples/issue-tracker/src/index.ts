@@ -735,6 +735,18 @@ function bugState(row: BugRow): BugState {
   return { status: row.status, resolution };
 }
 
+/**
+ * Blank a bug link that points somewhere the caller cannot look.
+ *
+ * Excluding the restricted ROW from a list is only half the job: a surviving
+ * row that still names the restricted bug in `duplicateOfId` confirms it
+ * exists, which is what a confidential bug is hiding.
+ */
+function maskHiddenBugLinks(row: BugRow, hidden: ReadonlySet<string>): BugRow {
+  if (!row.duplicateOfId || !hidden.has(row.duplicateOfId)) return row;
+  return { ...row, duplicateOfId: null };
+}
+
 function normalizeBugRow(row: BugRow): BugRow {
   const out = { ...row } as BugRow & Record<string, unknown>;
   for (const field of NULLABLE_BUG_TEXT_FIELDS) {
@@ -2015,14 +2027,34 @@ export const listDuplicates = query(
   async ({ bugId }: { bugId: string }) => {
     const identity = requireIdentity();
     const visible = await visibleProductIds(identity, true);
-    const bugs = (
+    const all = (
       await Promise.all(
         chunks([...visible]).map((ids) => readAll(db.bugs, { productId: { $in: ids } })),
       )
     ).flat();
+
+    // Bug-level restrictions apply here too. This filtered on product
+    // visibility alone, and a duplicate cluster is the classic way a
+    // confidential bug becomes reachable: a PUBLIC bug marked as a duplicate
+    // of a restricted one put the restricted bug's whole row -- summary,
+    // status, assignee -- into this response for anyone who could see the
+    // public one.
+    //
+    // The filter runs BEFORE the existence check, not after. Checking
+    // existence against the unfiltered set makes this an oracle: a caller
+    // could tell a restricted bug id (404 vs a result) from a nonexistent one.
+    const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
+    const bugs = all.filter((bug) => !hidden.has(bug.id));
+
     if (!bugs.some((bug) => bug.id === bugId)) notFound("Bug");
     const ids = new Set(weaklyConnectedComponent(duplicateEdges(bugs), bugId));
-    return bugs.filter((bug) => ids.has(bug.id)).map(normalizeBugRow);
+    // `duplicateOfId` is masked when it points at a bug the caller cannot see.
+    // Dropping the restricted ROW is not enough on its own: the surviving
+    // public row still named the restricted bug's id, which confirms it exists
+    // -- the same disclosure the dependency-edge check closes.
+    return bugs
+      .filter((bug) => ids.has(bug.id))
+      .map((bug) => maskHiddenBugLinks(normalizeBugRow(bug), hidden));
   },
   { id: "dupes.list" },
 );
@@ -2388,8 +2420,14 @@ export const listMyCc = query(
 
     const bugs = await readByIds(db.bugs, rows.map((row) => row.bugId));
     const visible = await visibleProductIds(identity);
+    // BOTH layers, not just the product one. Restricting a bug does not clear
+    // its CC list -- in Bugzilla or here -- so a user CC'd before the
+    // restriction keeps the row and would otherwise read the bug through this
+    // list while `bugs.get` returns 403 for the same id. The comment above
+    // used to claim visibility was re-applied while only half of it was.
+    const hidden = new Set(await hiddenBugIds(user));
     return bugs
-      .filter((bug) => visible.has(bug.productId))
+      .filter((bug) => visible.has(bug.productId) && !hidden.has(bug.id))
       .map(normalizeBugRow)
       .sort((left, right) => right.updated_at - left.updated_at);
   },

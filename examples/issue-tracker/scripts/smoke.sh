@@ -500,6 +500,37 @@ call bugs.reassign "{\"id\":\"$BUG\",\"assigneeId\":\"$BOB_ID\"}" >/dev/null
 [ "$(bob notifications.unreadCount | jget 'json.count')" = "$NOOP_BEFORE" ] \
   && pass "re-assigning to the same user notifies nobody" \
   || fail "a no-op update sent a notification"
+
+# Two list surfaces that were retrofitted with hiddenBugIds one at a time, and
+# these two were missed because they do not share the search code path.
+#
+# A duplicate cluster is the classic route to a confidential bug: a PUBLIC bug
+# marked as a duplicate of a restricted one pulled the restricted bug's whole
+# row into dupes.list for anyone who could see the public one.
+DUP_PUBLIC="$(call bugs.create "{\"productId\":\"$PROD\",\"componentId\":\"$COMP\",\"versionId\":\"$VER\",\"summary\":\"Dup of secret $STAMP\",\"description\":\"d\"}" | jget 'json.id')"
+call bugs.markDuplicate "{\"id\":\"$DUP_PUBLIC\",\"duplicateOfId\":\"$SECRET_BUG\"}" >/dev/null
+
+# Control: Alice, who can see the restricted bug, DOES get it in the cluster.
+call dupes.list "{\"bugId\":\"$DUP_PUBLIC\"}" | grep -q "$SECRET_BUG" \
+  && pass "control: the duplicate cluster contains the restricted bug for Alice" \
+  || fail "control failed: the cluster does not contain it even for Alice"
+
+bob dupes.list "{\"bugId\":\"$DUP_PUBLIC\"}" | grep -q "$SECRET_BUG" \
+  && fail "dupes.list leaks a restricted bug through a public duplicate" \
+  || pass "the restricted bug is absent from Bob's duplicate cluster"
+
+# ...and the existence oracle: asking directly about the restricted bug must
+# 404 for Bob rather than answering.
+[ "$(bobc dupes.list "{\"bugId\":\"$SECRET_BUG\"}")" = "404" ] \
+  && pass "dupes.list does not confirm a restricted bug id exists" \
+  || fail "dupes.list answers for a restricted bug id (existence oracle)"
+
+# cc.listMine: restricting a bug does not clear its CC list, so a user CC'd
+# before the restriction kept reading the row here while bugs.get 403s.
+call cc.add "{\"bugId\":\"$SECRET_BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
+bob cc.listMine | grep -q "$SECRET_BUG" \
+  && fail "cc.listMine returns a bug the caller cannot read" \
+  || pass "cc.listMine withholds a bug restricted after the CC"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.
