@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Rejects a commit message that breaks the conventions in CONTRIBUTING.md,
+# at the moment it is written rather than in CI a day later.
+#
+# Enabled by:  git config core.hooksPath .githooks
+# The same checks run in CI over the PR range, so a machine that never ran
+# that command, or a --no-verify, is still caught before merge.
+exec "$(git rev-parse --show-toplevel)/tests/commit_msg_gate.sh" --file "$1"

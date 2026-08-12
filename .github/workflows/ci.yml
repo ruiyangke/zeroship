@@ -2,6 +2,42 @@ name: CI
 on: [push, pull_request]
 
 jobs:
+  # Commit conventions, in CI as well as in the local commit-msg hook. The hook
+  # is the one that matters - it fails at the moment of the mistake - but it
+  # only runs where someone has set core.hooksPath, and --no-verify skips it.
+  # This is the backstop, and it is cheap: no toolchain, no submodule.
+  #
+  # MEASURED 2026-08-11: over one week, 59% of subjects exceeded the then-stated
+  # 72-char limit and 43 commits carried no scope. The rule existed in
+  # CONTRIBUTING.md the whole time and nothing checked it, so it rotted the way
+  # every unenforced invariant in this tree has. That is what this job is for.
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the range needs both endpoints
+      # Prove the linter can still FAIL before trusting a clean run from it.
+      # A gate that accepts everything and a gate that is broken look identical.
+      - name: Gate self-test
+        run: tests/commit_msg_gate.sh --self-test
+      - name: Check the commit messages in this change
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          elif [ -n "${{ github.event.before }}" ] \
+            && git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
+            range="${{ github.event.before }}..${{ github.sha }}"
+          else
+            # New branch, or a force-push whose base is gone. Checking the whole
+            # history here would fail on every pre-gate commit, so scope it to
+            # the tip and say so rather than reporting a vacuous pass.
+            echo "no usable base ref; checking the tip commit only"
+            range="${{ github.sha }}~1..${{ github.sha }}"
+          fi
+          echo "range: $range"
+          tests/commit_msg_gate.sh --range "$range"
+
   rust:
     runs-on: ubuntu-latest
     steps:
