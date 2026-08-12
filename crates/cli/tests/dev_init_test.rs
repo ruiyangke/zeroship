@@ -476,6 +476,65 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// No server binary may declare the deleted security-relaxation flag again.
+///
+/// Each of the five binaries already has its own `try_parse_from(["...",
+/// "--dev-insecure"])` rejection test. Those are per-crate and prove only that
+/// TODAY'S parser rejects it; this one is cross-crate and keys on the
+/// DECLARATION, so a re-added arg fails here even in a crate whose own suite
+/// was not run.
+///
+/// WHAT THIS DOES NOT CATCH, and it is the realistic remaining hole: a
+/// hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")` read that never goes
+/// through clap. Only the clap spellings are matched, because the existing
+/// rejection tests legitimately contain the bare strings inside `mod tests` and
+/// a bare-string scan would flag them.
+#[test]
+fn no_server_binary_redeclares_the_relaxation_flag() {
+    let root = workspace_root();
+    let mut sources = Vec::new();
+    for crate_name in ["control", "gateway", "worker", "auth", "migrated", "cli"] {
+        collect_rs_files(&root.join("crates").join(crate_name).join("src"), &mut sources);
+    }
+    assert!(
+        sources.len() > 50,
+        "expected to scan the five server crates plus the CLI, found only {} files -- \
+         the walk is broken and this test would pass over nothing",
+        sources.len()
+    );
+
+    let mut offenders = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        if text.contains(r#"env = "ZEROSHIP_DEV_INSECURE""#)
+            || text.contains(r#"long = "dev-insecure""#)
+            || text.contains(r#"long = "insecure-dev""#)
+        {
+            offenders.push(path.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the deleted security-relaxation flag is declared again in: {}",
+        offenders.join(", ")
+    );
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
 fn service_block<'a>(compose: &'a str, service: &str) -> &'a str {
     let marker = format!("\n  {service}:\n");
     let start = compose
