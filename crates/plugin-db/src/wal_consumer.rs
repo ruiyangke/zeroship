@@ -9,7 +9,7 @@
 //!
 //! ## Design
 //!
-//! The local-emit fast path publishes directly to the same-isolate
+//! The local-emit fast path publishes directly to the process-wide
 //! broker on success. That works for the single-worker case (the
 //! platform routes per-app traffic via CHWBL so it's the common case)
 //! but offers nothing when the writer and subscriber happen to land on
@@ -132,9 +132,9 @@ impl Drop for SuppressGuard {
 /// Called from the mutation callbacks (`insert`, `update_one`,
 /// `delete_one`, ...) after a successful SQL run.
 ///
-/// When [`local_emit_suppressed`] is `true` this is a no-op — the WAL
-/// consumer is publishing the same event on the cross-worker path and
-/// emitting locally too would double-deliver.
+/// When this app is suppressed, this is a no-op. The WAL consumer is
+/// publishing the same event on the cross-worker path and emitting
+/// locally too would double-deliver.
 ///
 /// The `new_tuple` is the row's post-image (or pre-image for
 /// DELETE) — used by the broker's read-set narrowing to test each
@@ -298,10 +298,9 @@ impl WalConsumer {
     /// Returns a typed [`crate::error::DbError`] so the SDK can
     /// distinguish failure classes by `.code`:
     ///
-    /// - [`DbError::ValidationFailed`] with `code = "invalid_app_id"` —
-    ///   the `app_id` failed [`crate::replication::sanitise_app_id`]
-    ///   (empty, non-alphanumeric, …). Restarting won't help; the
-    ///   deploy needs a valid id.
+    /// - [`DbError::ValidationFailed`] with `code = "invalid_app_id"`:
+    ///   the `app_id` is empty or contains NUL. Restarting will not
+    ///   help; the deploy needs a valid id.
     /// - [`DbError::Configuration`] with `code = "not_provisioned"` —
     ///   the runtime context has no `db_url` configured. Operator
     ///   must set `DB_URL` (or equivalent) before replication can run.
@@ -325,7 +324,7 @@ impl WalConsumer {
         }
         // slot_name / publication_name already return Result<String,
         // DbError> — propagate the typed error so the SDK sees
-        // `.code = "invalid_app_id"` for sanitise failures and not
+        // `.code = "invalid_app_id"` for validation failures and not
         // an opaque `"not_provisioned"` re-stamp.
         let slot_name = crate::replication::worker_slot_name(app_id, worker_id)?;
         let publication_name = crate::replication::publication_name(app_id)?;
@@ -339,7 +338,7 @@ impl WalConsumer {
     }
 
     /// Resume from a specific LSN on next [`Self::run`]. Pass the value
-    /// returned by [`crate::replication::ensure_publication_and_slot`].
+    /// returned by [`crate::replication::ensure_publication_and_worker_slot`].
     pub fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
         self.start_lsn = lsn.into();
         self
@@ -656,10 +655,9 @@ impl WalConsumer {
         // subscribers — the majority of tables in typical apps — the
         // event would otherwise be built only for `broker::publish` to
         // immediately discard it. The check is a single
-        // `HashMap::get` on the thread-local broker; safe because the
-        // broker and this consumer run on the same compio thread, so a
-        // subscriber registered after the check would only see FUTURE
-        // events anyway.
+        // `HashMap::get` under the process-wide broker's short lock.
+        // A subscriber registered after the check only needs future
+        // events; its initial snapshot covers earlier state.
         if !has_subscribers(&self.app_id, &rel.table) {
             return;
         }
@@ -961,8 +959,7 @@ mod tests {
 
     #[test]
     fn emit_local_reaches_thread_local_broker() {
-        // The thread-local broker is shared across tests on the same
-        // thread; clean it before observing.
+        // Clean the process-wide broker before observing.
         crate::broker::drop_app(None);
         let sub = crate::broker::subscribe("xapp", "messages");
         emit_local(
@@ -1099,8 +1096,7 @@ mod tests {
     /// into a single opaque `Configuration { code: "not_provisioned" }`.
     #[test]
     fn wal_consumer_new_invalid_app_id_returns_typed_error() {
-        // A '%' character fails [`crate::replication::sanitise_app_id`]
-        // — only `[A-Za-z0-9_]` is permitted.
+        // NUL is the sole disallowed non-empty app-id character.
         let err = WalConsumer::new("bad\0id", "worker-a", "postgres://localhost/db").unwrap_err();
         match err {
             DbError::ValidationFailed { code, message, hint } => {
@@ -1109,7 +1105,7 @@ mod tests {
                     message.contains("must not contain NUL"),
                     "message must explain the rejection: {message}"
                 );
-                assert!(hint.is_none(), "validation errors from sanitise_app_id carry no hint");
+                assert!(hint.is_none(), "app-id validation errors carry no hint");
             }
             other => panic!("expected ValidationFailed/invalid_app_id, got {other:?}"),
         }

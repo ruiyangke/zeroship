@@ -366,8 +366,8 @@ pub struct SlotHealth {
 /// Run the proposal's watchdog query against the cluster, **scoped to
 /// `app_id`**.
 ///
-/// Returns one entry per slot whose name starts with the per-app slot
-/// prefix (`__zs_slot_<sanitised_app_id>`). Callers (the maintenance
+/// Returns one entry per slot whose name starts with the hashed per-app
+/// slot prefix. Callers (the maintenance
 /// cron via the tenant-facing `db.replication.watchdog()`) interpret
 /// the results — warn at >8 GB, page at >24 GB, drop slots that have
 /// been `active=false` longer than the configured abandonment threshold
@@ -375,8 +375,8 @@ pub struct SlotHealth {
 ///
 /// ## Tenancy
 ///
-/// The `WHERE slot_name LIKE $1` filter binds the per-app prefix
-/// (`slot_name(app_id)`, terminated with `%`) so a tenant invocation
+/// The exact `left(slot_name, length($1)) = $1` filter binds the hashed
+/// per-app prefix so a tenant invocation
 /// only ever sees its own slots. Cluster-wide enumeration from inside
 /// a tenant isolate is a cross-tenant info-disclosure vector - the
 /// sibling vulnerability to the cross-app `setup` hijack that is
@@ -390,8 +390,7 @@ pub async fn watchdog_query(
     pool: &Pool,
     app_id: &str,
 ) -> Result<Vec<SlotHealth>, DbError> {
-    // Per-app slot prefix — `slot_name(app_id) + '%'`. See
-    // [`slot_name_like_prefix`]; bound via `$1` below.
+    // Bind the exact per-app worker-slot prefix via `$1` below.
     let slot_prefix = worker_slot_name_prefix(app_id)?;
     let sql = r"SELECT
             slot_name,
@@ -466,8 +465,8 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 ///
 /// ## Tenancy
 ///
-/// The candidate filter is bound via a `slot_name LIKE $1` parameter
-/// against `slot_name(app_id) + '%'` (not interpolated). Cluster-wide
+/// The candidate filter binds the exact hashed app prefix and compares
+/// it with `left(slot_name, length($1)) = $1`. Cluster-wide
 /// DROP from inside a tenant isolate is a cross-tenant DoS vector -
 /// the sibling vulnerability to the cross-app `setup` hijack that is
 /// closed elsewhere.
@@ -880,7 +879,7 @@ mod tests {
         assert_eq!(v["confirmedFlushLsn"], "0/16B3750");
     }
 
-    /// Regression: before the fix, `ensure_publication_and_slot`
+    /// Regression: before the fix, the provisioning path
     /// called `.unwrap_or_default()` on the rows returned by
     /// `pg_create_logical_replication_slot(...)`, silently returning
     /// `lsn = ""` when the RETURNING set was empty (e.g. a Postgres
@@ -899,7 +898,7 @@ mod tests {
     /// in `tests/integration.rs`) covers the success path against a
     /// real server.
     #[test]
-    fn ensure_publication_and_slot_empty_returning_is_internal_error() {
+    fn provisioning_empty_returning_is_internal_error() {
         let rows: Vec<()> = vec![];
         // Re-build the exact closure the fix uses so the test catches a
         // rename of the operation tag in the error message (the SDK and
@@ -922,7 +921,7 @@ mod tests {
         }
     }
 
-    /// Wire-shape regression guard. `ensure_publication_and_slot`
+    /// Wire-shape regression guard. The provisioning helper
     /// returns `Result<_, DbError>`
     /// directly, so the runtime path no longer calls `.into_string()`
     /// — but the operator-facing message must still carry the
@@ -980,14 +979,14 @@ mod tests {
     // Typed-error tests
     //
     // These pin the `.code` the SDK branches on for the validation paths
-    // through `sanitise_app_id`, `publication_name`, and `slot_name`.
-    // The pool-bound helpers (`ensure_publication_and_slot`,
+    // through `publication_name` and `worker_slot_name`.
+    // The pool-bound helpers (`ensure_publication_and_worker_slot`,
     // `watchdog_query`, `drop_abandoned_slots`) can only be reached via
     // a live Postgres connection; their typed-error mapping is exercised
     // by `tests/integration.rs::b8c_*` against pg-test.
     // -----------------------------------------------------------------
 
-    /// `sanitise_app_id("")` must surface a `ValidationFailed` carrying
+    /// An empty app id must surface a `ValidationFailed` carrying
     /// the stable `.code = "invalid_app_id"` so the SDK can refuse the
     /// request without parsing the message body.
     #[test]
@@ -1016,8 +1015,8 @@ mod tests {
         }
     }
 
-    /// `publication_name` / `slot_name` are thin wrappers around
-    /// `sanitise_app_id` — they MUST preserve the variant + code rather
+    /// `publication_name` / `worker_slot_name` share validation and
+    /// must preserve the variant + code rather
     /// than collapse to `Internal` (regression guard for the original
     /// `Result<_, String>` → `DbError::Internal` flattening at the
     /// dispatch boundary).
@@ -1060,21 +1059,17 @@ mod tests {
     // slot names and enabling cross-tenant DoS via `dropAbandoned`.
     //
     // Both helpers now build the candidate filter from
-    // `slot_name_like_prefix(app_id)` and pass it as a `$1` parameter
-    // bind. We can't drive a real `Pool` from a unit test, so these
-    // tests pin the per-app prefix value — the exact string the
-    // dispatchers bind into the `LIKE $1` predicate. Any future change
+    // `worker_slot_name_prefix(app_id)` and pass it as a `$1` bind.
+    // We can't drive a real `Pool` from a unit test, so these tests pin
+    // the exact per-app prefix. Any future change
     // that drops the `app_id` scoping has to first delete these tests.
     // -----------------------------------------------------------------
 
-    /// `watchdog_query` binds `slot_name(app_id) + '%'` into the
-    /// `slot_name LIKE $1` predicate so the cluster-wide scan is
-    /// scoped to the calling app's slot namespace.
+    /// `watchdog_query` binds the hashed worker-slot prefix so the
+    /// cluster-wide scan is scoped to the calling app's namespace.
     #[test]
     fn watchdog_query_filters_by_app_id() {
-        // `app_a`'s per-app prefix must be the canonical slot name
-        // terminated with `%`. The dispatcher passes this exact value
-        // as the `$1` bind.
+        // The dispatcher passes this exact value as the `$1` bind.
         let p = worker_slot_name_prefix("app_a").unwrap();
         assert!(p.starts_with("__zs_slot_"));
         assert!(p.ends_with("__"));
@@ -1084,37 +1079,28 @@ mod tests {
         let p_b = worker_slot_name_prefix("app_b").unwrap();
         assert_ne!(p, p_b);
 
-        // DB-17: a mixed-case app_id is rejected (not lowercased), so the
-        // slot-name prefix stays injective over app_ids. A lowercase id passes.
+        // Hashing preserves the distinction between case-sensitive ids.
         assert_ne!(
             worker_slot_name_prefix("MyApp").unwrap(),
             worker_slot_name_prefix("myapp").unwrap()
         );
 
-        // Empty / invalid app_id propagates the validation error
-        // (`invalid_app_id`) instead of producing the cluster-wide
-        // `%` wildcard that would re-introduce the vulnerability.
+        // Empty input rejects instead of producing a broad prefix.
         let err = worker_slot_name_prefix("").unwrap_err();
         assert!(
             matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
             "empty app_id must reject, not silently broaden the filter: got {err:?}"
         );
-        // Defence in depth: a literal `%` in the app_id would be a
-        // wildcard-injection vector, but `sanitise_app_id` already
-        // rejects non-`[A-Za-z0-9_]` characters — confirm the rejection
-        // flows through.
+        // Wildcard input is hashed and never reaches the SQL predicate.
         let wildcard = worker_slot_name_prefix("%").unwrap();
         assert!(!wildcard.contains('%'));
     }
 
-    /// `drop_abandoned_slots` uses the same `slot_name_like_prefix`
-    /// shape for its candidate filter (the `$1` bind), so a tenant
+    /// `drop_abandoned_slots` uses the same exact prefix helper, so a tenant
     /// `dropAbandoned` can only reap its own inactive slots.
     #[test]
     fn drop_abandoned_slots_filters_by_app_id() {
-        // The candidate-enumeration CTE binds `slot_name LIKE $1` with
-        // the per-app prefix. Same helper as `watchdog_query` — pinning
-        // both call sites against one canonical value catches any drift.
+        // Same helper as `watchdog_query`; both call sites must remain aligned.
         let p = worker_slot_name_prefix("app_a").unwrap();
         assert!(p.ends_with("__"));
 
