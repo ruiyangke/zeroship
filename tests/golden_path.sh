@@ -161,7 +161,7 @@ fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 # The paragraph above about the list being load-bearing was already there; it
 # argued carefully for a list that was incomplete, which is what made it look
 # audited. Sub-step ids are easy to miss precisely because they are not numbers.
-GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 13 12"
+GP_EXPECTED_STEPS="1 2 2b 2c 3 4 5 6 7 8 9 9b 10 11 13 14 12"
 declare -A GP_STEP_OUTCOMES=()
 GP_CUR_STEP=""; GP_STEP_BASE=0
 # step <id> <title...>  - prints the banner AND opens an accounting window.
@@ -3056,6 +3056,236 @@ fi
 
 gp_close_step
 
+# WHY THIS STEP EXISTS, and what every other auth assertion in this repo stops
+# short of.
+#
+# `tests/e2e_auth_rpc.sh` proves the gateway turns a session cookie into a
+# signed `ZeroShip-User` that reaches an `auth: user` procedure -- but the
+# procedures it drives (whoami / whoamiStrict) only REPORT the identity. They
+# never USE it. `tests/e2e_app_primitives_auth.sh` does drive a real two-user
+# ownership scenario, but over the WORKER edge (`/dispatch/<app>`), and it
+# BOOTS a gateway it then uses for exactly one health check.
+#
+# So "identity is delivered through the gateway" is covered, and "identity is
+# ENFORCED on data" is covered a tier down, and the join of the two -- a
+# procedure that scopes rows by owner, reached through the gateway -- was
+# covered by nothing (#348). This step is that join.
+#
+# THE TWO EDGES AUTHENTICATE DIFFERENTLY, which is why this is not a re-point
+# of the existing harness at a new URL: `/dispatch` takes an already-signed
+# `ZeroShip-User` header, while the gateway takes a session COOKIE and mints
+# that header itself. The minting is the part under test.
+#
+# FOUR CAUSES PRODUCE THE IDENTICAL SYMPTOM HERE -- every authed call 401s:
+# a missing gateway signing key, a missing gateway DSN, a malformed `pws_`
+# subject, and the wrong cookie name. Each was cleared separately before this
+# was written, so a red below is an ownership finding rather than a stack
+# problem. Two of the four are worth restating because they are counter-
+# intuitive:
+#   - COOKIE NAME is the DEV one, `zeroship_app_session`, UNPREFIXED. This file
+#     exports ZEROSHIP_DEV_INSECURE=1 (line 81) and the gateway declares
+#     `#[arg(long = "dev-insecure", env = "ZEROSHIP_DEV_INSECURE")]`
+#     (crates/gateway/src/main.rs:165-166), so `insecure_dev` is TRUE even
+#     though the launch line carries no flag, and oidc_rp.rs:980 selects
+#     APP_SESSION_COOKIE_DEV. Reading the launch line alone gives the WRONG
+#     answer here; `tests/e2e_auth_rpc.sh:157-159` already had it right.
+#   - SUBJECT must satisfy is_pairwise_subject: "pws_" + EXACTLY 20 ascii
+#     alphanumerics (PAIRWISE_SUB_BODY_LEN, crates/core/src/auth/mod.rs).
+#     router/auth.rs rejects anything else by returning CookieOutcome::None,
+#     which presents as anonymous -> 401, not as a parse error.
+#
+# DEV BASELINE this is diffed against (examples/auth-notes-db/scripts/smoke.sh
+# against a live `pnpm dev`, 10/10 on the run that produced these):
+#     notes.create (alice)        -> 200 with an id
+#     notes.list   (alice)        -> 200, contains that id
+#     notes.list   (bob)          -> 200, EMPTY
+#     notes.get    (bob, alice's) -> 404, body carries no note text
+#     notes.list   (anon)         -> 401
+# Each assertion below names the dev result it is matching, so a divergence is
+# readable without re-running the dev tier.
+# =============================================================================
+step 14 "Scoped data through the gateway: two identities, one row, no leak"
+
+AN_ZSHIP="$ROOT/examples/auth-notes-db/dist/app.zship"
+AN_APP="gpnotes"
+AN_HOST="$AN_APP.localhost"
+# Defined HERE rather than inherited: step 10 assigns GP_JOSE at :2254, but
+# inside its own branch, so depending on it would make this step's outcome a
+# function of whether an unrelated step ran.
+AN_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
+
+# ARTIFACT FRESHNESS, asserted rather than assumed. This step provisions a
+# PREBUILT .zship it does not build, so without this it measures whatever
+# happens to be on disk. That matters most for the mutation this step exists to
+# survive: dropping the owner_id predicate from notes.get and forgetting to
+# rebuild makes the mutation never apply and the run print GREEN, which is
+# indistinguishable from the platform being correct. Same class as the
+# vite-plugin dist warning this harness prints at startup.
+AN_STALE="$(find "$ROOT/examples/auth-notes-db/src" "$ROOT/examples/auth-notes-db/migrations" \
+              "$ROOT/examples/auth-notes-db/vite.config.ts" -type f -newer "$AN_ZSHIP" 2>/dev/null | head -3)"
+
+if [ ! -f "$AN_ZSHIP" ]; then
+  fail "14: missing $AN_ZSHIP - run: pnpm --filter auth-notes-db build"
+elif [ ! -f "$AN_JOSE" ]; then
+  fail "14: missing jose at $AN_JOSE - cannot mint a session, so nothing below is testable"
+elif [ -z "${SC_PAT:-}" ]; then
+  # The app MUST be registered through the deploy API, not dev-provision: only
+  # the deploy path calls ensure_app_client, so a dev-provisioned app has NO
+  # row in zeroship.app_oauth_clients and every authed call 401s for that reason
+  # alone (#328, and measured here on 2026-08-12 -- dev_provision.rs inserts
+  # only into zeroship.users). SC_PAT already carries apps:write + apps:deploy.
+  fail "14: SC_PAT is unset, so the app cannot be registered through the deploy API - a dev-provisioned app has no OAuth client and every assertion below would 401 for that reason"
+else
+  [ -z "$AN_STALE" ] \
+    && pass "14: the auth-notes-db artifact is newer than its sources (the run measures the current app)" \
+    || fail "14: STALE ARTIFACT - $AN_ZSHIP is older than $(echo "$AN_STALE" | tr '\n' ' ')
+      Rebuild with: pnpm --filter auth-notes-db build
+      Every verdict below would describe the PREVIOUS build, and a mutation of
+      this example would silently not apply."
+
+  AN_CREATE_JSON=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    -d "{\"name\":\"$AN_APP\"}" 2>/tmp/gp-notes-create.log)
+  # No jq: this harness's CI image installs lsof, zstd and postgresql-client
+  # and nothing else. Anchored on the QUOTED key so an error body with no id
+  # yields empty and the fail arm fires.
+  AN_APP_ID=$(printf '%s' "$AN_CREATE_JSON" | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  if [ -z "$AN_APP_ID" ]; then
+    fail "14: could not create the notes app: $(head -c 200 <<<"$AN_CREATE_JSON")"
+  elif ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
+         --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" \
+         >/tmp/gp-notes-deploy.log 2>&1; then
+    fail "14: deploy failed: $(tail -2 /tmp/gp-notes-deploy.log | tr '\n' ' ')"
+  else
+    pass "14: auth-notes-db registered through the deploy API ($AN_APP_ID)"
+
+    # Schema through the REAL deployed path. The apply endpoint takes an IR
+    # ENVELOPE, not an empty object: the first version of this step sent
+    # `-d '{}'` and got `400 Json deserialize error: missing field 'kind'`.
+    # The three working call sites (:1925, :2268, :2607) all --data-binary a
+    # recorder-produced document, and all send the PAT.
+    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" \
+      "$ROOT/examples/auth-notes-db/migrations" >/tmp/gp-notes-ir.json 2>/tmp/gp-notes-ir.log <<'NODE'
+import { pathToFileURL } from "node:url";
+const [recorderPath, dir] = process.argv.slice(2);
+const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
+const migrations = await discoverMigrations(dir);
+const documents = [];
+for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
+console.log(JSON.stringify({ kind: "ir", documents }));
+NODE
+    AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
+      "http://localhost:$MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+      --data-binary @/tmp/gp-notes-ir.json)
+    AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
+    { [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; } \
+      && pass "14: notes migration applied through zeroship-migrated (applied=$AN_APPLIED ops)" \
+      || fail "14: migrated could not apply (http=$AN_APPLY applied=${AN_APPLIED:-0}): $(head -c 200 /tmp/gp-notes-apply.json)"
+
+    # The gateway needs route.oauth_client_id + sector_identifier or it answers
+    # 503 client_not_provisioned. Control brokers the client at app-create; READ
+    # it rather than inserting our own (e2e_auth_rpc lost that race and every
+    # authed call failed with `app mismatch`).
+    AN_OAC=""
+    for _ in $(seq 1 20); do
+      AN_OAC=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+        "select client_id from zeroship.app_oauth_clients where app_id = '$AN_APP_ID'" 2>/dev/null | tr -d '[:space:]')
+      [ -n "$AN_OAC" ] && break
+      sleep 1
+    done
+    if [ -z "$AN_OAC" ]; then
+      fail "14: control never brokered an OAuth client for $AN_APP_ID - every authed call below would 401 for that reason alone"
+    else
+      pass "14: control brokered the app's OAuth client ($AN_OAC)"
+      docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
+        "update zeroship.app_oauth_clients set sector_identifier = 'https://$AN_HOST'
+           where app_id = '$AN_APP_ID' and (sector_identifier is null or sector_identifier = '')" >/dev/null 2>&1
+
+      # Offline-mint one session cookie per identity, signed with the SAME key
+      # the gateway loads (--signing-key-file). Bodies are exactly 20 chars.
+      an_mint() {
+        node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { importPKCS8, exportJWK, SignJWT } from "file://'"$AN_JOSE"'";
+const [pem, app, sub, email] = process.argv.slice(1);
+const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
+const x = (await exportJWK(key)).x;
+const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
+const now = Math.floor(Date.now()/1000);
+process.stdout.write(await new SignJWT({
+  app, sub, email, email_verified: true, name: sub, avatar: null, scopes: [],
+  auth_time: now, amr: ["pwd"],
+}).setProtectedHeader({ alg:"EdDSA", typ:"zeroship-sess+jwt", kid })
+  .setIssuer("https://api.zeroship.ai").setIssuedAt(now)
+  .setExpirationTime(now + 3600).sign(key));
+' "$GP_SIGNING_KEY" "$AN_OAC" "$1" "$2"
+      }
+      AN_ALICE=$(an_mint "pws_alice000000000000000" "alice@localhost")
+      AN_BOB=$(an_mint "pws_bob00000000000000000" "bob@localhost")
+
+      # an_rpc <cookie|-> <proc> [json] -> "<code> <body>"
+      an_rpc() {
+        local ck="$1" proc="$2" body="${3:-{\}}"
+        local args=(-s -m 25 -o /tmp/gp-notes.body -w '%{http_code}' -H "Host: $AN_HOST"
+                    -X POST -H 'content-type: application/json')
+        [ "$ck" != "-" ] && args+=(-H "Cookie: zeroship_app_session=$ck" -H "Origin: http://$AN_HOST")
+        local code; code=$(curl "${args[@]}" "http://localhost:$GATE_PORT/__zeroship/v1/$proc" -d "{\"json\":$body}")
+        echo "$code $(cat /tmp/gp-notes.body)"
+      }
+
+      # PRECONDITION, not a result: if the authed path cannot even reach the
+      # handler, every ownership verdict below is unproven. Assert it FIRST so
+      # a stack problem cannot masquerade as a scoping finding.
+      AN_READY=0
+      for _ in $(seq 1 20); do
+        [ "$(an_rpc "$AN_ALICE" notes.list | cut -d' ' -f1)" = "200" ] && { AN_READY=1; break; }
+        sleep 1
+      done
+      [ "$AN_READY" = "1" ] \
+        && pass "14: the gateway accepts a minted session (authed notes.list -> 200)" \
+        || fail "14: gateway never accepted the session - ownership rows below are UNPROVEN"
+
+      AN_ANON=$(an_rpc - notes.list)
+      [ "$(echo "$AN_ANON" | cut -d' ' -f1)" = "401" ] \
+        && pass "14: anon notes.list -> 401 (matches dev)" \
+        || fail "14: anon notes.list -> $(echo "$AN_ANON" | cut -d' ' -f1), dev says 401"
+
+      AN_CREATE=$(an_rpc "$AN_ALICE" notes.create '{"title":"Alice private","body":"for alice only"}')
+      AN_NOTE_ID=$(echo "$AN_CREATE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+      { [ "$(echo "$AN_CREATE" | cut -d' ' -f1)" = "200" ] && [ -n "$AN_NOTE_ID" ]; } \
+        && pass "14: alice notes.create -> 200 ($AN_NOTE_ID) (matches dev)" \
+        || fail "14: alice notes.create -> $AN_CREATE, dev says 200 with an id"
+
+      AN_ALIST=$(an_rpc "$AN_ALICE" notes.list)
+      echo "$AN_ALIST" | grep -q "${AN_NOTE_ID:-__none__}" \
+        && pass "14: alice's list contains her note (matches dev)" \
+        || fail "14: alice's list is missing her own note: $AN_ALIST"
+
+      # THE NEGATIVE. Status FIRST, then absence - an error response contains no
+      # note id either, so asserting absence alone is how a broken tier passes.
+      AN_BLIST=$(an_rpc "$AN_BOB" notes.list)
+      [ "$(echo "$AN_BLIST" | cut -d' ' -f1)" = "200" ] \
+        && pass "14: bob's list is a real 200, not an error that trivially omits it" \
+        || fail "14: bob's list -> $(echo "$AN_BLIST" | cut -d' ' -f1), cannot judge scoping from it"
+      echo "$AN_BLIST" | grep -q "${AN_NOTE_ID:-__none__}" \
+        && fail "14: CROSS-USER LEAK - bob's list contains alice's note $AN_NOTE_ID" \
+        || pass "14: bob's list does NOT contain alice's note (matches dev)"
+
+      AN_BGET=$(an_rpc "$AN_BOB" notes.get "{\"id\":\"$AN_NOTE_ID\"}")
+      [ "$(echo "$AN_BGET" | cut -d' ' -f1)" = "404" ] \
+        && pass "14: bob reading alice's note BY ID -> 404 (matches dev)" \
+        || fail "14: bob reading alice's note by id -> $AN_BGET, dev says 404"
+      echo "$AN_BGET" | grep -q 'for alice only' \
+        && fail "14: CONTENT LEAK - the refusal body carried alice's note text" \
+        || pass "14: the refusal leaks no note content (matches dev)"
+    fi
+  fi
+fi
+
+gp_close_step
+
 # --- 12. The creator DELETES the app, and everything it created goes away ---
 #
 # Rows 1-18 of docs/pilot/e2e-scenarios.md all cover an app being created,
@@ -3456,7 +3686,27 @@ gp_close_step
 # 2 is the whole point: step 12 emits SIX outcomes and only two of them pass at
 # HEAD. The four reds are #331 and are carried in GOLDEN_EXPECTED_FAILURES below.
 # MEASURED on this tree: 87 passed / 12 failed.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-89}"
+# RAISED 89 -> 101 on 2026-08-12 for step 14 (scoped data through the gateway).
+# Arithmetic is 89 + 12, where 12 is step 14's ENTIRE outcome count: unlike step
+# 12, every one of them passes at HEAD, so this step adds nothing to
+# GOLDEN_EXPECTED_FAILURES. MEASURED on this tree: 101 passed / 16 failed.
+#
+# The step is PROVEN load-bearing, not merely green, and the proof is the
+# asymmetry rather than the redness. Dropping `owner_id` from the notes.get
+# filter in examples/auth-notes-db/src/index.ts and REBUILDING the artifact (the
+# freshness guard at the top of the step refuses a stale one, which is what makes
+# this mutation honest) gives 99 passed / 18 failed. EXACTLY TWO rows flip -- the
+# by-id read, which returns 200 where dev says 404, and the content-leak check,
+# whose body then carries alice's note text to bob. The other TEN stay green,
+# INCLUDING bob's list. That is the point: the mutation models scoping that is
+# still correct on the list path and absent on the by-id path, which is precisely
+# the shape the step header names as easy to write and easy to miss. A test that
+# went entirely red here would not have distinguished it from a broken stack.
+#
+# LEDGER GAP, recorded so the chain above is not read as complete: three earlier
+# raises (71 -> 72, 75 -> 85, 87 -> 89) have no entry. The arithmetic in the
+# entries that DO exist is still checkable, but it does not compose end to end.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-101}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
