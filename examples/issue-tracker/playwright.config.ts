@@ -29,6 +29,22 @@ export default defineConfig({
   // One worker: every spec drives the same dev database, and the reports and
   // bug-list assertions read totals that a concurrent spec would move under
   // them.
+  //
+  // THE SUITE PASSES AT --workers=4 AND THAT IS NOT EVIDENCE IT IS SAFE.
+  // Measured 2026-08-12: 3 of 3 parallel runs green, and ~40% faster, which is
+  // exactly the result that invites raising this. The race it hides is in
+  // table-labels.spec.ts, which asserts that no dashboard row prints a raw
+  // `prod_...` id. Those rows resolve their product through maps that
+  // `useBugLookups()` fetched once on mount; a product created by another
+  // worker AFTER that fetch and BEFORE the rows render is absent from the map
+  // and renders as an id. The window is milliseconds wide, so it closes on
+  // most runs and opens on a loaded machine.
+  //
+  // reports-labels.spec.ts survives concurrency only by accident: it needs two
+  // products with the SAME name, and names carry a pid-derived marker that
+  // differs per worker. That is luck, not isolation.
+  //
+  // Raising this needs per-worker database isolation, not a green run.
   workers: 1,
   reporter: process.env.CI ? "line" : [["list"], ["html", { open: "never" }]],
   timeout: 60_000,
