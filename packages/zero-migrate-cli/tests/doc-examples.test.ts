@@ -8,10 +8,12 @@
 // `zero-migrate-cli` (the host/facade surface). This package can resolve
 // `zero-migrate-cli`'s own source, so those snippets are compiled here.
 //
-// `node-api.md` was added after a sweep found it gated by NOTHING: the DSL gate
-// reads `writing-migrations.md` and `getting-started.md`, this one read only
-// `getting-started.md`, and the document describing the API both gates protect was
-// the one neither of them opened.
+// The doc list grew twice. `node-api.md` was added after a sweep found it gated by
+// NOTHING - the DSL gate read `writing-migrations.md` and `getting-started.md`, this
+// one read only `getting-started.md`, and the document describing the API both gates
+// protect was the one neither opened. `architecture.md`, `operations.md` and
+// `troubleshooting.md` followed from surveying every fenced typed block in `docs/`
+// rather than waiting for the next one to surface.
 //
 // HOW IT WORKS. Extract every fenced ```ts / ```typescript block, keep the ones
 // importing `zero-migrate-cli`, rewrite the imports so tsc resolves the real
@@ -32,8 +34,6 @@ import { test } from "node:test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
-const GETTING_STARTED_DOC = resolve(PKG_ROOT, "../../docs/getting-started.md");
-const NODE_API_DOC = resolve(PKG_ROOT, "../../docs/node-api.md");
 
 /** Pull every fenced ```ts block that imports `zero-migrate-cli`. */
 function extractEngineBlocks(md: string): string[] {
@@ -109,15 +109,28 @@ function typecheck(harnessSource: string): string | null {
 // (importing a literal `.ts` path needs `allowImportingTsExtensions`).
 const SRC_INDEX = resolve(PKG_ROOT, "src/index");
 
-/** Typecheck every block SEPARATELY and return the first failure, or null.
+/** How a document's examples are written, which decides how they must compile.
  *
- *  Blocks are compiled one at a time rather than concatenated into one module.
- *  A documentation snippet is meant to stand on its own, and several of them
- *  legitimately declare the same names - `apply`, `plan`, `migration`, `policy`,
- *  `report` all recur across the reference. Concatenating produced a wall of
- *  TS2300/TS2451 duplicate-identifier errors that say nothing about the docs.
- *  The original gate never hit this because it only ever extracted one block. */
-function typecheckEach(blocks: string[], doc: string): string | null {
+ *  `standalone` - each block is a complete example a reader could paste on its own,
+ *  as in the API reference. Compiled one at a time: several legitimately reuse the
+ *  names `apply`, `plan`, `migration`, `policy` and `report`, so concatenating them
+ *  produces TS2300/TS2451 duplicate-identifier noise that says nothing about the docs.
+ *
+ *  `sequence` - the blocks continue one another, as in the operations guide, where a
+ *  later snippet uses the `pending` contract an earlier one obtained. Compiled
+ *  together, because reading them apart would report an undefined name that the
+ *  document has in fact defined.
+ *
+ *  Picking the wrong mode makes the gate lie in one of two directions, which is why
+ *  it is declared per document rather than inferred. */
+type DocShape = "standalone" | "sequence";
+
+function typecheckDoc(blocks: string[], doc: string, shape: DocShape): string | null {
+  if (shape === "sequence") {
+    const harness = blocks.map((b) => rewriteForGate(b, SRC_INDEX)).join("\n\n");
+    const diagnostics = typecheck(harness);
+    return diagnostics === null ? null : `${doc} (read as one sequence)\n\n${diagnostics}`;
+  }
   for (const [index, block] of blocks.entries()) {
     const diagnostics = typecheck(rewriteForGate(block, SRC_INDEX));
     if (diagnostics !== null) {
@@ -127,24 +140,46 @@ function typecheckEach(blocks: string[], doc: string): string | null {
   return null;
 }
 
-test("doc-gate: the zero-migrate-cli embedding example in getting-started.md typechecks", () => {
-  const md = readFileSync(GETTING_STARTED_DOC, "utf8");
-  const blocks = extractEngineBlocks(md);
-  assert.ok(
-    blocks.length >= 3,
-    `expected getting-started.md to carry its zero-migrate-cli examples; found ` +
-      `${blocks.length}. It has three once BOTH fence spellings are read - a drop ` +
-      `to one means the extractor regressed to the ts-only fence.`,
-  );
-  const diagnostics = typecheckEach(blocks, "docs/getting-started.md");
-  assert.equal(
-    diagnostics,
-    null,
-    `the zero-migrate-cli embedding example in docs/getting-started.md no longer ` +
-      `compiles against zero-migrate-cli.\nFix the doc (or the snippet) — do not ` +
-      `weaken this gate.\n\n${diagnostics ?? ""}`,
-  );
-});
+/** Every doc carrying `zero-migrate-cli` examples, with the number it must still
+ *  carry.
+ *
+ *  The count is not decoration. It is what stops a future edit from deleting the
+ *  examples, or the extractor from silently narrowing, and leaving a gate that
+ *  passes because it found nothing to check. Each number is measured against the
+ *  doc as it stands, not guessed.
+ *
+ *  `architecture.md`, `operations.md` and `troubleshooting.md` joined after a survey
+ *  found gateable host examples across the docs that no gate read. */
+const HOST_DOCS: ReadonlyArray<
+  readonly [file: string, minBlocks: number, shape: DocShape]
+> = [
+  ["getting-started.md", 3, "standalone"],
+  ["node-api.md", 3, "standalone"],
+  ["architecture.md", 1, "standalone"],
+  ["operations.md", 3, "sequence"],
+  ["troubleshooting.md", 1, "standalone"],
+];
+
+for (const [file, minBlocks, shape] of HOST_DOCS) {
+  test(`doc-gate: every zero-migrate-cli example in ${file} typechecks`, () => {
+    const md = readFileSync(resolve(PKG_ROOT, "../../docs", file), "utf8");
+    const blocks = extractEngineBlocks(md);
+    assert.ok(
+      blocks.length >= minBlocks,
+      `expected docs/${file} to carry at least ${minBlocks} zero-migrate-cli ` +
+        `example(s); found ${blocks.length}. A drop means the examples were removed ` +
+        `or the extractor narrowed - either way this gate stopped checking them.`,
+    );
+    const diagnostics = typecheckDoc(blocks, `docs/${file}`, shape);
+    assert.equal(
+      diagnostics,
+      null,
+      `an example in docs/${file} no longer compiles against zero-migrate-cli.\n` +
+        `Fix the doc (or the snippet) - do not weaken this gate.\n\n` +
+        String(diagnostics),
+    );
+  });
+}
 
 test("doc-gate REGRESSION WITNESS: a rotted engine snippet IS rejected", () => {
   const rotted = rewriteForGate(
@@ -165,27 +200,3 @@ test("doc-gate REGRESSION WITNESS: a rotted engine snippet IS rejected", () => {
   );
 });
 
-test("doc-gate: every zero-migrate-cli example in node-api.md typechecks", () => {
-  // `docs/node-api.md` is the reference for this package's public surface, and
-  // until this arm existed it was gated by nothing. The DSL gate covers
-  // `writing-migrations.md` and `getting-started.md`; the arm above covers the one
-  // embedding block in `getting-started.md`. The document describing the API those
-  // gates protect was the document neither of them read.
-  //
-  // It carries far more examples than the guide does, so the threshold is set
-  // against what is there now: a future edit that deletes the examples rather than
-  // fixing them fails here instead of quietly emptying the gate.
-  const md = readFileSync(NODE_API_DOC, "utf8");
-  const blocks = extractEngineBlocks(md);
-  assert.ok(
-    blocks.length >= 3,
-    `expected node-api.md to carry its zero-migrate-cli examples; found ${blocks.length}`,
-  );
-  const diagnostics = typecheckEach(blocks, "docs/node-api.md");
-  assert.equal(
-    diagnostics,
-    null,
-    `an example in docs/node-api.md no longer compiles against zero-migrate-cli.\n` +
-      `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
-  );
-});

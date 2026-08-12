@@ -205,3 +205,27 @@ test("doc-gate REGRESSION WITNESS: a rotted snippet IS rejected by the gate", ()
     `expected a 'cannot find name' diagnostic for the rotted op; got:\n${diagnostics}`,
   );
 });
+
+/** The other docs carrying DSL examples, found by a survey of every fenced typed
+ *  block in `docs/`. They ride the same harness as the two arms above; they were
+ *  simply never named, so a rename that rotted them broke nothing in CI. */
+const OTHER_DSL_DOCS = ["architecture.md", "concepts.md"] as const;
+
+for (const file of OTHER_DSL_DOCS) {
+  test(`doc-gate: every DSL example in ${file} typechecks against the real package`, () => {
+    const md = readFileSync(resolve(DOCS_DIR, file), "utf8");
+    const blocks = extractTsBlocks(md).filter((b) => /from\s+["']zero-migrate["']/.test(b));
+    assert.ok(
+      blocks.length >= 1,
+      `expected docs/${file} to carry at least one zero-migrate DSL example; found ${blocks.length}`,
+    );
+    const diagnostics = typecheck(assembleHarness(blocks));
+    assert.equal(
+      diagnostics,
+      null,
+      `a DSL example in docs/${file} no longer compiles against zero-migrate.\n` +
+        `Fix the doc (or the snippet) - do not weaken this gate.\n\n` +
+        String(diagnostics),
+    );
+  });
+}
