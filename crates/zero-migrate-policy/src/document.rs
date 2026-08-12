@@ -112,6 +112,26 @@ pub enum LoadError {
     /// it nor lets it be sealed above its default on the enforced path, so raising
     /// it would advertise authority the engine lacks. Rejected fail-closed at load.
     DeclaredOnlyNonDefault { key: String },
+    /// An `extends` document carries a grant whose value is at or below what its BASE
+    /// already grants on an overlapping scope, so the rule cannot take effect.
+    ///
+    /// `extends` merges the base's rules into this document, and one document is one
+    /// layer. Within a layer a grant resolves to the JOIN of every covering rule, so a
+    /// rule below the base's value is not an override - it contributes nothing, and the
+    /// composed value stays the base's. An operator writing `sql.raw = false` over a
+    /// schema their base grants `true` gets `true`, which is the opposite of what they
+    /// wrote.
+    ///
+    /// Rejected rather than accepted-and-ignored, the way an
+    /// [`InjectForbidsAuthorPrimaryKeyWithoutPin`](LoadError::InjectForbidsAuthorPrimaryKeyWithoutPin)
+    /// restriction is. `extends` ACCUMULATES: it can raise a base grant, never tighten
+    /// one. Tightening belongs in the layer stack, where a later layer is admitted as a
+    /// narrowing draft and presence-override applies.
+    ExtendsGrantDominatedByBase {
+        key: String,
+        base_value: String,
+        own_value: String,
+    },
     /// A scope pattern literal is malformed (bad glob, >2 segments, bad quoting).
     MalformedScope { pattern: String },
     /// A scope was authored with an empty include (the ⊥/⊤ collision guard).
@@ -405,9 +425,14 @@ impl PolicyDoc {
     /// base chain against the injected trusted `catalog` (II.7, H-1) with cycle
     /// detection. `ctx` MUST be a trusted context (`RootCharter`/`TrustedCatalogEntry`)
     /// — an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
-    /// base document's rules are inherited UNDER this document's (doc-level overlay:
-    /// this doc's rules are the inner/override layer, base is outer), and its
-    /// `default_scope` is inherited when this doc omits its own.
+    /// base document's rules ACCUMULATE into this document's, and its `default_scope` is
+    /// inherited when this document omits its own.
+    ///
+    /// Accumulate, not override. The merge produces one document, which is one layer,
+    /// and a layer joins every covering grant rule, so this document can raise a base
+    /// grant but never tighten one. A tightening rule would be inert and is refused
+    /// ([`LoadError::ExtendsGrantDominatedByBase`]). Tightening belongs in the layer
+    /// stack, where a later layer is admitted as a narrowing draft.
     pub fn parse_toml_with_catalog(
         src: &str,
         registry: &PolicyRegistry,
@@ -565,10 +590,14 @@ impl PolicyDoc {
                 Some(catalog),
                 seen,
             )?;
-            // Doc-level overlay: the base's rules are inherited UNDER this doc's (base
-            // first, then this doc's — this doc overrides on scalar knobs at query
-            // time, and rule lists accumulate). `default_scope` is inherited when this
-            // doc omits its own.
+            // The base's rules ACCUMULATE into this document: one flat rule list, so one
+            // layer, and a layer joins every covering grant rather than letting a later
+            // rule win. This doc can therefore RAISE a base grant and never tighten one,
+            // which is not what a doc-level overlay would do - `compose::overlay` builds
+            // two layers and gets presence-override; `overlay_docs` below builds one and
+            // does not. A tightening rule would be inert, so refuse it by name instead.
+            // `default_scope` is inherited when this doc omits its own.
+            check_extends_grant_direction(&base, &this, registry)?;
             this = overlay_docs(base, this);
         }
 
@@ -618,6 +647,81 @@ fn overlay_docs(base: PolicyDoc, over: PolicyDoc) -> PolicyDoc {
         rules,
         warnings: Vec::new(),
     }
+}
+
+/// Refuse an `extends` document whose grant the BASE already dominates.
+///
+/// `overlay_docs` below concatenates the two rule lists, so the result is one document
+/// and therefore one layer, and a layer resolves a grant by JOINING every covering rule
+/// (`GrantKeyMap::value_at`). A rule at or below the base's value on an overlapping
+/// region cannot lower the composed value there; it is inert. The direction that works
+/// is raising, so `extends` accumulates authority and cannot tighten it.
+///
+/// Compared through the two grant MODELS rather than rule against rule. The base's
+/// value at a point is the join of all its covering rules, which can dominate a value
+/// no single base rule does - two `StrSet` rules join to a superset of both - and a
+/// pairwise scan would miss exactly that case.
+fn check_extends_grant_direction(
+    base: &PolicyDoc,
+    own: &PolicyDoc,
+    registry: &PolicyRegistry,
+) -> Result<(), LoadError> {
+    // Both rule lists were validated against this same registry above, so neither model
+    // build nor value comparison below can fail on a key the registry lacks. Each is
+    // still surfaced rather than unwrapped: a future registry change that breaks the
+    // assumption should name itself at load, not panic in a host.
+    let model = |rules: &[Rule], which: &str| {
+        crate::compose::GrantModel::build(rules, registry).map_err(|e| {
+            LoadError::InvalidKnobValue {
+                key: format!("<{which} grants>"),
+                detail: format!("{e:?}"),
+            }
+        })
+    };
+    let base_grants = model(&base.rules, "base")?;
+    let own_grants = model(&own.rules, "extending document")?;
+
+    for rule in &own.rules {
+        let RuleKind::Grant { key, .. } = &rule.kind else {
+            continue;
+        };
+        let Some(base_key) = base_grants.get(key) else {
+            continue; // the base is silent on this key, so it dominates nothing.
+        };
+        let Some(own_key) = own_grants.get(key) else {
+            continue;
+        };
+        // Sample inside the region this rule and the base's coverage share. A witness
+        // is enough: the values are constant per region, and any point where the base
+        // dominates makes the rule inert there.
+        let shared = rule.scope.meet(&base_key.covered_scope());
+        let Some(witness) = crate::compose::witness_of(&shared) else {
+            continue;
+        };
+        let bad_value = |detail: String| LoadError::InvalidKnobValue {
+            key: key.as_str().to_string(),
+            detail,
+        };
+        let base_value = base_key
+            .value_at(&witness)
+            .map_err(|e| bad_value(format!("{e:?}")))?;
+        let own_value = own_key
+            .value_at(&witness)
+            .map_err(|e| bad_value(format!("{e:?}")))?;
+        if own_value == base_value {
+            continue; // restating what the base already says changes nothing.
+        }
+        if leq_value(&own_key.kind, &own_value, &base_value)
+            .map_err(|e| bad_value(format!("{e:?}")))?
+        {
+            return Err(LoadError::ExtendsGrantDominatedByBase {
+                key: key.as_str().to_string(),
+                base_value: format!("{base_value:?}"),
+                own_value: format!("{own_value:?}"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Which section a rule came from — drives the A3 grant-unbounded gate.

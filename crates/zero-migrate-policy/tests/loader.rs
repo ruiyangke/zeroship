@@ -1176,6 +1176,98 @@ fn extends_without_catalog_is_unknown_base() {
 }
 
 #[test]
+fn extends_refuses_a_grant_its_base_already_dominates() {
+    // `extends` concatenates the base's rules into this document, and one document is
+    // one layer. Within a layer a grant resolves to the JOIN of every covering rule, so
+    // a rule below what the base already grants cannot pull the value down - it is
+    // inert. Measured before this gate existed: base `sql.raw = true` over `app_*`,
+    // this document `sql.raw = false` over `app_one`, composed value at `app_one`
+    // `Some(Bool(true))`. An operator who wrote "deny raw SQL here" got "allow".
+    let cat = catalog(&[(
+        "base",
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+"#,
+    )]);
+    let err = PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[grant]]
+key = "sql.raw"
+value = false
+scope = { include = ["app_one"] }
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, LoadError::ExtendsGrantDominatedByBase { ref key, .. } if key == "sql.raw"),
+        "a rule the base already dominates must be refused by name, got {err:?}"
+    );
+}
+
+#[test]
+fn extends_still_accepts_a_grant_that_raises_its_base() {
+    // The control. `extends` accumulates, so RAISING a base grant is the direction that
+    // works, and the refusal above must not take it with it.
+    let cat = catalog(&[(
+        "base",
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = false
+scope = { include = ["app_*"] }
+"#,
+    )]);
+    PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_one"] }
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .expect("raising a base grant is what extends can express");
+}
+
+#[test]
+fn extends_accepts_a_grant_on_a_key_the_base_never_mentioned() {
+    // A second control. The gate compares against what the base grants on the SAME key,
+    // so an unrelated key must pass regardless of its value.
+    let cat = catalog(&[(
+        "base",
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+"#,
+    )]);
+    PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app_one"] }
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .expect("a key the base is silent on is not dominated by it");
+}
+
+#[test]
 fn extends_cannot_assemble_a_contradiction_neither_document_holds() {
     // The inject-versus-validate contradiction gate is what stops a charter from
     // injecting a column it also forbids. `extends` merges a base's rules into this
