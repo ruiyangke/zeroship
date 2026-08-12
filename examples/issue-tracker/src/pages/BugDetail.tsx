@@ -6,6 +6,7 @@ import { CcPanel } from "../components/bug-detail/CcPanel";
 import { CommentsPanel } from "../components/bug-detail/CommentsPanel";
 import { FieldsPanel } from "../components/bug-detail/FieldsPanel";
 import { FlagsPanel } from "../components/bug-detail/FlagsPanel";
+import { VotesPanel } from "../components/bug-detail/VotesPanel";
 import { HistoryPanel } from "../components/bug-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/bug-detail/RelationsPanel";
 import { KeywordsPanel } from "../components/bug-detail/KeywordsPanel";
@@ -98,6 +99,13 @@ export function BugDetailPage({ id }: { id: string }) {
             <CommentsPanel bugId={id} />
           </div>
           <div className="bug-detail-side">
+            <VotesPanel
+              bugId={id}
+              voteCount={detail.bug.voteCount}
+              maxVotesPerBug={productDetail?.product.maxVotesPerBug ?? 0}
+              votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
+              onChanged={reload}
+            />
             <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
             {/* No `activities` prop: the panel reads real flags from
                 flags.list instead of replaying the bug's history. */}

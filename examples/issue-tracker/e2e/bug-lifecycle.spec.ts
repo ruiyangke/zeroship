@@ -162,3 +162,49 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
   await page.reload();
   await expect(ccSection.getByText(summary)).toBeVisible();
 });
+
+test("voting is offered only when the product enables it", async ({ page, baseURL }) => {
+  // The votes panel reads two product fields that were uneditable until
+  // products.update learned about them, so this also pins that the limits can
+  // actually be turned on through the API the UI depends on.
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const product = await rpc("products.create", { name: `Vote ${RUN}`, description: "vote spec" });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary: `Vote target ${RUN}`,
+    description: "vote on me",
+  });
+
+  // Voting off by default: the panel must say so rather than show a control
+  // that always fails.
+  await page.goto(`/#/bugs/${bug.id}`);
+  const votes = page.locator("section.votes-panel");
+  await expect(votes).toBeVisible();
+  await expect(votes.getByText(/not enabled/i)).toBeVisible();
+
+  await rpc("products.update", {
+    id: product.id,
+    changes: { votesPerUser: 5, maxVotesPerBug: 3, votesToConfirm: 2 },
+  });
+
+  await page.reload();
+  await expect(votes.getByText(/not enabled/i)).toHaveCount(0);
+  await votes.getByLabel("My votes").fill("2");
+  await votes.getByRole("button", { name: "Vote" }).click();
+
+  // voteCount is the SUM of quantities, so two votes read as 2, not 1.
+  await expect(votes.getByText("2 votes")).toBeVisible();
+});
