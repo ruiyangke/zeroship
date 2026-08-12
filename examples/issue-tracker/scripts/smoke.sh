@@ -36,11 +36,21 @@
 # restriction below and would make the whole section vacuous while still
 # printing green.
 #
-# Attachment paths go through the same bug check (list/get via assertBugVisible,
-# setObsolete/delete via assertBugAccessible), but no assertion here pins
-# attachment CONTENT specifically -- that is the remaining second-identity gap.
-# Report aggregates ARE covered -- a restricted bug used to be counted in
-# reports.summary for a user who could not read it, and that is now pinned.
+# Covered as a denial with a control: bug-level and product-level groups,
+# private comments, report aggregates (a restricted bug used to be counted in
+# reports.summary for someone who could not read it), duplicate clusters,
+# dependency edges and the graph, the activity history, and attachment content,
+# list and obsolete.
+#
+# WHAT NO ASSERTION HERE COVERS, so it is not mistaken for tested:
+#   - the login form itself; every request carries a session cookie this script
+#     signs, so the credential exchange is never exercised;
+#   - the gateway's JWT validation, rate limiting and route dispatch, because
+#     this drives the dev runtime directly;
+#   - anything Postgres-specific. Two fixes in this app -- the serializable
+#     idempotent joins and the votes.cast lost update -- address failures that
+#     SQLite CANNOT produce, because it serialises writes. Those are argued
+#     from the code, not observed here.
 set -uo pipefail
 
 URL="${ZEROSHIP_URL:-http://localhost:3007}"
@@ -676,6 +686,38 @@ IDEM_AFTER="$(call cc.list "{\"bugId\":\"$BUG\"}" | node -e 'let s="";process.st
 [ "$(code cc.add "{\"bugId\":\"$BUG\",\"userId\":\"$BOB_ID\"}")" = "200" ] \
   && pass "a repeated cc.add still answers 200" \
   || fail "a repeated cc.add errored instead of returning the existing row"
+
+# Attachment CONTENT as a second identity -- the last gap this file's own
+# header named. attachments.list/get call assertBugVisible and
+# setObsolete/delete call assertBugAccessible, but nothing pinned that the
+# BYTES are actually withheld from someone who cannot read the bug.
+ATT_B64="$(node -e 'process.stdout.write(Buffer.from("secret patch contents").toString("base64"))')"
+ATT_ID="$(call attachments.upload "{\"bugId\":\"$SECRET_BUG\",\"filename\":\"fix.patch\",\"contentBase64\":\"$ATT_B64\",\"contentType\":\"text/plain\",\"isPatch\":true}" | jget 'json.id')"
+case "$ATT_ID" in
+  atch_*|att_*|*_*) pass "an attachment uploads to the restricted bug" ;;
+  *) fail "attachments.upload" "got: $ATT_ID" ;;
+esac
+
+# Control: Alice can read the bytes back, so a refusal for Bob is about access
+# and not about the upload having failed.
+call attachments.get "{\"id\":\"$ATT_ID\"}" | grep -q "$ATT_B64" \
+  && pass "control: the uploader reads the attachment bytes back" \
+  || fail "control failed: even the uploader cannot read the bytes"
+
+[ "$(bobc attachments.get "{\"id\":\"$ATT_ID\"}")" = "403" ] \
+  && pass "attachment CONTENT is refused to a user who cannot read the bug" \
+  || fail "attachment content is readable by a user who cannot read the bug" \
+          "http=$(bobc attachments.get "{\"id\":\"$ATT_ID\"}")"
+
+[ "$(bobc attachments.list "{\"bugId\":\"$SECRET_BUG\"}")" = "403" ] \
+  && pass "the attachment LIST is refused too (filenames are a disclosure)" \
+  || fail "attachments.list answered for a bug the caller cannot read"
+
+# And the write side: marking someone else's attachment obsolete on a bug you
+# cannot open must be refused, not just the read.
+[ "$(bobc attachments.setObsolete "{\"id\":\"$ATT_ID\",\"isObsolete\":true}")" = "403" ] \
+  && pass "attachments.setObsolete is refused on an unreadable bug" \
+  || fail "a user could obsolete an attachment on a bug they cannot read"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.
