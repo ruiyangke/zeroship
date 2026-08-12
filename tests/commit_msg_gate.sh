@@ -21,6 +21,7 @@ set -uo pipefail
 MAX_SUBJECT=100          # measured: accepts 97% of a week of unconstrained
                          # subjects, rejects the multi-clause outliers
 BODY_WARN_LINES=20       # advisory only, never fails
+MAX_BODY_LINE=80         # git log indents the body by 4; keep it inside 80 cols
 
 TYPES='fix|feat|refactor|test|docs|merge|chore|style|build|ci|perf|bench|revert'
 
@@ -95,6 +96,24 @@ lint_message() {
       say "body must be separated from the subject by a blank line" NO_BLANK_LINE
     fi
   fi
+
+  # Body lines must be hard-wrapped. `git log` indents the body by four and
+  # does not re-flow, so an unwrapped paragraph runs off the terminal. Only
+  # prose is checked: an indented block (code, command output, a table) is
+  # verbatim by intent, and a line whose first word already passes the limit
+  # is an unbreakable token such as a URL or a path.
+  local line
+  while IFS= read -r line; do
+    [ "${#line}" -le "$MAX_BODY_LINE" ] && continue
+    case "$line" in
+      " "*|"	"*|"|"*|'```'*|"- "*|"* "*) continue ;;
+    esac
+    local first="${line%% *}"
+    [ "$line" = "$first" ] && continue                 # single long token
+    [ "${#first}" -gt "$MAX_BODY_LINE" ] && continue   # unbreakable leading token
+    say "body line is ${#line} chars; wrap the body at $MAX_BODY_LINE" LONG_BODY_LINE
+    break
+  done <<< "$rest"
 
   if [ "$bad" -ne 0 ]; then
     [ -n "$label" ] && printf '  (%s)\n' "$label"
@@ -189,6 +208,19 @@ main() {
       check_good 'fix(bundle): S3 dedup must verify the bytes the caller supplied'
       check_good "$(printf 'fix(db): keep decimal defaults\n\nA real body, correctly separated.')"
       check_good 'Merge branch '"'"'main'"'"' of github.com:ruiyangke/zeroship'
+
+      # Body wrapping, with its one-variable partner: the same paragraph, once
+      # over the limit and once under. Then the three exemptions, each of which
+      # would make the rule unusable if it fired.
+      local long_para short_para
+      long_para="$(printf 'word %.0s' $(seq 1 25))"
+      short_para="$(printf 'word %.0s' $(seq 1 12))"
+      check_bad  LONG_BODY_LINE "$(printf 'fix(db): keep decimal defaults\n\n%s' "$long_para")"
+      check_good "$(printf 'fix(db): keep decimal defaults\n\n%s' "$short_para")"
+      check_good "$(printf 'fix(db): keep decimal defaults\n\n    %s' "$long_para")"
+      check_good "$(printf 'fix(db): keep decimal defaults\n\nhttps://example.com/%s' \
+        "$(printf 'x%.0s' $(seq 1 90))")"
+      check_good "$(printf 'fix(db): keep decimal defaults\n\n| a | markdown table row that is deliberately much longer than the limit |')"
 
       printf 'self-test: %d/%d bad messages rejected for the right reason, %d/%d good accepted\n' \
         "$bad_ok" "$bad_total" "$good_ok" "$good_total"
