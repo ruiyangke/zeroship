@@ -442,6 +442,34 @@ auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_auth holds SELECT+DELETE on token_revocations (its sweep needs both)" \
   || fail "zeroship_auth token_revocations privileges read $auth_del of 2: token_sweep cannot succeed (#319)"
 
+# The SAME table, the GATEWAY role, and a DIFFERENT missing privilege - which is
+# why the assertion above could not see this one. #319 was auth needing DELETE;
+# this is the gateway needing UPDATE.
+#
+# crates/authz/src/wrapper_revocation.rs:41 revoke_family() is
+#   INSERT INTO zeroship.token_revocations (...) VALUES (...)
+#   ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after
+# called from crates/gateway/src/backchannel_logout.rs:508 and
+# browser_auth.rs:421, both production (router/auth.rs's #[cfg(test)] starts at
+# 1071, and neither of these files is that one). PostgreSQL requires UPDATE to
+# PLAN an ON CONFLICT DO UPDATE, so a missing UPDATE fails EVERY call, not just
+# the conflicting ones - and both call sites swallow the error, so signout still
+# answers 204 while the marker was never written.
+#
+# MEASURED 2026-08-12 as zeroship_gateway inside BEGIN ... ROLLBACK, one variable:
+#   INSERT ... VALUES (...)                        -> INSERT 0 1
+#   INSERT ... VALUES (...) ON CONFLICT DO UPDATE  -> ERROR: permission denied
+# so the ON CONFLICT clause is the cause, not the table or the row.
+#
+# WHAT THIS DOES NOT CATCH: privilege, not behaviour. It proves the GRANT exists,
+# not that signout calls revoke_family, nor that the marker is later read by the
+# per-request gate. A signout path that stopped calling it would still pass.
+gw_revoke=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('INSERT'),('UPDATE')) p(v) where n.nspname='zeroship' and c.relname='token_revocations' and has_table_privilege('zeroship_gateway',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$gw_revoke" = "3" ] \
+  && pass "zeroship_gateway holds SELECT+INSERT+UPDATE on token_revocations (revoke_family upserts)" \
+  || fail "zeroship_gateway token_revocations privileges read $gw_revoke of 3: revoke_family cannot succeed, so signout never revokes the family (#356)"
+
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
