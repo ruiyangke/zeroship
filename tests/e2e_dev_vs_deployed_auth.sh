@@ -575,6 +575,19 @@ else
   n=$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep -c '^<')
   DIVERGENT_ROWS="$n"
   fail "dev and deployed DIVERGE on $n of $(wc -l < "$WORK/dev.txt") rows (< dev, > deployed)"
+  # Row IDENTITY, for the classifier below. The key is every field BEFORE the
+  # status code, which is what makes one uniform rule work across two row
+  # layouts: RPC rows are `persona probe.name STATUS body` and browser rows are
+  # `persona METHOD /path STATUS body`. Keying on `$2` alone (which is what the
+  # db and login harnesses do, correctly, because their row names are single
+  # dotted tokens) collapses all 20 auth rows onto 6 personas - I measured that
+  # before writing this. Stopping at the status is also deliberate: the status
+  # is part of what DIVERGES, so a key containing it would rename its own row
+  # the moment a divergence changed shape, and the classifier would report one
+  # undocumented row plus one missing row for a single behaviour change.
+  DIVERGENT_KEYS="$(diff "$WORK/dev.txt" "$WORK/deployed.txt" | grep '^< ' \
+    | awk '{k="";for(i=2;i<=NF;i++){if($i ~ /^[0-9][0-9][0-9]$/)break; k=k (k==""?"":".") $i} print k}' \
+    | sort -u | tr '\n' ' ')"
   diff "$WORK/dev.txt" "$WORK/deployed.txt"
   echo ""
   echo "  A divergence here is the finding, not a flaky test. Both tiers are"
@@ -679,16 +692,40 @@ fi
 #       the row-diff failed (the self-diff guard, the floor, a setup step), so
 #       the comparison is no longer measuring what the count claims.
 #
-# WHAT IT DOES NOT DO: it counts rows, not identities. Twenty divergences that
-# are a DIFFERENT twenty would still exit 0. Pinning the row set needs the
-# per-row verdict table in docs/pilot/e2e-scenarios.md scenario 6 to become
-# machine-readable, which it is not today. Stated so the exit code is not read
-# as more than it is.
+# IT ALSO COMPARES IDENTITIES, not just the count. This paragraph used to say
+# the opposite - "it counts rows, not identities, twenty divergences that are a
+# DIFFERENT twenty would still exit 0" - and claimed pinning the set needed the
+# scenario-6 verdict table to become machine-readable. That was wrong about the
+# requirement: the row keys come straight out of the diff, and the table is not
+# needed to name them. The count check is KEPT as well, because the two catch
+# different things - the count catches a row appearing twice, the identity set
+# catches a swap that leaves the count alone.
+#
+# MEASURED BEFORE PINNING, 2026-08-12, three consecutive runs of unmodified
+# code: every run `22 passed, 1 failed` and `20 of 48`, and the sorted key set
+# byte-identical across all three (md5 69e58f2b5599). That is the same check db
+# and login got, and it is why every one of the twenty is REQUIRED with none
+# tolerated - unlike db, where txBranch/txOrphan are genuinely timing-dependent
+# and are carved out as TOLERATED with the runs that justified it. If an auth
+# row starts flapping, move it to a tolerated list WITH the measurement; do not
+# loosen this back to a bare count.
 AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT:-20}"
+AUTH_REQUIRED_DIVERGENT="${AUTH_REQUIRED_DIVERGENT:-alpha.GET./auth/session anon.GET./auth/session anon.probe.defaulted anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.defaulted forged.probe.requireGated forged.probe.userDeclared garbage.probe.defaulted garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape}"
 if [ "${MUTATE:-none}" != "none" ]; then
   # The documented control moves the count to 17; see the header. Do not
   # classify a mutated run against the unmutated expectation.
   AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT_MUTATED:-17}"
+  # And the identity set the mutation must leave: RUN 2026-08-12, the delta is
+  # exactly the three rows named for it - anon/forged/garbage probe.defaulted -
+  # and it adds NONE. That is strictly more than `20 -> 17` could ever say: a
+  # count delta of 3 is satisfied by any three rows closing, or by five closing
+  # while two new ones open. This arm now names them.
+  #
+  # `stale.probe.defaulted` deliberately STAYS in the list. It is a fourth
+  # probe.defaulted row that diverges for a different reason, and the header
+  # already says so; a mutation control that also closed it would mean the
+  # posture change was reaching further than its name claims.
+  AUTH_REQUIRED_DIVERGENT="${AUTH_REQUIRED_DIVERGENT_MUTATED:-alpha.GET./auth/session anon.GET./auth/session anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.requireGated forged.probe.userDeclared garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape}"
 fi
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 if [ "$FAIL" -eq 0 ] && [ "$DIVERGENT_ROWS" -eq 0 ] && [ "$AUTH_EXPECTED_DIVERGENT" -eq 0 ]; then
@@ -717,12 +754,34 @@ if [ "$DIVERGENT_ROWS" -ne "$AUTH_EXPECTED_DIVERGENT" ]; then
   fi
   exit 1
 fi
+# The count matched. Now the IDENTITIES, which the count cannot see: a swap
+# (one row closes, another opens) leaves the count untouched and is exactly the
+# blind spot the old header admitted to.
+AUTH_UNDOCUMENTED=""
+AUTH_MISSING=""
+for k in $DIVERGENT_KEYS; do
+  case " $AUTH_REQUIRED_DIVERGENT " in *" $k "*) ;; *) AUTH_UNDOCUMENTED="$AUTH_UNDOCUMENTED $k" ;; esac
+done
+for k in $AUTH_REQUIRED_DIVERGENT; do
+  case " $DIVERGENT_KEYS " in *" $k "*) ;; *) AUTH_MISSING="$AUTH_MISSING $k" ;; esac
+done
+if [ -n "$AUTH_UNDOCUMENTED" ] || [ -n "$AUTH_MISSING" ]; then
+  echo "" >&2
+  echo "CLASSIFIER: the divergence COUNT is $DIVERGENT_ROWS as expected, but it is a" >&2
+  echo "  DIFFERENT set of rows. This is the case a count cannot see." >&2
+  [ -n "$AUTH_UNDOCUMENTED" ] && echo "  Diverging but not documented:$AUTH_UNDOCUMENTED" >&2
+  [ -n "$AUTH_MISSING" ] && echo "  Documented but no longer diverging:$AUTH_MISSING" >&2
+  echo "  Find out which rows moved and why before touching AUTH_REQUIRED_DIVERGENT." >&2
+  echo "  Record the verdicts in docs/pilot/e2e-scenarios.md scenario 6." >&2
+  exit 1
+fi
 echo "" >&2
 # Total rows read back rather than hardcoded: a literal here would go stale the
 # first time a probe row is added, and would then claim a denominator the diff
 # never used.
 AUTH_TOTAL_ROWS="$(wc -l < "$WORK/dev.txt" 2>/dev/null || echo '?')"
 echo "CLASSIFIER: exit 0 on the documented red - $DIVERGENT_ROWS of $AUTH_TOTAL_ROWS divergent," >&2
+echo "  and every divergent row is a KNOWN one (identities checked, not just the count)," >&2
 echo "  which is the KNOWN dev-vs-deployed auth contract gap, not a passing" >&2
 echo "  comparison. Scenario 6 in docs/pilot/e2e-scenarios.md has the row-by-row" >&2
 echo "  verdicts, including which divergences are deliberate and which are" >&2
