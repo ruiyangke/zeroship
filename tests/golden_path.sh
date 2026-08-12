@@ -1731,7 +1731,7 @@ fi
 # from the public client surface precisely because of it. Asserting the deployed
 # 500 here would need a second build+deploy for one status code; the worker suite
 # already pins it, and this step names where.
-step 7e "Dev tier: a creator's WebSocketPair app completes an RFC 6455 handshake"
+step 7e "Dev tier: a creator's WebSocketPair app handshakes AND round-trips a frame"
 WS_PORT=3391
 WS_TMP="$(mktemp -d)"
 WS_APP="$WS_TMP/wsapp.js"
@@ -1741,6 +1741,7 @@ export default {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
+    server.addEventListener("message", (e) => server.send("echo:" + e.data));
     return new Response(null, { status: 101, webSocket: client });
   }
 };
@@ -1765,6 +1766,30 @@ WS_PLAIN=$(ws_probe $'Connection: close\r\n')
 WS_UP=$(ws_probe $'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n')
 WS_WANT=$(printf '%s%s' "dGhlIHNhbXBsZSBub25jZQ==" "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" \
   | openssl dgst -sha1 -binary | openssl base64)
+
+# --- FRAMES, not just the handshake ---------------------------------------
+# The handshake proves the upgrade; it does NOT prove a byte ever moves. This
+# arm sends one masked client text frame and reads the app's reply frame back,
+# so `receive_loop` (parse + unmask), the dispatch into the isolate, and
+# `send_pump` (emit) are all on the measured path.
+#
+# THE MASK IS ALL ZEROS, deliberately. RFC 6455 requires client frames to BE
+# masked but puts no constraint on the mask VALUE, and XOR with zero leaves the
+# payload readable on the wire -- so a failure here shows the actual bytes
+# rather than a scrambled blob. It still exercises the unmask path: the server
+# must strip a 4-byte masking key it cannot skip.
+#
+#   client -> 81 84 00000000 "ping"   FIN|text, MASK|len4, zero key, payload
+#   server -> 81 09 "echo:ping"       FIN|text, len9, UNMASKED (server frames
+#                                     are never masked)
+WS_FRAME_RAW="$WS_TMP/frame.bin"
+exec 3<>"/dev/tcp/127.0.0.1/$WS_PORT" 2>/dev/null && {
+  printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n' "$WS_PORT" >&3
+  printf '\x81\x84\x00\x00\x00\x00ping' >&3
+  timeout 8 cat <&3 > "$WS_FRAME_RAW"
+  exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+}
+WS_FRAME_HEX=$(tail -c 11 "$WS_FRAME_RAW" 2>/dev/null | od -An -tx1 | tr -d ' \n')
 kill "$WS_PID" 2>/dev/null || true
 wait "$WS_PID" 2>/dev/null || true
 
@@ -1785,6 +1810,16 @@ case "$WS_UP" in
   *"$WS_WANT"*) pass "dev: Sec-WebSocket-Accept matches the value derived from the key ($WS_WANT)" ;;
   *) fail "dev: accept header does not match the derived $WS_WANT -- the 101 is not a real RFC 6455 handshake" ;;
 esac
+# 8109 = FIN|text, length 9; then "echo:ping" in hex. Asserting the FRAMING
+# bytes and not just the text is what separates "the app replied" from "the app
+# replied in a well-formed unmasked server frame".
+if [ "$WS_FRAME_HEX" = "81096563686f3a70696e67" ]; then
+  pass "dev: a masked client frame round-trips -- server answered 81 09 'echo:ping'"
+else
+  fail "dev: no well-formed reply frame. want 81096563686f3a70696e67, got '${WS_FRAME_HEX:-<nothing>}'
+      Empty means the reader was killed before the frame arrived, or the app
+      never got the message; the handshake arms above say which half worked."
+fi
 
 # --- 8. The same failure on the DEPLOYED tier, measured rather than assumed ---
 #
@@ -4110,10 +4145,15 @@ gp_close_step
 # 101, derived accept) and then MEASURED the same day:
 #   golden path: 111 passed, 15 failed (floor 111)
 #   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
-# The delta and the run agree to the assertion, and the 15 reds are the same
+# The delta and the run agreed to the assertion, and the 15 reds are the same
 # ticketed set as before (#260 x6, #236 x2, #332/#333 x3, #331 x4) -- the new
 # step added no red and disturbed none.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-111}"
+#
+# 111 -> 112, a DELTA again: step 7e gained a fourth arm (a masked client frame
+# round-trips and the server answers a well-formed unmasked frame). Standalone
+# 4 passed / 0 failed, and mutation-proven by deleting the app's message
+# listener: 3/1, only the frame arm red. NOT yet confirmed by a full run.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-112}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
