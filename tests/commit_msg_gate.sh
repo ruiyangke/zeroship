@@ -22,6 +22,9 @@ MAX_SUBJECT=100          # measured: accepts 97% of a week of unconstrained
                          # subjects, rejects the multi-clause outliers
 BODY_WARN_LINES=20       # advisory only, never fails
 MAX_BODY_LINE=80         # git log indents the body by 4; keep it inside 80 cols
+MAX_MESSAGE=500          # whole message. Deliberately tight: the week before
+                         # this landed ran p50 623, so this refuses the prevailing
+                         # style on purpose and forces the why into a few lines.
 
 TYPES='fix|feat|refactor|test|docs|merge|chore|style|build|ci|perf|bench|revert'
 
@@ -114,6 +117,13 @@ lint_message() {
     say "body line is ${#line} chars; wrap the body at $MAX_BODY_LINE" LONG_BODY_LINE
     break
   done <<< "$rest"
+
+  # Whole-message budget. The subject says what changed; the body says why it
+  # is not obvious. Past that, a commit message is being used as a notebook,
+  # and the log is the wrong place for one.
+  if [ "${#msg}" -gt "$MAX_MESSAGE" ]; then
+    say "message is ${#msg} chars, limit is $MAX_MESSAGE; keep the why, drop the narration" TOO_LONG_MSG
+  fi
 
   if [ "$bad" -ne 0 ]; then
     [ -n "$label" ] && printf '  (%s)\n' "$label"
@@ -221,6 +231,15 @@ main() {
       check_good "$(printf 'fix(db): keep decimal defaults\n\nhttps://example.com/%s' \
         "$(printf 'x%.0s' $(seq 1 90))")"
       check_good "$(printf 'fix(db): keep decimal defaults\n\n| a | markdown table row that is deliberately much longer than the limit |')"
+
+      # Whole-message budget, with its one-variable partner: the same wrapped
+      # paragraph repeated to sit either side of MAX_MESSAGE.
+      local unit over under
+      unit='keep the why and drop the narration from this body line here'
+      over="$(for _ in $(seq 1 10); do printf '%s\n' "$unit"; done)"
+      under="$(for _ in $(seq 1 3); do printf '%s\n' "$unit"; done)"
+      check_bad  TOO_LONG_MSG "$(printf 'fix(db): keep decimal defaults\n\n%s' "$over")"
+      check_good "$(printf 'fix(db): keep decimal defaults\n\n%s' "$under")"
 
       printf 'self-test: %d/%d bad messages rejected for the right reason, %d/%d good accepted\n' \
         "$bad_ok" "$bad_total" "$good_ok" "$good_total"
