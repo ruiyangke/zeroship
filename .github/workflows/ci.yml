@@ -1301,6 +1301,23 @@ jobs:
       # a different one loses first. That is worse for CI than storage's single
       # deterministic failure, because each mode reads like a different product
       # bug. Not wired until the budgets are sized for a loaded host.
+      #
+      # RE-MEASURED 2026-08-12 and the RATE has moved a lot, though the verdict
+      # has not. FOUR rounds under the same 12 busy loops that reproduce
+      # storage's red on this box (so the load is real, not a weaker harness):
+      #     3 rounds GREEN, 44 passed / 0 failed, exit 0
+      #     1 round  RED,   36 passed / 8 failed, exit 1
+      # So "3/3 red" no longer reproduces; it is roughly 1 in 4 now. Several
+      # timing fixes landed in between and I have NOT attributed the change to
+      # any of them.
+      #
+      # The surviving red is a FIFTH mode, none of the three above: the deployed
+      # `wf.start` RPC itself times out -
+      #     START-REFUSED {"message":"request timed out","name":"Error"}
+      # which is the @zeroship/rpc client timeout (sdks/rpc/src/transport.ts),
+      # not a readiness loop in the harness. Every one of the 8 failures is
+      # downstream of that one refused start. Still not wired, and still for the
+      # same reason - but anyone sizing budgets should start at the start RPC.
       # Asserts ABSOLUTELY on the deployed body, not only relatively: production
       # shipped Error.stack to anonymous callers for weeks while the auth harness
       # stayed green, because dev leaked the same stack and the diff was empty.
