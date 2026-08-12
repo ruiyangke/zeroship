@@ -10,6 +10,12 @@ production/test split was not reclassified for this update. Numbers this precise
 rot; the regeneration commands are at the bottom so the next reader can
 re-derive rather than trust them.
 
+Those two counts are STALE as of the operational-name conversion: the per-service
+sections below were rewritten to the canonical spellings, but the totals were
+not re-derived. Run
+`cargo run -p zeroship-config-contract -- inventory --format tsv` for the
+authoritative per-declaration set.
+
 **What this does NOT cover**, so a gap here is not evidence of absence:
 
 - Shell suites under `tests/` set and read many variables of their own.
