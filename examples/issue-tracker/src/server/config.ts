@@ -53,9 +53,11 @@ export default defineApp({
     "rpc:flags.set": { auth: "user" },
     "rpc:flags.clear": { auth: "user" },
     "rpc:flags.listRequests": { auth: "user" },
+    "rpc:flags.list": { auth: "user" },
     "rpc:cc.add": { auth: "user" },
     "rpc:cc.remove": { auth: "user" },
     "rpc:cc.list": { auth: "user" },
+    "rpc:cc.listMine": { auth: "user" },
 
     // Products and administration
     "rpc:products.list": { auth: "anon", publiclyAccessible: true },

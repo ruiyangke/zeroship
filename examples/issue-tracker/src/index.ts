@@ -2062,6 +2062,64 @@ export const listFlagRequests = query(
   { id: "flags.listRequests" },
 );
 
+// The flags currently on a bug, and on each of its attachments.
+//
+// WHY THIS EXISTS. Without it the only way a client could know a bug's flags
+// was to replay the `activities` log and reconstruct them, which is wrong for
+// any multiplicable flag type (several live flags of one type collapse to the
+// last write) and leaves `flags.clear` unusable: clearing needs a flag id, and
+// the id was only ever returned by `flags.set`, so a flag set in an earlier
+// session could never be cleared at all. Reconstructing state from a history
+// log is not a substitute for reading it.
+export const listFlags = query(
+  async ({ bugId }: { bugId: string }) => {
+    const identity = requireIdentity();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    await assertBugVisible(bug, identity);
+
+    const attachments = await readAll(db.attachments, { bugId });
+    const attachmentIds = new Set(attachments.map((row) => row.id));
+
+    // Attachment flags carry no bugId, so they are found through the bug's
+    // attachments rather than in one query.
+    const [onBug, types] = await Promise.all([
+      readAll(db.flags, { bugId }),
+      readAll(db.flagTypes, {}),
+    ]);
+    const onAttachments = (
+      await Promise.all(
+        attachments.map((attachment) =>
+          readAll(db.flags, { attachmentId: attachment.id }),
+        ),
+      )
+    ).flat();
+
+    const byType = new Map(types.map((type) => [type.id, type]));
+    const users = await readByIds(db.users, [
+      ...onBug.map((flag) => flag.setterId),
+      ...onBug.map((flag) => flag.requesteeId),
+      ...onAttachments.map((flag) => flag.setterId),
+      ...onAttachments.map((flag) => flag.requesteeId),
+    ].filter((id): id is string => Boolean(id)));
+    const byUser = new Map(users.map((user) => [user.id, user]));
+
+    const hydrate = (flag: FlagRow) => ({
+      flag,
+      flagType: byType.get(flag.flagTypeId) ?? null,
+      setter: byUser.get(flag.setterId) ?? null,
+      requestee: flag.requesteeId ? byUser.get(flag.requesteeId) ?? null : null,
+    });
+
+    return {
+      onBug: onBug.map(hydrate),
+      onAttachments: onAttachments
+        .filter((flag) => flag.attachmentId && attachmentIds.has(flag.attachmentId))
+        .map(hydrate),
+    };
+  },
+  { id: "flags.list" },
+);
+
 export const addCc = mutation(
   async ({ bugId, userId }: { bugId: string; userId: string }) => {
     const actor = await requireActor();
@@ -2130,6 +2188,33 @@ export const listCc = query(
     return rows.map((row) => ({ ...row, user: byId.get(row.userId) ?? null }));
   },
   { id: "cc.list" },
+);
+
+// The bugs the caller is CC'd on -- the reverse of `cc.list`, and the query
+// behind the dashboard's "CC'd to me" section.
+//
+// The schema was already indexed for this direction (`bug_cc_user_idx` on
+// bugCc.userId) but no procedure read it, so the dashboard had an index and no
+// way to reach it. Visibility is re-applied here rather than trusted from the
+// CC row: being CC'd on a bug does not by itself grant access to a product the
+// viewer can no longer see.
+export const listMyCc = query(
+  async ({}: EmptyInput) => {
+    const identity = requireIdentity();
+    const user = await appUserForIdentity(identity);
+    if (!user) return [];
+
+    const rows = await readAll(db.bugCc, { userId: user.id });
+    if (rows.length === 0) return [];
+
+    const bugs = await readByIds(db.bugs, rows.map((row) => row.bugId));
+    const visible = await visibleProductIds(identity);
+    return bugs
+      .filter((bug) => visible.has(bug.productId))
+      .map(normalizeBugRow)
+      .sort((left, right) => right.updated_at - left.updated_at);
+  },
+  { id: "cc.listMine" },
 );
 
 // ---------------------------------------------------------------------------
