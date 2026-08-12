@@ -847,6 +847,58 @@ scope = "all"
         assert!(err.is_creator_fault());
     }
 
+    /// A draft whose scope is a GLOB whose literal prefix lands INSIDE the granted
+    /// region. Every other escalation test here uses `scope = "all"`, which the
+    /// admission check catches wherever it samples; this one is built so a sampled
+    /// witness would land on the one object the ceiling does grant.
+    ///
+    /// The shape comes from zero-migrate's ZERO-MIGRATE-2026-08-12-001: their `admit`
+    /// proved a draft within a charter by sampling ONE object per charter-partitioned
+    /// region, and the sampled witness of a glob is built from its literal prefix. Our
+    /// confined ceiling binds `schema.create_table` to the app schema EXACTLY
+    /// (`bind_confined_charter_to_schema` rewrites the scope in place), so
+    /// `<app_schema>*` has the app schema itself as its prefix witness while also
+    /// covering `<app_schema>_evil`, which the ceiling does not grant.
+    ///
+    /// This test is a CANARY, not a reproduction: it passes at the vendored pin
+    /// (`cb1bcb59`, which predates their fix). Its value is that it fails if a future
+    /// pin move, or an edit to the confined charter that introduces a glob or a second
+    /// layer, makes the prefix-witness hole reachable here.
+    ///
+    /// What it does NOT cover: the layered-charter escalation their message actually
+    /// reproduces needs an upper layer that LOWERS a value over a sub-region, and our
+    /// charter is single-layer by construction, so no test in this file can exercise
+    /// that arm today.
+    #[test]
+    fn draft_glob_scope_anchored_on_the_granted_schema_is_still_rejected() {
+        let cfg = config();
+        let app_id = Uuid::new_v4();
+        let app_schema = app_id.to_string();
+        // The glob's literal prefix IS the granted schema; the glob also covers
+        // sibling schemas the ceiling never granted.
+        let draft_toml = format!(
+            r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = {{ include = ["{app_schema}*"] }}
+"#
+        );
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: &draft_toml,
+            })
+            .expect("glob-scoped draft parses before admission");
+
+        let err = cfg
+            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .expect_err("a glob reaching beyond the bound app schema must be rejected");
+        assert!(matches!(err, ManagedPolicyError::Compose(_)));
+        assert!(err.is_creator_fault());
+    }
+
     #[test]
     fn malformed_draft_is_rejected_fail_closed() {
         let cfg = config();
