@@ -1864,13 +1864,26 @@ SELECT con.conname AS name,
     assert_eq!(rows.len(), 1, "expected one FK on posts.authorId");
     let target: String = rows[0].get("target");
     assert_eq!(target, "users");
-    // Default ON DELETE RESTRICT = code 'r'
+    // `t.ref()` emits NO REFERENTIAL ACTION AT ALL, so Postgres' own defaults
+    // stand: NO ACTION on both sides ('a'), checked immediately rather than
+    // deferred. That is the contract settled in docs/reference/db.md:362-364
+    // ("the database's own defaults apply: NO ACTION for both actions, and
+    // immediate (non-deferred) checking") and implemented at
+    // crates/zeroship-schema/src/query.rs:1607, which OMITS the ON DELETE
+    // clause when the action is NO ACTION.
+    //
+    // These three assertions read `r`/`r`/`true` until 2026-08-12 -- the
+    // RESTRICT-and-deferrable contract the project decided AGAINST. Nothing
+    // caught it because this binary runs in no CI job at all (see the header).
+    // Values below are MEASURED against a live FK, not copied from the doc;
+    // measuring first was the point, because had they disagreed the
+    // disagreement would have been a product finding rather than a stale test.
     let on_delete: String = rows[0].get("on_delete");
-    assert_eq!(on_delete, "r", "expected RESTRICT, got {on_delete}");
+    assert_eq!(on_delete, "a", "expected NO ACTION, got {on_delete}");
     let on_update: String = rows[0].get("on_update");
-    assert_eq!(on_update, "r");
+    assert_eq!(on_update, "a", "expected NO ACTION, got {on_update}");
     let deferrable: bool = rows[0].get("deferrable");
-    assert!(deferrable, "expected DEFERRABLE INITIALLY DEFERRED");
+    assert!(!deferrable, "expected an IMMEDIATE (non-deferrable) FK check");
     release_pg(pool).await;
 }
 
