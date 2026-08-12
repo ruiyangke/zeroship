@@ -476,7 +476,7 @@ mod tests {
 
     async fn next_change(
         sub: &crate::broker::Subscription,
-    ) -> std::rc::Rc<crate::broker::ChangeEvent> {
+    ) -> std::sync::Arc<crate::broker::ChangeEvent> {
         for _ in 0..50 {
             if let Some(msg) = sub.pop() {
                 match msg {
