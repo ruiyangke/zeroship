@@ -124,6 +124,7 @@ impl Fixture {
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            origin_scheme: zeroship_core::config::OriginScheme::Https,
             insecure_dev,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),

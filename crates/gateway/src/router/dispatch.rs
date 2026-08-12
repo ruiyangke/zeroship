@@ -2531,13 +2531,14 @@ async fn handle_dispatch(
     // re-appended here — dropping it makes every GET query-RPC arrive with
     // `input: undefined` (→ 400 INVALID_ARGUMENT) and silently strips app query
     // params (ISS-70).
-    let scheme = if req.connection_info().scheme() == "https" { "https" } else { "http" };
+    // The worker sees the browser-visible URL, not the gateway-to-edge
+    // transport. A TLS-terminating edge legitimately forwards over HTTP.
     let host = req
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
-    let url = forward_url(scheme, host, tail, req.uri().query());
+    let url = worker_visible_url(&state.config, host, tail, req.uri().query());
 
     // Collect request headers as [key, value] pairs, scrubbing the
     // platform-reserved set so a forged inbound `ZeroShip-User` /
@@ -2617,6 +2618,15 @@ async fn handle_dispatch(
     // The status and body are the app's; the headers stamped above are
     // observability only, so this stays worker-authored.
     (response, ResponseOrigin::Worker)
+}
+
+fn worker_visible_url(
+    config: &crate::GateConfig,
+    host: &str,
+    tail: &str,
+    query: Option<&str>,
+) -> String {
+    forward_url(config.origin_scheme.as_str(), host, tail, query)
 }
 
 // ---------------------------------------------------------------------------
@@ -2968,11 +2978,7 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &st
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let scheme = if state.config.insecure_dev {
-        "http"
-    } else {
-        "https"
-    };
+    let scheme = state.config.origin_scheme;
     let redirect_uri = format!("{scheme}://{host}/__zeroship/auth/callback");
 
     let (auth_url, stash) = state
@@ -3198,6 +3204,8 @@ mod tests {
                 poll_interval_secs: 5,
                 worker_key: String::new(),
                 auth_ui_url: String::new(),
+                origin_scheme: zeroship_core::config::OriginScheme::Http,
+                trusted_origins: vec![],
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
@@ -3783,6 +3791,28 @@ mod tests {
         assert_eq!(
             forward_url("http", "h", "p", Some("")),
             "http://h/p",
+        );
+    }
+
+    #[test]
+    fn worker_visible_url_uses_public_scheme_independently_of_insecure_dev() {
+        let mut state = build_test_state_with_workers(vec![]);
+        let config = &mut Arc::get_mut(&mut state)
+            .expect("fresh test state has one owner")
+            .config;
+
+        assert!(config.insecure_dev);
+        config.origin_scheme = zeroship_core::config::OriginScheme::Https;
+        assert_eq!(
+            worker_visible_url(config, "app.zeroship.ai", "items", Some("page=2")),
+            "https://app.zeroship.ai/items?page=2",
+        );
+
+        config.insecure_dev = false;
+        config.origin_scheme = zeroship_core::config::OriginScheme::Http;
+        assert_eq!(
+            worker_visible_url(config, "app.zeroship.ai", "items", None),
+            "http://app.zeroship.ai/items",
         );
     }
 
@@ -5105,8 +5135,8 @@ mod tests {
         );
         assert!(location.contains("client_id=oac_myapp"));
         assert!(location.contains("code_challenge="));
-        // `redirect_uri` is the per-host callback path; insecure_dev=true
-        // in the test fixture, so scheme is http.
+        // `redirect_uri` is the per-host callback path; origin_scheme=Http in
+        // the test fixture selects the public scheme independently of cookies.
         assert!(
             location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"),
             "redirect_uri must include the per-host callback path; got {location:?}"

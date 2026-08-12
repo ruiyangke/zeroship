@@ -462,6 +462,8 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
             poll_interval_secs: 5,
             worker_key: String::new(),
             auth_ui_url: auth_base.to_string(),
+            origin_scheme: zeroship_core::config::OriginScheme::Http,
+            trusted_origins: vec![],
             insecure_dev: true,
             trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),

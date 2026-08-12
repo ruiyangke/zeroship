@@ -15,6 +15,7 @@ pub mod env;
 pub mod file;
 pub mod secrets;
 pub mod source;
+pub mod topology;
 
 pub use bootstrap::{
     bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,
@@ -31,4 +32,7 @@ pub use secrets::{
 pub use source::{
     load_overlay, log_overlay_source, resolve_overlay_string, ConfigSource, LoadedOverlay,
     SYSTEM_CONFIG_PATH,
+};
+pub use topology::{
+    resolve_origin_scheme, resolve_trusted_origins, OriginScheme, TrustedOrigin,
 };

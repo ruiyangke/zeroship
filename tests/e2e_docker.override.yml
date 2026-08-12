@@ -1,0 +1,7 @@
+# Test-only host access for tests/e2e_docker.sh. The deployment compose file
+# intentionally leaves control unpublished; this loopback binding must not be
+# copied into the base topology.
+services:
+  control:
+    ports:
+      - "127.0.0.1:9090:9090"

@@ -1,6 +1,12 @@
 # deploy/ops/zeroship.toml -- cross-binary domain config. Hand-edited; in git.
 # One file PER ENVIRONMENT. Secrets never live here.
 
+# Public-edge topology is intentionally omitted here. Compose injects
+# ZEROSHIP_ORIGIN_SCHEME so one .env value can vary by deployment and override
+# the optional root-level `origin_scheme` file key. Add a root-level
+# `trusted_origins = ["https://exact-origin.example"]` only when the gateway
+# must accept an additional exact origin; an absent list means no additions.
+
 [auth]
 # The native OP issuer is supplied to the auth service through AUTH_PUBLIC_URL
 # in deploy/compose/docker-compose.yml. This shared overlay does not define that key.

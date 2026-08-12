@@ -1081,6 +1081,8 @@ mod tests {
                 poll_interval_secs: 5,
                 worker_key: String::new(),
                 auth_ui_url: String::new(),
+                origin_scheme: zeroship_core::config::OriginScheme::Http,
+                trusted_origins: vec![],
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),

@@ -37,6 +37,7 @@ pub mod sync;
 use std::sync::Arc;
 
 use zeroship_bundle::BlobStore;
+use zeroship_core::config::{OriginScheme, TrustedOrigin};
 
 /// Boot-time configuration for the gateway. Populated from CLI flags
 /// or environment variables in `main.rs`.
@@ -55,6 +56,13 @@ pub struct GateConfig {
     /// (`/oauth2/*`, `/oauth2/.well-known/*`),
     /// login/signup UI, OAuth2 consent handlers, and webhook surfaces.
     pub auth_ui_url: String,
+    /// Scheme used in browser-visible app URLs and same-origin comparisons.
+    /// This describes the public edge, not the gateway's backend transport.
+    pub origin_scheme: OriginScheme,
+    /// Additional exact origins accepted by the gateway's same-origin guards.
+    /// Each app's own `{origin_scheme}://{request-host}` remains implicitly
+    /// trusted so arbitrary creator-app subdomains do not need enumeration.
+    pub trusted_origins: Vec<TrustedOrigin>,
     /// Dev-only flag. When true the gateway emits cookies without the
     /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
     /// / docker-compose. Production MUST set this to false — the
@@ -71,6 +79,45 @@ pub struct GateConfig {
     /// Verifiers pin `iss` to this string, so the value MUST be stable
     /// across gateway restarts.
     pub public_url: String,
+}
+
+/// How a request Origin matched the gateway's configured topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OriginMatch {
+    /// The app's implicit `{origin_scheme}://{request-host}` origin.
+    App,
+    /// A distinct, exact entry in `trusted_origins`.
+    Trusted,
+}
+
+impl OriginMatch {
+    /// Return whether browser fetch metadata is consistent with this match.
+    #[must_use]
+    pub(crate) fn accepts_sec_fetch_site(self, value: &str) -> bool {
+        match self {
+            Self::App => value == "same-origin",
+            Self::Trusted => matches!(value, "same-origin" | "same-site" | "cross-site"),
+        }
+    }
+}
+
+impl GateConfig {
+    /// Classify an exact Origin match, preferring the implicit app origin when
+    /// an operator redundantly lists it in `trusted_origins`.
+    #[must_use]
+    pub(crate) fn classify_origin(&self, origin: &str, host: &str) -> Option<OriginMatch> {
+        if origin == format!("{}://{host}", self.origin_scheme) {
+            Some(OriginMatch::App)
+        } else if self
+            .trusted_origins
+            .iter()
+            .any(|trusted| trusted.as_str() == origin)
+        {
+            Some(OriginMatch::Trusted)
+        } else {
+            None
+        }
+    }
 }
 
 /// Shared application state passed to every handler via

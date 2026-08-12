@@ -115,7 +115,7 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     // registered redirect_uris; we mirror that exact-match set up front so a
     // misconfigured SDK fails fast AND so a gateway-layer deviation can never
     // widen the OP's allowlist if registration ever drifts.
-    let scheme = if state.config.insecure_dev { "http" } else { "https" };
+    let scheme = state.config.origin_scheme.as_str();
     let redirect_uri = match q.redirect_uri.as_deref().filter(|s| !s.is_empty()) {
         None => default_redirect_uri(scheme, &route.host),
         Some(supplied) => {
@@ -324,7 +324,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
 
     // Same-origin guard: state-changing POST requires the custom X-ZS-Auth
     // header AND an exact Origin match (same posture as POST /token).
-    if let Err(resp) = same_origin_guard(&req, &route.host, state.config.insecure_dev, true, true) {
+    if let Err(resp) = same_origin_guard(&req, &route.host, &state.config, true, true) {
         return resp;
     }
 

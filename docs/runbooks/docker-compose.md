@@ -2,7 +2,7 @@
 
 ## Platform stack
 
-`deploy/compose/docker-compose.yml` is the day-to-day local platform stack — the
+`deploy/compose/docker-compose.yml` is the day-to-day local platform stack - the
 whole zeroship stack, fronted by a Caddy reverse proxy on the
 `*.zeroship.localhost` dev domain. Run from the repo root and point compose at
 the file (or `export COMPOSE_FILE=deploy/compose/docker-compose.yml` once to drop
@@ -23,7 +23,7 @@ docker compose -f deploy/compose/docker-compose.yml down -v
 
 `docker compose -f deploy/compose/docker-compose.yml up --build` also works (builds on the fly the first time). The
 single image compiles the SDKs (needed by the runtime crate) and all the native
-binaries incl. `zeroship-auth` — see [Image build](#image-build). There is no
+binaries incl. `zeroship-auth` - see [Image build](#image-build). There is no
 separate frontend image: the AI builder is now the **console**, a regular
 gateway-fronted zeroship app seeded by control (see [Console / AI builder](#console--ai-builder)).
 
@@ -37,14 +37,14 @@ A `caddy` service listens on host `:80` and reverse-proxies the
 `127.0.0.1` automatically, so **no `/etc/hosts` edits are needed**. Once the
 stack is up, open:
 
-- **`http://console.zeroship.localhost`** — the creator console / AI app-builder:
+- **`http://console.zeroship.localhost`** - the creator console / AI app-builder:
   describe an app and it builds + deploys it (requires `OPENAI_API_KEY`, see
   below). The console is a gateway-fronted zeroship app, so Caddy proxies this
   host straight to the gateway.
-- **`http://auth.zeroship.localhost`** — login UI and native OIDC OP
+- **`http://auth.zeroship.localhost`** - login UI and native OIDC OP
   endpoints, proxied to `zeroship-auth` on `:9092`
-- **`http://api.zeroship.localhost`** — the gateway (explicit API host)
-- **`http://<app>.zeroship.localhost`** — any deployed creator app; the
+- **`http://api.zeroship.localhost`** - the gateway (explicit API host)
+- **`http://<app>.zeroship.localhost`** - any deployed creator app; the
   `*.zeroship.localhost` catch-all routes app subdomains to the gateway
 
 Caddy chooses the most-specific matching site, so the explicit hosts above
@@ -52,10 +52,14 @@ always win over the `*.zeroship.localhost` catch-all. Site addresses use the
 `http://` scheme so Caddy serves plain HTTP and never tries to provision TLS
 for `.localhost`. Config: `deploy/ops/Caddyfile`.
 
+The Caddyfile also contains a fully commented `control.<domain>` block. It is
+staged for direct CLI deploys, but must remain disabled while control runs with
+`--dev-insecure` and the compose stack uses the hardcoded `platform-key`.
+
 #### Caddy network-alias trick (container-side OIDC)
 
-Server-side OIDC steps — control/gateway exchanging codes, fetching JWKS, and
-verifying tokens against the issuer `http://auth.zeroship.localhost` — run
+Server-side OIDC steps - control/gateway exchanging codes, fetching JWKS, and
+verifying tokens against the issuer `http://auth.zeroship.localhost` - run
 *inside* the compose network, where that hostname would not otherwise resolve.
 The `caddy` service therefore carries **network aliases** for
 `auth.zeroship.localhost`, `console.zeroship.localhost`, and
@@ -64,19 +68,29 @@ names to Caddy too. The net effect: the issuer URL the browser sees and the one
 the servers verify against are identical, which OIDC requires.
 
 Services and host ports from the live file (the proxy is the primary entry
-point; these raw ports remain mapped for direct debugging):
+point; non-edge publications are loopback-only debugging paths):
 
-- `caddy` → `localhost:80` (the dev domain front door)
-- `postgres` → `localhost:5440`
-- `control` (`zeroship-control`) → `localhost:9090`
-- `gateway` (`zeroship-gate`) → `localhost:8000`
-- `auth` (`zeroship-auth`) → `localhost:9092`
-- `redpanda` (Kafka-wire billing stream) → `REDPANDA_BROKERS=127.0.0.1:19092`
+- `caddy` -> `localhost:80` (the dev domain front door)
+- `postgres` -> `localhost:5440`
+- `gateway` (`zeroship-gate`) -> `localhost:8000`
+- `auth` (`zeroship-auth`) -> `localhost:9092`
+- `redpanda` (Kafka-wire billing stream) -> `REDPANDA_BROKERS=127.0.0.1:19092`
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 
 The one-shot `migrate` service runs to completion and exits; `verdaccio`
 publishes loopback-only on `localhost:4873`.
+
+Control is reachable only as `control:9090` inside the compose network. The
+base file deliberately publishes no control port. A local tool that must call
+control from the host can add this explicit loopback-only override:
+
+```yaml
+services:
+  control:
+    ports:
+      - "127.0.0.1:9090:9090"
+```
 
 There is no `sandbox` service here: the sandbox/preview backend lives in the
 standalone `zeroship-sandbox` project and is run from there. The `control`
@@ -111,7 +125,7 @@ regenerates them inside the image.
 The console's AI codegen calls OpenAI to generate apps. Export `OPENAI_API_KEY`
 before `docker compose -f deploy/compose/docker-compose.yml up`; the `control` service reads it from its own process
 env and `--bootstrap-console` writes it onto the seeded console app's server-side
-env store (never the browser). Absent, the stack still boots — the console's AI
+env store (never the browser). Absent, the stack still boots - the console's AI
 features degrade.
 
 ```bash
@@ -127,7 +141,7 @@ container network: `control` and `gateway` pass `--bind 0.0.0.0`, `zeroship-work
 passes `--bind 0.0.0.0` (paired with `--worker-key`), and `zeroship-auth` passes
 `--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
 need no override. Under `--dev-insecure`, control/gateway emit a warning when bound
-non-loopback because app/admin auth is relaxed — only do this on a trusted network.
+non-loopback because app/admin auth is relaxed - only do this on a trusted network.
 
 ### Auth service
 
@@ -137,8 +151,10 @@ gateway redirects unauthenticated end users to the Caddy-fronted host
 for local HTTP cookies and weak dev secrets, plus `--bootstrap` so the local
 service can publish signing metadata and initialize first-boot state.
 
-`AUTH_PUBLIC_URL` is set to `https://auth.zeroship.localhost`, so discovery and
-token `iss` use `https://auth.zeroship.localhost/oauth2`. The DB DSN comes from
+`AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
+is `http://auth.zeroship.localhost` and a TLS-terminating deployment can set the
+public scheme to `https`. Discovery and token `iss` use that URL plus `/oauth2`.
+The DB DSN comes from
 `[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
 the service's `AUTH_DB_URL` env), not a literal `--db-url`. The shared
 `deploy/ops/zeroship.toml` overlay supplies `trusted_oauth_clients` and
@@ -157,17 +173,17 @@ The compose file already sets the current service names, keys, and sandbox env v
 ### Production object storage (S3 / R2 / MinIO)
 
 The local-volume defaults above are the dev path. For a production-like
-multi-node run — or to exercise the real S3 code path locally — point both the
+multi-node run - or to exercise the real S3 code path locally - point both the
 deploy blob store and `env.storage` at an S3-compatible provider. Both use the
 **same URL grammar** and the **same** AWS credentials (one S3 identity per
 process), differing only by prefix:
 
 ```yaml
-# control / gateway / worker — deploy blobs:
+# control / gateway / worker - deploy blobs:
 - --blob-store
 - s3://my-bucket/deploy?region=us-east-1
 
-# worker only — env.storage objects:
+# worker only - env.storage objects:
 - --storage-url
 - s3://my-bucket/storage?region=us-east-1
 ```
@@ -195,22 +211,22 @@ the AWS checksum headers); the parser enforces these.
 
 A self-contained MinIO smoke is available at `tests/e2e_s3_storage.sh`: it
 brings up a MinIO container, creates a bucket, boots control/worker/gateway
-with `--blob-store s3://…` and the worker with `--storage-url s3://…`, deploys
-a real app whose blobs now live in S3, asserts gateway→worker dispatch reading
+with `--blob-store s3://...` and the worker with `--storage-url s3://...`, deploys
+a real app whose blobs now live in S3, asserts gateway->worker dispatch reading
 the bundle from S3, and byte-compares a large (> 8 MiB part size) multipart
 `env.storage` streaming round-trip. It skips cleanly when Docker is
 unavailable.
 
 ### Console / AI builder
 
-The AI builder is the **console** — a regular zeroship app, not a separate
+The AI builder is the **console** - a regular zeroship app, not a separate
 service. Control starts with `--bootstrap-console --console-host
 console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship` in
 this stack. On first boot it ingests that prebuilt `.zship` (emitted by the
 image's `sdks` stage) and registers it as a public-PKCE gateway-fronted app, so
 Caddy proxies `console.zeroship.localhost` to the gateway like any creator app.
-Its runtime config — `OPENAI_API_KEY`, `SANDBOX_URL`/`SANDBOX_TOKEN`,
-`ZEROSHIP_CONTROL_URL` — is forwarded from control's process env onto the seeded
+Its runtime config - `OPENAI_API_KEY`, `SANDBOX_URL`/`SANDBOX_TOKEN`,
+`ZEROSHIP_CONTROL_URL` - is forwarded from control's process env onto the seeded
 console app's server-side env store at install time (secrets encrypted, plain
 URLs as vars), replacing what the retired `builder` Vite service used to inject.
 The standalone Vite container and its confidential OIDC client
@@ -222,32 +238,36 @@ were removed in the R5 cutover.
 `deploy/compose/docker-compose.yml` mounts `../ops/zeroship.toml` into `control`, `gateway`,
 `worker`, and `auth` at the well-known path `/etc/zeroship/zeroship.toml`. The
 compose stack relies on auto-discovery: because the file lives at the system
-well-known path, no service passes `--config` — each binary's config resolver
+well-known path, no service passes `--config` - each binary's config resolver
 finds it automatically. (Any service that does not mount the file simply falls
-back to compiled defaults — discovery only fires when the file is present at the
+back to compiled defaults - discovery only fires when the file is present at the
 well-known path.)
 
 The overlay is the source of truth for the config-covered values, so they are
 defined ONCE instead of being repeated as per-service flags:
 
-- `[auth]` — native OP trust settings: `trusted_oauth_clients` and
+- Top level - optional `origin_scheme` and `trusted_origins` topology settings.
+  Compose supplies `ZEROSHIP_ORIGIN_SCHEME` to control and gateway, so its env
+  tier wins over a file value. It does not inject an empty trusted-origin env;
+  add exact origins to the TOML only when the deployment needs them.
+- `[auth]` - native OP trust settings: `trusted_oauth_clients` and
   `frame_ancestor_origins`. `AUTH_PUBLIC_URL` stays on the `auth` service env
   because it is the auth-service issuer setting for this deployment.
-- `[observability]` — shared `rust_log` / `log_format` (every service, worker
+- `[observability]` - shared `rust_log` / `log_format` (every service, worker
   included).
-- `[secrets]` — REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
+- `[secrets]` - REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
   literal). `control_key`, `master_key`, `worker_key`, `database_url`, and
   `auth_db_url` are resolved per-binary from each service's `environment:` block,
   so the command lines carry no literal `--control-key` / `--master-key` /
   `--worker-key` / `--db` / `--db-url`. The single `database_url` reference points
   every binary at `ZEROSHIP_DATABASE_URL`; each service sets its OWN role-specific
-  DSN under that name (control → `zeroship_control`, gateway → `zeroship_gateway`,
-  worker → the privileged `postgres` provisioning superuser), so one shared
+  DSN under that name (control -> `zeroship_control`, gateway -> `zeroship_gateway`,
+  worker -> the privileged `postgres` provisioning superuser), so one shared
   reference resolves to distinct per-role DSNs. `auth` uses its own
   `AUTH_DB_URL` (the `auth_db_url` slot, flag `--db-url`).
 
-Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
-leftover literal flag would silently WIN and defeat the file — keep config-covered
+Precedence is CLI > env > file > default. For secrets, a
+leftover literal flag would silently WIN and defeat the file - keep config-covered
 values OFF the command lines. Copy `deploy/ops/zeroship.example.toml` to
 `deploy/ops/zeroship.toml` when customizing an environment. The file itself stays
 secret-free: it carries only `urn:`/`arn:` references, never a plaintext secret
@@ -287,8 +307,8 @@ internal Postgres is OpenMeter metadata only and is **not** published on `:5440`
 (the zeroship billing PG the cargo integration tests use), so bringing it up or
 tearing it down never touches the main stack or the billing tests.
 
-It stands up the minimal real OpenMeter pipeline — Kafka + ClickHouse + Redis +
-Postgres + the OpenMeter API + a sink-worker — with a single `compute_units`
+It stands up the minimal real OpenMeter pipeline - Kafka + ClickHouse + Redis +
+Postgres + the OpenMeter API + a sink-worker - with a single `compute_units`
 meter pre-provisioned in `deploy/ops/openmeter-config.yaml` to match exactly what
 `crates/control/src/metering/provider/adapters/openmeter.rs` emits (`eventType` /
 `slug` = `compute_units`, `aggregation: SUM` over `$.value`).
@@ -308,7 +328,7 @@ docker compose -f deploy/compose/openmeter.yml down -v
 The e2e script brings the stack up/down for you; run the raw compose only when
 iterating manually. `KEEP_OPENMETER=1 ./tests/e2e_openmeter_export.sh` leaves the
 OpenMeter stack running between iterations. See
-[Billing & metering](../reference/billing-metering.md) (OpenMeter §"Real-API
+[Billing & metering](../reference/billing-metering.md) (OpenMeter section "Real-API
 divergences from the mock") for what this e2e catches that the in-test mock cannot
 (eventual-consistency lag + the query-window/`time` interaction).
 
@@ -336,7 +356,7 @@ schema. See [Database migrations](db-migrations.md) for the layout,
 
 ## Related docs
 
-- [Database migrations](db-migrations.md) — platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
-- [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
+- [Database migrations](db-migrations.md) - platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
+- [Local dev setup](../runbooks/local-dev.md) - the same platform stack run as three bare `cargo`-built binaries instead of containers.
 - [Builder sandbox](../architecture/builder.md) - where the sandbox/preview backend lives now and how `control` reaches it.
-- [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.
+- [Distributed architecture](../architecture/distributed.md) - what the `control`/`gateway`/`worker` services are and how they coordinate.

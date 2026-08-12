@@ -28,13 +28,15 @@ Cloudflare (terminates TLS)
   -> host:80  Caddy            deploy/ops/Caddyfile, host-based routing
        -> gateway:8000         creator apps, {app}.<domain>
        -> auth:9092            OIDC provider, auth.<domain>
-  host:9090   control          LOOPBACK ONLY, see Control plane access
+       # control:9090          STAGED, disabled until security prerequisites
+  host:9090 -> control:9090    LOOPBACK override, SSH fallback only
 ```
 
-Everything except Caddy's `:80` binds to loopback. Caddy reaches gateway and
-auth by compose service name over the internal network, so publishing their
-ports would only add a second entrance that bypasses the edge (and therefore
-bypasses TLS). `tests/compose_port_exposure_gate.sh` enforces this.
+Every base host publication except Caddy's `:80` binds to loopback. Control has
+no host publication in the base file. Caddy reaches gateway and auth by compose
+service name over the internal network, so publishing their ports would only
+add a second entrance that bypasses the edge (and therefore bypasses TLS).
+`tests/compose_port_exposure_gate.sh` enforces this.
 
 ## One-time: build and push
 
@@ -142,16 +144,17 @@ substitutes `{$ZEROSHIP_DOMAIN}` at config-adapt time, which is why the compose
 `caddy` service passes the variable into its environment - without that the
 Caddyfile silently falls back to its own default and every host 404s).
 
-`ZEROSHIP_SCHEME` is separate because the origin does not serve what the browser
-sees: behind a TLS-terminating proxy Caddy speaks plain http while the issuer
-must advertise `https`. Defaults are `zeroship.localhost` + `http`, which is a
-working local-dev stack with no DNS.
+`ZEROSHIP_ORIGIN_SCHEME` is separate because the origin does not serve what the
+browser sees: behind a TLS-terminating proxy Caddy speaks plain http while the
+issuer must advertise `https`. Defaults are `zeroship.localhost` + `http`,
+which is a working local-dev stack with no DNS. This topology setting does not
+enable or disable a security check.
 
 Check the merge rather than the intent, since a missed spot fails as a 404 and
 not as an error:
 
 ```bash
-docker compose config | grep -E 'AUTH_PUBLIC_URL|app-base-domain|ZEROSHIP_DOMAIN:'
+docker compose config | grep -E 'AUTH_PUBLIC_URL|app-base-domain|ZEROSHIP_(DOMAIN|ORIGIN_SCHEME):'
 ```
 
 ### .env
@@ -165,7 +168,7 @@ ZEROSHIP_SECRETS_DIR=/opt/zeroship-deploy/secrets
 
 # The domain this deployment serves, and the scheme its PUBLIC urls advertise.
 ZEROSHIP_DOMAIN=<your domain>
-ZEROSHIP_SCHEME=https
+ZEROSHIP_ORIGIN_SCHEME=https
 
 # Safe to set: these are ${VAR}-indirected in EVERY service that reads them.
 ZEROSHIP_WORKER_KEY=<openssl rand -hex 32>
@@ -183,31 +186,38 @@ parameterizing all four in the compose file first.
 
 ### Control plane access
 
-Control publishes on all interfaces in the repo's compose file, and
-`tests/compose_port_exposure_gate.sh` is RED on that line **on purpose**: there
-is no Caddy site block for control, so the published port is the only way
-`zeroship deploy --control=...` reaches it. That is an open design gap
-(task #186), not a typo.
+The base compose file does not publish control. `deploy/ops/Caddyfile` contains
+a fully commented `control.<domain>` route, but it must stay disabled while
+control still runs with `--dev-insecure` and the stack still uses the hardcoded
+`platform-key`. Enabling it now would put relaxed control-plane auth and a known
+credential on the public edge.
 
-On an internet-facing host that is not acceptable as-is, because control still
-carries the hardcoded `platform-key`. Bind it to loopback with a
-**server-only** override, so the upstream gate keeps telling the truth:
+Until both prerequisites are removed, add a **server-only**, loopback-only
+publication for the SSH fallback:
 
 ```yaml
 # /opt/zeroship-deploy/compose/docker-compose.override.yml
 services:
   control:
-    ports: !override
+    ports:
       - "127.0.0.1:9090:9090"
 ```
 
-`!override` is REQUIRED. See [Things that will bite you](#things-that-will-bite-you).
+No `!override` tag is needed: the base service has no `ports` list to replace.
 
 Reach control from a workstation over SSH:
 
 ```bash
 ssh -L 9090:127.0.0.1:9090 root@<host>
 zeroship deploy ./dist/app.zship --app=<uuid> --control=http://127.0.0.1:9090 --token=<PAT>
+```
+
+After BOTH prerequisites land, remove this loopback override, uncomment the
+staged Caddy block, and deploy directly without SSH:
+
+```bash
+zeroship deploy ./dist/app.zship --app=<uuid> \
+  --control=https://control.<domain> --token=<PAT>
 ```
 
 ### Host hygiene
@@ -311,9 +321,9 @@ tagging per commit instead of relying on `latest`.
 
 ## Things that will bite you
 
-**Compose CONCATENATES `ports` across override files.** Without `!override` you
-get BOTH bindings, so `0.0.0.0:9090` stays published while the override looks
-like it fixed it. Verify the merge, never the intent:
+**The control port exists only in the server override.** The base file has no
+control `ports` entry, so the loopback fallback is additive and does not use
+`!override`. Verify the merge rather than the intent:
 
 ```bash
 docker compose config | grep -A4 'published: "9090"'   # exactly one entry, host_ip 127.0.0.1

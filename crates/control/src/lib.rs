@@ -510,6 +510,9 @@ pub struct AppState {
     /// at `myapp.{app_base_domain}`; the per-app OAuth client's
     /// redirect_uris / sector_identifier are derived from that apex host.
     pub app_base_domain: String,
+    /// Scheme used in browser-visible app, auth, and console URLs. This is
+    /// independent of backend transport and all security-relaxation flags.
+    pub origin_scheme: zeroship_core::config::OriginScheme,
     /// OAuth client IDs that get `skip_consent=true` when registered.
     pub trusted_oauth_clients: HashSet<String>,
     /// Expected audience for OAuth access tokens accepted by the control
@@ -587,15 +590,11 @@ impl AppState {
         Self::is_trusted_client_id(&self.trusted_oauth_clients, client_id)
     }
 
-    /// The URL scheme hosted apps serve under: `http` in dev-insecure,
-    /// `https` otherwise. Drives per-app OAuth redirect_uri derivation.
+    /// The public URL scheme hosted apps serve under. Drives per-app OAuth
+    /// redirect URI derivation and other browser-visible control URLs.
     #[must_use]
     pub fn app_scheme(&self) -> &'static str {
-        if self.insecure_dev {
-            "http"
-        } else {
-            "https"
-        }
+        self.origin_scheme.as_str()
     }
 
     /// The apex host an app named `name` serves at:

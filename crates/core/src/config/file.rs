@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use super::topology::{OriginScheme, TrustedOrigin};
+
 /// Error returned while loading an optional zeroship configuration file.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -41,6 +43,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
+    /// Scheme used in browser-visible platform URLs.
+    pub origin_scheme: Option<OriginScheme>,
+    /// Additional exact origins accepted by the gateway's same-origin guards.
+    pub trusted_origins: Option<Vec<TrustedOrigin>>,
     /// Auth-domain configuration shared by platform binaries.
     #[serde(default)]
     pub auth: AuthSection,
@@ -248,6 +254,8 @@ mod tests {
         let config = FileConfig::load(None).expect("load default config");
 
         assert!(config.auth.auth_provider.is_none());
+        assert!(config.origin_scheme.is_none());
+        assert!(config.trusted_origins.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
         assert!(config.auth.platform_issuer.is_none());
@@ -290,6 +298,9 @@ frame_ancestor_origins = ["https://console.zeroship.ai", "https://staging-consol
         let file = TempFile::write(
             "full.toml",
             r#"
+origin_scheme = "http"
+trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
+
 [auth]
 auth_provider = "supabase"
 supabase_url = "https://project.supabase.test"
@@ -306,6 +317,18 @@ log_format = "json"
         );
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
+
+        assert_eq!(config.origin_scheme, Some(super::OriginScheme::Http));
+        assert_eq!(
+            config
+                .trusted_origins
+                .as_deref()
+                .expect("trusted origins")
+                .iter()
+                .map(super::TrustedOrigin::as_str)
+                .collect::<Vec<_>>(),
+            vec!["https://console.zeroship.ai", "http://localhost:3000"]
+        );
 
         assert_eq!(config.auth.auth_provider.as_deref(), Some("supabase"));
         assert_eq!(
@@ -399,6 +422,22 @@ rust_log = "debug"
 
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert!(err.to_string().contains(file.path.to_str().expect("utf-8 path")));
+    }
+
+    #[test]
+    fn invalid_topology_values_are_parse_errors() {
+        for (name, raw) in [
+            ("scheme", "origin_scheme = \"ftp\""),
+            (
+                "origin-path",
+                "trusted_origins = [\"https://console.zeroship.ai/path\"]",
+            ),
+            ("origin-wildcard", "trusted_origins = [\"https://*.zeroship.ai\"]"),
+        ] {
+            let file = TempFile::write(name, raw);
+            let err = FileConfig::load(Some(&file.path)).expect_err("invalid topology rejected");
+            assert!(matches!(err, ConfigError::Parse { .. }));
+        }
     }
 
     #[test]

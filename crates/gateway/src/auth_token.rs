@@ -32,10 +32,10 @@
 //!
 //! Both endpoints emit NO `Access-Control-Allow-Origin` /
 //! `allow-credentials`. The boundary is the conjunction of: a custom
-//! `X-ZS-Auth` header, an exact `Origin == app origin` match (foreign /
-//! `null` rejected; no reflection), and `Sec-Fetch-Site: same-origin`
-//! (enforced when present). `?mint=1` additionally REQUIRES `X-ZS-Auth` so
-//! a top-level navigation cannot trigger a family rotation.
+//! `X-ZS-Auth` header, an exact app or configured trusted `Origin` match
+//! (foreign / `null` rejected; no reflection), and consistent
+//! `Sec-Fetch-Site` metadata when present. `?mint=1` additionally REQUIRES
+//! `X-ZS-Auth` so a top-level navigation cannot trigger a family rotation.
 //!
 //! ## Reload-recovery single-flight
 //!
@@ -191,7 +191,7 @@ pub(crate) async fn relay_alias_for(
 pub(crate) fn same_origin_guard(
     req: &HttpRequest,
     host: &str,
-    insecure_dev: bool,
+    config: &crate::GateConfig,
     require_custom_header: bool,
     require_origin: bool,
 ) -> Result<(), HttpResponse> {
@@ -204,12 +204,9 @@ pub(crate) fn same_origin_guard(
         ));
     }
 
-    let scheme = if insecure_dev { "http" } else { "https" };
-    let expected_origin = format!("{scheme}://{host}");
-
-    // (2) Origin exact-match the app's own origin. Never reflect, never
-    // substring/subdomain-match.
-    match req
+    // (2) Origin exact-matches the app's own public origin or an additional
+    // operator-configured trusted origin. Never reflect or substring-match.
+    let origin_match = match req
         .headers()
         .get(http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
@@ -221,14 +218,16 @@ pub(crate) fn same_origin_guard(
                 "Origin: null rejected",
             ));
         }
-        Some(origin) if origin == expected_origin => {}
-        Some(_) => {
-            return Err(error_response(
-                HttpResponse::Forbidden(),
-                "forbidden",
-                "foreign Origin rejected",
-            ));
-        }
+        Some(origin) => match config.classify_origin(origin, host) {
+            Some(origin_match) => Some(origin_match),
+            None => {
+                return Err(error_response(
+                    HttpResponse::Forbidden(),
+                    "forbidden",
+                    "foreign Origin rejected",
+                ));
+            }
+        },
         None => {
             // Modern browsers always send Origin on POST fetch; a missing
             // Origin on a state-changing POST is rejected. GET /session is
@@ -241,20 +240,23 @@ pub(crate) fn same_origin_guard(
                     "missing Origin on state-changing request",
                 ));
             }
+            None
         }
-    }
+    };
 
-    // (3) Sec-Fetch-Site: enforced WHEN present, advisory when absent.
-    if let Some(sfs) = req
-        .headers()
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-    {
-        if sfs != "same-origin" {
+    // (3) Sec-Fetch-Site: when present, require metadata consistent with the
+    // exact Origin class. Its absence remains advisory for older clients.
+    if let Some(value) = req.headers().get("sec-fetch-site") {
+        let sfs = value.to_str().unwrap_or("");
+        let accepted = match origin_match {
+            Some(matched) => matched.accepts_sec_fetch_site(sfs),
+            None => sfs == "same-origin",
+        };
+        if !accepted {
             return Err(error_response(
                 HttpResponse::Forbidden(),
                 "forbidden",
-                "Sec-Fetch-Site is not same-origin",
+                "Sec-Fetch-Site is inconsistent with Origin",
             ));
         }
     }
@@ -268,19 +270,19 @@ pub(crate) fn same_origin_guard(
 /// rewrite + DB row write) — a state-changing operation — so it gets the SAME
 /// Origin discipline as POST `/token`: it REQUIRES both the custom `X-ZS-Auth`
 /// header (a top-level navigation cannot set it ⇒ cannot trigger a rotation) AND
-/// a present, same-origin `Origin`. A missing or foreign Origin is rejected;
-/// browsers send `Origin` on same-origin `fetch`, so the legitimate SDK mint is
-/// unaffected, and `X-ZS-Auth` stays as an additional, browser-version-independent
-/// layer. A non-`mint` GET is a pure read, so neither the header nor `Origin` is
-/// required there. Centralised so the policy is pinned by one regression test
-/// rather than scattered call-site booleans.
+/// a present, accepted `Origin`. A missing or foreign Origin is rejected;
+/// browser fetch metadata must agree with whether that Origin is the app itself
+/// or an exact configured origin. `X-ZS-Auth` stays as an additional,
+/// browser-version-independent layer. A non-`mint` GET is a pure read, so
+/// neither the header nor `Origin` is required there. Centralised so the policy
+/// is pinned by one regression test rather than scattered call-site booleans.
 pub(crate) fn session_csrf_guard(
     req: &HttpRequest,
     host: &str,
-    insecure_dev: bool,
+    config: &crate::GateConfig,
     want_mint: bool,
 ) -> Result<(), HttpResponse> {
-    same_origin_guard(req, host, insecure_dev, want_mint, want_mint)
+    same_origin_guard(req, host, config, want_mint, want_mint)
 }
 
 /// Form/JSON body the SDK posts to `POST /__zeroship/auth/session` (the merged
@@ -317,7 +319,7 @@ pub async fn session_post(
 
     // Same-origin guard: POST /token requires the custom header AND an
     // Origin (state-changing).
-    if let Err(resp) = same_origin_guard(&req, &route.host, state.config.insecure_dev, true, true) {
+    if let Err(resp) = same_origin_guard(&req, &route.host, &state.config, true, true) {
         return resp;
     }
 
@@ -372,7 +374,7 @@ pub async fn session_post(
     };
     // Default redirect_uri to the popup-callback on the app origin (what the
     // SDK uses) when the body omits it.
-    let scheme = if state.config.insecure_dev { "http" } else { "https" };
+    let scheme = state.config.origin_scheme;
     let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = parsed.redirect_uri.as_deref().unwrap_or(&default_redirect);
     // RFC 9207 issuer identification. The popup callback relays `iss` when
@@ -731,7 +733,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         matches!(kv.split_once('='), Some(("mint", "1")))
     });
 
-    if let Err(resp) = session_csrf_guard(&req, &route.host, state.config.insecure_dev, want_mint) {
+    if let Err(resp) = session_csrf_guard(&req, &route.host, &state.config, want_mint) {
         return resp;
     }
 
@@ -1614,9 +1616,35 @@ mod session_csrf_tests {
     //! carry both `X-ZS-Auth` and a present same-origin `Origin`.
     use super::session_csrf_guard;
     use ntex::web::test::TestRequest;
+    use zeroship_core::config::OriginScheme;
+
+    use crate::GateConfig;
 
     const HOST: &str = "app.zeroship.localhost";
     const ORIGIN: &str = "https://app.zeroship.localhost";
+
+    fn gate_config(
+        origin_scheme: OriginScheme,
+        insecure_dev: bool,
+        trusted_origins: &[&str],
+    ) -> GateConfig {
+        GateConfig {
+            control_url: String::new(),
+            control_key: String::new(),
+            worker_urls: vec![],
+            poll_interval_secs: 5,
+            worker_key: String::new(),
+            auth_ui_url: String::new(),
+            origin_scheme,
+            trusted_origins: trusted_origins
+                .iter()
+                .map(|origin| origin.parse().expect("validated trusted origin"))
+                .collect(),
+            insecure_dev,
+            trust_proxy: false,
+            public_url: String::new(),
+        }
+    }
 
     // A mint with X-ZS-Auth but NO Origin must be REJECTED. Pre-fix this was
     // accepted (require_origin=false), so this assertion fails on old code.
@@ -1627,7 +1655,8 @@ mod session_csrf_tests {
             .header("x-zs-auth", "1")
             // no Origin header
             .to_http_request();
-        let res = session_csrf_guard(&req, HOST, false, true);
+        let config = gate_config(OriginScheme::Https, false, &[]);
+        let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(
             res.is_err(),
             "mint?=1 with X-ZS-Auth but no Origin must be rejected (state-changing rotation)"
@@ -1642,7 +1671,8 @@ mod session_csrf_tests {
             .header("x-zs-auth", "1")
             .header(http::header::ORIGIN, "https://evil.example")
             .to_http_request();
-        let res = session_csrf_guard(&req, HOST, false, true);
+        let config = gate_config(OriginScheme::Https, false, &[]);
+        let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_err(), "mint with a foreign Origin must be rejected");
     }
 
@@ -1654,7 +1684,8 @@ mod session_csrf_tests {
             .header(http::header::ORIGIN, ORIGIN)
             // no X-ZS-Auth
             .to_http_request();
-        let res = session_csrf_guard(&req, HOST, false, true);
+        let config = gate_config(OriginScheme::Https, false, &[]);
+        let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_err(), "mint without X-ZS-Auth must be rejected");
     }
 
@@ -1668,8 +1699,107 @@ mod session_csrf_tests {
             .header(http::header::ORIGIN, ORIGIN)
             .header("sec-fetch-site", "same-origin")
             .to_http_request();
-        let res = session_csrf_guard(&req, HOST, false, true);
+        let config = gate_config(OriginScheme::Https, false, &[]);
+        let res = session_csrf_guard(&req, HOST, &config, true);
         assert!(res.is_ok(), "legitimate same-origin SDK mint must succeed: {res:?}");
+    }
+
+    #[test]
+    fn origin_scheme_is_independent_of_insecure_dev() {
+        let https_req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, ORIGIN)
+            .to_http_request();
+        let http_req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, "http://app.zeroship.localhost")
+            .to_http_request();
+
+        let https_with_insecure_cookies = gate_config(OriginScheme::Https, true, &[]);
+        assert!(
+            session_csrf_guard(&https_req, HOST, &https_with_insecure_cookies, true).is_ok()
+        );
+        assert!(
+            session_csrf_guard(&http_req, HOST, &https_with_insecure_cookies, true).is_err()
+        );
+
+        let http_with_secure_cookies = gate_config(OriginScheme::Http, false, &[]);
+        assert!(session_csrf_guard(&http_req, HOST, &http_with_secure_cookies, true).is_ok());
+        assert!(session_csrf_guard(&https_req, HOST, &http_with_secure_cookies, true).is_err());
+    }
+
+    #[test]
+    fn configured_origins_accept_realistic_metadata_without_weakening_checks() {
+        let config = gate_config(
+            OriginScheme::Https,
+            false,
+            &[
+                ORIGIN,
+                "https://console.zeroship.localhost",
+                "https://console.zeroship.example",
+            ],
+        );
+
+        for (origin, fetch_site) in [
+            ("https://console.zeroship.example", "same-origin"),
+            ("https://console.zeroship.localhost", "same-site"),
+            ("https://console.zeroship.example", "cross-site"),
+        ] {
+            let req = TestRequest::default()
+                .header(http::header::HOST, HOST)
+                .header("x-zs-auth", "1")
+                .header(http::header::ORIGIN, origin)
+                .header("sec-fetch-site", fetch_site)
+                .to_http_request();
+            assert!(
+                session_csrf_guard(&req, HOST, &config, true).is_ok(),
+                "trusted {origin} with {fetch_site} metadata must be accepted"
+            );
+        }
+
+        let trusted_without_fetch_metadata = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, "https://console.zeroship.example")
+            .to_http_request();
+        assert!(
+            session_csrf_guard(&trusted_without_fetch_metadata, HOST, &config, true).is_ok()
+        );
+
+        for origin in ["null", "https://foreign.example"] {
+            let req = TestRequest::default()
+                .header(http::header::HOST, HOST)
+                .header("x-zs-auth", "1")
+                .header(http::header::ORIGIN, origin)
+                .to_http_request();
+            assert!(
+                session_csrf_guard(&req, HOST, &config, true).is_err(),
+                "{origin} must remain rejected"
+            );
+        }
+
+        for fetch_site in ["none", "unknown"] {
+            let req = TestRequest::default()
+                .header(http::header::HOST, HOST)
+                .header("x-zs-auth", "1")
+                .header(http::header::ORIGIN, "https://console.zeroship.example")
+                .header("sec-fetch-site", fetch_site)
+                .to_http_request();
+            assert!(
+                session_csrf_guard(&req, HOST, &config, true).is_err(),
+                "distinct trusted origin with {fetch_site} metadata must be rejected"
+            );
+        }
+
+        let app_cross_site = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, ORIGIN)
+            .header("sec-fetch-site", "cross-site")
+            .to_http_request();
+        assert!(session_csrf_guard(&app_cross_site, HOST, &config, true).is_err());
     }
 
     // A non-mint GET (pure read) stays lenient: no X-ZS-Auth, no Origin → OK.
@@ -1678,7 +1808,8 @@ mod session_csrf_tests {
         let req = TestRequest::default()
             .header(http::header::HOST, HOST)
             .to_http_request();
-        let res = session_csrf_guard(&req, HOST, false, false);
+        let config = gate_config(OriginScheme::Https, false, &[]);
+        let res = session_csrf_guard(&req, HOST, &config, false);
         assert!(res.is_ok(), "non-mint read must not require Origin or X-ZS-Auth: {res:?}");
     }
 }
