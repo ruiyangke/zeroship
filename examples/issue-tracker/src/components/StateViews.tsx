@@ -2,14 +2,22 @@
 // empty, and error -- with a 401 (fail-closed "user" procedures hit while
 // signed out) rendered as an explicit sign-in prompt, never as an empty list.
 import type { ReactNode } from "react";
+import {
+  Button,
+  EmptyState as UiEmptyState,
+  ErrorState as UiErrorState,
+  Spinner,
+  Stack,
+} from "@zeroship/ui";
+
 import { errorCode, errorMessage, isUnauthenticated, type AsyncState } from "./rpc";
 
 export function Loading({ label = "Loading..." }: { label?: string }) {
   return (
-    <div className="state state-loading" role="status" aria-live="polite">
-      <span className="spinner" aria-hidden="true" />
+    <Stack className="state state-loading" gap={2} align="center" role="status" aria-live="polite">
+      <Spinner />
       <span>{label}</span>
-    </div>
+    </Stack>
   );
 }
 
@@ -20,12 +28,9 @@ export function EmptyState({
   title: string;
   hint?: ReactNode;
 }) {
-  return (
-    <div className="state state-empty">
-      <p className="state-title">{title}</p>
-      {hint ? <p className="state-hint">{hint}</p> : null}
-    </div>
-  );
+  // Ergonomic props only. The block composes rather than suppresses, so
+  // passing a title prop AND a <Title> child renders two headings.
+  return <UiEmptyState title={title} description={hint} />;
 }
 
 export function ErrorState({
@@ -35,23 +40,33 @@ export function ErrorState({
   error: unknown;
   onRetry?: () => void;
 }) {
+  // A 401 is not a failure, it is a state: the fail-closed procedures return
+  // it whenever a signed-out visitor reaches one. It renders as a WARNING with
+  // an instruction, not a red error -- nothing is broken and there is nothing
+  // to retry until they sign in.
   const authRequired = isUnauthenticated(error);
   return (
-    <div className="state state-error" role="alert">
-      <p className="state-title">
-        {authRequired ? "Sign-in required" : "Something went wrong"}
-      </p>
-      <p className="state-hint">
-        {authRequired
+    <UiErrorState
+      intent={authRequired ? "warning" : "danger"}
+      title={authRequired ? "Sign-in required" : "Something went wrong"}
+      description={
+        authRequired
           ? "This needs a signed-in identity. Sign in through the platform and reload."
-          : `${errorCode(error) ?? "ERROR"} · ${errorMessage(error)}`}
-      </p>
+          : `${errorCode(error) ?? "ERROR"} · ${errorMessage(error)}`
+      }
+    >
+      {/* The action is a compound child rather than the ergonomic onRetry
+          prop, whose button is labelled "Retry" and cannot be changed. There
+          is nothing to retry when the answer is 401 -- the visitor has to sign
+          in first, so the button says what it does. */}
       {onRetry ? (
-        <button type="button" className="btn ghost small" onClick={onRetry}>
-          {authRequired ? "Check again" : "Retry"}
-        </button>
+        <UiErrorState.Actions>
+          <Button variant="filled" onClick={onRetry}>
+            {authRequired ? "Check again" : "Retry"}
+          </Button>
+        </UiErrorState.Actions>
       ) : null}
-    </div>
+    </UiErrorState>
   );
 }
 

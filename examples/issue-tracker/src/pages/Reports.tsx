@@ -7,6 +7,7 @@ import {
   reportTimeToResolve,
   reportTrend,
 } from "../api";
+import { Cluster, PageHeader, Progress, StatCard } from "@zeroship/ui";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
 
@@ -16,12 +17,13 @@ function CountBars({ counts }: { counts: Record<string, number> }) {
   if (entries.length === 0) return <p className="state-hint small">Nothing open.</p>;
   return (
     <ul className="bar-chart">
+      {/* A real Progress rather than two nested spans faking a track and a
+          fill with an inline width percentage. It carries the value, max and
+          role, so the bar is readable by something other than an eye. */}
       {entries.map(([label, value]) => (
         <li key={label}>
           <span className="bar-label">{label}</span>
-          <span className="bar-track">
-            <span className="bar-fill" style={{ width: `${(value / max) * 100}%` }} />
-          </span>
+          <Progress value={value} max={max} aria-label={`${label}: ${value}`} />
           <span className="bar-value">{value}</span>
         </li>
       ))}
@@ -36,16 +38,14 @@ function SummarySection({ productId }: { productId: string }) {
       {(summary) => (
         <section className="report-section">
           <h2>Summary</h2>
-          <div className="stat-row">
-            <div className="stat">
-              <span className="stat-value">{summary.total}</span>
-              <span className="stat-label">Total</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{summary.open}</span>
-              <span className="stat-label">Open</span>
-            </div>
-          </div>
+          {/* StatCards rather than hand-rolled stat divs. Three of them: the
+              closed count was derivable from the other two and a reader should
+              not have to do the subtraction to answer "how are we doing". */}
+          <Cluster gap={3}>
+            <StatCard label="Total" value={summary.total} />
+            <StatCard label="Open" value={summary.open} />
+            <StatCard label="Closed" value={summary.total - summary.open} />
+          </Cluster>
           <div className="report-grid">
             <div>
               <h3>By status</h3>
@@ -278,7 +278,9 @@ export function ReportsPage() {
 
   return (
     <div className="page reports-page">
-      <h1>Reports</h1>
+      <PageHeader>
+        <PageHeader.Title>Reports</PageHeader.Title>
+      </PageHeader>
       <div className="filter-bar">
         <select value={productId} onChange={(e) => setProductId(e.target.value)}>
           <option value="">All products</option>

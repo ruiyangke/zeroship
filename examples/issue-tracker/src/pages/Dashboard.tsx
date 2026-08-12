@@ -1,9 +1,10 @@
 import { useMemo } from "react";
+import { PageHeader } from "@zeroship/ui";
 import { currentUser, getAttachment, getBug, listFlagRequests, listMyCc, searchBugs } from "../api";
 import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable";
 import { NotificationsPanel } from "../components/NotificationsPanel";
-import { AsyncSection } from "../components/StateViews";
-import { toPromise, useAsync } from "../components/rpc";
+import { AsyncSection, ErrorState } from "../components/StateViews";
+import { isUnauthenticated, toPromise, useAsync } from "../components/rpc";
 import type { Bug, BugDetail, FlagRequestEntry } from "../components/types";
 
 type DashboardBug = BugDetail["bug"];
@@ -106,9 +107,29 @@ export function DashboardPage() {
     [flagRequestsQ.state],
   );
 
+  // Signed out, the whole page is one answer: sign in. Without this the bug
+  // sections fell back to Promise.resolve([]) and rendered "Assigned to me (0)
+  // -- Nothing here", which tells a visitor they have no bugs when the truth
+  // is that we do not know who they are. searchBugs is anonymous and returns
+  // an empty list rather than a 401, so nothing downstream could tell the two
+  // apart. StateViews says this in its own header: a 401 is a sign-in prompt,
+  // never an empty list.
+  if (userState.status === "error" && isUnauthenticated(userState.error)) {
+    return (
+      <div className="page dashboard-page">
+        <PageHeader>
+          <PageHeader.Title>My dashboard</PageHeader.Title>
+        </PageHeader>
+        <ErrorState error={userState.error} />
+      </div>
+    );
+  }
+
   return (
     <div className="page dashboard-page">
-      <h1>My dashboard</h1>
+      <PageHeader>
+        <PageHeader.Title>My dashboard</PageHeader.Title>
+      </PageHeader>
 
       <NotificationsPanel />
 
