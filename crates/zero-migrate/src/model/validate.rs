@@ -4302,7 +4302,7 @@ pub fn validate_op_authorized(
             Ok(())
         }
         Op::Update { table, set, r#where, .. } => {
-            let scope = TargetScope::structural_only(table);
+            let scope = TargetScope::structural_only(table).refusing_foreign_qualifiers();
             for (column, value) in set {
                 if let crate::model::ir::IrValue::Expr(expr) = value {
                     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
@@ -4335,7 +4335,7 @@ pub fn validate_op_authorized(
             Ok(())
         }
         Op::Delete { table, r#where, .. } => {
-            let scope = TargetScope::structural_only(table);
+            let scope = TargetScope::structural_only(table).refusing_foreign_qualifiers();
             validate_expr(r#where, target_dialect, &scope, op_index, ts_location)?;
             validate_no_aggregate_expr_context(
                 r#where,
@@ -4383,7 +4383,7 @@ pub fn validate_op_authorized(
             Ok(())
         }
         Op::Insert { table, rows, on_conflict, .. } => {
-            let scope = TargetScope::structural_only(table);
+            let scope = TargetScope::structural_only(table).refusing_foreign_qualifiers();
             for row in rows {
                 for value in row {
                     if let crate::model::ir::IrValue::Expr(expr) = value {

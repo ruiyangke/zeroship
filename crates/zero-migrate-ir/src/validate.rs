@@ -493,6 +493,24 @@ pub struct TargetScope<'a> {
     pub table: &'a str,
     /// The valid columns on that table, or `None` to skip the (c) resolution.
     pub columns: Option<&'a [String]>,
+    /// Whether a QUALIFIED `ColRef` naming a table other than [`Self::table`] is
+    /// refused here.
+    ///
+    /// `false` - the historical lenient pass. A qualified ref is accepted
+    /// structurally and the real scope check is deferred to whatever builds the FROM
+    /// set. That is correct for a view's SELECT, which may join, so a qualifier
+    /// naming another table is legal there.
+    ///
+    /// `true` - there IS no FROM set to defer to. A DML statement has exactly one
+    /// target, so the only legal qualifier is that target and anything else can be
+    /// refused structurally, with no catalog and no live snapshot. Opt in with
+    /// [`Self::refusing_foreign_qualifiers`].
+    ///
+    /// Defaulting to `false` is deliberate: the lenient pass is reached from more
+    /// than thirty construction sites and only the DML ones were measured, so the
+    /// strict mode is opt-in rather than opt-out. Widening it is a separate change
+    /// that has to enumerate the rest.
+    pub only_target_qualifier: bool,
 }
 
 impl<'a> TargetScope<'a> {
@@ -502,6 +520,7 @@ impl<'a> TargetScope<'a> {
         Self {
             table,
             columns: Some(columns),
+            only_target_qualifier: false,
         }
     }
 
@@ -511,7 +530,18 @@ impl<'a> TargetScope<'a> {
         Self {
             table,
             columns: None,
+            only_target_qualifier: false,
         }
+    }
+
+    /// This scope, with a qualified `ColRef` naming another table refused.
+    ///
+    /// For a context with no FROM set to defer the check to - every DML statement.
+    /// See [`Self::only_target_qualifier`].
+    #[must_use]
+    pub const fn refusing_foreign_qualifiers(mut self) -> Self {
+        self.only_target_qualifier = true;
+        self
     }
 }
 
@@ -863,6 +893,28 @@ impl Ctx<'_> {
             // builder; for this additive slice accept the qualified form
             // structurally (lenient pass).
             Expr::ColRef { name, table } => match table {
+                Some(qualifier)
+                    if self.scope.only_target_qualifier && qualifier != self.scope.table =>
+                {
+                    Err(self.err(
+                        CODE_UNSUPPORTED,
+                        Some(UnsupportedKind::Expr),
+                        self.target_dialect,
+                        format!(
+                            "column reference {qualifier}.{name} names a table other than the \
+                             statement's target {:?}; a DML statement has one target table and \
+                             no FROM set, so there is nothing for that qualifier to resolve \
+                             against",
+                            self.scope.table
+                        ),
+                        Some(format!(
+                            "drop the {qualifier:?} qualifier if you meant {:?}.{name}, or move \
+                             the value into the statement another way - a DML predicate cannot \
+                             read a second table",
+                            self.scope.table
+                        )),
+                    ))
+                }
                 Some(_) => Ok(()),
                 None => self.check_colref(name),
             },
