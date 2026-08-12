@@ -53,6 +53,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
+| **Deploying to a remote server** (image-based, no source on the host) | `docs/runbooks/deploy-server.md` |
 | **Sandbox / preview backend** (controller, in-VM agent, Nomad+Cloud-Hypervisor driver) | **Moved to the standalone `zeroship-sandbox` project** (sibling repo) — not built by this repo. The control plane reaches it over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`); it uses this deployment's shared Postgres via the `sandbox_*` roles defined in `db/migrations-ts/20260702000100_schema_roles_extensions.ts` and granted in `db/migrations-ts/20260702000900_grants.ts`. |
 | **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
 | **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
@@ -351,6 +352,8 @@ cargo test -p compio-postgres -- --test-threads=1   # needs DB
 ```
 
 Detailed setup: `docs/runbooks/local-dev.md`. Multi-node: `docs/runbooks/docker-compose.md`.
+Remote server (build locally, ship the image, no source on the host):
+`docs/runbooks/deploy-server.md`.
 
 ---
 
