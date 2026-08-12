@@ -812,7 +812,6 @@ fn parse_duration_number(raw: &str) -> Option<f64> {
 pub(crate) fn compute_bucket_id(
     req: &HttpRequest,
     per: zeroship_bundle::RateLimitPer,
-    insecure_dev: bool,
     trust_proxy: bool,
     identity_verified: bool,
 ) -> String {
@@ -847,7 +846,7 @@ pub(crate) fn compute_bucket_id(
                 .headers()
                 .get("cookie")
                 .and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie, insecure_dev)
+            extract_session_cookie(cookie)
                 .map(|s| format!("sess:{s}"))
                 .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
@@ -856,7 +855,7 @@ pub(crate) fn compute_bucket_id(
                 .headers()
                 .get("cookie")
                 .and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie, insecure_dev)
+            extract_session_cookie(cookie)
                 .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::App => "app".to_string(),
@@ -926,7 +925,6 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///      hitting subscriptions on `publicly_accessible` resources).
 pub(crate) fn subscription_affinity_key(
     req: &HttpRequest,
-    insecure_dev: bool,
     trust_proxy: bool,
 ) -> String {
     // `"Bearer "` ONLY - see the note in `compute_bucket_id`. This function is
@@ -945,7 +943,7 @@ pub(crate) fn subscription_affinity_key(
         .headers()
         .get("cookie")
         .and_then(|v| v.to_str().ok());
-    if let Some(token) = extract_session_cookie(cookie, insecure_dev) {
+    if let Some(token) = extract_session_cookie(cookie) {
         return format!("sess:{token}");
     }
     if let Some(key) = req
@@ -1507,7 +1505,6 @@ async fn execute_resource_tree(
         let bucket_id = compute_bucket_id(
             &req,
             rl.per,
-            state.config.insecure_dev,
             state.config.trust_proxy,
             user_header_from_gate.is_some(),
         );
@@ -2401,11 +2398,7 @@ async fn handle_subscription_dispatch(
     // Affinity selection — exercised even when the proxy itself
     // returns 501, so tests against this path can verify that the
     // hashing decision is correct.
-    let affinity = subscription_affinity_key(
-        &_req,
-        state.config.insecure_dev,
-        state.config.trust_proxy,
-    );
+    let affinity = subscription_affinity_key(&_req, state.config.trust_proxy);
     let (idx, _worker_url) = state.hash_ring.select_with_affinity(app_id, &affinity);
     state.hash_ring.acquire(idx);
     // Release immediately — see comment below; we never actually
@@ -2740,16 +2733,10 @@ async fn handle_auth_callback(
     // would never match on the real SPA→app request path. The slug can be
     // renamed; the UUID is the immutable identity.
     let Some(app_name) = extract_app_name(&req, None) else {
-        return render_callback_error(
-            state.config.insecure_dev,
-            "host header missing or unparseable",
-        );
+        return render_callback_error("host header missing or unparseable");
     };
     let Some((app_uuid, route)) = state.routes.lookup_by_name(&app_name) else {
-        return render_callback_error(
-            state.config.insecure_dev,
-            "app not found for this host",
-        );
+        return render_callback_error("app not found for this host");
     };
     // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
     // SDK popup flow does (BFF slice R1b) — so the cookie arm has ONE
@@ -2758,10 +2745,7 @@ async fn handle_auth_callback(
     // derivation). An app with no OAuth client provisioned can't have a signed
     // cookie minted, so fail the callback closed.
     let Some(client_id) = route.entry.oauth_client_id.clone() else {
-        return render_callback_error(
-            state.config.insecure_dev,
-            "app has no oauth_client_id yet",
-        );
+        return render_callback_error("app has no oauth_client_id yet");
     };
     let sector_identifier = route.entry.sector_identifier.clone();
 
@@ -2782,20 +2766,17 @@ async fn handle_auth_callback(
         }
     }
     if let Some(e) = oauth_error {
-        return render_callback_error(state.config.insecure_dev, &format!("oauth error: {e}"));
+        return render_callback_error(&format!("oauth error: {e}"));
     }
     let (Some(code), Some(state_param)) = (code, state_param) else {
-        return render_callback_error(
-            state.config.insecure_dev,
-            "missing code or state query parameter",
-        );
+        return render_callback_error("missing code or state query parameter");
     };
     // RFC 9207 issuer identification. The OP emits `iss` on authorize
     // responses; tolerate absence for mixed-version local/dev flows, but reject
     // any present mismatch before consuming the code.
     if let Some(issuer_param) = issuer_param.as_deref() {
         if issuer_param != state.oidc_rp.issuer {
-            return render_callback_error(state.config.insecure_dev, "issuer mismatch");
+            return render_callback_error("issuer mismatch");
         }
     }
 
@@ -2805,8 +2786,8 @@ async fn handle_auth_callback(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(stash) = oidc_rp::parse_stash_cookie(cookie_header, state.config.insecure_dev) else {
-        return render_callback_error(state.config.insecure_dev, "missing stash cookie");
+    let Some(stash) = oidc_rp::parse_stash_cookie(cookie_header) else {
+        return render_callback_error("missing stash cookie");
     };
 
     // 3. Exchange the code with the OP + verify the ID token.
@@ -2818,33 +2799,27 @@ async fn handle_auth_callback(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "gateway: oidc callback failed");
-            return render_callback_error(
-                state.config.insecure_dev,
-                oidc_callback_public_error(&e),
-            );
+            return render_callback_error(oidc_callback_public_error(&e));
         }
     };
 
     // 4. Create a per-origin session row. Check out a pooled connection
     //    for just this insert and release it on drop.
     let Some(db_cfg) = state.db.as_ref() else {
-        return render_callback_error(
-            state.config.insecure_dev,
-            "gateway not configured with a session database",
-        );
+        return render_callback_error("gateway not configured with a session database");
     };
     let pool = match crate::db::checkout(db_cfg).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
-            return render_callback_error(state.config.insecure_dev, "session create failed");
+            return render_callback_error("session create failed");
         }
     };
     let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
-            return render_callback_error(state.config.insecure_dev, "session create failed");
+            return render_callback_error("session create failed");
         }
     };
     let session = match crate::sessions::create(
@@ -2869,7 +2844,7 @@ async fn handle_auth_callback(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "gateway: session create failed");
-            return render_callback_error(state.config.insecure_dev, "session create failed");
+            return render_callback_error("session create failed");
         }
     };
     // Release the pooled connection before building the response — no
@@ -2883,7 +2858,7 @@ async fn handle_auth_callback(
     //    verifier). `claims.sub` is the global UUID; the helper derives the
     //    per-app `pws_` + relay alias before signing.
     let Ok(global_user_id) = uuid::Uuid::parse_str(&claims.sub) else {
-        return render_callback_error(state.config.insecure_dev, "id_token sub is not a global user id");
+        return render_callback_error("id_token sub is not a global user id");
     };
     let amr = claims.amr.clone().unwrap_or_default();
     let session_cookie = match crate::auth_token::issue_interactive_session_cookie(
@@ -2902,7 +2877,7 @@ async fn handle_auth_callback(
     .await
     {
         Ok(c) => c,
-        Err(msg) => return render_callback_error(state.config.insecure_dev, &msg),
+        Err(msg) => return render_callback_error(&msg),
     };
 
     // 6. 302 back to the original path, set the signed session cookie, clear
@@ -2911,10 +2886,7 @@ async fn handle_auth_callback(
     let mut builder = HttpResponse::Found();
     builder.header("location", sanitize_oidc_original_path(&original_path));
     builder.header("set-cookie", session_cookie);
-    builder.header(
-        "set-cookie",
-        oidc_rp::clear_stash_cookie(state.config.insecure_dev),
-    );
+    builder.header("set-cookie", oidc_rp::clear_stash_cookie());
     builder.finish()
 }
 
@@ -2922,7 +2894,7 @@ async fn handle_auth_callback(
 /// op's error string to the user would be a noisy debugging tool
 /// for an attacker. The structured error is already in the gateway log
 /// at warn / error.
-fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
+fn render_callback_error(msg: &str) -> HttpResponse {
     let body = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
         <h1>Sign-in failed</h1><p>{}</p>\
@@ -2991,10 +2963,7 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &st
 
     let mut builder = HttpResponse::Found();
     builder.header("location", auth_url);
-    builder.header(
-        "set-cookie",
-        oidc_rp::set_stash_cookie(&stash, state.config.insecure_dev),
-    );
+    builder.header("set-cookie", oidc_rp::set_stash_cookie(&stash));
     builder.finish()
 }
 
@@ -3206,7 +3175,6 @@ mod tests {
                 auth_ui_url: String::new(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
-                insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
             },
@@ -3748,7 +3716,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=abc")
             .to_http_request();
-        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false, true), "app");
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, true), "app");
     }
 
     #[test]
@@ -3756,7 +3724,7 @@ mod tests {
         // The TestRequest has no peer addr → "unknown" sentinel keeps
         // the bucket lookup well-defined instead of crashing.
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false, true);
+        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, true);
         assert_eq!(id, "unknown");
     }
 
@@ -3795,20 +3763,18 @@ mod tests {
     }
 
     #[test]
-    fn worker_visible_url_uses_public_scheme_independently_of_insecure_dev() {
+    fn worker_visible_url_uses_public_scheme() {
         let mut state = build_test_state_with_workers(vec![]);
         let config = &mut Arc::get_mut(&mut state)
             .expect("fresh test state has one owner")
             .config;
 
-        assert!(config.insecure_dev);
         config.origin_scheme = zeroship_core::config::OriginScheme::Https;
         assert_eq!(
             worker_visible_url(config, "app.zeroship.ai", "items", Some("page=2")),
             "https://app.zeroship.ai/items?page=2",
         );
 
-        config.insecure_dev = false;
         config.origin_scheme = zeroship_core::config::OriginScheme::Http;
         assert_eq!(
             worker_visible_url(config, "app.zeroship.ai", "items", None),
@@ -3898,7 +3864,7 @@ mod tests {
 
         assert_eq!(client_ip(&req, true), "203.0.113.77");
         assert_eq!(
-            compute_bucket_id(&req, RateLimitPer::Ip, false, true, true),
+            compute_bucket_id(&req, RateLimitPer::Ip, true, true),
             "203.0.113.77"
         );
     }
@@ -3911,7 +3877,7 @@ mod tests {
                 "other=foo; __Host-zeroship_app_session=abc123; trailing=x",
             )
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false, true);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, true);
         assert_eq!(id, "abc123");
     }
 
@@ -3922,7 +3888,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false, true);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, true);
         assert_eq!(id, "unknown");
     }
 
@@ -3947,7 +3913,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {}", jwt_with_sub("usr_alice")))
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::User, false, false, true);
+        let id = compute_bucket_id(&req, RateLimitPer::User, false, true);
         assert_eq!(id, "sub:usr_alice");
     }
 
@@ -3973,7 +3939,7 @@ mod tests {
             )
             .header("cookie", "__Host-zeroship_app_session=real-session")
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::User, false, false, true);
+        let id = compute_bucket_id(&req, RateLimitPer::User, false, true);
         assert_ne!(
             id, "sub:usr_attacker",
             "a scheme the auth gate never validated must not choose the bucket"
@@ -3996,7 +3962,7 @@ mod tests {
                 format!("bearer {}", jwt_with_sub("usr_attacker")),
             )
             .to_http_request();
-        let key = subscription_affinity_key(&req, false, false);
+        let key = subscription_affinity_key(&req, false);
         assert!(
             !key.contains("usr_attacker"),
             "lowercase bearer must not steer affinity, got {key:?}"
@@ -4019,9 +3985,9 @@ mod tests {
         let req_bob = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
             .to_http_request();
-        let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, false, true);
-        let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, false, true);
-        let bob = compute_bucket_id(&req_bob, RateLimitPer::User, false, false, true);
+        let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, true);
+        let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, true);
+        let bob = compute_bucket_id(&req_bob, RateLimitPer::User, false, true);
         assert_eq!(a1, a2, "same user shares a bucket across sessions");
         assert_ne!(a1, bob, "different users get different buckets");
     }
@@ -4033,13 +3999,13 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_sess, RateLimitPer::User, false, false, true),
+            compute_bucket_id(&req_sess, RateLimitPer::User, false, true),
             "sess:anon-tab"
         );
         // Neither bearer nor cookie → IP ("unknown" for the peer-less fixture).
         let req_none = ntex::web::test::TestRequest::default().to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_none, RateLimitPer::User, false, false, true),
+            compute_bucket_id(&req_none, RateLimitPer::User, false, true),
             "unknown"
         );
         // A malformed bearer (no decodable payload) is treated as anonymous —
@@ -4049,7 +4015,7 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
-            compute_bucket_id(&req_bad, RateLimitPer::User, false, false, true),
+            compute_bucket_id(&req_bad, RateLimitPer::User, false, true),
             "sess:anon-tab"
         );
     }
@@ -4087,7 +4053,7 @@ mod tests {
             let req = ntex::web::test::TestRequest::default()
                 .header("cookie", format!("__Host-zeroship_app_session=forged-{i}"))
                 .to_http_request();
-            let bucket_id = compute_bucket_id(&req, rl.per, false, false, false);
+            let bucket_id = compute_bucket_id(&req, rl.per, false, false);
             if reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok() {
                 admitted += 1;
             }
@@ -4112,8 +4078,8 @@ mod tests {
                 .header("cookie", format!("__Host-zeroship_app_session={v}"))
                 .to_http_request()
         };
-        let a = compute_bucket_id(&mk("real-a"), RateLimitPer::Session, false, false, true);
-        let b = compute_bucket_id(&mk("real-b"), RateLimitPer::Session, false, false, true);
+        let a = compute_bucket_id(&mk("real-a"), RateLimitPer::Session, false, true);
+        let b = compute_bucket_id(&mk("real-b"), RateLimitPer::Session, false, true);
         assert_eq!(a, "real-a");
         assert_ne!(a, b, "two verified sessions must not share one bucket");
     }
@@ -4141,10 +4107,10 @@ mod tests {
         let app_id = uuid::Uuid::nil();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let bucket_id = compute_bucket_id(&req, rl.per, false, false, true);
+        let bucket_id = compute_bucket_id(&req, rl.per, false, true);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
-        let bucket_id2 = compute_bucket_id(&req, rl.per, false, false, true);
+        let bucket_id2 = compute_bucket_id(&req, rl.per, false, true);
         assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
@@ -4167,8 +4133,8 @@ mod tests {
         let req_b = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=user-b")
             .to_http_request();
-        let bucket_a = compute_bucket_id(&req_a, rl.per, false, false, true);
-        let bucket_b = compute_bucket_id(&req_b, rl.per, false, false, true);
+        let bucket_a = compute_bucket_id(&req_a, rl.per, false, true);
+        let bucket_b = compute_bucket_id(&req_b, rl.per, false, true);
         assert_eq!(bucket_a, "user-a");
         assert_eq!(bucket_b, "user-b");
         assert!(reg.check(&app_id, 0, rl.per, &bucket_a, &rl).is_ok());
@@ -4785,7 +4751,7 @@ mod tests {
             .header("authorization", format!("Bearer {jwt}"))
             .header("cookie", "__Host-zeroship_app_session=cookieval")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false, false), "sub:alice");
+        assert_eq!(subscription_affinity_key(&req, false), "sub:alice");
     }
 
     #[test]
@@ -4793,7 +4759,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=tok123")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false, false), "sess:tok123");
+        assert_eq!(subscription_affinity_key(&req, false), "sess:tok123");
     }
 
     #[test]
@@ -4801,11 +4767,11 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("sec-websocket-key", "abc==")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false, false), "wsk:abc==");
+        assert_eq!(subscription_affinity_key(&req, false), "wsk:abc==");
 
         let req = ntex::web::test::TestRequest::default().to_http_request();
         // No headers, no remote — falls back to "ip:unknown".
-        assert_eq!(subscription_affinity_key(&req, false, false), "ip:unknown");
+        assert_eq!(subscription_affinity_key(&req, false), "ip:unknown");
     }
 
     /// Session-affinity invariant: the same `(app_id, principal)` always
@@ -5147,12 +5113,9 @@ mod tests {
             .get("set-cookie")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        // `insecure_dev=true` in the test fixture → no `__Host-` prefix
-        // (RFC 6265bis §4.1.3.2: `__Host-` requires `Secure`, dev runs
-        // over plain HTTP without it).
         assert!(
-            set_cookie.starts_with("zs_oidc_stash="),
-            "must set the dev stash cookie; got {set_cookie:?}"
+            set_cookie.starts_with("__Host-zs_oidc_stash=") && set_cookie.contains("Secure"),
+            "must set the secure host-only stash cookie; got {set_cookie:?}"
         );
     }
 
@@ -5218,7 +5181,7 @@ mod tests {
     /// markup through the failure path.
     #[test]
     fn render_callback_error_returns_html_400_and_escapes_message() {
-        let resp = render_callback_error(true, "<script>alert(1)</script>");
+        let resp = render_callback_error("<script>alert(1)</script>");
         assert_eq!(resp.status(), ntex::http::StatusCode::BAD_REQUEST);
         let ct = resp
             .headers()
@@ -6726,7 +6689,7 @@ mod tests {
             .header("host", host)
             .header("origin", format!("http://{host}"))
             .header("content-type", "application/json")
-            .header("cookie", format!("zeroship_app_session={cookie}"))
+            .header("cookie", format!("__Host-zeroship_app_session={cookie}"))
             .header("idempotency-key", key)
             .to_http_request();
         handle_request(

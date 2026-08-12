@@ -26,10 +26,8 @@ pub const CHALLENGE_MAX_AGE_SECS: i64 = 300;
 /// Tolerated issuer clock skew for a freshly signed stash.
 pub const CHALLENGE_FUTURE_SKEW_SECS: i64 = 30;
 
-/// Production cookie name (`__Host-` prefix → Secure required).
-pub const COOKIE_NAME_PROD: &str = "__Host-zsidp_2fa";
-/// Dev cookie name (no prefix → no Secure requirement).
-pub const COOKIE_NAME_DEV: &str = "zsidp_2fa";
+/// Cookie name (`__Host-` prefix requires Secure, Path=/, and no Domain).
+pub const COOKIE_NAME: &str = "__Host-zsidp_2fa";
 
 /// The factor the user cleared before this challenge was raised.
 ///
@@ -138,33 +136,22 @@ impl TotpChallenge {
     }
 }
 
-/// Resolve the cookie name for the current environment.
+/// Build the `Set-Cookie` header.
 #[must_use]
-pub const fn cookie_name(insecure_dev: bool) -> &'static str {
-    if insecure_dev { COOKIE_NAME_DEV } else { COOKIE_NAME_PROD }
-}
-
-/// Build the `Set-Cookie` header. `HttpOnly; SameSite=Strict; Path=/`; Secure +
-/// `__Host-` in prod, dropped together in dev (RFC 6265bis §4.1.3.2).
-#[must_use]
-pub fn set_cookie(value: &str, insecure_dev: bool) -> String {
-    let name = cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}={value}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age={CHALLENGE_MAX_AGE_SECS}")
+pub fn set_cookie(value: &str) -> String {
+    format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age={CHALLENGE_MAX_AGE_SECS}")
 }
 
 /// Clear the challenge cookie (set on the success/abort response).
 #[must_use]
-pub fn clear_cookie(insecure_dev: bool) -> String {
-    let name = cookie_name(insecure_dev);
-    let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{name}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0")
+pub fn clear_cookie() -> String {
+    format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0")
 }
 
 /// Extract the signed challenge blob from a `Cookie` header.
 #[must_use]
-pub fn parse_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
-    let prefix = format!("{}=", cookie_name(insecure_dev));
+pub fn parse_cookie(cookie_header: &str) -> Option<String> {
+    let prefix = format!("{COOKIE_NAME}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
@@ -251,8 +238,8 @@ mod tests {
     }
 
     #[test]
-    fn cookie_prod_has_host_prefix_secure_strict() {
-        let c = set_cookie("v.sig", false);
+    fn cookie_has_host_prefix_secure_strict() {
+        let c = set_cookie("v.sig");
         assert!(c.starts_with("__Host-zsidp_2fa=v.sig"));
         assert!(c.contains("; Secure"));
         assert!(c.contains("SameSite=Strict"));
@@ -260,17 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn cookie_dev_drops_prefix_and_secure() {
-        let c = set_cookie("v", true);
-        assert!(!c.starts_with("__Host-"));
-        assert!(c.starts_with("zsidp_2fa=v"));
-        assert!(!c.contains("Secure"));
-    }
-
-    #[test]
-    fn parse_cookie_env_scoped() {
+    fn parse_cookie_accepts_only_host_prefixed_name() {
         let header = "foo=bar; __Host-zsidp_2fa=a.b; baz=qux";
-        assert_eq!(parse_cookie(header, false), Some("a.b".into()));
-        assert_eq!(parse_cookie(header, true), None);
+        assert_eq!(parse_cookie(header), Some("a.b".into()));
+        assert_eq!(parse_cookie("zsidp_2fa=a.b"), None);
     }
 }

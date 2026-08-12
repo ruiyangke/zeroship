@@ -9,6 +9,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=tests/lib/e2e_stack.sh
+source "$ROOT/tests/lib/e2e_stack.sh"
 # The base deployment intentionally gives control no host port. This harness
 # needs localhost access for its HTTP assertions, so it adds an isolated,
 # test-only loopback publication. Relative paths continue to resolve from the
@@ -32,7 +34,6 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-zs-docker-e2e}"
 NUM_WORKERS=${NUM_WORKERS:-3}
 GATE="http://localhost:8000"
 CONTROL="http://localhost:9090"
-MASTER_KEY="master-key"
 
 PASS=0
 FAIL=0
@@ -94,6 +95,17 @@ curl -sf "$GATE/health" > /dev/null && pass "gateway" || fail "gateway"
 RUNNING=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
 [ "$RUNNING" -eq "$NUM_WORKERS" ] && pass "$RUNNING workers running" || fail "expected $NUM_WORKERS workers, got $RUNNING"
 
+# Creator APIs accept PAT/OAuth bearers only. Mint a real short-lived test PAT
+# against the compose database with the same generated key control loaded.
+command -v node >/dev/null 2>&1 || { fail "node is required to mint a test PAT"; exit 1; }
+[ -f "$E2E_JOSE_JS" ] || { fail "workspace jose is required to mint a test PAT"; exit 1; }
+WORK="$ROOT/deploy/compose/secrets"
+SIGNING_KEY_FILE="$WORK/control-signing.pem"
+PG_CONTAINER="$(docker compose ps -q postgres)"
+E2E_PG_DATABASE=zeroship
+[ -n "$PG_CONTAINER" ] || { fail "compose postgres container is missing"; exit 1; }
+mint_admin_pat || { fail "mint compose admin PAT"; exit 1; }
+
 # --- Create + Deploy 20 apps ---
 echo ""
 echo "=== Test 2: Create + Deploy 20 apps ==="
@@ -104,7 +116,7 @@ for i in $(seq 1 20); do
     name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$CONTROL/api/apps" \
         -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $MASTER_KEY" \
+        -H "Authorization: Bearer $PAT" \
         -d "{\"name\":\"$name\"}")
     IDS[$name]=$(echo "$result" | jq -r '.id')
     KEYS[$name]=$(echo "$result" | jq -r '.api_key')
@@ -113,7 +125,7 @@ for i in $(seq 1 20); do
     if [ -n "${IDS[$name]}" ] && [ "${IDS[$name]}" != "null" ] \
        && docker compose exec -T control sh -c "
         echo 'export function ping() { return \"I am $name\"; }' > /tmp/$name.js
-        zeroship deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --key=$MASTER_KEY 2>/dev/null
+        zeroship deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --token=$PAT 2>/dev/null
     " > /dev/null 2>&1; then
         DEPLOYED=$((DEPLOYED + 1))
     fi

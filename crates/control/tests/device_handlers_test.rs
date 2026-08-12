@@ -407,7 +407,7 @@ impl Fixture {
         zeroship_control::plan_catalog::seed_plans(&registry)
             .await
             .expect("seed built-in plans");
-        let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
+        let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY)
             .expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_root = tmpdir("blob");
@@ -456,10 +456,8 @@ impl Fixture {
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(admin_quota)),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
-            // Deliberately differs from insecure_dev below: public topology
-            // must not inherit a security-relaxation setting.
+            // Public URLs follow deployment topology.
             origin_scheme: OriginScheme::Https,
-            insecure_dev: true,
             trust_proxy,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
@@ -468,7 +466,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider,
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),

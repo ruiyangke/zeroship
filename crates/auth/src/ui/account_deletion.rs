@@ -52,10 +52,10 @@ pub async fn request(
     mailer: web::types::State<Arc<dyn Mailer>>,
     issuer: web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
-    if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
+    if !csrf_ok(&req, &form.csrf) {
         return redirect_to_login();
     }
-    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return redirect_to_login();
     };
 
@@ -119,13 +119,13 @@ pub async fn request(
 pub async fn cancel(
     req: HttpRequest,
     form: web::types::Form<CsrfForm>,
-    cfg: web::types::State<Arc<AuthConfig>>,
+    _cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
+    if !csrf_ok(&req, &form.csrf) {
         return redirect_to_login();
     }
-    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
+    let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return redirect_to_login();
     };
 
@@ -206,13 +206,13 @@ impl<T: askama::Template> RenderOrEmpty for T {
     }
 }
 
-fn csrf_ok(req: &HttpRequest, form_token: &str, insecure_dev: bool) -> bool {
+fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    csrf::parse_cookie(cookie_header, insecure_dev)
+    csrf::parse_cookie(cookie_header)
         .as_deref()
         .is_some_and(|c| csrf::matches(form_token, c))
 }
@@ -223,14 +223,13 @@ fn csrf_ok(req: &HttpRequest, form_token: &str, insecure_dev: bool) -> bool {
 async fn resolve_user(
     req: &HttpRequest,
     db: &compio_postgres::Client,
-    insecure_dev: bool,
 ) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let session_id = session_cookie::parse_cookie(cookie_header, insecure_dev)?;
+    let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
     users::find_by_id(db, &session.user_id.to_string())
         .await

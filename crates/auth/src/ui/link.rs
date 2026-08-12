@@ -108,7 +108,7 @@ pub async fn get(
 
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -149,7 +149,7 @@ pub async fn post(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -426,7 +426,7 @@ pub async fn post(
     let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
     resp.finish()
@@ -453,7 +453,7 @@ fn render_link_error(
 fn render_link_error_with_status(
     token: &str,
     pending: &PendingLink,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     err: &str,
     status: ntex::http::StatusCode,
 ) -> HttpResponse {
@@ -470,7 +470,7 @@ fn render_link_error_with_status(
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -484,7 +484,7 @@ fn render_link_error_with_status(
 /// are the same assertion `/link` verified the password against.
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 pub(crate) async fn finish_after_second_factor(
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     db: &compio_postgres::Client,
     user: &users::UserRow,
     provider: &str,
@@ -550,10 +550,10 @@ pub(crate) async fn finish_after_second_factor(
     let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header("cache-control", "no-store");
-    resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
+    resp.header(SET_COOKIE, totp_challenge::clear_cookie());
     resp.finish()
 }
 

@@ -297,7 +297,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         .await
         .expect("seed built-in plans");
     let env_store =
-        EnvStore::new(registry.clone(), "test-master-key-deadbeefcafebabe", false).expect("env");
+        EnvStore::new(registry.clone(), "test-master-key-deadbeefcafebabe").expect("env");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -323,10 +323,8 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
-        // Deliberately differs from insecure_dev below: public OAuth URLs
-        // follow deployment topology, not the security-relaxation flag.
+        // Public OAuth URLs follow deployment topology.
         origin_scheme: OriginScheme::Https,
-        insecure_dev: true,
         trust_proxy: false,
         deploy_tmp_dir: blob_root.clone(),
         control_pg,
@@ -334,7 +332,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies().expect("authz policies"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
         auth_provider: zeroship_control::platform_auth_provider(
             "https://auth.zeroship.test/oauth2",
             Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string()),
@@ -361,7 +359,6 @@ async fn appstate_origin_scheme_provisions_urls_then_purge_deletes_oauth_rows() 
     let app_base_domain = "zeroship.localhost";
     let state = build_state(&url, app_base_domain).await;
     assert_eq!(state.origin_scheme, OriginScheme::Https);
-    assert!(state.insecure_dev);
     let owner_id = seed_owner(&state.control_pg, "oac-state-owner").await;
 
     let app_name = format!("zs-1d-state-{}", Uuid::new_v4().simple());

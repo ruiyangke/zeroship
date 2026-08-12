@@ -293,8 +293,7 @@ async fn style() -> web::HttpResponse {
 ///
 /// Threads shared-state slots through ntex's `App::state`:
 ///
-/// - `Arc<AuthConfig>` — the parsed config; used by handlers for the
-///   `insecure_dev` cookie flag and runtime URLs.
+/// - `Arc<AuthConfig>` - the parsed config; used by handlers for runtime URLs.
 /// - `Arc<compio_postgres::Client>` — the PG client; `Client` is not
 ///   itself `Clone`, so it must be wrapped before being shared across
 ///   worker tasks.

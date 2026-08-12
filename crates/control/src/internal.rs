@@ -13,9 +13,6 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    if state.insecure_dev {
-        return None;
-    }
     let header = req
         .headers()
         .get("authorization")
@@ -23,9 +20,8 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         .unwrap_or("");
     let token = zeroship_core::auth::extract_bearer(header);
     match token {
-        // Empty control_key still requires a bearer token OR insecure_dev —
-        // otherwise an unauthenticated GET to /internal/* leaks decrypted
-        // secrets to anyone on the network.
+        // Empty control_key never authenticates. Otherwise an unauthenticated
+        // GET to /internal/* could leak decrypted secrets to the network.
         Some(key)
             if !state.control_key.is_empty()
                 && zeroship_core::auth::validate_control_key(key, state.control_key.expose_secret()) =>
@@ -150,8 +146,7 @@ pub async fn get_routes(
 /// on-demand trigger of the billing reconciler for a SPECIFIC closed period.
 ///
 /// Same gate as every other `/internal/*` endpoint ([`check_auth`]): the
-/// control-key shared secret (or `--dev-insecure`). This is NOT an
-/// unauthenticated bypass — without a valid control-key bearer it 401s exactly
+/// control-key shared secret. Without a valid control-key bearer it 401s exactly
 /// like the operator reconcile endpoints.
 ///
 /// The production reconcile cron only ever bills the PREVIOUS calendar month

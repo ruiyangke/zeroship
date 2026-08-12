@@ -160,8 +160,8 @@ impl EnrollFixture {
             .header(
                 "cookie",
                 format!(
-                    "zsidp_csrf={CSRF_TOKEN}; {}={}",
-                    session_cookie::COOKIE_NAME_DEV,
+                    "__Host-zsidp_csrf={CSRF_TOKEN}; {}={}",
+                    session_cookie::COOKIE_NAME,
                     self.session_id
                 ),
             )

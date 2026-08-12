@@ -57,6 +57,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 PASS=0; FAIL=0; KNOWN=0
@@ -324,13 +326,17 @@ pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
 # group.id per role). A SHORT --spend-recompute-interval makes usage aggregation
 # deterministic (the recompute drains the stream every 2s). lite is recompute-fed
 # so no forwarder is spawned for it (Meter::accepts_forwarded_events=false).
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "$MOCK_URL" --stripe-secret-key "sk_test_e2e_billing" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
@@ -343,7 +349,7 @@ USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
   --config "$CFG_TOML" \
   --control "$CONTROL_URL" --db "$DBURL" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
@@ -358,7 +364,7 @@ USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
   --gateway-broker-secret-file "$WORK/gateway-broker-secret" \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
@@ -366,7 +372,7 @@ curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
-  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" --dev-insecure \
+  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 && break; sleep 1; done
@@ -595,7 +601,7 @@ SL_CODE="$(echo "$SL_JSON" | tail -1)"
 # Force ONE spend sweep on demand (operator-gated internal endpoint) so we
 # don't wait on the 60s cron. This prices the app's current-period usage,
 # derives Block, and persists app_spend_state.
-SR="$(curl -s -X POST "$CONTROL_URL/internal/spend/reconcile")"
+SR="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile")"
 echo "    spend sweep result: $SR"
 pass "forced spend sweep via POST /internal/spend/reconcile (operator-gated)"
 
@@ -633,7 +639,7 @@ if [ -n "$SPEND_CENTS" ] && [ "$SPEND_CENTS" -ge 50 ] 2>/dev/null; then
   DEG_CAP=$(( SPEND_CENTS * 100 / 97 ))
   curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$DEG_CAP}"
-  curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"
+  curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
   DEG_STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
   if [ "$DEG_STATE" = "degrade" ]; then
     pass "intermediate threshold: cap=\$$DEG_CAP cents puts spend ($SPEND_CENTS cents) in Degrade (throttle, not Block)"
@@ -692,7 +698,7 @@ then pass "seeded closed-period creator+app (period=$(date -u -d @$PERIOD_START 
 
 # Trigger the on-demand reconcile for this period (operator-gated internal).
 # We pass `now`=$NOW_UNIX; the endpoint bills previous_period_start_unix(now).
-RECON="$(curl -s -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 echo "    reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget '.billed')"
 RPERIOD="$(echo "$RECON" | jget '.period_start')"
@@ -754,7 +760,7 @@ INV_TOTAL="$(psql_exec -tA -c "SELECT COALESCE(total_cents,0) FROM zeroship.invo
 [ "$INV_TOTAL" = "750" ] && pass "finalized invoice total = 750 cents (750 requests × 1¢)" || fail "expected invoice total 750, got '$INV_TOTAL'"
 
 # --- idempotency: a SECOND trigger creates NO new items ---------------------
-RECON2="$(curl -s -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON2="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 BILLED2="$(echo "$RECON2" | jget '.billed')"
 [ "$BILLED2" = "0" ] && pass "second reconcile is a no-op (billed=0) — per-period idempotency" || fail "expected billed=0 on re-trigger, got '$BILLED2' ($RECON2)"
 MOCK_REQS2="$(curl -s "$MOCK_URL/__mock/requests")"
@@ -762,13 +768,11 @@ MOCK_REQS="$MOCK_REQS2"
 ITEMS2="$(count_path POST /v1/invoiceitems)"
 [ "$ITEMS2" = "1" ] && pass "no double-bill: invoice-item create count still 1 after the second trigger" || fail "double-bill! invoice-item creates = '$ITEMS2' after re-trigger (expected 1)"
 
-# --- gate check: the internal endpoint is NOT an unauthenticated bypass -----
-# Under --dev-insecure the check passes (no control-key); to prove the endpoint
-# is GATED (not a bare public route), confirm a NON-dev control would reject it.
-# Here we assert the route exists + is the same check as /internal/usage by
-# confirming /internal/usage and /internal/billing/reconcile share the gate:
-# with insecure_dev both accept; the gate code path is identical (check_auth).
-pass "force-reconcile endpoint shares the /internal/* check_auth gate (control-key/dev-insecure), not a public bypass"
+# --- gate check: the internal endpoint is not an unauthenticated bypass -----
+UNAUTH_RECON_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+[ "$UNAUTH_RECON_CODE" = "401" ] \
+  && pass "force-reconcile rejects a request without the control bearer" \
+  || fail "force-reconcile without control bearer returned $UNAUTH_RECON_CODE (expected 401)"
 
 # ===========================================================================
 echo ""

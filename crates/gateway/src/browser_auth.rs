@@ -340,14 +340,14 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         .headers()
         .get(http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|c| anchors::parse_anchor_cookie(c, state.config.insecure_dev));
+        .and_then(anchors::parse_anchor_cookie);
 
     let Some(db_cfg) = state.db.as_ref() else {
         // No DB — nothing server-side to revoke; still clear the cookies.
-        return signout_cleared(&route.host, state.config.insecure_dev);
+        return signout_cleared(&route.host);
     };
     let Some(anchor_id) = anchor_id else {
-        return signout_cleared(&route.host, state.config.insecure_dev);
+        return signout_cleared(&route.host);
     };
 
     // Load the anchor (released immediately — no conn held across the OP
@@ -367,7 +367,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // `anchor.app_id == route.app_id` check.
         match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
-            Ok(None) => return signout_cleared(&route.host, state.config.insecure_dev),
+            Ok(None) => return signout_cleared(&route.host),
             Err(e) => {
                 tracing::error!(error = %e, "/signout: anchor read failed");
                 return error_response(
@@ -494,19 +494,16 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     }
 
     // (d) Clear the anchor cookie + breadcrumb. 204 No Content.
-    signout_cleared(&route.host, state.config.insecure_dev)
+    signout_cleared(&route.host)
 }
 
 /// Build the 204 signout response: clear the `__Host-zeroship_app_anchor` anchor
 /// cookie + the `is.authenticated` breadcrumb, `Cache-Control: no-store`.
-fn signout_cleared(host: &str, insecure_dev: bool) -> HttpResponse {
+fn signout_cleared(host: &str) -> HttpResponse {
     HttpResponse::NoContent()
         .header("cache-control", CACHE_NO_STORE)
-        .header("set-cookie", anchors::clear_anchor_cookie(insecure_dev))
-        .header(
-            "set-cookie",
-            anchors::clear_breadcrumb_cookie(host, insecure_dev),
-        )
+        .header("set-cookie", anchors::clear_anchor_cookie())
+        .header("set-cookie", anchors::clear_breadcrumb_cookie(host))
         // The SESSION cookie, which this function did not clear until
         // 2026-08-10 despite two doc sites promising it did. A live deployed
         // signout returned only the anchor and breadcrumb clears, measured by
@@ -518,10 +515,7 @@ fn signout_cleared(host: &str, insecure_dev: bool) -> HttpResponse {
         // credential in the browser after an explicit signout is precisely
         // what signout exists to prevent. Pinned by
         // `signout_clears_the_session_cookie_not_just_the_anchor`.
-        .header(
-            "set-cookie",
-            crate::oidc_rp::clear_app_session_cookie(insecure_dev),
-        )
+        .header("set-cookie", crate::oidc_rp::clear_app_session_cookie())
         .finish()
 }
 
@@ -647,23 +641,21 @@ mod tests {
     /// those belong to `clear_app_session_cookie`'s own test.
     #[test]
     fn signout_clears_the_session_cookie_not_just_the_anchor() {
-        for insecure_dev in [false, true] {
-            let resp = signout_cleared("app.example.test", insecure_dev);
-            let cookies: Vec<String> = resp
-                .headers()
-                .get_all("set-cookie")
-                .filter_map(|v| v.to_str().ok())
-                .map(str::to_owned)
-                .collect();
-            let name = crate::oidc_rp::app_session_cookie_name(insecure_dev);
-            let cleared = cookies
-                .iter()
-                .any(|c| c.starts_with(&format!("{name}=")) && c.contains("Max-Age=0"));
-            assert!(
-                cleared,
-                "signout must clear the session cookie {name:?} (insecure_dev={insecure_dev}), got: {cookies:?}"
-            );
-        }
+        let resp = signout_cleared("app.example.test");
+        let cookies: Vec<String> = resp
+            .headers()
+            .get_all("set-cookie")
+            .filter_map(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .collect();
+        let name = crate::oidc_rp::app_session_cookie_name();
+        let cleared = cookies
+            .iter()
+            .any(|c| c.starts_with(&format!("{name}=")) && c.contains("Max-Age=0"));
+        assert!(
+            cleared,
+            "signout must clear the session cookie {name:?}, got: {cookies:?}"
+        );
     }
 
     #[test]

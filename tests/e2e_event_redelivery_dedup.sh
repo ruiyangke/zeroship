@@ -31,6 +31,8 @@
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 PASS=0; FAIL=0
 pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
@@ -158,12 +160,15 @@ pass "Lago customer + subscription for creator $CREATOR"
 openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null; chmod 600 "$WORK/sk.pem"
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
+SIGNING_KEY_FILE="$WORK/sk.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 LAGO_API_KEY="$LAGO_KEY" \
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \
-  --billing-forwarder-group-id "$FWD_GROUP" --spend-recompute-interval 5 --dev-insecure > "$WORK/control.log" 2>&1 &
+  --billing-forwarder-group-id "$FWD_GROUP" --spend-recompute-interval 5 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (forwarder → REAL Lago)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }

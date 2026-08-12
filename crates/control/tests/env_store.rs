@@ -72,7 +72,7 @@ async fn raw_conn(dsn: &str) -> compio_postgres::Client {
 async fn var_crud_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     // Empty initially.
@@ -110,7 +110,7 @@ async fn var_crud_roundtrip() {
 async fn secret_roundtrip_encrypted() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_secret(app, "STRIPE_KEY", "sk_live_sensitive").await.unwrap();
@@ -151,7 +151,7 @@ async fn secret_roundtrip_encrypted() {
 async fn merged_env_secret_overrides_var() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     // Same key in both tables — secret wins because it's applied last in merged_env.
@@ -172,7 +172,7 @@ async fn merged_env_secret_overrides_var() {
 async fn invalid_key_rejected_client_side() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     for bad in ["lowercase", "1LEADING_DIGIT", "HAS-DASH", "_LEADING_US", "HAS SPACE", ""] {
@@ -195,7 +195,7 @@ async fn invalid_key_rejected_client_side() {
 async fn per_app_isolation() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app_a = create_test_app(&registry).await;
     let app_b = create_test_app(&registry).await;
 
@@ -223,8 +223,8 @@ async fn per_app_isolation() {
 async fn wrong_master_key_fails_decrypt() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let writer = EnvStore::new(registry.clone(), "correct-key", false).expect("store");
-    let reader = EnvStore::new(registry.clone(), "wrong-key", false).expect("store");
+    let writer = EnvStore::new(registry.clone(), "correct-key").expect("store");
+    let reader = EnvStore::new(registry.clone(), "wrong-key").expect("store");
     let app = create_test_app(&registry).await;
 
     writer.set_secret(app, "TOKEN", "hidden").await.unwrap();
@@ -250,7 +250,7 @@ async fn wrong_master_key_fails_decrypt() {
 async fn ciphertext_transplant_fails_across_app_and_key() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app_a = create_test_app(&registry).await;
     let app_b = create_test_app(&registry).await;
     let client = pg_connect(&url).await;
@@ -308,7 +308,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 async fn delete_cascades_from_app() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_var(app, "V1", "x").await.unwrap();
@@ -328,7 +328,7 @@ async fn delete_cascades_from_app() {
 async fn env_version_bumps_on_every_mutation() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
     // Freshly-created app starts at env_version=0.
@@ -382,7 +382,7 @@ async fn env_version_bumps_on_every_mutation() {
 async fn delete_secret_and_set_expose_bump_exactly_once() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_secret(app, "TOKEN", "sk_1").await.unwrap();
@@ -432,7 +432,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let app = create_test_app(&registry).await;
 
     // Initial write with key v1.
-    let store_v1 = EnvStore::new(registry.clone(), "key-v1", false).expect("store");
+    let store_v1 = EnvStore::new(registry.clone(), "key-v1").expect("store");
     store_v1.set_secret(app, "STRIPE_KEY", "sk_live_old").await.unwrap();
 
     // Rotate to key v2 and keep key-v1 as a legacy decrypt-only key.
@@ -441,7 +441,6 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
         registry.clone(),
         "key-v2",
         &["key-v1"],
-        false,
     ).expect("store");
 
     let merged = store_v2.merged_env(app).await.unwrap();
@@ -460,7 +459,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
 
     // Drop the legacy key. Previously-rotated secrets still decrypt
     // via the new primary alone.
-    let store_v3 = EnvStore::new(registry.clone(), "key-v2", false).expect("store");
+    let store_v3 = EnvStore::new(registry.clone(), "key-v2").expect("store");
     let merged = store_v3.merged_env(app).await.unwrap();
     assert_eq!(merged.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_old"));
     assert_eq!(merged.get("OPENAI_KEY").and_then(|v| v.as_str()), Some("sk-new"));
@@ -576,7 +575,7 @@ async fn app_audit_is_append_only() {
 async fn merged_env_404s_on_missing_app() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
 
     let ghost = Uuid::new_v4();
     let err = store.merged_env(ghost).await.unwrap_err();
@@ -591,22 +590,12 @@ async fn merged_env_404s_on_missing_app() {
 }
 
 #[compio::test]
-async fn empty_master_key_rejected_without_dev_flag() {
+async fn empty_master_key_is_always_rejected() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let err = EnvStore::new(registry, "", false).unwrap_err();
+    let err = EnvStore::new(registry, "").unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::MasterKeyRequired));
 
-    common::drain_pg().await;
-}
-
-#[compio::test]
-async fn empty_master_key_allowed_in_dev_mode() {
-    let url = db_url();
-    let registry = Registry::new(&url).await.expect("registry");
-    let _store = EnvStore::new(registry, "", true).expect("dev-mode should accept empty key");
-
-    drop(_store);
     common::drain_pg().await;
 }
 
@@ -614,7 +603,7 @@ async fn empty_master_key_allowed_in_dev_mode() {
 async fn set_value_over_cap_rejected() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
     let too_big = "A".repeat(zeroship_control::env_store::MAX_VALUE_BYTES + 1);
@@ -634,7 +623,7 @@ async fn set_value_over_cap_rejected() {
 async fn merged_env_for_worker_emits_split_shape() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     // Mix of vars + secrets + an opt-in expose entry.
@@ -696,7 +685,7 @@ async fn merged_env_for_worker_emits_split_shape() {
 async fn long_value_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
     // 16 KiB — simulating a JSON Stripe-connect OAuth blob or similar.
@@ -727,7 +716,7 @@ async fn long_value_roundtrip() {
 async fn undecryptable_secret_names_the_key_in_the_error() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_secret(app, "GOOD_KEY", "fine").await.unwrap();

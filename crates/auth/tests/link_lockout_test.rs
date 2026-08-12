@@ -37,7 +37,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "zeroship-auth",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);
@@ -129,7 +128,7 @@ async fn locked_account_cannot_link_with_correct_password() {
         .to_request();
     let get_resp = test::call_service(&app, get_req).await;
     assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf").expect("csrf cookie");
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf").expect("csrf cookie");
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)
@@ -139,7 +138,7 @@ async fn locked_account_cannot_link_with_correct_password() {
     let post_req = test::TestRequest::post()
         .uri("/link")
         .header("content-type", "application/x-www-form-urlencoded")
-        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
         .to_request();
     let post_resp = test::call_service(&app, post_req).await;
@@ -156,7 +155,7 @@ async fn locked_account_cannot_link_with_correct_password() {
         "locked account should be rejected at /link with 401"
     );
 
-    let session_cookie = read_set_cookie(post_resp.headers(), "zsidp_session");
+    let session_cookie = read_set_cookie(post_resp.headers(), "__Host-zsidp_session");
     assert!(
         session_cookie.is_none(),
         "no session cookie may be minted for a locked account"

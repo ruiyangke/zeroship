@@ -258,7 +258,6 @@ fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<Ga
             auth_ui_url: auth_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],
-            insecure_dev: false,
             trust_proxy: false,
             public_url: GATEWAY_ISS.to_string(),
         },
@@ -378,7 +377,7 @@ async fn drive_login_to_code(auth_base: &str, auth_url: &str, email: &str) -> St
         .await
         .expect("send GET /login");
     assert_eq!(login_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("login csrf");
+    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
     let login_body = form(&[
         ("csrf", csrf.as_str()),
         ("email", email),
@@ -390,7 +389,7 @@ async fn drive_login_to_code(auth_base: &str, auth_url: &str, email: &str) -> St
         .expect("build POST /login")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .expect("cookie")
         .body(login_body)
         .send()
@@ -398,12 +397,13 @@ async fn drive_login_to_code(auth_base: &str, auth_url: &str, email: &str) -> St
         .expect("send POST /login");
     assert_eq!(login_post.status().as_u16(), 303);
     assert_eq!(location(&login_post), return_to);
-    let session = read_set_cookie(&login_post, "zsidp_session").expect("session cookie");
+    let session =
+        read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
 
     let final_authorize = http
         .request(http::Method::GET, format!("{auth_base}{return_to}"))
         .expect("build GET /authorize with session")
-        .header("cookie", format!("zsidp_session={session}"))
+        .header("cookie", format!("__Host-zsidp_session={session}"))
         .expect("cookie")
         .send()
         .await
@@ -443,9 +443,10 @@ fn test_auth_config(db_url: &str) -> AuthConfig {
         "127.0.0.1:0",
         "--db-url",
         db_url,
-        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
+        "--totp-enc-key",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "--mail-from-email",
         "test@zeroship.test",
         "--mail-from-name",
@@ -791,7 +792,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .await
         .expect("send GET /login");
     assert_eq!(login_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("login csrf");
+    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
     let login_body = form(&[
         ("csrf", csrf.as_str()),
         ("email", email.as_str()),
@@ -803,7 +804,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .expect("build POST /login")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .expect("cookie")
         .body(login_body)
         .send()
@@ -811,12 +812,13 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .expect("send POST /login");
     assert_eq!(login_post.status().as_u16(), 303);
     assert_eq!(location(&login_post), return_to);
-    let session = read_set_cookie(&login_post, "zsidp_session").expect("session cookie");
+    let session =
+        read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
 
     let final_authorize = http
         .request(http::Method::GET, format!("{auth_base}{return_to}"))
         .expect("build GET /authorize with session")
-        .header("cookie", format!("zsidp_session={session}"))
+        .header("cookie", format!("__Host-zsidp_session={session}"))
         .expect("cookie")
         .send()
         .await

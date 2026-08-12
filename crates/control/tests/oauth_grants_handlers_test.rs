@@ -64,7 +64,7 @@ impl Fixture {
         let registry = Registry::new(db_url).await.expect("registry");
     zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
         let env_store =
-            EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
+            EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -90,7 +90,6 @@ impl Fixture {
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
-            insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
@@ -99,7 +98,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can

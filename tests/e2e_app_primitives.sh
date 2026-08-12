@@ -7,8 +7,7 @@
 #   1. Stand up a fresh ephemeral Postgres + apply deploy/ops/postgres-init.sql +
 #      the full platform migration set (0001→0036). A migration failure here is
 #      a finding — the migration set must apply cleanly from scratch.
-#   2. Boot control + worker + gateway with `--dev-insecure` (current code
-#      requires WORKER_KEY/SIGNING_KEY otherwise — ISS-53).
+#   2. Boot control + worker + gateway with generated signing and shared keys.
 #   3. Mint an admin PAT OFFLINE (control's `/api/apps` now requires a real
 #      PAT bearer or OAuth introspection — the old `--master-key` bearer is
 #      gone). We give control a STABLE ed25519 signing key via
@@ -18,12 +17,12 @@
 #   5. Exercise primitives THROUGH THE EDGE:
 #        a. anon SSR/HTML for a schema-less app  (proves dispatch+load+serve)
 #        b. db-todos RPC over the gateway          (env.db primitive)
-#        c. db-todos RPC direct to worker /dispatch (env.db, no auth gate)
+#        c. db-todos RPC direct to worker /dispatch (env.db, worker bearer)
 #
 # Known findings this harness SURFACES (see the report at the end):
 #   * SEC-5 fail-closed default — db-todos RPC procedures declare no `auth`,
 #     so the gateway defaults them to `User` ⇒ 401 without a real OIDC (native
-#     OP) session. There is NO `--dev-insecure` shortcut to mint an app session,
+#     OP) session. There is no shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
 #     reachable without standing up the native OP. (gateway-auth gap)
 #   * SCHEMA-INIT bug — FIXED, and this header described it as live long after
@@ -67,6 +66,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset from e2e_platform.sh to avoid colliding with a dev stack)
@@ -162,7 +163,7 @@ psql_q() { docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1" 2>
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot stack (--dev-insecure) ==="
+echo "=== Stage 2: boot authenticated stack ==="
 
 # stable ed25519 PKCS#8 signing key so we can offline-mint a PAT the
 # control PatIssuer (built via --signing-key-file) will verify.
@@ -171,18 +172,22 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: empty worker_key (dev) ⇒ /dispatch unauthenticated on loopback;
+# worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern); --db for env.db.
 "$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
@@ -197,7 +202,7 @@ chmod 600 "$WORK/gate-secret"
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --gateway-broker-secret-file "$WORK/gate-secret" \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
@@ -311,7 +316,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 5c: db-todos RPC DIRECT to worker /dispatch (no auth gate) ==="
+echo "=== Stage 5c: db-todos RPC DIRECT to worker /dispatch (authenticated) ==="
 # Bypasses the gateway auth gate (empty worker_key ⇒ loopback dispatch is
 # unauthenticated). This is the cleanest proof env.db works on the runtime —
 # IF schema-init succeeds.
@@ -345,7 +350,7 @@ fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
 
 zs_frame "$WORK/frame-users.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
-WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
+WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
 WK_CODE="$(echo "$WK_RESP" | tail -1)"
 WK_BODY="$(echo "$WK_RESP" | head -1)"
 if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
@@ -355,11 +360,11 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
   if [ -n "$UID_VAL" ]; then
     zs_frame "$WORK/frame-create.bin" POST "http://x/__zeroship/v1/todos.create" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}}))' "$UID_VAL")"
-    C_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
+    C_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
     echo "$C_RESP" | grep -q '"json"' && pass "env.db mutation todos.create over worker" || fail "todos.create failed: $C_RESP"
     zs_frame "$WORK/frame-list.bin" POST "http://x/__zeroship/v1/todos.list" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1]}}))' "$UID_VAL")"
-    L_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
+    L_RESP="$(curl -s -X POST "http://localhost:$WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else

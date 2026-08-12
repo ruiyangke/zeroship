@@ -637,7 +637,6 @@ mod tests {
             "zeroship-auth",
             "--db-url",
             "postgres://test",
-            "--dev-insecure",
             "--stash-signing-key",
             "test-stash-key-not-for-prod-32bytes!",
             "--auth-provider",

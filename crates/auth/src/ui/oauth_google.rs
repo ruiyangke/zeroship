@@ -116,7 +116,7 @@ pub async fn start(
     );
     resp.header(
         SET_COOKIE,
-        set_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), &cookie_value, cfg.insecure_dev),
+        set_stash_cookie(google_stash_cookie_name(), &cookie_value),
     );
     resp.finish()
 }
@@ -141,7 +141,7 @@ pub async fn callback(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let Some(stash_blob) = parse_stash_cookie(cookie_header, google_stash_cookie_name(cfg.insecure_dev)) else {
+    let Some(stash_blob) = parse_stash_cookie(cookie_header, google_stash_cookie_name()) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -311,7 +311,7 @@ pub async fn callback(
             // federation handler's perspective.
             resp.header(
                 SET_COOKIE,
-                clear_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
+                clear_stash_cookie(google_stash_cookie_name()),
             );
             return resp.finish();
         }
@@ -395,11 +395,11 @@ pub async fn callback(
     let mut resp = return_to::see_other(&native_return_to);
     resp.header(
         SET_COOKIE,
-        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        session_cookie::set_cookie(&session.id),
     );
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
+        clear_stash_cookie(google_stash_cookie_name()),
     );
     resp.header("cache-control", "no-store");
     resp.finish()
@@ -442,7 +442,7 @@ fn render_error(message: PublicErrorMessage) -> HttpResponse {
 /// browser.
 fn render_error_clearing(
     message: PublicErrorMessage,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
 ) -> HttpResponse {
     let page = ErrorPage {
         message,
@@ -455,7 +455,7 @@ fn render_error_clearing(
     resp.content_type("text/html; charset=utf-8");
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
+        clear_stash_cookie(google_stash_cookie_name()),
     );
     resp.body(body)
 }

@@ -10,16 +10,16 @@
 #      platform migration set. (Control still needs a DB for app CRUD + deploy.)
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
-#   3. Boot control + worker + gateway with `--dev-insecure`. The worker gets
+#   3. Boot control + worker + gateway with generated keys. The worker gets
 #      `--kv-url redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
 #      (enables env.storage). Without those flags the namespaces simply are
 #      not registered.
 #   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + seeded
 #      permission_tokens row), exactly as e2e_app_primitives.sh does.
 #   5. Create + deploy examples/kv-dashboard and examples/storage-gallery.
-#   6. Exercise the primitives DIRECT to the worker /dispatch (empty
-#      worker_key ⇒ loopback dispatch is unauthenticated; this bypasses the
-#      gateway's SEC-5 fail-closed auth gate, mirroring Stage 5c). This is the
+#   6. Exercise the primitives DIRECT to the worker /dispatch with the
+#      generated worker bearer, bypassing only the gateway's SEC-5 app-auth
+#      policy while retaining transport authentication. This is the
 #      cleanest proof the primitive works on the runtime over the real edge:
 #        env.kv      — kv.visit (incr) → kv.snapshot → kv.string.set →
 #                      kv.keys.list → kv.string.delete   (round-trips)
@@ -42,6 +42,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset again to avoid colliding with e2e_app_primitives.sh)
@@ -93,6 +95,7 @@ dispatch() {
   local frame="$WORK/frame-$$.bin"
   zs_rpc_frame "$frame" "$id" "$args"
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$app" \
+    -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/octet-stream' --data-binary @"$frame"
 }
 
@@ -162,7 +165,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot stack (--dev-insecure, worker with --kv-url + --storage-url) ==="
+echo "=== Stage 2: boot secured stack (worker with --kv-url + --storage-url) ==="
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
@@ -170,19 +173,23 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: env.kv ← --kv-url (Redis), env.storage ← --storage-url (LocalFs path),
-# env.db ← --db. Empty worker_key (dev) ⇒ /dispatch is unauthenticated on loopback.
+# env.db comes from --db; direct /dispatch uses the generated worker bearer.
 "$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
   --kv-url "$KVURL" --storage-url "$WORK/storage" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv+storage configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
@@ -197,7 +204,7 @@ chmod 600 "$WORK/gate-secret"
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --gateway-broker-secret-file "$WORK/gate-secret" \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
+ > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }

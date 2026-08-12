@@ -2,10 +2,8 @@
 
 /// Return true when environment variable `key` is exactly `expected`.
 ///
-/// Web binaries use a `SetTrue` flag plus skipped env field so `--dev-insecure`
-/// and `--trust-proxy` preserve exact `"1"` environment truthiness. Bootstrap
-/// flags intentionally use [`env_is_truthy`] to also accept `"true"`, while the
-/// auth binary uses clap's normal boolean env parsing.
+/// Some bootstrap flags preserve exact `"1"` environment truthiness, while
+/// others intentionally use [`env_is_truthy`] to also accept `"true"`.
 #[must_use]
 pub fn env_is_exact(key: &str, expected: &str) -> bool {
     std::env::var(key).is_ok_and(|value| value == expected)
@@ -23,7 +21,7 @@ pub fn env_is_truthy(key: &str) -> bool {
 /// Parse a boolean flag value accepting `1/0/true/false/yes/no` case-insensitively.
 ///
 /// This is the single boolean-env truthiness used by every `Option<bool>` flag
-/// (e.g. `--dev-insecure[=…]`, `--trust-proxy[=…]`) so CLI presence can override
+/// (for example, `--trust-proxy[=...]`) so CLI presence can override
 /// a stray env value with proper `CLI > env` precedence. It is used as a clap
 /// `value_parser`, hence the [`String`] error type.
 ///

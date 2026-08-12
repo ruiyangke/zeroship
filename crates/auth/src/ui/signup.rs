@@ -72,7 +72,7 @@ pub async fn get(
         .unwrap_or_else(|_| "<h1>error</h1>".to_string());
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 
@@ -97,7 +97,7 @@ pub async fn post(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let cookie_token = csrf::parse_cookie(cookie_header);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -379,7 +379,7 @@ fn render_signup_bad_request(
 
 fn render_signup_error_with_status(
     continuation: Option<&SignupContinuation>,
-    cfg: &AuthConfig,
+    _cfg: &AuthConfig,
     err: &str,
     status: StatusCode,
 ) -> HttpResponse {
@@ -394,7 +394,7 @@ fn render_signup_error_with_status(
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.body(body)
 }
 

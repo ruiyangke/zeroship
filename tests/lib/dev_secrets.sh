@@ -29,34 +29,56 @@
 # test run. It also does not provision anything for a REMOTE deployment; that is
 # the operator's own secrets directory (docs/runbooks/deploy-server.md).
 
+_dev_secrets_complete() {
+  local env_file="$1" secrets_dir="$2" name file
+  [ -f "$env_file" ] || return 1
+  for name in \
+    ZEROSHIP_CONTROL_KEY ZEROSHIP_MASTER_KEY ZEROSHIP_WORKER_KEY \
+    GATEWAY_OIDC_SECRET MIGRATED_POLICY_SEAL_KEY STASH_SIGNING_KEY \
+    STRIPE_WEBHOOK_SECRET PAIRWISE_SALT AUTH_STASH_SIGNING_KEY \
+    AUTH_TOTP_ENC_KEY; do
+    grep -q "^${name}=" "$env_file" 2>/dev/null || return 1
+  done
+  for file in \
+    auth-signing.pem gateway-signing.pem control-signing.pem broker-secret \
+    refresh-hash-key refresh-idem-key pairwise-salt; do
+    [ -s "$secrets_dir/$file" ] || return 1
+  done
+}
+
 ensure_dev_secrets() {
-  local root env_file bin
+  local root env_file secrets_dir bin
   # Resolve the repo root from git, not from path arithmetic on BASH_SOURCE:
   # inside a function that expands to the DEFINING file, which differs by how
   # the caller sourced this, and a wrong root silently provisions nothing.
   root="$(git rev-parse --show-toplevel 2>/dev/null)"
   [ -n "$root" ] || root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   env_file="$root/deploy/compose/.env"
+  secrets_dir="$root/deploy/compose/secrets"
 
   # Already provisioned: do nothing, so a run cannot disturb local state.
-  if [ -f "$env_file" ] && grep -q '^ZEROSHIP_CONTROL_KEY=' "$env_file" 2>/dev/null; then
+  if _dev_secrets_complete "$env_file" "$secrets_dir"; then
     return 0
   fi
 
-  # Prefer an already-built binary over a cargo build: these harnesses are slow
-  # enough already, and `cargo run` would rebuild the whole CLI on a cold cache.
-  for bin in "$root/target/release/zeroship" "$root/target/debug/zeroship"; do
+  # Prefer an already-built binary over a cargo build, but verify its output
+  # against the complete current contract before trusting a possibly stale bin.
+  for bin in "$root/target/debug/zeroship" "$root/target/release/zeroship"; do
     if [ -x "$bin" ]; then
-      "$bin" dev init && return 0
-      echo "ensure_dev_secrets: $bin dev init failed" >&2
-      return 1
+      if "$bin" dev init && _dev_secrets_complete "$env_file" "$secrets_dir"; then
+        return 0
+      fi
+      echo "ensure_dev_secrets: $bin did not provision the complete current secret set" >&2
     fi
   done
 
   if command -v cargo >/dev/null 2>&1; then
-    ( cd "$root" && cargo run -q -p zeroship --bin zeroship -- dev init ) && return 0
+    if ( cd "$root" && cargo run -q -p zeroship --bin zeroship -- dev init ) &&
+       _dev_secrets_complete "$env_file" "$secrets_dir"; then
+      return 0
+    fi
   fi
 
-  echo "ensure_dev_secrets: no zeroship binary and no cargo; run 'zeroship dev init' first" >&2
+  echo "ensure_dev_secrets: could not provision the complete current secret set" >&2
   return 1
 }

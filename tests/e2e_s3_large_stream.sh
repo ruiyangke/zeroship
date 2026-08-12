@@ -47,6 +47,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 
 PASS=0; FAIL=0
 declare -a ROWS
@@ -198,9 +200,12 @@ chmod 600 "$WORK/signing-key.pem"
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control
+SIGNING_KEY_FILE="$WORK/signing-key.pem"
+GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
+ > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
@@ -209,7 +214,7 @@ curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "contro
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
   --storage-url "$STORAGE_S3" \
-  --blob-store "$BLOB_S3" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+  --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
 echo $WORKER_PID >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
@@ -219,7 +224,7 @@ curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker 
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$BLOB_S3" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --signing-key-file "$WORK/signing-key.pem" --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
@@ -246,8 +251,8 @@ fi
 sleep 5  # let route + version sync to worker
 
 # ---------------------------------------------------------------------------
-# Dispatch helpers — direct to the worker /dispatch/<app> (unauthenticated
-# loopback), exactly like e2e_s3_storage.sh. We do NOT go through the gateway.
+# Dispatch helpers - direct to the worker /dispatch/<app> with its generated
+# bearer, exactly like e2e_s3_storage.sh. We do not go through the gateway.
 # ---------------------------------------------------------------------------
 envelope() {
   node -e 'process.stdout.write(JSON.stringify({method:"POST",url:"http://x/__zeroship/v1/"+process.argv[1],headers:[["content-type","application/json"]],body:JSON.stringify({json:JSON.parse(process.argv[2])})}))' "$1" "$2"
@@ -257,6 +262,7 @@ dispatch_to() {
   local out="$1" proc="$2" body="$3"
   curl -s -o "$out" -w '%{http_code} %{time_total}' --max-time 1800 \
     -X POST "http://localhost:$WORKER_PORT/dispatch/$ST_APP" \
+    -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/json' -d "$(envelope "$proc" "$body")"
 }
 jget_json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json'"$1"')??"")}catch(e){console.log("")}})'; }

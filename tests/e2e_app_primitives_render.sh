@@ -16,10 +16,10 @@
 # session / native-OP login (the SEC-5 fail-closed default only gates `rpc:` resources —
 # which is why the *authenticated* env.db RPC in e2e_app_primitives.sh is the
 # ISS-64 known-fail, and why here we drive RPC streaming over the worker
-# /dispatch path directly, which is unauthenticated on loopback).
+# /dispatch path directly with the generated worker bearer).
 #
 # Bring-up mirrors e2e_app_primitives.sh exactly: ephemeral PG :5444 + the full
-# platform migration set + control/worker/gateway with --dev-insecure + an
+# platform migration set + control/worker/gateway with an
 # OFFLINE-minted admin PAT + create-app + deploy + Host-header addressing.
 #
 # Usage:
@@ -84,9 +84,9 @@ command -v zstd >/dev/null || { echo "zstd required"; exit 2; }
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 1+2: ephemeral Postgres + migrations + boot stack (--dev-insecure) ==="
+echo "=== Stage 1+2: ephemeral Postgres + migrations + authenticated stack ==="
 # Shared bring-up (tests/lib/e2e_stack.sh): ephemeral PG on :$PG_PORT + the FULL
-# platform migration set from scratch + control/worker/gateway --dev-insecure,
+# platform migration set from scratch + control/worker/gateway,
 # health-polled. Exports WORK / PIDFILE / DBURL. Emits its own ✓/✗ via pass()/fail().
 stack_up || { fail "stack bring-up failed"; exit 1; }
 
@@ -255,7 +255,7 @@ echo ""
 echo "=== Scenario 4: RPC streaming (SSE) — csr-todo searchTodos over /dispatch ==="
 # stream procedure → POST /__zeroship/v1/searchTodos with {json:{query:"build"}}
 # wire: AI-SDK data-stream frames — `2:[<json>]\n` per yield, `d:{}\n` at end.
-# Driven over the worker /dispatch (unauthenticated on loopback) since rpc:
+# Driven over the authenticated worker /dispatch since rpc:
 # resources are gateway-auth-gated (SEC-5). csr-todo's searchTodos is kind:stream.
 if [ ! -f "$CSR_ZSHIP" ] || [ -z "${APP_ID:-}" ]; then
   # re-resolve csr app id (deploy_app set APP_ID to the last app; redeploy if needed)
@@ -280,6 +280,7 @@ else
     '{"json":{"query":"build"}}' \
     '[["content-type","application/json"],["accept","text/event-stream"]]'
   curl -s -N -D "$WORK/stream.hdr" -X POST "http://localhost:$WORKER_PORT/dispatch/$CSR_APP_ID" \
+    -H "Authorization: Bearer $WORKER_KEY" \
     -H 'content-type: application/octet-stream' \
     --data-binary @"$WORK/stream-frame.bin" > "$WORK/stream.body" 2>/dev/null
   S_CODE="$(awk 'NR==1{print $2}' "$WORK/stream.hdr")"
@@ -401,6 +402,7 @@ else
       zs_write_frame "$WORK/oai-frame.bin" POST \
         "http://openai-demo-e2e.localhost/__zeroship/v1/ping" '{"json":null}'
       OAI_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$WORKER_PORT/dispatch/$OAI_ID" \
+                   -H "Authorization: Bearer $WORKER_KEY" \
                    -H 'content-type: application/octet-stream' \
                    --data-binary @"$WORK/oai-frame.bin" 2>/dev/null)"
       OAI_CODE="$(echo "$OAI_RESP" | tail -1)"; OAI_BODY="$(echo "$OAI_RESP" | head -1)"

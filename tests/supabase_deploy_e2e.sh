@@ -15,6 +15,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
+# shellcheck source=tests/lib/runtime_secrets.sh
+source "$ROOT/tests/lib/runtime_secrets.sh"
 STARTER="$ROOT/examples/starter"
 ZSHIP="$STARTER/dist/app.zship"
 
@@ -338,21 +340,7 @@ ensure_starter_zship() {
 }
 
 prepare_auth_native_op_secrets() {
-  openssl genpkey -algorithm ed25519 -out "$WORK/auth-signing.pem" \
-    >"$WORK/auth-signing-keygen.log" 2>&1 || fail "auth native OP signing key generation failed"
-  openssl rand -base64 48 >"$WORK/auth-pairwise-salt" \
-    || fail "auth pairwise salt generation failed"
-  openssl rand -base64 48 >"$WORK/auth-broker-secret" \
-    || fail "auth broker secret generation failed"
-  printf '1:%s\n' "$(openssl rand -hex 48)" >"$WORK/refresh-hash-key"
-  openssl rand -base64 48 >"$WORK/refresh-idem-key" \
-    || fail "auth refresh idempotency key generation failed"
-  chmod 0600 \
-    "$WORK/auth-signing.pem" \
-    "$WORK/auth-pairwise-salt" \
-    "$WORK/auth-broker-secret" \
-    "$WORK/refresh-hash-key" \
-    "$WORK/refresh-idem-key"
+  : # e2e_export_runtime_secrets prepared and permissioned these inputs.
 }
 
 start_auth_service() {
@@ -361,13 +349,13 @@ start_auth_service() {
     --addr "0.0.0.0:$AUTH_PORT" \
     --db-url "$CONTROL_DB_URL" \
     --public-url "http://localhost:$AUTH_PORT" \
-    --dev-insecure \
     --stash-signing-key "$AUTH_STASH_KEY" \
-    --auth-signing-key-file "$WORK/auth-signing.pem" \
-    --auth-pairwise-salt-file "$WORK/auth-pairwise-salt" \
-    --auth-broker-secret-file "$WORK/auth-broker-secret" \
-    --refresh-hash-key-file "$WORK/refresh-hash-key" \
-    --refresh-idem-key-file "$WORK/refresh-idem-key" \
+    --totp-enc-key "$AUTH_TOTP_ENC_KEY" \
+    --auth-signing-key-file "$AUTH_SIGNING_KEY_FILE" \
+    --auth-pairwise-salt-file "$AUTH_PAIRWISE_SALT_FILE" \
+    --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
+    --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
+    --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
     --auth-provider supabase \
     --supabase-url "$SUPABASE_URL" \
     --supabase-anon-key "$SUPABASE_ANON_KEY" \
@@ -545,7 +533,6 @@ SQL
 }
 
 start_zeroship_stack() {
-  export ZEROSHIP_DEV_INSECURE=1
   export WORKER_KEY
   local control_verify_args=(--supabase-jwt-issuer "$SUPABASE_ISSUER")
   if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
@@ -560,7 +547,6 @@ start_zeroship_stack() {
     --control-key "$CONTROL_KEY" \
     --worker-key "$WORKER_KEY" \
     --master-key "$MASTER_KEY" \
-    --dev-insecure \
     --auth-provider supabase \
     --supabase-url "$SUPABASE_URL" \
     --supabase-anon-key "$SUPABASE_ANON_KEY" \
@@ -578,7 +564,6 @@ start_zeroship_stack() {
     --db "$CONTROL_DB_URL" \
     --blob-store "$WORK/blobs" \
     --poll-interval 2 \
-    --dev-insecure \
     >"$WORK/worker.log" 2>&1 &
   PIDS+=("$!")
   wait_http "http://localhost:$WORKER_PORT/health" "worker healthy"
@@ -592,7 +577,6 @@ start_zeroship_stack() {
     --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" \
     --poll-interval 2 \
-    --dev-insecure \
     >"$WORK/gate.log" 2>&1 &
   PIDS+=("$!")
   wait_http "$GATE_URL/health" "gateway healthy"
@@ -666,6 +650,16 @@ docker pull "$GOTRUE_IMAGE" >/dev/null || fail "docker pull $GOTRUE_IMAGE failed
 start_postgres "$CONTROL_PG_CONTAINER" "$CONTROL_PG_PORT"
 pass "control Postgres ready on :$CONTROL_PG_PORT"
 apply_control_migrations
+STASH_SIGNING_KEY="$AUTH_STASH_KEY"
+AUTH_STASH_SIGNING_KEY="$AUTH_STASH_KEY"
+PAIRWISE_SALT="$(openssl rand -hex 32)"
+AUTH_SIGNING_KEY_FILE="$WORK/auth-signing.pem"
+AUTH_PAIRWISE_SALT_FILE="$WORK/auth-pairwise-salt"
+GATEWAY_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
+AUTH_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
+REFRESH_HASH_KEY_FILE="$WORK/refresh-hash-key"
+REFRESH_IDEM_KEY_FILE="$WORK/refresh-idem-key"
+e2e_export_runtime_secrets "$WORK" || exit 1
 start_auth_service
 start_postgres "$GOTRUE_PG_CONTAINER"
 pass "GoTrue Postgres ready"

@@ -259,7 +259,7 @@ impl ConsentTestApp {
             .uri("/consent/accept")
             .header("content-type", "application/x-www-form-urlencoded");
         if let Some(csrf) = csrf {
-            req = req.header("cookie", format!("zsidp_csrf={csrf}"));
+            req = req.header("cookie", format!("__Host-zsidp_csrf={csrf}"));
         }
         test::call_service(&app, req.set_payload(body).to_request())
             .await
@@ -295,7 +295,7 @@ async fn consent_deny_redirect_includes_issuer_parameter() {
     let req = test::TestRequest::post()
         .uri("/consent/deny")
         .header("content-type", "application/x-www-form-urlencoded")
-        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&service, req).await;

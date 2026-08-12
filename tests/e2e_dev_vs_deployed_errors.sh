@@ -529,9 +529,8 @@ APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy error-probe"; ex
 pass "deployed error-probe ($APP_ID)"
 
 # The DEPLOYED worker must NOT have the escape hatch in its environment, or the
-# "production" half of this comparison is measuring dev behaviour. `--dev-insecure`
-# (which stack_up does pass) is a CLI flag on a different subsystem and does not
-# set this var -- assert that rather than assume it, by reading the live process.
+# "production" half of this comparison is measuring dev behaviour. Assert the
+# worker environment directly rather than inferring it from stack arguments.
 worker_pid="$(sed -n '2p' "$PIDFILE")"
 if [ -n "$worker_pid" ] && [ -r "/proc/$worker_pid/environ" ]; then
   # NOT `tr ... | grep -q`, for a LATENT size-dependence rather than an observed

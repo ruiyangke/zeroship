@@ -242,7 +242,7 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 # `/api/apps` call answers 401 "platform token verification failed" — which
 # is exactly how this harness died before, silently, inside a `$(curl -sf)`.
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" --blob-store "$WORK/blobs" \
-    --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" --dev-insecure \
+    --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
@@ -252,7 +252,7 @@ WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
     "$BIN/zeroship-worker" --port "$port" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
         --control-key "$CONTROL_KEY" --db "$DBURL" --blob-store "$WORK/blobs" \
-        --poll-interval 2 --dev-insecure > "$WORK/worker-$port.log" 2>&1 &
+        --poll-interval 2 > "$WORK/worker-$port.log" 2>&1 &
     PIDS+=($!)
     [ -n "$WORKER_URL_LIST" ] && WORKER_URL_LIST="$WORKER_URL_LIST,"
     WORKER_URL_LIST="${WORKER_URL_LIST}http://localhost:${port}"
@@ -264,7 +264,7 @@ done
     --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 \
     --db "$DBURL" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
     --signing-key-file "$WORK/signing-key.pem" \
-    --gateway-broker-secret-file "$WORK/gate-secret" --dev-insecure \
+    --gateway-broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done

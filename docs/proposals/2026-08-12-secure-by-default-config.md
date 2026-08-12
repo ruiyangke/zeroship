@@ -1,9 +1,18 @@
 # Secure by default, including local runs
 
-- **Status:** proposal, not implemented
+- **Status:** implemented
 - **Date:** 2026-08-12
 - **Scope:** the five server binaries (control, gateway, worker, auth, migrated)
   and the `zeroship` CLI
+
+## Implementation
+
+The server-side relaxation flag and environment variable have been deleted.
+Authentication, signature verification, secure-cookie behavior, and secret
+validation now run unconditionally. `zeroship dev init` provisions the strong,
+stable local inputs consumed by compose, while `origin_scheme`, trusted origins,
+and explicit issuer URLs remain ordinary topology settings. Historical counts
+and observations below describe the code before implementation.
 
 ## Relationship to existing work
 

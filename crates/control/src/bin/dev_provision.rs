@@ -60,14 +60,6 @@ fn err(msg: impl Into<String>) -> DevProvisionError {
 #[compio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    if std::env::var("ZEROSHIP_DEV_INSECURE").ok().as_deref() != Some("1") {
-        eprintln!(
-            "dev-provision: refusing to run unless ZEROSHIP_DEV_INSECURE=1 is set \
-             (DEV/LOCAL/CI ONLY; bypasses PAT/OAuth via direct DB writes)"
-        );
-        return ExitCode::FAILURE;
-    }
-
     match run(cli).await {
         Ok(app) => {
             println!("app_id={}", app.id);
