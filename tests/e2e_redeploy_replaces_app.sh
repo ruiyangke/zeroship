@@ -132,7 +132,37 @@ echo "    A getMessages -> $(printf '%s' "$A_MSGS" | head -c 90)"
 printf '%s' "$A_VISIT" | grep -q '"visits"' && ok "A: kv.visit answers" || no "A: kv.visit did not answer"
 absent "$A_MSGS" && ok "A: getMessages absent, as expected" || no "A: getMessages unexpectedly present"
 
+# --- scenario 22: does a redeploy cut requests that are already in flight? ---
+#
+# The creator ships a fix while end users are mid-request. Until now this
+# harness redeployed against an idle stack, so nothing here had ever measured
+# what a user receives across the swap. docs/pilot/e2e-scenarios.md row 22.
+#
+# WHY THE OBSERVABLE IS 5xx-OR-TRANSPORT AND NOT "non-200": A and B expose
+# DISJOINT procedures on purpose (kv.visit vs getMessages), so once B is live a
+# kv.visit request SHOULD be refused. Counting non-200s -- the natural thing to
+# write -- would report "redeploy breaks in-flight requests" out of a perfectly
+# healthy run. A dropped connection or a 5xx is wrong on EITHER bundle, so that
+# is what is asserted. Every code seen is printed regardless, so a wave of 401s
+# (see the api-key note below) shows itself instead of hiding inside "not 5xx".
+KEY_A="$KEY"
+TRAF="$WORK/traffic.tsv"; : > "$TRAF"
+STOPFILE="$WORK/traffic.stop"; rm -f "$STOPFILE"
+(
+  while [ ! -f "$STOPFILE" ]; do
+    _s=$(date +%s%3N)
+    _c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST \
+      -H 'content-type: application/json' -H "X-Api-Key: $KEY_A" \
+      "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/kv.visit" \
+      -d '{"json":{}}' 2>/dev/null)
+    _rc=$?
+    _e=$(date +%s%3N)
+    printf '%s\t%s\t%s\t%s\n' "$_s" "$_e" "${_c:-000}" "$_rc" >> "$TRAF"
+  done
+) & TRAFFIC_PID=$!
+
 echo "=== redeploy B under the SAME name"
+DEPLOY_T0=$(date +%s%3N)
 OUT2=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
 APPID2=$(echo "$OUT2" | awk -F= '$1=="app_id"{print $2}')
 KEY=$(echo "$OUT2" | awk -F= '$1=="api_key"{print $2}')
@@ -140,6 +170,39 @@ KEY=$(echo "$OUT2" | awk -F= '$1=="api_key"{print $2}')
 [ "$APPID" = "$APPID2" ] && ok "same app id reused, so this is a redeploy not a create" \
   || no "app id changed $APPID -> $APPID2, which is a create not a redeploy"
 sleep 8   # gateway route-sync poll + worker bundle pickup
+# T1 is AFTER the propagation sleep on purpose: the swap does not happen at the
+# dev-provision call, it happens when the gateway re-syncs routes and the worker
+# picks the new bundle up. Ending the window at the CLI return would bound it to
+# an interval in which nothing had swapped yet.
+DEPLOY_T1=$(date +%s%3N)
+touch "$STOPFILE"; wait "$TRAFFIC_PID" 2>/dev/null || true
+
+TR_TOTAL=$(wc -l < "$TRAF" | tr -d ' ')
+# Overlap = the request was OPEN at some point inside the deploy window.
+TR_OVER=$(awk -F'\t' -v a="$DEPLOY_T0" -v b="$DEPLOY_T1" '$1<=b && $2>=a' "$TRAF" | wc -l | tr -d ' ')
+TR_BAD=$(awk -F'\t' '$4!=0 || $3 ~ /^5/' "$TRAF" | wc -l | tr -d ' ')
+echo "    traffic: $TR_TOTAL requests, $TR_OVER overlapping the ${DEPLOY_T0}..${DEPLOY_T1} window"
+echo "    codes:   $(awk -F'\t' '{print $3}' "$TRAF" | sort | uniq -c | tr '\n' ' ')"
+[ "$KEY_A" = "$KEY" ] || echo "    NOTE: the api key ROTATED on redeploy, so 401s below are the old key, not a fault"
+# DISCRIMINATION GUARD, and the first version of it WAS VACUOUS -- kept as a
+# warning because it looked like the careful thing to write. It asserted
+# TR_OVER > 0, but the traffic loop starts just before DEPLOY_T0 and is stopped
+# at DEPLOY_T1, so every request is inside the window BY CONSTRUCTION; the first
+# run duly printed "579 requests, 579 overlapping" and could not have printed
+# anything else. A guard whose predicate cannot be false is decoration.
+#
+# What actually proves the traffic SPANNED the swap is that it saw both bundles:
+# 200s while A served kv.visit, then 404s once B is live and kv.visit is gone.
+# All-200 means the swap never landed during traffic; all-404 means traffic
+# began after it. Either way the clean 5xx result would be about one side only.
+TR_200=$(awk -F'\t' '$3==200' "$TRAF" | wc -l | tr -d ' ')
+TR_404=$(awk -F'\t' '$3==404' "$TRAF" | wc -l | tr -d ' ')
+{ [ "${TR_200:-0}" -gt 0 ] && [ "${TR_404:-0}" -gt 0 ]; } \
+  && ok "traffic spanned the swap: $TR_200 served by A, then $TR_404 refused by B" \
+  || no "traffic did NOT span the swap (200s=$TR_200, 404s=$TR_404), so the 5xx result below is one-sided"
+[ "${TR_BAD:-1}" -eq 0 ] && ok "no in-flight request saw a transport failure or 5xx across the redeploy" \
+  || { no "$TR_BAD request(s) hit a transport failure or 5xx across the redeploy"; \
+       awk -F'\t' '$4!=0 || $3 ~ /^5/' "$TRAF" | head -5; }
 
 B_VISIT=$(rpc kv.visit); B_MSGS=$(rpc getMessages)
 echo "    B kv.visit    -> $(printf '%s' "$B_VISIT" | head -c 90)"
