@@ -36,7 +36,9 @@
 # restriction below and would make the whole section vacuous while still
 # printing green.
 #
-# What a second identity still does NOT cover here: attachment visibility.
+# Attachment paths go through the same bug check (list/get via assertBugVisible,
+# setObsolete/delete via assertBugAccessible), but no assertion here pins
+# attachment CONTENT specifically -- that is the remaining second-identity gap.
 # Report aggregates ARE covered -- a restricted bug used to be counted in
 # reports.summary for a user who could not read it, and that is now pinned.
 set -uo pipefail
