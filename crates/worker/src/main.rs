@@ -7,7 +7,7 @@ mod logs;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
-use zeroship_worker::config::{WorkerControls, WorkerControlsSources};
+use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources};
 use zeroship_core::config::{
     bootstrap_or_exit, CheckConfigReport, CheckValue,
 };
@@ -24,45 +24,17 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// zeroship worker startup configuration.
 ///
-/// No `#[derive(Debug)]`: this struct holds raw secrets (`control_key`,
-/// `worker_key`, `db`) before they are consumed, and a `{:?}` would print
-/// them in plaintext (S2).
+/// Only the credential-bearing fields are left here; every operational value
+/// is generated in `zeroship_worker::config`. No `#[derive(Debug)]`: what
+/// remains IS the raw-secret set, and a `{:?}` would print it in plaintext (S2).
 #[derive(Parser)]
 #[command(name = "zeroship-worker")]
 struct WorkerCli {
-    /// HTTP listen port.
-    #[arg(long, env = "WORKER_PORT", default_value_t = 8080)]
-    port: u16,
-
-    /// Number of ntex worker threads.
-    #[arg(long = "worker-threads", env = "WORKER_THREADS")]
-    worker_threads: Option<usize>,
-
-    /// Control-plane API base URL.
-    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
-    control: String,
-
     /// Admin/control API shared secret.
     #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
     control_key: String,
 
     // No --trust-proxy: the worker has no client-facing IP logic.
-
-    /// Maximum number of cached app isolates.
-    #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
-    max_isolates: usize,
-
-    /// Maximum deploy-pinned workflow replay isolates kept per app.
-    #[arg(
-        long = "max-pinned-isolates-per-app",
-        env = "MAX_PINNED_ISOLATES_PER_APP",
-        default_value = "4"
-    )]
-    max_pinned_isolates_per_app: usize,
-
-    /// Control-plane polling interval in seconds.
-    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
-    poll_interval: u64,
 
     /// PostgreSQL DSN for runtime env/db state.
     #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
@@ -71,19 +43,6 @@ struct WorkerCli {
     /// Shared secret for gateway dispatch endpoints.
     #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
     worker_key: String,
-
-    /// Shutdown drain timeout in seconds.
-    ///
-    /// Zero does NOT mean wait forever. ntex takes its ungraceful branch when the
-    /// timeout is zero and stops workers immediately, dropping in-flight requests,
-    /// so zero is the harshest setting rather than the most patient one. To wait a
-    /// long time, pass a long time.
-    #[arg(long = "shutdown-timeout", env = "SHUTDOWN_TIMEOUT", default_value = "30")]
-    shutdown_timeout: u64,
-
-    /// Root directory for content-addressed deploy blobs.
-    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
-    blob_store: String,
 
     /// Redis connection URL for the app `env.kv` namespace.
     ///
@@ -96,81 +55,31 @@ struct WorkerCli {
     /// per-process embedded store). The single-tenant CLI's per-process
     /// `redb` backend is deliberately NOT used here — it can't stay
     /// consistent across a worker fleet.
+    ///
+    /// It may embed `redis://user:pass@host`, which is why it sits with the
+    /// secrets rather than with the operational settings.
     #[arg(long = "kv-url", env = "ZEROSHIP_KV_URL", default_value = "", hide_env_values = true)]
     kv_url: String,
 
-    /// Object-store location for the app `env.storage` namespace.
-    ///
-    /// A bare path or `file://…` selects the `LocalFs` backend; `s3://…`
-    /// selects the S3 backend (S3/R2/MinIO/Spaces/B2), parsed through the
-    /// same grammar as `--blob-store`. Multi-node storage MUST be shared so
-    /// an object `put` on one worker node is readable on another: a `LocalFs`
-    /// path is a shared volume mounted identically on every replica (the
-    /// deploy-blob-store pattern); S3/R2 is inherently shared. S3 credentials
-    /// resolve from the AWS env vars. When empty the `env.storage` namespace
-    /// is absent.
-    #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
-    storage_url: String,
-
-    /// Maximum persisted bytes for one workflow step output blob.
-    #[arg(
-        long = "max-step-blob-bytes",
-        env = "ZEROSHIP_MAX_STEP_BLOB_BYTES",
-        default_value = "67108864"
-    )]
-    max_step_blob_bytes: u64,
-
-    /// HTTP bind host.
-    #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
-    bind: String,
-
-    /// Optional Unix domain socket path.
-    #[arg(long = "socket", env = "WORKER_SOCKET", default_value = "")]
-    socket: String,
-
-    /// Bootstrap, command and observability controls, generated from one
-    /// declaration in `zeroship_worker::config`.
+    /// Every operational value, generated from one declaration in
+    /// `zeroship_worker::config`.
     #[command(flatten)]
-    controls: WorkerControlsSources,
+    settings: WorkerSettingsSources,
 }
 
-// Hand-written Debug that redacts the raw-secret fields (`control_key`,
-// `worker_key`, `db`) so a `{:?}` never leaks credentials (S2). The derived
-// Debug is intentionally NOT used.
+// Hand-written Debug that redacts every remaining field. All four are raw
+// secrets, so a `{:?}` never leaks credentials (S2). The derived Debug is
+// intentionally NOT used.
 impl std::fmt::Debug for WorkerCli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkerCli")
-            .field("port", &self.port)
-            .field("worker_threads", &self.worker_threads)
-            .field("control", &self.control)
             .field("control_key", &"<redacted>")
-            .field("max_isolates", &self.max_isolates)
-            .field(
-                "max_pinned_isolates_per_app",
-                &self.max_pinned_isolates_per_app,
-            )
-            .field("poll_interval", &self.poll_interval)
             .field("db", &"<redacted>")
             .field("worker_key", &"<redacted>")
-            .field("shutdown_timeout", &self.shutdown_timeout)
-            .field("blob_store", &self.blob_store)
-            // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
-            .field("storage_url", &self.storage_url)
-            .field("max_step_blob_bytes", &self.max_step_blob_bytes)
-            .field("bind", &self.bind)
-            .field("socket", &self.socket)
-            .field("controls", &self.controls)
+            .field("settings", &self.settings)
             .finish()
     }
-}
-
-fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
-    worker_threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    })
 }
 
 /// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
@@ -258,22 +167,22 @@ pub struct WorkerConfig {
 
 fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
-    let (controls, boot) = bootstrap_or_exit::<WorkerControls>(
-        cli.controls,
+    let (settings, boot) = bootstrap_or_exit::<WorkerSettings>(
+        cli.settings,
         "info,zeroship_worker=debug,zeroship_runtime=info",
         "worker",
     );
-    let check_config = *controls.check_config.get();
-    let workflow_advance_unsigned = *controls.workflow_advance_unsigned.get();
+    let check_config = *settings.check_config.get();
+    let workflow_advance_unsigned = *settings.workflow_advance_unsigned.get();
 
     // `[secrets]` overlay tier: reference-only values that back-fill any secret
     // the CLI/env leaves empty (CLI/env still wins). Clone the section once,
     // early, so later partial moves of the overlay config can't invalidate it.
     let file_secrets = boot.overlay.config.secrets.clone();
 
-    let port = cli.port;
-    let workers_count = resolve_worker_threads(cli.worker_threads);
-    let control_url = cli.control;
+    let port = *settings.port.get();
+    let workers_count = *settings.threads.get();
+    let control_url = settings.control_url.get().clone();
     // Secret-reference resolution (env:/file:/vault:/awssm: indirection) with a
     // `[secrets]` overlay tier: CLI/env > `[secrets]` file (reference-only) > unset.
     // On the real boot path we resolve to the live value (side effects: env/file
@@ -285,9 +194,9 @@ fn main() -> std::io::Result<()> {
         file_secrets.control_key.as_deref(),
         check_config,
     );
-    let max_isolates = cli.max_isolates;
-    let max_pinned_isolates_per_app = cli.max_pinned_isolates_per_app;
-    let poll_interval = match crate::sync::validate_poll_interval_secs(cli.poll_interval) {
+    let max_isolates = *settings.max_isolates.get();
+    let max_pinned_isolates_per_app = *settings.max_pinned_isolates_per_app.get();
+    let poll_interval = match crate::sync::validate_poll_interval_secs(*settings.poll_interval.get()) {
         Ok(secs) => secs,
         Err(message) => {
             tracing::error!("worker: {message}");
@@ -306,8 +215,8 @@ fn main() -> std::io::Result<()> {
         file_secrets.worker_key.as_deref(),
         check_config,
     );
-    let shutdown_timeout = cli.shutdown_timeout;
-    let blob_store_root = cli.blob_store;
+    let shutdown_timeout = *settings.shutdown_timeout.get();
+    let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store, bare path → local disk (dev default).
     // Validated now so a bad `s3://` URL fails fast.
     let store_url = match StoreUrl::parse(&blob_store_root) {
@@ -332,7 +241,7 @@ fn main() -> std::io::Result<()> {
     // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
     // S3 credentials are resolved when the plugin is built per worker thread)
     // so a malformed `s3://` URL fails fast.
-    let storage_raw = cli.storage_url;
+    let storage_raw = settings.storage_url.get().clone();
     let storage_backend = if storage_raw.is_empty() {
         None
     } else {
@@ -347,8 +256,8 @@ fn main() -> std::io::Result<()> {
             }
         }
     };
-    let bind_host = cli.bind;
-    let socket_path = cli.socket;
+    let bind_host = settings.bind.get().clone();
+    let socket_path = settings.socket.get().clone();
 
     if control_key.is_empty() {
         tracing::error!(
@@ -437,7 +346,7 @@ fn main() -> std::io::Result<()> {
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
             "max_step_blob_bytes",
-            CheckValue::Count(usize::try_from(cli.max_step_blob_bytes).unwrap_or(usize::MAX)),
+            CheckValue::Count(usize::try_from(*settings.max_step_blob_bytes.get()).unwrap_or(usize::MAX)),
         );
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
         report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
@@ -479,7 +388,7 @@ fn main() -> std::io::Result<()> {
             ),
         );
 
-        report.emit(*controls.check_config_format.get());
+        report.emit(*settings.check_config_format.get());
         return Ok(());
     }
 
@@ -537,7 +446,7 @@ fn main() -> std::io::Result<()> {
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
         workflow_blob_store,
-        max_step_blob_bytes: cli.max_step_blob_bytes,
+        max_step_blob_bytes: *settings.max_step_blob_bytes.get(),
         workflow_advance_unsigned,
     });
 
@@ -781,8 +690,13 @@ mod tests {
 
     #[test]
     fn worker_threads_default_resolves_to_positive_count() {
-        assert!(resolve_worker_threads(None) > 0);
-        assert_eq!(resolve_worker_threads(Some(3)), 3);
+        // The Option-taking helper is gone: absence is now the generated
+        // resolver's job, and the compiled default is the "one per core" call.
+        assert!(zeroship_worker::config::default_worker_threads() > 0);
+
+        let flagged = WorkerCli::try_parse_from(["zeroship-worker", "--threads", "3"])
+            .expect("--threads parses");
+        assert_eq!(flagged.settings.threads, Some(3));
     }
 
     #[test]
@@ -810,7 +724,7 @@ mod tests {
     fn worker_thread_flag_uses_unambiguous_name() {
         let cli = WorkerCli::try_parse_from([
             "zeroship-worker",
-            "--worker-threads",
+            "--threads",
             "3",
             "--max-isolates",
             "200",
@@ -819,11 +733,19 @@ mod tests {
             "--shutdown-timeout",
             "30",
         ])
-        .expect("--worker-threads should parse");
-        assert_eq!(cli.worker_threads, Some(3));
+        .expect("--threads should parse");
+        assert_eq!(cli.settings.threads, Some(3));
 
+        // The point of the original assertion survives the rename: the worker's
+        // thread count must never share a flag with the control plane's list of
+        // worker URLs. `--workers` belongs to control and gateway.
         let old_flag = WorkerCli::try_parse_from(["zeroship-worker", "--workers", "3"]);
         assert!(old_flag.is_err(), "--workers must not parse for worker threads");
+        let renamed = WorkerCli::try_parse_from(["zeroship-worker", "--worker-threads", "3"]);
+        assert!(
+            renamed.is_err(),
+            "the pre-conversion flag must be gone, not aliased"
+        );
     }
 
     #[test]

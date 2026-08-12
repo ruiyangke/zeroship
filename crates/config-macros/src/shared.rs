@@ -85,6 +85,97 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "LogFormat",
     },
+    // Platform-global operational identities. Each has no component prefix
+    // because it means the same thing to every consumer: one blob store, one
+    // control plane, one worker fleet. A per-binary name here would be the
+    // "one concept, six operator-visible names" outcome the design rejects.
+    SharedIdentity {
+        symbol: "BLOB_STORE",
+        canonical: "blob_store",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "CONTROL_URL",
+        canonical: "control_url",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "WORKER_URLS",
+        canonical: "worker_urls",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "POLL_INTERVAL",
+        canonical: "poll_interval",
+        wrapper: "Operational",
+        inner: "u64",
+    },
+    SharedIdentity {
+        symbol: "ORIGIN_SCHEME",
+        canonical: "origin_scheme",
+        wrapper: "Operational",
+        inner: "OriginScheme",
+    },
+    SharedIdentity {
+        symbol: "TRUST_PROXY",
+        canonical: "trust_proxy",
+        wrapper: "Operational",
+        inner: "bool",
+    },
+    SharedIdentity {
+        symbol: "TRUSTED_ORIGINS",
+        canonical: "trusted_origins",
+        wrapper: "Operational",
+        inner: "Vec<TrustedOrigin>",
+    },
+    SharedIdentity {
+        symbol: "OAUTH_AUDIENCE",
+        canonical: "oauth_audience",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "APP_BASE_DOMAIN",
+        canonical: "app_base_domain",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    // Auth-domain identities. These sit under `auth.` because they configure
+    // the auth domain rather than any one binary, and the overlay already
+    // carries that table.
+    SharedIdentity {
+        symbol: "AUTH_PROVIDER",
+        canonical: "auth.auth_provider",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "AUTH_PLATFORM_ISSUER",
+        canonical: "auth.platform_issuer",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "AUTH_PLATFORM_JWKS_URL",
+        canonical: "auth.platform_jwks_url",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "AUTH_SUPABASE_URL",
+        canonical: "auth.supabase_url",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "AUTH_CONTROL_URL",
+        canonical: "auth.control_url",
+        wrapper: "Operational",
+        inner: "String",
+    },
 ];
 
 /// Look up a shared identity by the symbol a declaration wrote.
