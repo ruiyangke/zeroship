@@ -92,6 +92,7 @@ than rotating it:
 | `PAIRWISE_SALT` | Permanent control/gateway pairwise-subject seed; must match the file described below. |
 | `AUTH_STASH_SIGNING_KEY` | Auth-origin stash-cookie signing key. |
 | `AUTH_TOTP_ENC_KEY` | Auth TOTP secret-at-rest key. |
+| `MIGRATED_POLICY_SEAL_KEY` | Migration-service policy seal key. |
 
 Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
 values rather than built-in weak defaults. One generated value therefore moves
