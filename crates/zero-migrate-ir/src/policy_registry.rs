@@ -796,13 +796,48 @@ scope = "all"
 
     #[test]
     fn every_grant_default_is_valid_and_denies() {
-        // Every Grant Bool knob defaults to the deny value (false) and validates.
+        // The deny half used to live in this test's NAME and comment only: it asserted
+        // that each default validates for its kind and stopped there, so a knob
+        // registered with a permissive default passed. The two sibling tests do assert
+        // denial, but over eight hardcoded keys, so a NEWLY ADDED knob was covered by
+        // neither. This walks the whole registry and asserts the property itself.
         let reg = builtin_registry();
         for def in reg.iter() {
             assert!(
                 def.default.validate_for(&def.kind).is_ok(),
                 "{} default must validate for its kind",
                 def.key
+            );
+            // The bottom of each kind's lattice: the value that grants nothing and
+            // obliges nothing, so a knob the charter never mentions cannot widen
+            // authority.
+            let bottom = match &def.kind {
+                KnobKind::Bool => KnobValue::Bool(false),
+                KnobKind::OrderedEnum { variants } => KnobValue::Str(
+                    variants
+                        .first()
+                        .expect("an OrderedEnum knob declares at least one variant")
+                        .clone(),
+                ),
+                KnobKind::StrSet => KnobValue::StrSet(Vec::new()),
+                KnobKind::UintCharter { hard_floor } => KnobValue::Uint(*hard_floor),
+                // A digest is an identity, not an authority level, so it has no
+                // tightest value to fall back to. No builtin knob is one today, and
+                // registering the first must be a decision somebody makes rather than
+                // a case this test quietly skips.
+                KnobKind::Digest => panic!(
+                    "{} is the first Digest knob in the builtin registry. Decide what an \
+                     unstated digest means before registering it: there is no bottom of \
+                     the lattice to default to.",
+                    def.key
+                ),
+            };
+            assert_eq!(
+                def.default, bottom,
+                "{} defaults to {:?}, which is not the tightest value of its kind. A knob \
+                 the charter never mentions must grant nothing; defaulting above the floor \
+                 hands out authority no operator wrote down.",
+                def.key, def.default
             );
         }
     }
