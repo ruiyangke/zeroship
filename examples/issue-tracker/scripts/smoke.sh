@@ -172,11 +172,19 @@ esac
 # average. This asserts the average stays a number after a reopen.
 call bugs.reopen "{\"id\":\"$BUG\"}" >/dev/null
 AVG="$(call reports.timeToResolve '{}' | jget 'json.averageMs')"
-case "$AVG" in
-  ''|*[!0-9]*) [ "$AVG" = "<null>" ] && pass "averageMs stays clean after a reopen (null, no bugs in window)" \
-                 || fail "averageMs is not a number after a reopen" "got: $AVG (an empty resolvedAt leaked in as NaN)" ;;
-  *)           pass "averageMs stays a number after a reopen" ;;
-esac
+# A mean is legitimately FRACTIONAL. An earlier version of this tested for
+# digits only, so it rejected the decimal point and passed purely because the
+# sample happened to average to a whole number -- it went red the first time a
+# run produced 448.5, reporting an app defect that was not there.
+#
+# What it actually guards is that an empty resolvedAt never leaks in as NaN,
+# so the real assertion is "null, or a finite number".
+if [ "$AVG" = "<null>" ] \
+  || node -e 'process.exit(Number.isFinite(Number(process.argv[1])) && process.argv[1] !== "" ? 0 : 1)' "$AVG"; then
+  pass "averageMs is null or a finite number after a reopen ($AVG)"
+else
+  fail "averageMs is not finite after a reopen" "got: $AVG (an empty resolvedAt leaked in as NaN)"
+fi
 
 # The transition table is enforced by the runtime, not only by the unit tests:
 # the bug is now open, so a second reopen must be refused.
@@ -531,6 +539,22 @@ call cc.add "{\"bugId\":\"$SECRET_BUG\",\"userId\":\"$BOB_ID\"}" >/dev/null
 bob cc.listMine | grep -q "$SECRET_BUG" \
   && fail "cc.listMine returns a bug the caller cannot read" \
   || pass "cc.listMine withholds a bug restricted after the CC"
+
+# Both ends of a dependency edge are checked on REMOVE as well as add.
+# Checking only the near end made this an existence oracle (404 "Dependency"
+# vs success distinguishes a real restricted bug from a nonexistent id) and
+# let a public-side caller delete a restricted bug's blocker bookkeeping.
+[ "$(bobc deps.remove "{\"bugId\":\"$BUG\",\"dependsOnId\":\"$SECRET_BUG\"}")" = "403" ] \
+  && pass "deps.remove refuses an edge whose far end is unreadable" \
+  || fail "deps.remove checks only the near end of the edge"
+
+# Removing a restriction requires belonging to the group, exactly as adding
+# one does. Bob is not in the group and cannot see the bug, so this is 403
+# either way; the sharper case (a member of another group stripping this one)
+# needs a second group and is left to the reader.
+[ "$(bobc bugs.unrestrict "{\"bugId\":\"$SECRET_BUG\",\"groupId\":\"$GROUP\"}")" = "403" ] \
+  && pass "bugs.unrestrict refuses a non-member" \
+  || fail "bugs.unrestrict let a non-member strip a restriction"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.

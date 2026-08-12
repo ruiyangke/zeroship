@@ -285,11 +285,9 @@ type AppDb = {
   groupMembers: Collection<GroupMemberRow>;
   bugGroups: Collection<BugGroupRow>;
   bugs: Collection<BugRow>;
-  // NOT LISTED, and therefore unreachable from this file even though the
-  // migration creates them: `bugSeeAlso`, `votes`, `watchers`. Their absence
-  // here is why no procedure touches them -- SPEC.md describes voting and
-  // watching, and neither is implemented. Adding the collection type is the
-  // first step, not the feature.
+  // Every table the migration creates is now listed here. This comment used to
+  // say bugSeeAlso, votes and watchers were absent and their features
+  // unimplemented; all three are listed above and implemented.
   comments: Collection<CommentRow>;
   attachments: Collection<AttachmentRow>;
   keywords: Collection<KeywordRow>;
@@ -1915,6 +1913,15 @@ export const removeDependency = mutation(
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
     await assertBugAccessible(bug, actor);
+
+    // BOTH ends, matching deps.add. Checking only `bugId` made this an
+    // existence oracle -- probe `dependsOnId` and a 404 ("Dependency") is
+    // distinguishable from a success, which confirms an edge to a bug the
+    // caller cannot open -- and let that caller quietly delete a restricted
+    // bug's blocker bookkeeping from the public side.
+    const dependency = await getRequired(db.bugs, dependsOnId, "Dependency");
+    await assertBugAccessible(dependency, actor);
+
     const result = await db.transaction(async (tx) => {
       const existing = await tx.bugDependencies.get({ bugId, dependsOnId });
       if (!existing) notFound("Dependency");
@@ -3705,6 +3712,18 @@ export const unrestrictBug = mutation(
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
     if (!(await canViewBug(bug, actor))) forbidden();
+
+    // Membership is required to REMOVE a restriction, exactly as it is to add
+    // one. Without this, a bug restricted to two groups could have group B's
+    // restriction stripped by a member of group A -- who can see the bug
+    // through their own group and so passes the check above. That downgrades
+    // confidentiality somebody else set, which is why Bugzilla gates edits to
+    // a bug's group set in both directions, not just on the way in.
+    if (!actor.isAdmin) {
+      const membership = must(await db.groupMembers.get({ groupId, userId: actor.id }));
+      if (!membership) forbidden("You must belong to a group to remove its restriction");
+    }
+
     return must(
       await db.transaction(async (tx) => {
         const existing = await tx.bugGroups.get({ bugId, groupId });
@@ -3789,13 +3808,25 @@ export const castVote = mutation(
         const total = after.reduce((sum, row) => sum + row.count, 0);
 
         const patch: DbPatch = { voteCount: total };
+
+        // The status is re-read INSIDE the transaction. Deciding from the row
+        // fetched before it opened is a lost update with teeth: a concurrent
+        // bugs.resolve moves the bug to RESOLVED/FIXED, this transaction still
+        // sees the stale UNCONFIRMED, and writes status=CONFIRMED while
+        // leaving resolution=FIXED. That pair is a state assertValidState
+        // rejects, so every later changeStatus, resolve, reopen and
+        // markDuplicate throws on the way in -- and since resolution can only
+        // be cleared through those same transitions, no RPC can repair it. The
+        // bug is wedged permanently.
+        const current = await getTxRequired(tx.bugs, bugId, "Bug");
+
         // Bugzilla's auto-confirm: enough votes turn an UNCONFIRMED bug into a
         // CONFIRMED one. Only from UNCONFIRMED -- votes never move a bug that
         // is already resolved.
         const confirms =
           product.votesToConfirm > 0 &&
           total >= product.votesToConfirm &&
-          bug.status === "UNCONFIRMED";
+          current.status === "UNCONFIRMED";
         if (confirms) {
           patch.status = "CONFIRMED";
           patch.isConfirmed = true;
@@ -3808,7 +3839,7 @@ export const castVote = mutation(
           bugId,
           actor.id,
           "votes",
-          String(bug.voteCount),
+          String(current.voteCount),
           String(total),
         );
         if (confirms) {
@@ -3822,7 +3853,15 @@ export const castVote = mutation(
           );
         }
         return { bugId, count, voteCount: total, confirmed: confirms };
-      }),
+        // Serializable, like every other read-modify-write in this file.
+        // Without it the recompute below read committed does NOT make the
+        // counter safe: two concurrent voters each sum the votes without
+        // seeing the other's uncommitted row, and the later update wins with a
+        // total that omits one of them. The comment above claiming voteCount
+        // "cannot drift away from them" was only true under this isolation.
+        // The SQLite dev tier serialises writes, so no local test can show it;
+        // it is a Postgres-only failure.
+      }, { isolationLevel: "serializable" }),
     );
   },
   { id: "votes.cast" },
@@ -3873,6 +3912,29 @@ export const listMyVotes = query(
  * exactly what a restricted bug is hiding.
  */
 async function notifyBugChange(
+  bug: BugRow,
+  actorId: string,
+  title: string,
+  body?: string,
+): Promise<void> {
+  // The WHOLE body is guarded, not just the insert.
+  //
+  // This runs after the caller's transaction has committed, and it makes five
+  // more database reads (CC list, watchers, users, canViewBug's own reads, the
+  // unread recount). Only the insert error was swallowed, so a transient
+  // failure in any of the others threw out of a mutation that had ALREADY
+  // committed: comments.add would return 500 with the comment saved, and a
+  // retry -- by a client or a person -- would file it a second time. A fanout
+  // hiccup became duplicated user data, which is exactly what the old comment
+  // promised could not happen.
+  try {
+    await fanOutBugChange(bug, actorId, title, body);
+  } catch (error) {
+    console.warn(`notification fanout failed for bug ${bug.id}: ${String(error)}`);
+  }
+}
+
+async function fanOutBugChange(
   bug: BugRow,
   actorId: string,
   title: string,
