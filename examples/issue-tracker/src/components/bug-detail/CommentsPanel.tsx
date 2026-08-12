@@ -45,7 +45,7 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
     <li className={`comment ${comment.isPrivate ? "private" : ""}`} id={`comment-${comment.commentNumber}`}>
       <div className="comment-head">
         <span className="comment-number">#{comment.commentNumber}</span>
-        <span className="comment-author">{comment.authorId}</span>
+        <span className="comment-author">{comment.author?.name || comment.author?.handle || comment.authorId}</span>
         <span className="comment-when">{formatDate(comment.created_at)}</span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
         {comment.workTimeMinutes > 0 ? (

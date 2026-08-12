@@ -1131,8 +1131,25 @@ export const getBug = query(
       db.products.get(bug.productId),
       db.components.get(bug.componentId),
     ]);
+    // Everyone this bug names, resolved once. The page showed raw ids for the
+    // assignee, reporter and QA contact while the CC panel beside them showed
+    // real names, because `cc.list` joins its user and nothing else did.
+    // `publicUserView`, since `bugs.get` is anonymous.
+    const people = Object.fromEntries(
+      (
+        await readByIds(
+          db.users,
+          // assignee and QA contact are both nullable; an unset one must not
+          // become a null inside the `$in` list.
+          [bug.assigneeId, bug.reporterId, bug.qaContactId].filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          ),
+        )
+      ).map((user) => [user.id, publicUserView(user)]),
+    );
     return {
       bug,
+      people,
       product: must(product),
       component: must(component),
       // The history is filtered too. Several activity rows carry ANOTHER
@@ -1729,9 +1746,17 @@ export const listComments = query(
             ],
           }
         : { bugId, isPrivate: false };
-    return must(
+    const rows = must(
       await db.comments.find(filter).sort({ commentNumber: 1 }).limit(500),
     );
+    // The author is resolved here rather than left to the client, following
+    // `cc.list`. A comment is attributable or it is not worth much, and the
+    // client cannot do this itself on a public bug: `users.list` requires
+    // authentication, so an anonymous reader would be stuck with the id.
+    // `publicUserView` and not the row -- this is reachable anonymously.
+    const authors = await readByIds(db.users, rows.map((row) => row.authorId));
+    const byId = new Map(authors.map((user) => [user.id, publicUserView(user)]));
+    return rows.map((row) => ({ ...row, author: byId.get(row.authorId) ?? null }));
   },
   { id: "comments.list" },
 );

@@ -87,6 +87,7 @@ export function BugDetailPage({ id }: { id: string }) {
           <div className="bug-detail-main">
             <FieldsPanel
               bug={detail.bug}
+              people={detail.people}
               product={product}
               component={component}
               productDetail={productDetail}

@@ -5,6 +5,7 @@ import { PriorityBadge, SeverityBadge } from "../Badges";
 import { errorMessage, toPromise } from "../rpc";
 import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
+import { personName, type PeopleMap } from "./people";
 import { StatusControl } from "./StatusControl";
 
 type Bug = BugDetail["bug"];
@@ -72,7 +73,15 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
   );
 }
 
-function AssigneeControl({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) => void }) {
+function AssigneeControl({
+  bug,
+  people,
+  onUpdated,
+}: {
+  bug: Bug;
+  people: PeopleMap;
+  onUpdated: (b: Bug) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
@@ -94,7 +103,7 @@ function AssigneeControl({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) => 
     <div className="field-block">
       <div className="field-block-head">
         <span className="field-label">Assignee</span>
-        <span>{bug.assigneeId ?? "unassigned"}</span>
+        <span>{personName(bug.assigneeId, people, "unassigned")}</span>
         <button type="button" className="btn ghost small" disabled={busy} onClick={() => setPicking((v) => !v)}>
           Change
         </button>
@@ -252,6 +261,7 @@ function GeneralField({
 
 export function FieldsPanel({
   bug,
+  people,
   product,
   component,
   productDetail,
@@ -260,6 +270,7 @@ export function FieldsPanel({
   onUpdated,
 }: {
   bug: Bug;
+  people: PeopleMap;
   product: BugProduct;
   component: BugComponent;
   productDetail: ProductDetail | null;
@@ -275,7 +286,7 @@ export function FieldsPanel({
 
       <StatusControl bug={bug} onUpdated={onUpdated} />
       <SeverityPriority bug={bug} onUpdated={onUpdated} />
-      <AssigneeControl bug={bug} onUpdated={onUpdated} />
+      <AssigneeControl bug={bug} people={people} onUpdated={onUpdated} />
 
       <div className="field-row readonly">
         <span>
@@ -284,8 +295,8 @@ export function FieldsPanel({
         <span>
           Component: <b>{component.name}</b>
         </span>
-        <span>Reporter: {bug.reporterId}</span>
-        <span>QA contact: {bug.qaContactId ?? "--"}</span>
+        <span>Reporter: {personName(bug.reporterId, people)}</span>
+        <span>QA contact: {personName(bug.qaContactId, people)}</span>
       </div>
 
       <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
