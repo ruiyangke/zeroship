@@ -764,6 +764,37 @@ GP_SIGNING_KEY=/tmp/gp-signing-key.pem
 openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
 chmod 600 "$GP_SIGNING_KEY"
 
+# WHY control gets --audit-retention-check-secs 1 below.
+#
+# Step 2c runs control under zeroship_control and diffs its ERROR count against
+# the same binary on the superuser DSN. That catches a missing grant only for
+# crons that actually TICK inside the step's few-second window. Measured
+# 2026-08-12, the default cadences are:
+#      1s  workflow_engine, workflow_schedules, workflow_signal_fanout
+#    300s  billing_notify, billing_reconcile (safety net)
+#    900s / 1800s  workflow_blob_gc (ref / orphan sweeps)
+#   3600s  deploy_retention, spend_recompute, workflow_retention,
+#          audit_retention, billing_reconcile, dunning, orphaned_app_reaper,
+#          stripe_reconcile
+# so step 2c could only ever observe THREE of fifteen. Of the twelve it cannot
+# reach, exactly two have a cadence knob at all, and audit_retention is one --
+# a DELETE-heavy sweep of precisely the class that produced #319 (auth could
+# never delete token_revocations) and the five that followed it.
+#
+# MEASURED that the flag is honoured, not assumed from its name: control
+# launched with it echoes the value in its own startup line --
+#   "control audit_retention cron starting","retention_months":12,"check_secs":1
+#
+# WHAT THIS DOES NOT DO: it adds no assertion. A SUCCESSFUL sweep is SILENT
+# (cron/audit_retention.rs logs only `if total > 0`), so on a healthy run this
+# changes nothing observable. It only widens what step 2c's existing error-count
+# diff can see: a tick that fails on a missing privilege logs at ERROR, and that
+# is what the diff counts.
+# NOT YET PROVEN BY A RUN: that a revoked grant actually surfaces in that diff.
+# The mechanism is read, not executed. Prove it the way #322 did -- revoke the
+# real grant and watch the count move -- before treating this as coverage
+# rather than reach.
+
 # `--workers` is NOT optional decoration, and its absence was invisible for as
 # long as this harness existed. crates/control/src/main.rs:81 declares it with
 # `default_value = "http://localhost:8080"`, and this harness runs its worker on
@@ -776,6 +807,7 @@ chmod 600 "$GP_SIGNING_KEY"
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
   --workers "http://localhost:$WORKER_PORT" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --audit-retention-check-secs 1 \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
   --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
