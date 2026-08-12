@@ -98,7 +98,12 @@ export function BugListPage() {
       {/* No page-level "New bug": the shell header carries it on every
           page, and two of them side by side was the first thing the
           screenshot showed. */}
-      <PageHeader title="Bugs" />
+      {/* Compound parts, not a `title` prop -- PageHeader is a container and
+          passing title rendered nothing at all, which reads as a missing
+          heading rather than a wrong API. */}
+      <PageHeader>
+        <PageHeader.Title>Bugs</PageHeader.Title>
+      </PageHeader>
 
       <form
         className="filter-bar"
@@ -223,8 +228,6 @@ export function BugListPage() {
             <BugResultsTable
               bugs={bugs}
               columns={columns}
-              allowInlineStatus
-              onStatusChanged={reload}
             />
             <div className="pager">
               <button

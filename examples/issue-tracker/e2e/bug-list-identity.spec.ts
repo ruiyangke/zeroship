@@ -68,7 +68,7 @@ test("every bug in the list shows a distinct id", async ({ page, baseURL, contex
   await page.getByPlaceholder("Search summary").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
 
-  const idCells = page.locator("table tbody tr td[data-col='id']");
+  const idCells = page.locator("table tbody tr td[data-column='id']");
   await expect(idCells).toHaveCount(created.length);
 
   const shown = (await idCells.allTextContents()).map((t) => t.trim());

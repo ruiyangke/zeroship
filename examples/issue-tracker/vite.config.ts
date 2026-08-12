@@ -20,6 +20,21 @@ export default defineConfig({
   // Migration-first build: the plugin reads `migrations/` and the generated
   // descriptor artifacts. No schema plugin option is needed.
   plugins: [react(), zeroship({ devServerPort })],
+  resolve: {
+    // ONE React instance, always.
+    //
+    // `@zeroship/ui` is a workspace package, so vite serves its built bundle
+    // from outside this package's tree (a `/@fs/` URL) and its bare `react`
+    // import resolves against `sdks/ui/node_modules`. That is a different
+    // module instance even when it is the same version on disk, and the
+    // second copy has its own hook dispatcher: every component from the
+    // library threw "Invalid hook call ... mismatching versions of React and
+    // the renderer" and the whole page failed to render.
+    //
+    // The symptom named React versions, which sent me looking at the catalog
+    // pins -- both were already 19.2.5. Two instances, not two versions.
+    dedupe: ["react", "react-dom"],
+  },
   server: {
     port: webPort,
     strictPort: true,

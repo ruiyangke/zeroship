@@ -1,10 +1,11 @@
 // Shared results table used by the bug list, advanced/quick search results,
 // and the "my dashboard" sections. Presentation only -- callers own data
 // fetching, filtering, and (for the bug list) which columns are visible.
+import { DataTable, type DataTableColumn } from "@zeroship/ui";
+
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
-import { useBugLookups } from "./useBugLookups";
-import { InlineStatusEdit } from "./InlineStatusEdit";
 import type { Bug } from "./types";
+import { useBugLookups } from "./useBugLookups";
 
 export type BugColumnKey =
   | "id"
@@ -34,17 +35,6 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
 /**
  * The identifier a person reads: PARSER-12.
  *
- * This replaced a truncated UUID. That form took the FIRST six characters of
- * the id body, and a typed_id is a time-ordered UUIDv7 in base62, so the
- * leading characters encode the timestamp: measured against the dev database,
- * 61 bugs rendered as 11 distinct strings. Taking the tail instead made them
- * unique but not meaningful -- `bug_...4ewAeC` is no more quotable than the
- * whole thing.
- *
- * A per-product sequence is both. It is short, ordered, sayable out loud, and
- * survives being copied into a commit message, which is the actual job of the
- * column.
- *
  * Falls back to the UUID when the product key has not resolved yet, rather
  * than rendering a bare number: "12" on its own belongs to no product.
  */
@@ -63,68 +53,102 @@ function formatDate(ms: number): string {
   });
 }
 
+/**
+ * Built on the design system's DataTable rather than a hand-rolled `<table>`.
+ *
+ * The status column is a BADGE, not a select. Every row used to carry an
+ * always-live dropdown, so a screen of twelve bugs was twelve form controls
+ * and the eye had nowhere to rest -- the control competed with the data it
+ * described. Changing status is a deliberate act and belongs on the bug page,
+ * which is also the only place that can ask for the resolution a close
+ * requires.
+ */
 export function BugResultsTable({
   bugs,
   columns,
-  allowInlineStatus = false,
-  onStatusChanged,
+  caption,
 }: {
   bugs: readonly Bug[];
   columns: readonly BugColumnKey[];
-  allowInlineStatus?: boolean;
-  onStatusChanged?: (bug: Bug) => void;
+  caption?: string;
 }) {
   // Resolved HERE rather than passed in. These were props, and three of the
   // four call sites left them out, so those tables printed raw ids with
-  // nothing failing. Making them required only moved the problem: the pages
-  // call the hook where the rows are not loaded yet. The table is the one
-  // place that always knows which ids are on screen.
+  // nothing failing. The table is the one place that always knows which ids
+  // are on screen.
   const { productsById, productKeysById, usersById } = useBugLookups(bugs);
+
+  const byKey: Record<BugColumnKey, DataTableColumn<Bug>> = {
+    id: {
+      key: "id",
+      header: "ID",
+      cell: (bug) => (
+        <a href={`#/bugs/${bug.id}`} className="bug-link" title={bug.id}>
+          {bugLabel(bug, productKeysById)}
+        </a>
+      ),
+    },
+    status: { key: "status", header: "Status", cell: (bug) => <StatusBadge status={bug.status} /> },
+    resolution: {
+      key: "resolution",
+      header: "Resolution",
+      cell: (bug) => <ResolutionBadge resolution={bug.resolution ?? null} />,
+    },
+    severity: {
+      key: "severity",
+      header: "Severity",
+      cell: (bug) => <SeverityBadge severity={bug.severity} />,
+    },
+    priority: {
+      key: "priority",
+      header: "Priority",
+      cell: (bug) => <PriorityBadge priority={bug.priority} />,
+    },
+    product: {
+      key: "product",
+      header: "Product",
+      cell: (bug) => productsById[bug.productId] ?? bug.productId,
+    },
+    summary: {
+      key: "summary",
+      header: "Summary",
+      cell: (bug) => (
+        <a href={`#/bugs/${bug.id}`} className="bug-summary-link">
+          {bug.summary}
+        </a>
+      ),
+    },
+    assignee: {
+      key: "assignee",
+      header: "Assignee",
+      cell: (bug) => (bug.assigneeId ? usersById[bug.assigneeId] ?? bug.assigneeId : "--"),
+    },
+    reporter: {
+      key: "reporter",
+      header: "Reporter",
+      cell: (bug) => usersById[bug.reporterId] ?? bug.reporterId,
+    },
+    updated: { key: "updated", header: "Updated", cell: (bug) => formatDate(bug.updated_at) },
+  };
+
   return (
-    <div className="table-wrap">
-      <table className="bug-table">
-        <thead>
-          <tr>
-            {columns.map((key) => (
-              <th key={key}>{ALL_BUG_COLUMNS.find((c) => c.key === key)?.label ?? key}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {bugs.map((bug) => (
-            <tr key={bug.id}>
-              {columns.map((key) => (
-                <td key={key} data-col={key}>
-                  {key === "id" && (
-                    <a href={`#/bugs/${bug.id}`} className="bug-link" title={bug.id}>
-                      {bugLabel(bug, productKeysById)}
-                    </a>
-                  )}
-                  {key === "status" &&
-                    (allowInlineStatus ? (
-                      <InlineStatusEdit bug={bug} onChanged={onStatusChanged} />
-                    ) : (
-                      <StatusBadge status={bug.status} />
-                    ))}
-                  {key === "resolution" && <ResolutionBadge resolution={bug.resolution ?? null} />}
-                  {key === "severity" && <SeverityBadge severity={bug.severity} />}
-                  {key === "priority" && <PriorityBadge priority={bug.priority} />}
-                  {key === "product" && (productsById[bug.productId] ?? bug.productId)}
-                  {key === "summary" && (
-                    <a href={`#/bugs/${bug.id}`} className="bug-summary-link">
-                      {bug.summary}
-                    </a>
-                  )}
-                  {key === "assignee" &&
-                    (bug.assigneeId ? usersById[bug.assigneeId] ?? bug.assigneeId : "--")}
-                  {key === "reporter" && (usersById[bug.reporterId] ?? bug.reporterId)}
-                  {key === "updated" && formatDate(bug.updated_at)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      columns={columns.map((key) => byKey[key])}
+      data={[...bugs]}
+      rowKey={(bug) => bug.id}
+      // The SERVER filters, sorts and pages -- searchBugs takes text, sortBy
+      // and limit/offset. Leaving the managed engine on gave the page two
+      // search boxes and two paginators disagreeing with each other: the
+      // built-in one showing "1-10 of 25" over a set the server had already
+      // narrowed to 25 of hundreds.
+      searchable={false}
+      paginated={false}
+      manualSorting
+      manualFiltering
+      manualPagination
+      // A caption or an aria-label is REQUIRED -- the component dev-warns and
+      // the table is left unnamed for a screen reader without one.
+      aria-label={caption ?? "Bugs"}
+    />
   );
 }
