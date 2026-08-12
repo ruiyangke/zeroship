@@ -934,3 +934,151 @@ fn armed_fault_claim_is_released_when_a_thread_exits_without_disarming() {
         "thread exit released the armed-fault claim (no leak)"
     );
 }
+
+// ── PROBE: a SUPPORTED affinity holding a MISMATCHED live storage class ──────
+//
+// `docs/security-model.md`: "A SQLite backfill additionally requires an exact
+// ordered, non-null primary or unique candidate-key tuple with supported declared
+// `INTEGER` or `TEXT` affinity. Every live cursor value must use the matching
+// storage class."
+//
+// Every rejection arm above measures the first sentence - the DECLARED affinity
+// (REAL declared, non-UTF8 text). None measures the second, which is a different
+// claim and the one SQLite's dynamic typing makes possible: a column DECLARED
+// `INTEGER` accepts a TEXT value whenever the text will not convert losslessly,
+// so `k INTEGER` can hold `'abc'` and still satisfy its UNIQUE index.
+//
+// That matters for a cursor because SQLite orders ACROSS storage classes
+// (NULL < INTEGER/REAL < TEXT < BLOB), so a mixed-class key column orders by class
+// first. A resume that bound a saved INTEGER cursor and asked for `k > ?` would
+// step over every TEXT-classed row silently - they sort after all integers - and
+// the run would report success having skipped them.
+#[compio::test]
+async fn sqlite_backfill_rejects_a_text_value_living_in_an_integer_cursor() {
+    let _g = serial();
+    let p = paths("bf_mixed_class");
+    let be = backend(&p);
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    // `k` is INTEGER-affinity and UNIQUE but NOT the rowid alias, so SQLite stores
+    // a non-convertible text value as TEXT rather than coercing it.
+    actor
+        .exec(
+            "CREATE TABLE mixed (\
+               k INTEGER NOT NULL UNIQUE, \
+               val INTEGER NOT NULL, \
+               done INTEGER NOT NULL DEFAULT 0); \
+             INSERT INTO mixed (k, val, done) VALUES (1, 1, 0), (2, 2, 0), ('abc', 3, 0)",
+        )
+        .await
+        .expect("seed a mixed-storage-class cursor column");
+
+    // The setup control: SQLite really did keep one value as TEXT. Without this the
+    // arm could pass on a table where everything coerced to INTEGER, which is a
+    // different (and safe) shape entirely.
+    assert_eq!(
+        scalar_i64(&be, "SELECT count(*) FROM mixed WHERE typeof(k) = 'text'").await,
+        1,
+        "the fixture needs one genuinely TEXT-classed value in the INTEGER column"
+    );
+
+    let spec = BackfillSpec {
+        schema: "main".to_string(),
+        table: "mixed".to_string(),
+        cursor_columns: vec!["k".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "mixed_k_is_immutable".to_string(),
+        },
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
+        per_row: Default::default(),
+        filter: Some("\"done\" = 0".to_string()),
+        name: "increment_mixed".to_string(),
+    };
+
+    let error = be
+        .run_backfill_bounded_sqlite(
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+        )
+        .await
+        .expect_err("a mixed-storage-class cursor column must be refused");
+    match &error {
+        BackfillError::CursorTupleUnavailable { reason, .. } => assert!(
+            reason.contains("runtime storage class") && reason.contains("integer"),
+            "the refusal must name the RUNTIME storage class rather than the declared \
+             affinity, got {reason:?}"
+        ),
+        other => panic!("expected CursorTupleUnavailable, got {other:?}"),
+    }
+
+    // Refused BEFORE mutation, which is what makes the rule safe rather than
+    // merely noisy: the two well-typed rows were reachable and still untouched.
+    assert_eq!(
+        scalar_i64(&be, "SELECT count(*) FROM mixed WHERE done <> 0").await,
+        0,
+        "the storage-class rejection must land before any row is written"
+    );
+}
+
+/// The control for the arm above: the SAME shape with every value well-typed
+/// still backfills.
+///
+/// Without it, "mixed classes are refused" also holds for a build that refused
+/// every non-rowid INTEGER cursor, and the arm above would be reporting a working
+/// rule over a dead one.
+#[compio::test]
+async fn sqlite_backfill_accepts_a_non_rowid_integer_cursor_when_every_value_matches() {
+    let _g = serial();
+    let p = paths("bf_uniform_class");
+    let be = backend(&p);
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE uniform (\
+               k INTEGER NOT NULL UNIQUE, \
+               val INTEGER NOT NULL, \
+               done INTEGER NOT NULL DEFAULT 0); \
+             INSERT INTO uniform (k, val, done) VALUES (1, 1, 0), (2, 2, 0), (3, 3, 0)",
+        )
+        .await
+        .expect("seed a uniformly INTEGER-classed cursor column");
+
+    let spec = BackfillSpec {
+        schema: "main".to_string(),
+        table: "uniform".to_string(),
+        cursor_columns: vec!["k".to_string()],
+        cursor_stability: CursorStability::ExternalInvariant {
+            name: "uniform_k_is_immutable".to_string(),
+        },
+        cursor_contract: None,
+        batch_size: 1,
+        set_clause: "\"val\" = (\"val\" + 1), \"done\" = 1".to_string(),
+        per_row: Default::default(),
+        filter: Some("\"done\" = 0".to_string()),
+        name: "increment_uniform".to_string(),
+    };
+
+    let out = be
+        .run_backfill_bounded_sqlite(
+            &spec,
+            &spec.set_clause,
+            spec.filter.as_deref(),
+            "tester",
+            None,
+        )
+        .await
+        .expect("a uniformly typed non-rowid INTEGER cursor is supported");
+    assert!(out.complete, "the run completed");
+    assert_eq!(out.rows_updated, 3, "every row was backfilled");
+    assert_eq!(
+        scalar_i64(&be, "SELECT count(*) FROM uniform WHERE val <> k + 1").await,
+        0,
+        "every row incremented exactly once"
+    );
+}
