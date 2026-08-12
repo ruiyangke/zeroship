@@ -1,0 +1,19 @@
+[package]
+name = "zeroship-config-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macros for zeroship's canonical configuration declarations"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+prettyplease = "0.2"
+
+[lints]
+workspace = true

@@ -4,6 +4,21 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship control plane — admin API, internal API, Postgres, VFS"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-control"
+class = "platform"
+reason = "Initial long-running control-plane service in the server configuration scope."
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-mock-stripe"
+class = "test-dev-tool"
+reason = "Standalone Stripe mock used only by billing and metering end-to-end tests."
+
+[[package.metadata.zeroship-config.targets]]
+target = "dev-provision"
+class = "test-dev-tool"
+reason = "Development and CI provisioning helper that is never deployed as a service."
+
 [[bin]]
 name = "zeroship-control"
 path = "src/main.rs"

@@ -1,0 +1,31 @@
+[package]
+name = "zeroship-config-contract"
+version = "0.1.0"
+edition = "2024"
+description = "Non-shipped configuration naming contract checker"
+publish = false
+
+[[bin]]
+name = "zeroship-config-contract"
+path = "src/main.rs"
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-config-contract"
+class = "test-dev-tool"
+reason = "Non-shipped configuration contract checker."
+
+[dependencies]
+zeroship-core = { workspace = true }
+clap = { workspace = true }
+cargo_metadata = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+syn = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+trybuild = "1.0"
+
+[lints]
+workspace = true

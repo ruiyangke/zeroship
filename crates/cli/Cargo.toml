@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship CLI — build, serve, deploy, inspect"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship"
+class = "creator-cli"
+reason = "Creator CLI and local serve flow are outside the server configuration overlay."
+
 [[bin]]
 name = "zeroship"
 path = "src/main.rs"

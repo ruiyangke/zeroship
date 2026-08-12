@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship gateway — auth, rate limit, proxy to workers"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-gate"
+class = "platform"
+reason = "Initial long-running gateway service in the server configuration scope."
+
 [[bin]]
 name = "zeroship-gate"
 path = "src/main.rs"

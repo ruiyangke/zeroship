@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship auth service — login/consent UI, identity flows, native OIDC OP"
 
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-auth"
+class = "platform"
+reason = "Initial long-running authentication service in the server configuration scope."
+
 [[bin]]
 name = "zeroship-auth"
 path = "src/main.rs"
