@@ -588,6 +588,57 @@ jobs:
           PG_USER: postgres
           PG_PASS: zeroship
 
+  # The live-Postgres gate for zeroship-plugin-db: 111 tests that ran in NO job
+  # at all until 2026-08-12. The `rust` job skips the target for want of
+  # `test-helpers` and defers it to "the other live-database gates", but
+  # billing-gate runs control and migrated by name and this crate declares no
+  # `live-db-tests` feature, so the binary fell between the two. What that cost
+  # is not hypothetical: `b2_ref_creates_foreign_key` asserted the FK default
+  # the project decided AGAINST and sat red unnoticed (fixed a182cc22a).
+  #
+  # Postgres is an explicit `docker run`, NOT a `services:` entry, and that is
+  # forced rather than stylistic: `-c wal_level=logical` is a command argument
+  # and GitHub service containers accept none. Same reason golden-path and
+  # dev-vs-deployed launch theirs this way.
+  #
+  # WITHOUT that flag ELEVEN TESTS SKIP AND STILL COUNT AS PASSED. Measured on
+  # two servers differing in nothing else, both printing the IDENTICAL
+  # `103 passed; 0 failed; 8 ignored` and both clearing the floor:
+  #     logical  -> exit 0, census 1 allowlisted / 0 not
+  #     replica  -> exit 1, census 12 total / 11 not allowlisted
+  # The census is the ONLY thing that tells them apart, which is why the script
+  # treats it as a failure rather than a report.
+  plugin-db-live-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # pgvector because two tests build vector columns, and the extension has
+      # to be CREATED in the target database, not merely available: a fresh
+      # database with it available still fails `type "vector" does not exist`.
+      - name: Start Postgres (pgvector, logical WAL)
+        run: |
+          docker run -d --name plugin-db-pg -p 5441:5432 \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
+            -e POSTGRES_DB=zeroship \
+            pgvector/pgvector:pg16 -c wal_level=logical
+          for i in $(seq 1 40); do
+            if docker exec plugin-db-pg pg_isready -U postgres; then
+              docker exec plugin-db-pg psql -U postgres -d zeroship \
+                -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "postgres failed to become ready" >&2; docker logs plugin-db-pg; exit 1
+      - name: Run the plugin-db live-database gate
+        run: tests/run_plugin_db_live_suite.sh
+        env:
+          PG_TEST_URL: postgres://postgres:zeroship@127.0.0.1:5441/zeroship
+
   # Gate the SDK type-level + unit suites. In particular this runs
   # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`
   # `@ts-expect-error` structural-safety / names-stay-strings suite) and its
