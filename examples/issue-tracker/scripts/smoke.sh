@@ -482,6 +482,24 @@ AFTER_WARM="$(bob notifications.unreadCount | jget 'json.count')"
   && pass "the unread count is fresh after a notification even with a warm cache ($WARM -> $AFTER_WARM)" \
   || fail "stale unread count: the KV cache was not refreshed by the fanout" "warm=$WARM after=$AFTER_WARM"
 
+
+# Fanout used to live at call sites, and so covered 2 of the 10 mutations that
+# change a bug. bugs.reassign was silent -- a new assignee was never told they
+# had been given a bug, which is the most useful notification a tracker sends.
+REASSIGN_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
+call bugs.reassign "{\"id\":\"$BUG\",\"assigneeId\":\"$BOB_ID\"}" >/dev/null
+[ "$(bob notifications.unreadCount | jget 'json.count')" -gt "$REASSIGN_BEFORE" ] 2>/dev/null \
+  && pass "reassigning a bug notifies the new assignee" \
+  || fail "bugs.reassign sent no notification to the new assignee" \
+          "before=$REASSIGN_BEFORE after=$(bob notifications.unreadCount | jget 'json.count')"
+
+# A no-op update must NOT wake anyone: the fanout is driven by the fields that
+# actually differed, not by the call happening.
+NOOP_BEFORE="$(bob notifications.unreadCount | jget 'json.count')"
+call bugs.reassign "{\"id\":\"$BUG\",\"assigneeId\":\"$BOB_ID\"}" >/dev/null
+[ "$(bob notifications.unreadCount | jget 'json.count')" = "$NOOP_BEFORE" ] \
+  && pass "re-assigning to the same user notifies nobody" \
+  || fail "a no-op update sent a notification"
 echo "see also"
 # The bugSeeAlso table had zero server references: schema described the
 # feature, nothing implemented it.

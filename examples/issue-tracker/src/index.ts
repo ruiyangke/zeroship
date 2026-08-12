@@ -825,13 +825,30 @@ async function updateBugWithHistory(
           logicalBugValue(field, value),
       ),
     );
-    if (Object.keys(patch).length === 0) return normalizeBugRow(before);
+    if (Object.keys(patch).length === 0) return { row: normalizeBugRow(before), changed: [] };
     const after = await tx.bugs.update(id, patch);
     if (!after) notFound("Bug");
     await recordChanges(tx.activities, id, actorId, before, after, trackedFields);
-    return normalizeBugRow(after);
+    return {
+      row: normalizeBugRow(after),
+      changed: Object.keys(patch).filter((field) => trackedFields.includes(field)),
+    };
   }, { isolationLevel: "serializable" });
-  return must(result);
+
+  const { row, changed } = must(result);
+
+  // Fanout lives HERE rather than at each call site, because putting it at
+  // call sites is exactly how it ended up on two of the ten mutations that
+  // change a bug. bugs.reassign was silent, so a new assignee was never told
+  // they had been given a bug -- the single most useful notification a tracker
+  // sends.
+  //
+  // Nothing is sent when the patch was empty: `changed` is derived from the
+  // fields that actually differed, so a no-op update does not wake anyone.
+  if (changed.length > 0) {
+    await notifyBugChange(row, actorId, `${row.summary} was updated (${changed.join(", ")})`);
+  }
+  return row;
 }
 
 function rejectUnsupportedBugNullClears(
@@ -1331,11 +1348,9 @@ export const resolveBug = mutation(
       },
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
     );
-    await notifyBugChange(
-      updated,
-      actor.id,
-      `${updated.summary} was resolved as ${resolution}`,
-    );
+    // No explicit fanout here any more: updateBugWithHistory sends one for
+    // every field it actually changed, and calling it again would notify
+    // twice for a single resolve.
     return updated;
   },
   { id: "bugs.resolve" },
