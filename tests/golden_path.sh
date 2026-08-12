@@ -3023,13 +3023,26 @@ SQL
   #
   # The 400 arm above cannot separate "the error rail does not deliver" from
   # "no JS ever ran", because an input rejection is refused BEFORE the handler.
-  # `boom` throws INSIDE the handler, so the isolate demonstrably executed and
-  # fetch-handler.ts:381's console.error is unambiguously on the path.
+  # `boom` throws INSIDE the handler, so the isolate demonstrably executed.
   #
-  # PREDICTION ON RECORD, written before the first run of this arm: the throw's
-  # error line DOES reach the creator, and the 400 result above is therefore
-  # pre-isolate rejection rather than a broken rail. If this arm is ALSO empty,
-  # the rail genuinely does not deliver and the finding is the serious version.
+  # THE PREDICTION IS RESOLVED, and half of it was wrong. It read: "the throw's
+  # error line DOES reach the creator ... fetch-handler.ts's console.error is
+  # unambiguously on the path." The second clause is FALSE, established by
+  # reading the control flow rather than by inferring from the empty count:
+  #   sdks/bootstrap/src/fetch-handler.ts:216 is `await dispatch(...)` with NO
+  #   try/catch around it. Every errResponse() call site -- 131, 141, 151, 162,
+  #   174, 192 -- is BEFORE that line (wireId, input decode, method, module
+  #   import, schema init). errResponse is logRawError's only caller.
+  # So a creator handler throw propagates out of dispatch UNCAUGHT and is
+  # handled in Rust (core/runtime.rs handler-threw arm). The rpc marker covers
+  # FRAMEWORK-level failures only and CANNOT appear for a handler throw.
+  #
+  # Hence LOG_BOOM is expected to be 0 here and is printed as an observation,
+  # not an assertion: the OR below is carried entirely by the app-text arm,
+  # which is the load-bearing one. Do NOT read `rpc error marker x0` as a
+  # symptom -- it misled this pilot for two ticks while the comment above
+  # asserted the opposite. If LOG_BOOM ever goes non-zero, something routed a
+  # handler throw through the framework rail and that is worth understanding.
   LOG_BOOM_CODE=$(curl -s -o /tmp/gp-boom-resp.json -w '%{http_code}' --max-time 15 \
     "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
     -H "X-Api-Key: $API_KEY" 2>/dev/null)
