@@ -3576,6 +3576,46 @@ else
       crates/plugin-db/src/drop_namespace.rs and the migrated apply path."
   fi
 
+  # PUT THE SECOND CASCADE BLOCKER IN PLAY, so a fix for the first one cannot
+  # produce a false all-clear here.
+  #
+  # There are TWO append-only triggers on cascade edges out of zeroship.apps, and
+  # NEITHER honours the `zeroship.audit_retention` GUC hatch that the three
+  # platform audit tables have:
+  #   migrated_migration_audit_append_only   <- what this step hits today
+  #   plan_change_events_immutable_trg       <- only fires if the app has rows
+  #
+  # MEASURED 2026-08-12 on a scratch database, one variable, isolated from the
+  # first blocker (no migrated_migration_audit rows in either arm):
+  #   app with NO plan_change_events row  -> DELETE succeeds, 0 rows remaining
+  #   identical app WITH one such row     -> ERROR: plan_change_events is
+  #     append-only (no UPDATE/DELETE) - the proration timeline is frozen
+  #     CONTEXT: DELETE FROM ONLY "zeroship"."plan_change_events" WHERE $1 = "app_id"
+  # Postgres names the cascade edge itself, so which trigger fired is observed.
+  #
+  # WHY SEED IT HERE. crates/control/src/proration.rs:188 INSERTs one of these on
+  # every plan change, so ANY app that has been on a paid plan carries them. The
+  # scaffold app has never changed plan, so without this line the harness would
+  # go GREEN the moment blocker 1 is fixed -- while real apps with plan changes
+  # stayed broken. That is a false all-clear, not missing coverage, and it is the
+  # more dangerous of the two.
+  #
+  # to_plan_id is taken from the app's OWN plan_id so this cannot fail on the
+  # plans FK, and the SELECT form inserts nothing if the app is already gone.
+  docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "insert into zeroship.plan_change_events (id, app_id, period, to_plan_id, effective_at)
+     select 'gp_pce_$SC_APP_ID', id, DATE '2026-08-01', plan_id, NOW()
+     from zeroship.apps where id='$SC_APP_ID' on conflict (id) do nothing" >/dev/null 2>&1
+  DEL_PCE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  [ "${DEL_PCE:-0}" -ge 1 ] 2>/dev/null \
+    && pass "second cascade blocker armed: app carries $DEL_PCE plan_change_events row(s)" \
+    || fail "could not arm the second cascade blocker (plan_change_events rows=$DEL_PCE).
+      Without it a fix for migrated_migration_audit alone turns this step GREEN
+      while real apps that have changed plan stay broken. Check the insert above:
+      billing_period is a DOMAIN OVER DATE, not an enum, and to_plan_id must
+      reference an existing zeroship.plans row."
+
   # --- THE DELETE, over the real HTTP surface with the creator's own PAT -----
   DEL_BODY=$(curl -s -o /tmp/gp-delete.json -w '%{http_code}' --max-time 20 \
     -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$SC_APP_ID" \
@@ -3964,7 +4004,13 @@ gp_close_step
 # beside the five named privilege arms. Same delta reasoning as the raise above,
 # and the canary is proven to move in BOTH directions rather than being a
 # constant (26 when a pair is resolved, 28 when a risky one is added).
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-106}"
+# 106 -> 107, same day: step 12 now arms the SECOND cascade blocker
+# (plan_change_events) before its delete, and that arming is itself an asserted
+# outcome. Same delta reasoning as the two raises above. Note this arm asserts
+# SETUP, not product behaviour -- it goes red only if the seed fails to land,
+# which is exactly when the step below would silently stop testing what it
+# claims to test.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-107}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
