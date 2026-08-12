@@ -101,6 +101,44 @@ scope = "all"
 `;
 }
 
+/**
+ * A charter that additionally lets a migration declare a PARTITIONED table.
+ *
+ * Separate from {@link noInjectPolicy} for the same reason
+ * {@link createSchemaPolicy} is: `schema.partition` is a grant every other host arm
+ * does without, and adding it to the shared charter would widen all of them to
+ * serve one suite.
+ *
+ * @param projectSchema the schema the suite is confined to, named literally.
+ */
+export function partitionPolicy(projectSchema: string): string {
+  const scope = `{ include = [${JSON.stringify(projectSchema)}] }`;
+  return `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = ${scope}
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = ${scope}
+
+# The grant this charter exists for. Global by construction, like the other
+# non-namespace knobs.
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`;
+}
+
 export function noInjectPolicy(projectSchema: string): string {
   const scope = `{ include = [${JSON.stringify(projectSchema)}] }`;
   return `policy_version = 1
