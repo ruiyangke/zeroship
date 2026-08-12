@@ -617,9 +617,18 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerMultipleEvents,
+        // SQLite shares MySQL's constraint here, and used to be declared supported
+        // beside a message that already spelled out why it could not be. Both
+        // grammars take exactly one event; only PostgreSQL accepts `INSERT OR
+        // UPDATE`. Declaring SQLite supported meant the engine lowered the
+        // PostgreSQL spelling and SQLite's parser rejected it AFTER the migration's
+        // earlier statements had run - `near "OR": syntax error`, mid-deploy.
         DialectSupport::new(
             supported(RenderMode::Offline),
-            supported(RenderMode::Offline),
+            unsupported(
+                UNSUPPORTED,
+                "SQLite CREATE TRIGGER accepts exactly one trigger event",
+            ),
             unsupported(
                 UNSUPPORTED,
                 "MySQL CREATE TRIGGER accepts exactly one trigger event",

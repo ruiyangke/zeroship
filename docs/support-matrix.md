@@ -124,16 +124,16 @@
 | Structured trigger body | No[^24] | Yes | Yes |
 | `TRUNCATE` trigger event | Yes | No[^25] | No[^25] |
 | Statement-level trigger | Yes | No[^26] | No[^26] |
-| Multiple trigger events | Yes | No[^27] | Yes |
-| `INSTEAD OF` trigger timing | Yes | No[^28] | Yes |
-| Trigger `WHEN` predicate | Yes | No[^29] | Yes |
-| Trigger `RAISE IGNORE` | No[^30] | No[^31] | Yes |
+| Multiple trigger events | Yes | No[^27] | No[^28] |
+| `INSTEAD OF` trigger timing | Yes | No[^29] | Yes |
+| Trigger `WHEN` predicate | Yes | No[^30] | Yes |
+| Trigger `RAISE IGNORE` | No[^31] | No[^32] | Yes |
 
 ## PostgreSQL raw SQL
 
 | Feature | PostgreSQL 18 | MySQL 8 | SQLite |
 | --- | --- | --- | --- |
-| Raw SQL | Yes | No[^32] | No[^32] |
+| Raw SQL | Yes | No[^33] | No[^33] |
 
 ## Notes
 
@@ -164,8 +164,9 @@
 [^25]: SQLite/MySQL have no TRUNCATE trigger event
 [^26]: SQLite/MySQL triggers are row-level only
 [^27]: MySQL CREATE TRIGGER accepts exactly one trigger event
-[^28]: MySQL does not support INSTEAD OF triggers
-[^29]: MySQL triggers do not support WHEN predicates
-[^30]: Postgres trigger bodies are unsupported; named functions must be used
-[^31]: MySQL cannot render RAISE IGNORE
-[^32]: pgRaw statements are PostgreSQL-only
+[^28]: SQLite CREATE TRIGGER accepts exactly one trigger event
+[^29]: MySQL does not support INSTEAD OF triggers
+[^30]: MySQL triggers do not support WHEN predicates
+[^31]: Postgres trigger bodies are unsupported; named functions must be used
+[^32]: MySQL cannot render RAISE IGNORE
+[^33]: pgRaw statements are PostgreSQL-only
