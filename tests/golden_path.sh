@@ -525,6 +525,32 @@ ctl_upsert=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   && pass "zeroship_control holds UPDATE on app_vars + token_revocations (both are upsert targets)" \
   || fail "zeroship_control UPDATE on its upsert targets reads $ctl_upsert of 2: \`zeroship var set\` and/or grant-delete revocation cannot complete (#358)"
 
+# The last instance the sweep found, and the only one where the WRITING SERVICE
+# had to be established by elimination rather than read off the crate.
+#
+# crates/mailer/src/suppressions.rs:57 upserts zeroship.email_suppressions with
+# ON CONFLICT (email) DO UPDATE. The mailer is referenced from BOTH auth's and
+# control's main.rs, so the crate does not name its own role. The database did:
+# on the migrated schema only zeroship_auth holds INSERT on that table at all
+# (control/gateway/worker are ins=f), so auth is the only possible executor.
+# It is reached from crates/auth/src/ui/webhooks.rs:118 and :164 -- the provider
+# bounce/complaint handlers -- and BOTH swallow the error into a log line
+# reading "suppression add failed", so every webhook reported success while the
+# suppression list stayed empty.
+#
+# MEASURED 2026-08-12 as zeroship_auth, one variable:
+#   INSERT ... VALUES (...)                        -> INSERT 0 1
+#   INSERT ... VALUES (...) ON CONFLICT DO UPDATE  -> permission denied
+#
+# WHAT THIS DOES NOT CATCH: privilege, not behaviour, and not policy. Whether
+# alias-level suppression should exist is open separately (#126); this asserts
+# only that the write the code already attempts can land.
+auth_suppress=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "select count(*) from (values ('INSERT'),('UPDATE')) p(v) where has_table_privilege('zeroship_auth','zeroship.email_suppressions',p.v)" 2>/dev/null | tr -d '[:space:]')
+[ "$auth_suppress" = "2" ] \
+  && pass "zeroship_auth holds INSERT+UPDATE on email_suppressions (bounce suppression upserts)" \
+  || fail "zeroship_auth email_suppressions privileges read $auth_suppress of 2: bounce/complaint suppression is silently discarded (#359)"
+
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
