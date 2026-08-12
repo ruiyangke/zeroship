@@ -207,6 +207,35 @@ named after it.
   meaningless to anyone reading the history later. State the outcome, not how the work
   was scheduled: `chore(reorg): libs/ extraction`, not `chore(reorg) phase 5: ...`.
 
+## Names in code: no process markers either
+
+The rule above applies to anything that outlives the work: **test names, function
+and type names, module names, feature flags, and doc comments.** A commit subject
+is read once in `git log`; a test name is read every time it fails, by someone who
+was not in the room when the plan was written.
+
+Name the behaviour, not the schedule:
+
+```
+p9z_supervised_consumer_exits_on_slot_invalidated        <- what plan item was this?
+consumer_exits_when_its_replication_slot_is_dropped      <- what breaks if it fails
+```
+
+Two failure modes, both of which this repo has hit:
+
+- **The decoder ring is a single comment.** A plan token gets defined once, usually
+  in a doc comment on one file, and then used across many crates. Every other site
+  assumes you already read that one comment. Delete or reword it and the rest of
+  the tree becomes undecodable.
+- **Short plan tokens collide.** Independent plans reach for the same cheap
+  identifiers, so one token ends up meaning two unrelated things in one repo.
+  Grepping to decode a name then lands you confidently on the wrong plan.
+
+A plan identifier is fine in a proposal or an ADR, where the plan is the subject
+and the document is dated. It is not fine in a symbol, because the symbol outlives
+the plan. If a name needs a decoder, rename it; pre-launch there is no
+compatibility reason not to.
+
 ### Breaking changes
 
 Mark with `!` before the colon (`refactor(core)!: ...`). Do not use a `BREAKING CHANGE:`
