@@ -73,6 +73,11 @@ echo "  Docker Compose E2E ($NUM_WORKERS workers)"
 echo "============================================"
 echo ""
 
+# The stack now REQUIRES generated secrets; without them compose refuses to
+# render. Idempotent, never rotates.
+. "$(dirname "$0")/lib/dev_secrets.sh"
+ensure_dev_secrets || exit 1
+
 # --- Start cluster ---
 echo "=== Starting cluster ==="
 docker compose down -v > /dev/null 2>&1 || true

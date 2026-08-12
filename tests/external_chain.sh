@@ -227,6 +227,10 @@ NODE
 
 require_local_registry
 
+# compose now requires generated secrets to interpolate; idempotent.
+. "$(dirname "$0")/lib/dev_secrets.sh"
+ensure_dev_secrets || exit 1
+
 log "1. Verdaccio up"
 docker compose up -d verdaccio
 wait_for_registry
