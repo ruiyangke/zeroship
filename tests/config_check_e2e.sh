@@ -92,12 +92,40 @@ expect_stdout_contains() {
     fi
 }
 
+# An ABSENCE assertion over EMPTY output proves nothing: every needle is absent
+# from an empty file. Measured 2026-08-12 -- with `$BIN` pointing at a directory
+# with no binaries, all three call sites below passed, because the command never
+# produced a byte of stdout. Requiring stdout to be non-empty is what makes the
+# absence meaningful; it is the cheapest possible positive pair.
 expect_stdout_not_contains() {
     local needle="$1"
     local label="$2"
 
-    if grep -Fq "$needle" "$LAST_STDOUT"; then
+    if [ ! -s "$LAST_STDOUT" ]; then
+        fail "$label (stdout was EMPTY - an absence assertion over no output proves nothing)"
+    elif grep -Fq "$needle" "$LAST_STDOUT"; then
         fail "$label (unexpected $needle)"
+    else
+        pass "$label"
+    fi
+}
+
+# The strong form of expect_nonzero: the command must fail AND must say WHY.
+#
+# WHY THIS EXISTS. `expect_nonzero` alone cannot tell "the binary refused this
+# config" from "the binary never ran". A missing executable, a renamed flag and
+# a startup panic all exit non-zero, so every "control rejects <bad config>"
+# case stayed green while testing nothing -- measured, four of them, with `$BIN`
+# pointing nowhere. Each of these cases already prints a precise diagnostic, so
+# asserting on it costs nothing and closes the gap. Same class as #275/#297.
+expect_rejected() {
+    local needle="$1"
+    local label="$2"
+
+    if [ "$LAST_STATUS" -eq 0 ]; then
+        fail "$label (expected non-zero status)"
+    elif ! grep -Fq "$needle" "$LAST_STDERR" && ! grep -Fq "$needle" "$LAST_STDOUT"; then
+        fail "$label (exited $LAST_STATUS but never said '$needle' - did it reject the config, or just fail to run?)"
     else
         pass "$label"
     fi
@@ -247,7 +275,15 @@ env -i PATH="$PATH" HOME="${HOME:-}" \
     DATABASE_URL="postgres://u:SUPERSECRETPW1@h/d" \
     AUTH_DB_URL="postgres://u:SUPERSECRETPW2@h/d" \
     "$CONTROL" --help >"$HELP_OUT" 2>&1 || true
-if grep -Fq "SUPERSECRETPW" "$HELP_OUT"; then
+# Same vacuous-absence trap as expect_stdout_not_contains: if `--help` produced
+# nothing at all (missing binary, renamed flag, panic), "SUPERSECRETPW is not in
+# the output" is trivially true. Require the help text to actually BE help text
+# before believing the secret is absent from it.
+if [ ! -s "$HELP_OUT" ]; then
+    fail "control --help produced NO output - cannot conclude anything about secret redaction"
+elif ! grep -Fq -- "--db" "$HELP_OUT"; then
+    fail "control --help output does not mention --db - not the help text this assertion assumes"
+elif grep -Fq "SUPERSECRETPW" "$HELP_OUT"; then
     fail "control --help must not print DSN env secrets (hide_env_values on --db AND --auth-db)"
 else
     pass "control --help hides DSN env secrets"
@@ -257,7 +293,8 @@ echo ""
 echo "=== Case 7: invalid --check-config-format rejected (NEW-2) ==="
 run_cmd control-bad-format "$CONTROL" --check-config --check-config-format xml --dev-insecure
 show_last_output
-expect_nonzero "control rejects an unknown --check-config-format value (no silent text fallback)"
+expect_rejected "invalid value 'xml' for '--check-config-format" \
+    "control rejects an unknown --check-config-format value (no silent text fallback)"
 echo ""
 
 echo "=== Case 8: MASTER_KEY secret-ref FORMAT validated, NOT fetched ==="
@@ -295,7 +332,8 @@ env -i PATH="$PATH" HOME="${HOME:-}" \
 LAST_STATUS=$?
 set -e
 show_last_output
-expect_nonzero "control rejects a malformed MASTER_KEY secret reference under --check-config"
+expect_rejected "malformed secret reference" \
+    "control rejects a malformed MASTER_KEY secret reference under --check-config"
 echo ""
 
 echo "=== Case 10: [secrets] file tier with a REFERENCE validates (no fetch) ==="
@@ -312,7 +350,8 @@ echo "=== Case 11: [secrets] file tier with a LITERAL rejected (file must be a r
 # carry a secret value, only a urn:/arn: reference. obtain_secret rejects it.
 run_cmd control-secrets-file-literal "$CONTROL" --check-config --config "$TMPDIR/secrets-literal.toml" --dev-insecure
 show_last_output
-expect_nonzero "control rejects a literal master_key in the [secrets] file (must be a urn:/arn: reference)"
+expect_rejected "must be a urn:/arn: reference, not a literal value" \
+    "control rejects a literal master_key in the [secrets] file (must be a urn:/arn: reference)"
 echo ""
 
 echo "=== Case 12: LEGACY_MASTER_KEYS comma-list is resolved PER ENTRY ==="
@@ -329,7 +368,8 @@ env -i PATH="$PATH" HOME="${HOME:-}" \
 LAST_STATUS=$?
 set -e
 show_last_output
-expect_nonzero "control rejects a malformed per-entry reference in a LEGACY_MASTER_KEYS comma-list"
+expect_rejected "LEGACY_MASTER_KEYS / --legacy-master-keys: malformed secret reference" \
+    "control rejects a malformed per-entry reference in a LEGACY_MASTER_KEYS comma-list"
 echo ""
 
 echo "============================================"
@@ -337,5 +377,21 @@ echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"
 
 if [ "$FAIL" -ne 0 ]; then
+    exit 1
+fi
+
+# MINIMUM-PASSED FLOOR. Without this the verdict is only "nothing failed", so a
+# run that asserted NOTHING would print "0 passed, 0 failed" and exit 0 -- the
+# shape already fixed in #279, #285, #294 and #316. The number is MEASURED, not
+# chosen: a full run on 2026-08-12 reported exactly 29.
+#
+# Raise it when you add cases. If it trips after you deleted a case on purpose,
+# lower it deliberately and say so in the commit -- do not delete the check.
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-29}"
+if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
+    echo "" >&2
+    echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2
+    echo "  Nothing FAILED, so this is not a broken assertion - it is MISSING ones." >&2
+    echo "  Something skipped a whole section, or a case stopped running silently." >&2
     exit 1
 fi
