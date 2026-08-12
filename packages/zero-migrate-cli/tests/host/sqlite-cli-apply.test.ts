@@ -15,6 +15,9 @@
 // in-crate suites), and the host suite proves the CLI against PostgreSQL and MySQL,
 // but no arm ran the CLI against SQLite - the one combination both claims are about.
 //
+// The second arm covers the one thing zero-migrate does to a SQLite database that
+// OUTLIVES the apply, and so is the one an operator has to be told about in advance.
+//
 // GATE: none. SQLite is an in-process file, so unlike every other arm here this one
 // runs everywhere, including a checkout with no database containers up.
 
@@ -133,6 +136,204 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
       assert.equal(rows[0]?.body, "written by the CLI", "the authored body landed in the file");
     } finally {
       db.close();
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// A WAL application database comes back from an apply in DELETE journal mode, and
+// stays there.
+//
+// `docs/security-model.md` warns about it in one sentence: "Opening an application
+// database that uses WAL changes its persistent journal mode." That is the only
+// effect zero-migrate has on a SQLite database that OUTLIVES the migration. It is
+// not a side effect of the schema change - it is a property of the connection
+// profile, so it lands even on an apply that changes nothing, and it does not
+// revert when the connection closes.
+//
+// It is deliberate. A transaction spanning `main` and the attached `_mig` journal
+// is crash-atomic only under SQLite's super-journal protocol, which WAL, MEMORY,
+// and OFF do not provide, so `enforce_atomic_profile_for_schema` pins DELETE and
+// `synchronous = FULL` and reads both back rather than trusting the assignment.
+//
+// Nothing measured it. `journal_mode` appeared in the whole test tree only as a
+// PRAGMA the authorizer denies. So the promise an operator plans around - "your WAL
+// database will not be WAL afterwards" - rested on one sentence of prose, and the
+// refusal path beside it ("remained {actual}") had no shape either.
+//
+// The assertions read the FILE with a separate connection after the CLI process has
+// exited. A pragma read on the engine's own connection would only be the engine
+// agreeing with itself, and the claim is specifically about persistence.
+
+test("a WAL application database is left in DELETE journal mode, persistently", () => {
+  const work = mkdtempSync(join(HERE, "sqlite-wal-"));
+  const dbPath = join(work, "app.db");
+  try {
+    // Set up a genuinely WAL database, and prove the setup took before measuring
+    // what the apply did to it. Without this the arm below would also pass on a
+    // database that was never WAL in the first place.
+    const before = new DatabaseSync(dbPath);
+    try {
+      before.exec("PRAGMA journal_mode = WAL");
+      before.exec("CREATE TABLE wal_probe (id INTEGER PRIMARY KEY)");
+    } finally {
+      before.close();
+    }
+    const reopened = new DatabaseSync(dbPath);
+    try {
+      const mode = reopened.prepare("PRAGMA journal_mode").get() as Record<string, unknown>;
+      assert.equal(
+        String(mode?.journal_mode).toLowerCase(),
+        "wal",
+        "the fixture must start from a database that really is in WAL mode",
+      );
+    } finally {
+      reopened.close();
+    }
+
+    const migrations = join(work, "migrations");
+    writeFileSync(join(work, "policy.toml"), CHARTER);
+    mkdirSync(migrations);
+    writeFileSync(join(migrations, "20260101000000_create_notes.ts"), MIGRATION);
+
+    const applied = spawnCli(
+      [
+        "apply",
+        "--dir",
+        migrations,
+        "--database-url",
+        `sqlite:${dbPath}`,
+        "--policy",
+        join(work, "policy.toml"),
+        "--schema",
+        "main",
+        "--owner-app",
+        OWNER_APP,
+      ],
+      work,
+    );
+    assert.equal(
+      applied.status,
+      0,
+      `apply against a WAL database must succeed; stdout=${applied.stdout} stderr=${applied.stderr}`,
+    );
+
+    // A fresh connection, after the CLI process exited. Journal mode is stored in
+    // the database header, so this is the persistence claim itself.
+    const after = new DatabaseSync(dbPath);
+    try {
+      const mode = after.prepare("PRAGMA journal_mode").get() as Record<string, unknown>;
+      assert.equal(
+        String(mode?.journal_mode).toLowerCase(),
+        "delete",
+        "the apply must leave the application database in DELETE journal mode",
+      );
+
+      // The control against a vacuous pass: the apply has to have actually run.
+      // A CLI that exited 0 without touching the database would satisfy the
+      // journal-mode assertion only by leaving WAL alone, but this catches the
+      // reverse mistake - a migration that never landed.
+      const rows = after.prepare("SELECT id, body FROM notes ORDER BY id").all() as Array<
+        Record<string, unknown>
+      >;
+      assert.equal(rows.length, 1, "the migration really applied to the WAL database");
+      assert.equal(rows[0]?.body, "written by the CLI", "and wrote its authored row");
+    } finally {
+      after.close();
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// `plan` does it too, and `plan` is advertised as a dry run.
+//
+// This arm exists because the previous one made the behaviour look like a property
+// of applying, and it is not. `docs/cli.md` calls `plan` "a live dry run" that "does
+// not call the apply or resolution APIs and does not execute the rendered migration
+// SQL", and says "planning uses a read-only status path". All of that is true of the
+// SQL. None of it is true of the FILE: `statusIrSqlite` opens through the same
+// `SqliteBackend::open`, so `plan` gets the same hardened profile as apply and pins
+// `journal_mode = DELETE` on the application database before it reads anything. The
+// `readOnly` flag reaches only the journal-bootstrap decision, not the connection.
+//
+// So a preview command permanently changes an operator's database, silently: WAL is
+// what gives SQLite concurrent readers alongside a writer, DELETE serializes them,
+// and the `-wal` sidecar is removed on the way. Running `plan` from CI against a
+// live SQLite database degrades that database's concurrency and does not say so.
+//
+// THIS ARM IS WRITTEN TO FAIL WHEN THAT IMPROVES, not to bless it. The fix is a
+// genuinely read-only open for the status path - one that does not pin the atomic
+// profile, since nothing on that path commits across `main` and `_mig` - and it is
+// deliberately not attempted here: it changes the hardened connection used by every
+// SQLite entry point, and that decision wants more than a passing test. Until then,
+// `docs/cli.md` carries the warning this measured, and this is where the current
+// behaviour is recorded rather than assumed.
+
+test("plan, a dry run, converts a WAL application database too - the documented wart", () => {
+  const work = mkdtempSync(join(HERE, "sqlite-plan-wal-"));
+  const dbPath = join(work, "app.db");
+  try {
+    const before = new DatabaseSync(dbPath);
+    try {
+      before.exec("PRAGMA journal_mode = WAL");
+      before.exec("CREATE TABLE wal_probe (id INTEGER PRIMARY KEY)");
+    } finally {
+      before.close();
+    }
+
+    const migrations = join(work, "migrations");
+    writeFileSync(join(work, "policy.toml"), CHARTER);
+    mkdirSync(migrations);
+    writeFileSync(join(migrations, "20260101000000_create_notes.ts"), MIGRATION);
+
+    const planned = spawnCli(
+      [
+        "plan",
+        "--dir",
+        migrations,
+        "--database-url",
+        `sqlite:${dbPath}`,
+        "--policy",
+        join(work, "policy.toml"),
+        "--schema",
+        "main",
+        "--owner-app",
+        OWNER_APP,
+      ],
+      work,
+    );
+    assert.equal(
+      planned.status,
+      0,
+      `plan must succeed; stdout=${planned.stdout} stderr=${planned.stderr}`,
+    );
+    // The control on the other side: plan really did preview the pending work, so
+    // the journal-mode change below is not the artefact of a command that bailed.
+    assert.match(
+      planned.stdout,
+      /would apply 1 migration/,
+      "plan must have previewed the pending migration",
+    );
+
+    const after = new DatabaseSync(dbPath);
+    try {
+      const mode = after.prepare("PRAGMA journal_mode").get() as Record<string, unknown>;
+      assert.equal(
+        String(mode?.journal_mode).toLowerCase(),
+        "delete",
+        "TODAY plan converts a WAL database; when a read-only open lands this must read 'wal'",
+      );
+
+      // And it really was only a preview - nothing was applied. Without this the
+      // arm could not tell "plan previewed and converted" from "plan applied".
+      const applied = after
+        .prepare("SELECT name FROM sqlite_master WHERE type = ? AND name = ?")
+        .all("table", "notes");
+      assert.equal(applied.length, 0, "plan must not have created the previewed table");
+    } finally {
+      after.close();
     }
   } finally {
     rmSync(work, { recursive: true, force: true });
