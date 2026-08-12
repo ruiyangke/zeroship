@@ -1,0 +1,241 @@
+{
+  "version": 1,
+  "collections": {
+    "channels": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "slug": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "channels_slug_key",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
+        },
+        {
+          "name": "channels_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "channels_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "channels_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "messages": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "channelId": {
+          "type": "string",
+          "refTarget": "channels",
+          "refColumn": "id",
+          "required": true
+        },
+        "authorId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "body": {
+          "type": "string",
+          "required": true
+        },
+        "flagged": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "messages_channel_idx",
+          "fields": [
+            "channelId"
+          ]
+        },
+        {
+          "name": "messages_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "messages_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "messages_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "users": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "handle": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_handle_key",
+          "fields": [
+            "handle"
+          ],
+          "unique": true
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}
