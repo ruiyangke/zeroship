@@ -15,7 +15,7 @@ For platform servers and one-shots, the canonical projections are:
 - CLI: kebab-case, local to the consuming binary.
 - Environment: `ZEROSHIP_` plus the complete canonical identity in
   `SCREAMING_SNAKE_CASE`.
-- TOML: the canonical dotted path, with secret locators under `secrets.`.
+- TOML: the canonical dotted path, for operational and secret settings alike.
 
 Delete the deployment alias hops. In particular, control's database setting
 will no longer travel through `CONTROL_DATABASE_URL`,
@@ -27,11 +27,14 @@ distinct settings (`deploy/compose/docker-compose.yml:373-394` and
 `deploy/compose/docker-compose.yml:430-470`).
 
 Operational values may be supplied by flag, environment, or the optional TOML
-overlay. Secret values may be supplied directly by environment or indirectly
-by a file reference; a secret's CLI input is a generated `-file` path flag,
-never a value flag, and its TOML entry is a file reference, never a value. Source
-precedence remains `CLI > env > file > compiled default`, as required by the
-accepted ADR (`docs/decisions/2026-05-28-server-config-unification.md:30-46`).
+overlay. Secret values may be supplied by environment or by the TOML overlay,
+each as either a literal or a `urn:`/`arn:` reference, or by file path. A
+secret's CLI input remains a generated `-file` path flag and never a value
+flag, so a secret never reaches a process argument list. The prohibition on
+plaintext secrets moves from the TOML FORMAT to TRACKED FILES, enforced by the
+repository gate in Section 4.7. Source precedence remains
+`CLI > env > file > compiled default`, as required by the accepted ADR
+(`docs/decisions/2026-05-28-server-config-unification.md:30-46`).
 
 Enforcement combines generated declarations with compiled contract, TOML,
 rendered-Compose, runtime unknown-environment, and compiler-resolved raw-access
@@ -166,10 +169,19 @@ segment       = [a-z][a-z0-9]*("_"[a-z0-9]+)*
 canonical     = segment("."segment)*
 ```
 
-The top-level segment `secrets` is reserved for the TOML projection and cannot
-begin an operational canonical name. This prevents operational
-`secrets.foo` from colliding with the secret path derived from canonical
-`foo`; the registry also checks the final projected paths for uniqueness.
+No segment is reserved. The TOML projection of every canonical name is the
+canonical name itself, for operational and secret settings alike, so there is
+no second namespace to collide with and no carve-out to remember. The registry
+still checks the final projected paths for uniqueness.
+
+AMENDED 2026-08-12. This previously reserved a top-level `secrets` segment,
+because secrets projected to `secrets.C` rather than `C`. That prefix split one
+component's settings across two tables on a TRANSPORT property, in a design
+whose stated rule is that a name describes one semantic setting and not one
+transport. The reserved word existed only to stop an operational `secrets.foo`
+colliding with the secret projection of `foo`; removing the prefix removes the
+collision and the reservation together. See Section 2 for where secrets now sit
+and what still separates them.
 
 The name describes one semantic setting, not one transport. It includes a
 service or domain prefix when the value is not platform-global. Separate values
@@ -205,7 +217,7 @@ within a consumer binary.
 | Supply class | Canonical `C` | CLI in binary `B` | Environment | TOML overlay |
 | --- | --- | --- | --- | --- |
 | Operational | `C` | `--kebab(local(C, B))` | `env(C)` | dotted path `C` |
-| Secret | `C` | `--kebab(local(C, B))-file` path only | `env(C)` literal or file reference | dotted path `secrets.C`, file reference only |
+| Secret | `C` | `--kebab(local(C, B))-file` path only | `env(C)` literal or file reference | dotted path `C`, literal or file reference |
 | Bootstrap | `C` | generated flag when enabled | `env(C)` when enabled | disabled because it selects or controls loading |
 | Command control | `C` | generated flag | disabled | disabled |
 | Platform one-shot | `C` | generated flag under its operational/secret rule | `env(C)` when enabled | disabled |
@@ -216,7 +228,8 @@ TOML dotted paths are normally written as tables. For example,
 `worker.max_pinned_isolates_per_app` is
 `[worker] max_pinned_isolates_per_app = 4`, while secret
 `control.database_url` is
-`[secrets.control] database_url = "urn:zeroship:file:/run/secrets/control-db"`.
+`[control] database_url = "urn:zeroship:file:/run/secrets/control-db"` - the
+same table its operational siblings live in.
 The overlay remains optional: absence continues to produce compiled defaults,
 and the fixed `/etc/zeroship/zeroship.toml` discovery behavior is unchanged
 (`crates/core/src/config/source.rs:52-104`).
@@ -237,15 +250,15 @@ setting; it does not preserve the current spelling as an alias.
 | Canonical | Class | Target flag | Target env | Target TOML | Current evidence |
 | --- | --- | --- | --- | --- | --- |
 | `control.port` | Operational | `--port` | `ZEROSHIP_CONTROL_PORT` | `[control] port` | `--port`/`CONTROL_PORT` at `crates/control/src/main.rs:42-44` |
-| `control.database_url` | Secret | `--database-url-file` | `ZEROSHIP_CONTROL_DATABASE_URL` | `[secrets.control] database_url` | `--db`/`DATABASE_URL` at `crates/control/src/main.rs:50-66` |
-| `gateway.database_url` | Secret | `--database-url-file` | `ZEROSHIP_GATEWAY_DATABASE_URL` | `[secrets.gateway] database_url` | `--db`/`DATABASE_URL` at `crates/gateway/src/main.rs:77-79` |
-| `control_key` | Secret | `--control-key-file` | `ZEROSHIP_CONTROL_KEY` | `[secrets] control_key` | shared current readers are catalogued at `docs/reference/env-vars.md:228-245`; representative clap fields are `crates/control/src/main.rs:72-74` and `crates/gateway/src/main.rs:41-43` |
+| `control.database_url` | Secret | `--database-url-file` | `ZEROSHIP_CONTROL_DATABASE_URL` | `[control] database_url` | `--db`/`DATABASE_URL` at `crates/control/src/main.rs:50-66` |
+| `gateway.database_url` | Secret | `--database-url-file` | `ZEROSHIP_GATEWAY_DATABASE_URL` | `[gateway] database_url` | `--db`/`DATABASE_URL` at `crates/gateway/src/main.rs:77-79` |
+| `control_key` | Secret | `--control-key-file` | `ZEROSHIP_CONTROL_KEY` | top-level `control_key` | shared current readers are catalogued at `docs/reference/env-vars.md:228-245`; representative clap fields are `crates/control/src/main.rs:72-74` and `crates/gateway/src/main.rs:41-43` |
 | `worker.max_pinned_isolates_per_app` | Operational | `--max-pinned-isolates-per-app` | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `[worker] max_pinned_isolates_per_app` | `crates/worker/src/main.rs:70-76` |
-| `gateway.signing_key` | Secret | `--signing-key-file` | `ZEROSHIP_GATEWAY_SIGNING_KEY` | `[secrets.gateway] signing_key` | current file-path input at `crates/gateway/src/main.rs:88-94` |
-| `auth.postmark_webhook_password` | Secret | `--postmark-webhook-password-file` | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `[secrets.auth] postmark_webhook_password` | `crates/auth/src/config.rs:498-514` |
+| `gateway.signing_key` | Secret | `--signing-key-file` | `ZEROSHIP_GATEWAY_SIGNING_KEY` | `[gateway] signing_key` | current file-path input at `crates/gateway/src/main.rs:88-94` |
+| `auth.postmark_webhook_password` | Secret | `--postmark-webhook-password-file` | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `[auth] postmark_webhook_password` | `crates/auth/src/config.rs:498-514` |
 | `auth.public_url` | Operational | `--public-url` | `ZEROSHIP_AUTH_PUBLIC_URL` | `[auth] public_url` | `crates/auth/src/config.rs:348-360` |
 | `observability.log_filter` | Operational | `--observability-log-filter` | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `[observability] log_filter` | current independent flag/env at `crates/core/src/observability.rs:70-78` and TOML field at `crates/core/src/config/file.rs:173-183` |
-| `migrated.provision_database_url` | Secret | `--provision-database-url-file` | `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` | `[secrets.migrated] provision_database_url` | `crates/migrated/src/main.rs:40-47` |
+| `migrated.provision_database_url` | Secret | `--provision-database-url-file` | `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` | `[migrated] provision_database_url` | `crates/migrated/src/main.rs:40-47` |
 
 The transformation deliberately renames `--db` to the unambiguous
 `--database-url-file`, and it deliberately removes `DATABASE_URL`,
@@ -254,6 +267,51 @@ renaming and deleting old shapes in one change, rather than keeping deprecated
 or compatibility aliases (`AGENTS.md:11-24`).
 
 ## 2. Supply-set classification
+
+### AMENDED 2026-08-12: secrets sit with their siblings, and may be literals
+
+Three linked changes replace the original `[secrets]` design. All three follow
+from one observation: the section never enforced anything.
+
+**Secrets are declared in their component's table, not a separate one.**
+`SecretSection` is a flat struct of `Option<String>` fields
+(`crates/core/src/config/file.rs:119-131`); the reference-only rule is enforced
+per VALUE by `obtain_secret` / `is_secret_ref` operating on a raw string
+(`crates/core/src/config/secrets.rs:451-470`), not by the section. Moving a
+secret out of `[secrets]` therefore removes no check. It gains something the
+flat section actively destroyed: LOCATION NOW ENCODES SHARING. A secret under
+`[control]` is control's; a top-level secret is platform-global. Today
+`control_key` (five consumers) and a per-service DSN sit side by side in one
+flat table with nothing distinguishing them, which is the same ambiguity that
+produced the live `ZEROSHIP_CONTROL_KEY` split - a literal in control, gateway,
+worker and migrated, `${VAR}`-indirected only in auth
+(`docs/reference/env-vars.md:99-108`).
+
+**A secret may be a literal in the overlay.** The current rejection exists
+because of the ARTIFACT, not the format: the code comment is "the config file
+must never carry a plaintext secret", and `deploy/ops/zeroship.toml` is a
+tracked file. That conflation blocks a standard deployment shape - projecting a
+Kubernetes Secret as a mounted file and letting it BE the overlay, so the values
+never enter git and are RBAC-controlled. It is also inconsistent with what is
+already permitted: `Secret<T>` accepts a raw literal from the environment, and
+under Kubernetes that value arrives from `secretKeyRef`, the same object with
+the same lifecycle. Permitting a literal by env and forbidding it by mounted
+file has no principled basis.
+
+**The prohibition moves to tracked files** (Section 4.7). That is strictly
+stronger: it fails at commit time, where the violation happens, instead of at
+boot, after the secret is already in history.
+
+What does NOT change: no secret value flag, so secrets never reach a process
+argument list; automatic redaction, which becomes a prerequisite rather than a
+nice-to-have once literals are permitted from more sources; and presence-only
+`--check-config` output.
+
+Cost accepted: an operator can no longer read the whole secret surface from one
+table. That is recovered more accurately by `grep urn:` and by `--check-config`,
+which reports what the process actually resolved rather than what the file
+claims. Convention, not mechanism: keep secret entries last within each table.
+
 
 Classification is type-driven, not a table of names and not a suffix heuristic.
 Every declaration uses exactly one of these wrapper types:
@@ -298,9 +356,8 @@ The macro derives the supply set mechanically from the wrapper:
   higher-precedence source. This retains the mechanism required by the ADR
   (`docs/decisions/2026-05-28-server-config-unification.md:39-44`).
 - `Secret<T>` gets one environment literal/file-reference source, one generated
-  CLI file-path flag, one TOML reference slot, automatic redaction, and presence-only
-  `--check-config` output. A TOML literal is rejected, matching the existing
-  fail-closed behavior (`crates/core/src/config/secrets.rs:451-470`). There is
+  CLI file-path flag, one TOML literal-or-reference slot at its canonical path,
+  automatic redaction, and presence-only `--check-config` output. There is
   no secret value flag and no second `_FILE` environment alias; an environment
   may carry `urn:zeroship:file:...` when indirection is needed. A canonical env
   source may not contain `urn:zeroship:env:...`, because that would recreate an
@@ -372,7 +429,7 @@ same env would be redundant: the direct env tier already wins. An env reference
 to any other name would be the alias hop under another spelling, so parsed ops
 TOML rejects env references altogether. Operators who want file indirection put
 `urn:zeroship:file:...` at the derived
-`[secrets.<service>] database_url` path. File resolution is implemented today
+`[<service>] database_url` path. File resolution is implemented today
 (`crates/core/src/config/secrets.rs:335-386`); the parsed but unavailable Vault
 and AWS forms are not part of this proposal's supply set
 (`crates/core/src/config/secrets.rs:232-277`).
@@ -526,8 +583,10 @@ In `crates/config-contract/tests/ops_toml.rs`, load both
 the raw text and the parsed TOML. Assert:
 
 1. every leaf is a generated TOML path with at least one production consumer;
-2. every secret leaf is under `secrets.`, is never a literal, and uses a
-   reference backend implemented at startup, currently `urn:zeroship:file:`;
+2. every secret leaf sits at its canonical path, and where it is a reference it
+   uses a backend implemented at startup, currently `urn:zeroship:file:`. A
+   LITERAL is permitted here and is checked instead by the tracked-file gate in
+   Section 4.7, which is where the no-plaintext guarantee now lives;
 3. a lexical scan of every concrete `urn:zeroship:env:NAME`, including comments,
    finds a generated environment name with a production consumer;
 4. if that env URN is a parsed value, it is under the secret path for that same
@@ -689,6 +748,43 @@ presence-only output, CLI-over-env-over-file precedence, and rejection of an
 unknown `ZEROSHIP_*` name. Retain a minimum assertion floor; the current test
 already uses one to prevent a zero-assertion pass
 (`tests/config_check_e2e.sh:375-397`).
+
+### 4.7 No plaintext secret in a tracked file
+
+ADDED 2026-08-12 with the Section 2 amendment. Because a secret may now be a
+literal in the overlay, the guarantee that used to come from rejecting TOML
+literals is restored here, against the artifact that actually needs it.
+
+A repository gate walks every TRACKED file that can carry configuration -
+`deploy/**/*.toml`, `deploy/**/*.yml`, and any `*.env` under version control -
+resolves each value against the canonical registry, and fails when a value
+whose canonical identity is secret-classed is not a `urn:`/`arn:` reference.
+Classification comes from the registry, so the gate needs no name heuristics
+and cannot drift from the declarations.
+
+This is strictly stronger than the runtime check it replaces. The runtime
+rejection only fires if someone deploys the mistake; the repository gate fails
+at commit time, before the secret enters history, which is the point at which a
+leaked credential becomes unrecoverable.
+
+Two further protections, neither of which the format rule provided:
+
+- Runtime permission check. When the overlay contains a secret literal and is
+  group- or world-readable, startup refuses. This mirrors OpenSSH's treatment
+  of private key files and targets the realistic misconfiguration - a mounted
+  secret left at mode 0644 - rather than the file's syntax.
+- Redaction becomes load-bearing rather than incidental. `Secret<T>` cannot
+  format its value, replacing the hand-maintained redaction lists in
+  `crates/control/src/main.rs:401-416` and `crates/worker/src/main.rs:179-213`.
+  With literals permitted from more sources, a `Debug` that printed a raw value
+  would be a live disclosure, so this part of Section 4.1 must land with the
+  amendment and not after it.
+
+WHAT THIS DOES NOT COVER: a secret literal in an UNTRACKED overlay is
+deliberately allowed - that is the Kubernetes mounted-Secret case the amendment
+exists to permit - so the gate says nothing about files it cannot see. It also
+does not inspect image layers or Compose files rendered at deploy time outside
+the repository.
 
 ## 5. Migration plan ordered by risk
 
