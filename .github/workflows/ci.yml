@@ -1705,3 +1705,50 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_metering_billing.sh 2>&1 | tee "$RUNNER_TEMP/billing-pipeline.log"
+
+  # examples/issue-tracker -- the Bugzilla-shaped app that exercises env.db,
+  # env.auth, env.storage and env.kv on a workload with real shape (24 tables,
+  # 82 procedures, three layers of access control).
+  #
+  # WIRED FOR THE DETERMINISTIC GATES ONLY, and that limit is deliberate rather
+  # than an oversight. typecheck, the vitest suite and the build need no
+  # database, no runtime and no browser, so they behave the same on a 2-4 vCPU
+  # GitHub runner as they do locally.
+  #
+  # NOT WIRED: scripts/smoke.sh (88 checks) and the 7 Playwright specs. Both
+  # need a live dev runtime, the smoke suite additionally reads a per-process
+  # secret out of /proc to sign a dev session, and neither has been measured
+  # against a loaded runner. This file's own dev-vs-deployed comment records
+  # what happens when a gate is wired before that is proven -- an assertion was
+  # silently dropped under load and 38 of 39 reported as "0 failed". Adding
+  # them without the same measurement would repeat it.
+  #
+  # WHAT THE THREE STEPS ACTUALLY CATCH, beyond compiling:
+  #   - `build` runs gen-types --check, so a committed generated/zeroship/
+  #     artifact that has drifted from migrations/ fails here. That is the
+  #     same staleness class this file already hit on db-todos.
+  #   - `test` includes two structural gates: every server procedure must be
+  #     re-exported from src/api.ts (a procedure missing there is invisible to
+  #     the browser while every other signal stays green -- it happened three
+  #     times), and SPEC.md's RPC surface must match the implementation in both
+  #     directions.
+  issue-tracker:
+    runs-on: ubuntu-latest
+    steps:
+      # submodules: the vendored engine is a workspace member; without it the
+      # workspace globs match nothing and install fails.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/; build it before anything imports it.
+      - run: pnpm --filter zero-migrate build
+      # Root build emits the SDK dist files the example's vite plugin consumes.
+      - run: pnpm build
+      - run: pnpm --filter issue-tracker typecheck
+      - run: pnpm --filter issue-tracker test
+      - run: pnpm --filter issue-tracker build
