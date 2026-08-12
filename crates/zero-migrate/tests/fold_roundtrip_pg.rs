@@ -1090,3 +1090,42 @@ async fn partitioned_parent_index_only_lifecycle() {
     )
     .await;
 }
+
+#[compio::test]
+async fn index_storage_parameter_lifecycle() {
+    // `IndexSnapshot.with` is compared by both the attribute pass and index equality,
+    // and PostgreSQL stores it in `pg_class.reloptions` as text that has to parse back
+    // into the same typed pair. Nothing authored a storage parameter, so nothing had
+    // ever checked that round trip against a live server. BRIN carries
+    // `pages_per_range`; the B-tree carries `fillfactor`.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "index_storage_parameter_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"storage_params","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"bucket","type":"int","nullable":true},
+          {"name":"note","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createIndex","table":"storage_params","name":"storage_params_note_idx",
+         "columns":[{"kind":"column","name":"note"}],
+         "with":{"fillfactor":70}},
+        {"op":"createIndex","table":"storage_params","name":"storage_params_brin_idx",
+         "columns":[{"kind":"column","name":"bucket"}],"using":"brin",
+         "with":{"pagesPerRange":32}}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "index storage parameter lifecycle",
+        source,
+        &[
+            ("create table", 1),
+            ("create index with a fillfactor", 2),
+            ("create a BRIN index with pages_per_range", 3),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
