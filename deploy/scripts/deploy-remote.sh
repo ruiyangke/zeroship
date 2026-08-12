@@ -47,6 +47,7 @@ PROBE_URL=""
 DRY_RUN=0
 DO_ROLLBACK=0
 SKIP_BUILD=0
+IMAGE_OVERRIDE=""
 
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -62,6 +63,7 @@ while [ $# -gt 0 ]; do
     --dry-run)   DRY_RUN=1; shift ;;
     --rollback)  DO_ROLLBACK=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --image)     IMAGE_OVERRIDE="$2"; shift 2 ;;
     -h|--help)   usage 0 ;;
     *) echo "unknown argument: $1" >&2; usage 1 ;;
   esac
@@ -110,6 +112,12 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "WARNING: working tree is dirty; tagging $SHA"
 fi
 IMAGE="$REGISTRY:$SHA"
+# --image pins an EXISTING reference: redeploying a known-good tag, or rolling
+# back to a prior one, must not depend on what this checkout happens to be at.
+if [ -n "$IMAGE_OVERRIDE" ]; then
+  IMAGE="$IMAGE_OVERRIDE"
+  SKIP_BUILD=1
+fi
 echo "ok  image will be $IMAGE"
 
 # ------------------------------------------------- required-variable contract
