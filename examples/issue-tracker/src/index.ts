@@ -3827,6 +3827,80 @@ export const createGroup = mutation(
   { id: "groups.create" },
 );
 
+/**
+ * Flag types, without which the whole flag feature is unreachable.
+ *
+ * `flags.set`, `flags.clear`, `flags.list` and `flags.listRequests` all take or
+ * return a `flagTypeId`, the bug page renders a Flags panel, and SPEC.md lists
+ * flags as delivered -- but nothing in the app, the migration or any seed ever
+ * inserted a row into `flagTypes`. Every product reported "defines no
+ * bug-level flag types" and always would have. Four procedures and a panel
+ * were dead surface behind a table nobody could populate.
+ *
+ * Admin-gated, matching `groups.create`: in Bugzilla flag types are
+ * administrator-defined per product, not something a reporter invents while
+ * filing.
+ */
+export const createFlagType = mutation(
+  async ({
+    name,
+    description,
+    targetType = "bug",
+    isRequestable = true,
+    isMultiplicable = false,
+    productId,
+  }: {
+    name: string;
+    description?: string | null;
+    targetType?: "bug" | "attachment";
+    isRequestable?: boolean;
+    isMultiplicable?: boolean;
+    productId?: string | null;
+  }) => {
+    await requireAdmin();
+    const cleanName = requireNonEmpty(name, "name");
+    if (targetType !== "bug" && targetType !== "attachment") {
+      invalid('targetType must be "bug" or "attachment"');
+    }
+    // The unique index is on (name, targetType), so the conflict check has to
+    // be as well -- "review" for a bug and "review" for an attachment are two
+    // legitimate types, and checking the name alone would refuse the second.
+    if (must(await db.flagTypes.get({ name: cleanName, targetType }))) {
+      conflict(`a ${targetType} flag type named "${cleanName}" already exists`);
+    }
+    if (productId) await getRequired(db.products, productId, "Product");
+    return must(
+      await db.flagTypes.insert({
+        name: cleanName,
+        ...(description ? { description } : {}),
+        targetType,
+        isRequestable,
+        isMultiplicable,
+        // Null means the type applies to every product, which is how
+        // `flags.list` already reads it.
+        ...(productId ? { productId } : {}),
+      }),
+    );
+  },
+  { id: "flagTypes.create" },
+);
+
+export const listFlagTypes = query(
+  async ({ productId }: { productId?: string | null }) => {
+    const identity = optionalIdentity();
+    // Scoped to what the caller can see: a flag type carries a product, and
+    // naming the types defined on a restricted product would disclose that the
+    // product exists. Types with no product are global and always listed.
+    const visible = await visibleProductIds(identity, false);
+    const rows = await readAll(db.flagTypes, {});
+    return rows
+      .filter((row) => !row.productId || visible.has(row.productId))
+      .filter((row) => !productId || !row.productId || row.productId === productId)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  },
+  { id: "flagTypes.list" },
+);
+
 export const listGroups = query(
   async ({}: EmptyInput) => {
     await requireAdmin();

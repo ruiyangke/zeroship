@@ -102,6 +102,8 @@ explicitly with `publiclyAccessible: true`.
 `keywords.list` `keywords.create` `keywords.attach` `keywords.detach`
 `flags.set` `flags.clear` `flags.listRequests` (my requests / requests of me)
 `flags.list` (the live flags on a bug and its attachments)
+`flagTypes.create` `flagTypes.list` (admin-defined; without a type no flag can
+be set, which is what made the four `flags.*` procedures unreachable)
 `cc.add` `cc.remove` `cc.list` `cc.listMine` (the bugs I am CC'd on)
 
 ### Access control

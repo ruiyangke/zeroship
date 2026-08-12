@@ -11,7 +11,7 @@ The example is deliberately migration-first. The committed migration in
 `env.db` runtime descriptor. There is no inline `dbSchema` or server-module
 schema export.
 
-The server exposes **82 explicitly named RPC procedures**, each with an auth
+The server exposes **84 explicitly named RPC procedures**, each with an auth
 policy in `src/server/config.ts`. Nine are anonymous — bug browsing, comment
 reading, product listing and the reports — and every one of those nine is a
 read. Writes, administration, personal searches and notification data require

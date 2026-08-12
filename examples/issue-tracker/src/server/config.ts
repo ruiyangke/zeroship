@@ -67,6 +67,8 @@ export default defineApp({
     "rpc:seeAlso.remove": { auth: "user" },
     "rpc:seeAlso.list": { auth: "user" },
     "rpc:groups.create": { auth: "user" },
+    "rpc:flagTypes.create": { auth: "user" },
+    "rpc:flagTypes.list": { auth: "user" },
     "rpc:groups.list": { auth: "user" },
     "rpc:groups.addMember": { auth: "user" },
     "rpc:groups.removeMember": { auth: "user" },

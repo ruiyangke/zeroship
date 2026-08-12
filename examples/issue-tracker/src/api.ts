@@ -80,7 +80,9 @@ export {
   reportTimeToResolve,
 
   // Access control -- groups, and product- and bug-level restriction
+  createFlagType,
   createGroup,
+  listFlagTypes,
   listGroups,
   addGroupMember,
   removeGroupMember,

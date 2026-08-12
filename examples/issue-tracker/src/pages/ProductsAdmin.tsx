@@ -9,6 +9,7 @@ import {
   updateComponent,
   updateProduct,
 } from "../api";
+import { FlagTypesAdmin } from "../components/FlagTypesAdmin";
 import { GroupsAdmin } from "../components/GroupsAdmin";
 import { AsyncSection } from "../components/StateViews";
 import { errorMessage, useAsync } from "../components/rpc";
@@ -325,6 +326,7 @@ export function ProductsAdminPage() {
     <div className="page products-admin-page">
       <h1>Products administration</h1>
       <GroupsAdmin />
+      <FlagTypesAdmin />
       <NewProductForm onCreated={reload} />
       <AsyncSection
         state={state}
