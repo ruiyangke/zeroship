@@ -1,0 +1,5 @@
+error: configuration fields must have type Operational<T>, Secret<T>, BootstrapControl<T> or CommandControl<T>
+ --> tests/ui/command_control_has_no_env.rs
+  |
+  |     check_config: CommandEnv<bool>,
+  |                   ^^^^^^^^^^

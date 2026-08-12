@@ -91,13 +91,41 @@ fn validate_scope(scope: &LitStr) -> syn::Result<()> {
 enum SupplyClass {
     Operational,
     Secret,
+    Bootstrap,
+    Command,
+}
+
+impl SupplyClass {
+    /// A control's clap carrier never carries an environment name for the
+    /// command class, and a secret never carries one at all.
+    const fn has_clap_env(self) -> bool {
+        matches!(self, Self::Operational | Self::Bootstrap)
+    }
+}
+
+/// How the clap carrier for a control field is shaped.
+///
+/// `--no-config` must stay a bare flag and `--config` must stay optional, so a
+/// control cannot use the operational `Option<T>` + required-default carrier
+/// unconditionally.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CarrierShape {
+    /// `bool` carrier with `ArgAction::SetTrue`: a bare presence flag.
+    Flag,
+    /// `Option<U>` carrier resolving to `Option<U>`: absence is a real value.
+    Optional,
+    /// `Option<T>` carrier resolving to `T` via the carrier or a default.
+    Valued,
 }
 
 struct FieldConfig {
     ident: Ident,
     visibility: Visibility,
     class: SupplyClass,
+    shape: CarrierShape,
     inner_type: Type,
+    /// For [`CarrierShape::Optional`], the `U` inside the declared `Option<U>`.
+    carrier_type: Type,
     canonical: LitStr,
     default: Option<Expr>,
     retained_attrs: Vec<Attribute>,
@@ -223,6 +251,14 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                 "Secret<T> fields cannot declare a compiled secret default",
             ));
         }
+        let (shape, carrier_type) = carrier_shape(class, &inner_type);
+        if shape != CarrierShape::Valued && config.default.is_some() {
+            return Err(syn::Error::new_spanned(
+                &field.attrs[config_index],
+                "a bool control defaults to false and an Option<T> control defaults to None; \
+                 remove the `default`",
+            ));
+        }
 
         field.attrs.remove(config_index);
         let retained_attrs = field.attrs.clone();
@@ -235,7 +271,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             ident,
             visibility: field.vis.clone(),
             class,
+            shape,
             inner_type,
+            carrier_type,
             canonical: config.name,
             default: config.default,
             retained_attrs,
@@ -250,7 +288,8 @@ fn wrapper_type(ty: &Type) -> syn::Result<(SupplyClass, Type)> {
     let Type::Path(type_path) = ty else {
         return Err(syn::Error::new_spanned(
             ty,
-            "configuration fields must have type Operational<T> or Secret<T>",
+            "configuration fields must have type Operational<T>, Secret<T>, \
+             BootstrapControl<T> or CommandControl<T>",
         ));
     };
     if type_path.qself.is_some() {
@@ -265,10 +304,13 @@ fn wrapper_type(ty: &Type) -> syn::Result<(SupplyClass, Type)> {
     let class = match segment.ident.to_string().as_str() {
         "Operational" => SupplyClass::Operational,
         "Secret" => SupplyClass::Secret,
+        "BootstrapControl" => SupplyClass::Bootstrap,
+        "CommandControl" => SupplyClass::Command,
         _ => {
             return Err(syn::Error::new_spanned(
                 &segment.ident,
-                "configuration fields must have type Operational<T> or Secret<T>",
+                "configuration fields must have type Operational<T>, Secret<T>, \
+                 BootstrapControl<T> or CommandControl<T>",
             ));
         }
     };
@@ -312,27 +354,50 @@ fn emit(
         let ident = &config.ident;
         let visibility = &config.visibility;
         let attrs = &config.retained_attrs;
-        let inner = &config.inner_type;
         let canonical = config.canonical.value();
         let flag = flag_projection(&canonical, &scope.value(), config.class);
-        match config.class {
-            // `Option` is deliberately unqualified. clap's derive only treats a
-            // field as optional when the type path has exactly one segment, so
-            // `::std::option::Option<T>` is parsed as a required value whose
-            // parser must accept `Option<T>`, and the carrier fails to compile.
-            SupplyClass::Operational => {
-                let env = env_projection(&canonical);
-                quote! {
-                    #(#attrs)*
-                    #[arg(long = #flag, env = #env)]
-                    #visibility #ident: Option<#inner>
-                }
-            }
-            SupplyClass::Secret => quote! {
+        if config.class == SupplyClass::Secret {
+            return quote! {
                 #(#attrs)*
                 #[arg(long = #flag, value_name = "PATH")]
                 #visibility #ident: Option<::std::path::PathBuf>
+            };
+        }
+        // The environment name is attached to the clap carrier for every class
+        // that has one, so `clap` itself performs the CLI-over-env merge and no
+        // generated code re-implements that precedence.
+        let env = config
+            .class
+            .has_clap_env()
+            .then(|| env_projection(&canonical))
+            .map(|env| quote!(, env = #env))
+            .unwrap_or_default();
+        // `Option` is deliberately unqualified. clap's derive only treats a
+        // field as optional when the type path has exactly one segment, so
+        // `::std::option::Option<T>` is parsed as a required value whose
+        // parser must accept `Option<T>`, and the carrier fails to compile.
+        match config.shape {
+            CarrierShape::Flag => quote! {
+                #(#attrs)*
+                #[arg(long = #flag #env, action = ::zeroship_core::__private::clap::ArgAction::SetTrue)]
+                #visibility #ident: bool
             },
+            CarrierShape::Optional => {
+                let carrier = &config.carrier_type;
+                quote! {
+                    #(#attrs)*
+                    #[arg(long = #flag #env)]
+                    #visibility #ident: Option<#carrier>
+                }
+            }
+            CarrierShape::Valued => {
+                let inner = &config.inner_type;
+                quote! {
+                    #(#attrs)*
+                    #[arg(long = #flag #env)]
+                    #visibility #ident: Option<#inner>
+                }
+            }
         }
     });
 
@@ -354,6 +419,8 @@ fn emit(
         let (constructor, trailing) = match config.class {
             SupplyClass::Operational => (quote!(operational), quote!(#default,)),
             SupplyClass::Secret => (quote!(secret), quote!()),
+            SupplyClass::Bootstrap => (quote!(bootstrap), quote!(#default,)),
+            SupplyClass::Command => (quote!(command), quote!(#default,)),
         };
         quote! {
             #(#cfg_attrs)*
@@ -377,15 +444,24 @@ fn emit(
             let scope = scope.clone();
             let field_name = config.ident.to_string().to_ascii_uppercase();
             let struct_name = resolved_ident.to_string().to_ascii_uppercase();
-            let mut kinds = vec![
-                match config.class {
-                    SupplyClass::Operational => ("CLI", quote!(Cli)),
-                    SupplyClass::Secret => ("CLI_FILE", quote!(CliFile)),
-                },
-                ("TOML", quote!(Toml)),
-            ];
-            if config.class == SupplyClass::Operational {
-                kinds.push(("ENV", quote!(Env)));
+            // Exactly the sources ConfigSpec::sources() derives for this class,
+            // MINUS the ones the resolver registers itself: a secret's Env site
+            // comes from the read_config_env! expansion in the resolver, not
+            // from here.
+            let mut kinds = vec![match config.class {
+                SupplyClass::Secret => ("CLI_FILE", quote!(CliFile)),
+                SupplyClass::Operational | SupplyClass::Bootstrap | SupplyClass::Command => {
+                    ("CLI", quote!(Cli))
+                }
+            }];
+            match config.class {
+                SupplyClass::Operational => {
+                    kinds.push(("TOML", quote!(Toml)));
+                    kinds.push(("ENV", quote!(Env)));
+                }
+                SupplyClass::Secret => kinds.push(("TOML", quote!(Toml))),
+                SupplyClass::Bootstrap => kinds.push(("ENV", quote!(Env))),
+                SupplyClass::Command => {}
             }
             kinds.into_iter().map(move |(kind_name, kind)| {
                 let static_ident = format_ident!(
@@ -415,14 +491,14 @@ fn emit(
         let ident = &config.ident;
         let canonical = &config.canonical;
         let cfg_attrs = &config.cfg_attrs;
+        let default = config
+            .default
+            .as_ref()
+            .map_or_else(|| quote!(::std::option::Option::None), |default| {
+                quote!(::std::option::Option::Some(#default))
+            });
         match config.class {
             SupplyClass::Operational => {
-                let default = config
-                    .default
-                    .as_ref()
-                    .map_or_else(|| quote!(::std::option::Option::None), |default| {
-                        quote!(::std::option::Option::Some(#default))
-                    });
                 quote! {
                     #(#cfg_attrs)*
                     #ident: ::zeroship_core::config::resolve_operational(
@@ -431,6 +507,27 @@ fn emit(
                         overlay,
                         || #default,
                     )?
+                }
+            }
+            SupplyClass::Bootstrap | SupplyClass::Command => {
+                let wrapper = match config.class {
+                    SupplyClass::Command => quote!(CommandControl),
+                    _ => quote!(BootstrapControl),
+                };
+                // `overlay` is deliberately not mentioned in any arm below.
+                let value = match config.shape {
+                    CarrierShape::Flag | CarrierShape::Optional => quote!(sources.#ident),
+                    CarrierShape::Valued => quote! {
+                        ::zeroship_core::config::resolve_control(
+                            ::zeroship_core::config::CanonicalName::from_static(#canonical),
+                            sources.#ident,
+                            || #default,
+                        )?
+                    },
+                };
+                quote! {
+                    #(#cfg_attrs)*
+                    #ident: ::zeroship_core::config::#wrapper::new(#value)
                 }
             }
             SupplyClass::Secret => quote! {
@@ -539,6 +636,53 @@ fn flag_projection(canonical: &str, scope: &str, class: SupplyClass) -> String {
         flag.push_str("-file");
     }
     flag
+}
+
+/// Decide the clap carrier for a control field from its declared inner type.
+///
+/// Only bootstrap and command controls get the flag/optional shapes. An
+/// operational or secret field always uses the valued carrier, so this cannot
+/// quietly turn `Operational<bool>` into a presence flag with no env tier.
+fn carrier_shape(class: SupplyClass, inner: &Type) -> (CarrierShape, Type) {
+    if !matches!(class, SupplyClass::Bootstrap | SupplyClass::Command) {
+        return (CarrierShape::Valued, inner.clone());
+    }
+    if is_bool(inner) {
+        return (CarrierShape::Flag, inner.clone());
+    }
+    option_argument(inner).map_or_else(
+        || (CarrierShape::Valued, inner.clone()),
+        |argument| (CarrierShape::Optional, argument),
+    )
+}
+
+fn is_bool(ty: &Type) -> bool {
+    matches!(ty, Type::Path(path)
+        if path.qself.is_none() && path.path.is_ident("bool"))
+}
+
+/// Return `U` when `ty` is written exactly as `Option<U>`.
+fn option_argument(ty: &Type) -> Option<Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1 {
+        return None;
+    }
+    match arguments.args.first()? {
+        GenericArgument::Type(inner) => Some(inner.clone()),
+        _ => None,
+    }
 }
 
 fn env_projection(canonical: &str) -> String {
@@ -651,6 +795,126 @@ mod tests {
 
         // This does not inspect global registry collisions; the contract crate
         // compares projections across every linked declaration.
+    }
+
+    fn controls_expansion() -> String {
+        let expanded = expand(
+            quote!(binary = "zeroship-control", scope = "control"),
+            quote! {
+                pub struct Controls {
+                    #[config(name = "config")]
+                    pub config: BootstrapControl<Option<PathBuf>>,
+                    #[config(name = "no_config")]
+                    pub no_config: BootstrapControl<bool>,
+                    #[config(name = "check_config")]
+                    pub check_config: CommandControl<bool>,
+                    #[config(name = "check_config_format", default = CheckFormat::Text)]
+                    pub check_config_format: CommandControl<CheckFormat>,
+                }
+            },
+        )
+        .expect("controls expand");
+        formatted(expanded)
+    }
+
+    #[test]
+    fn a_command_control_gets_a_flag_and_nothing_else() {
+        let output = controls_expansion();
+        assert!(output.contains("long = \"check-config\""));
+        assert!(output.contains("ConfigSpec::command"));
+        // The env projection of `check_config` would be ZEROSHIP_CHECK_CONFIG.
+        // Its absence from the whole expansion is the claim: no clap env, and
+        // no read_config_env! fallback either.
+        assert!(
+            !output.contains("ZEROSHIP_CHECK_CONFIG"),
+            "a command control must reach no environment tier:\n{output}"
+        );
+        assert!(!output.contains("SourceKind::Toml"));
+        assert!(!output.contains("overlay,"), "no arm may consult the overlay");
+
+        // This reads the expansion. That clap actually builds an env-free
+        // argument is asserted against the compiled Command in the contract
+        // crate; token text alone cannot rule out a derive default.
+    }
+
+    #[test]
+    fn a_bootstrap_control_gets_a_flag_and_an_env_but_no_overlay() {
+        let output = controls_expansion();
+        assert!(output.contains("long = \"no-config\""));
+        assert!(output.contains("env = \"ZEROSHIP_NO_CONFIG\""));
+        assert!(output.contains("env = \"ZEROSHIP_CONFIG\""));
+        assert!(output.contains("ConfigSpec::bootstrap"));
+        assert!(output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_NO_CONFIG_ENV"));
+        assert!(!output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_NO_CONFIG_TOML"));
+
+        // Does not cover precedence between the flag and the environment; clap
+        // owns that merge and no code here re-implements it.
+    }
+
+    #[test]
+    fn control_carriers_keep_bare_flags_bare_and_optionals_optional() {
+        let output = controls_expansion();
+        let compact = compact(&output);
+        assert!(compact.contains("no_config:bool"), "{output}");
+        assert!(compact.contains("check_config:bool"));
+        assert!(output.contains("ArgAction::SetTrue"));
+        assert!(
+            compact.contains("config:Option<PathBuf>"),
+            "an Option<T> control keeps exactly one Option layer:\n{output}"
+        );
+        assert!(
+            compact.contains("check_config_format:Option<CheckFormat>"),
+            "{output}"
+        );
+        assert!(compact.contains("resolve_control("));
+        assert!(compact.contains("CommandControl::new"));
+        assert!(compact.contains("BootstrapControl::new"));
+    }
+
+    #[test]
+    fn a_default_on_a_flag_or_optional_control_is_rejected() {
+        for field in [
+            quote! {
+                #[config(name = "no_config", default = true)]
+                no_config: BootstrapControl<bool>
+            },
+            quote! {
+                #[config(name = "config", default = None)]
+                config: BootstrapControl<Option<PathBuf>>
+            },
+        ] {
+            let error = expand(
+                quote!(binary = "zeroship-control", scope = "control"),
+                quote! { struct Controls { #field, } },
+            )
+            .expect_err("a defaulted flag/optional control must not expand");
+            assert!(error.to_string().contains("remove the `default`"));
+        }
+
+        // The paired positive control is `controls_expansion`, which differs
+        // only by having no `default` on those two fields and does expand.
+    }
+
+    #[test]
+    fn operational_bool_is_not_silently_turned_into_a_presence_flag() {
+        let output = formatted(
+            expand(
+                quote!(binary = "zeroship-worker", scope = "worker"),
+                quote! {
+                    struct Ops {
+                        #[config(name = "worker.trust_proxy", default = false)]
+                        trust_proxy: Operational<bool>,
+                    }
+                },
+            )
+            .expect("operational bool expands"),
+        );
+        assert!(
+            !output.contains("ArgAction::SetTrue"),
+            "only a control may become a bare flag; an operational value keeps \
+             its env and TOML tiers:\n{output}"
+        );
+        assert!(output.contains("SourceKind::Toml"));
     }
 
     #[test]
