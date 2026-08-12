@@ -216,11 +216,24 @@ pub enum ComposeError {
         /// region, or a covered region where `draft_value ⋢ charter_value`).
         offending_pattern: String,
     },
-    /// The draft's granted scope for `key` reaches OUTSIDE the charter's granted
-    /// scope, and that uncovered region is not cleanly representable by `∖`
-    /// (II.3.1) — the sanctioned fail-closed conservative deny.
+    /// A region `admit` had to reason about for `key` is not cleanly representable by
+    /// `∖` (II.3.1) — the sanctioned fail-closed conservative deny.
+    ///
+    /// TWO causes reach here, and the variant deliberately does not distinguish them,
+    /// because the whole point is that the region could not be named:
+    ///
+    /// - the draft's grant reaches OUTSIDE everything the charter raises, and the
+    ///   difference has no glob form (`All ∖ app_*` is the common one); or
+    /// - the charter DOES cover the draft, and the algebra could not prove it -
+    ///   subtracting the scopes that would discharge the obligation was not
+    ///   representable.
+    ///
+    /// The second is a FALSE REJECT of a policy a perfect checker would admit. That is
+    /// the accepted price of never sampling a witness: an unprovable region denies
+    /// rather than passes. A charter that trips this and looks legitimate is a report
+    /// worth making, not a policy worth loosening the check for.
     UncoveredRegionNotRepresentable {
-        /// The knob key whose uncovered region could not be represented.
+        /// The knob key whose region could not be represented.
         key: KnobKey,
     },
     /// A draft `Inject` collides with a charter `Inject` on scope-overlapping
