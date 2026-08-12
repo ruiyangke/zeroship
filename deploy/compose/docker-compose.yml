@@ -72,6 +72,39 @@ services:
 
   postgres:
     image: postgres:16
+    # wal_level=logical is LOAD-BEARING for `db.live` / stream RPCs, and the
+    # postgres:16 default (`replica`) breaks them HALF-WAY rather than loudly.
+    #
+    # MEASURED 2026-08-12 by me, two throwaway postgres:16 containers differing
+    # in nothing but this flag. On `replica`:
+    #   CREATE PUBLICATION      -> succeeds, only `WARNING: wal_level is
+    #                              insufficient to publish logical changes`,
+    #                              and pg_publication really does gain the row
+    #   pg_create_logical_...   -> ERROR: logical decoding requires
+    #                              wal_level >= logical, pg_replication_slots 0
+    # On `logical` both succeed and the slot is created. That asymmetry is the
+    # whole problem: `replication::ensure_publication_and_slot` creates the
+    # publication with a bare `pool.execute` and NOT in a transaction with the
+    # slot step, so the publication survives the failure. A subscription can
+    # therefore serve its initial snapshot and then never emit another frame,
+    # which reads as a hang rather than an error.
+    #
+    # This is a server START parameter, and the trap is that the wrong fix LOOKS
+    # like it works: `SET` is refused outright ("cannot be changed without
+    # restarting the server"), but `ALTER SYSTEM SET` is ACCEPTED and a reload
+    # silently does not apply it - SHOW still says `replica` and pg_settings
+    # flags pending_restart. So it must be on the command line here; putting it
+    # in postgres-init.sql would appear to succeed and change nothing.
+    #
+    # CONCRETE COST of leaving it at the default: 12 plugin-db integration tests
+    # skip themselves on a `replica` server (`pg_has_logical_wal`), and
+    # crates/plugin-db/tests/integration.rs:2243 already anticipates this,
+    # saying CI's pg-test image gets `-c wal_level=logical` "once the rollout
+    # lands". This is that rollout for the compose stack.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
