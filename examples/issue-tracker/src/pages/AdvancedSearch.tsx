@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Select } from "@zeroship/ui";
 import {
   deleteSavedSearch,
   listSavedSearches,
@@ -160,34 +161,36 @@ function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
       <h2>Advanced search</h2>
       {conditions.map((condition, index) => (
         <div className="condition-row" key={condition.id}>
-          <select
+          <Select
             value={condition.field}
-            onChange={(e) =>
+            aria-label="Field"
+            onValueChange={(next) =>
               setConditions((cs) =>
-                cs.map((c) => (c.id === condition.id ? { ...c, field: e.target.value as Field } : c)),
+                cs.map((c) => (c.id === condition.id ? { ...c, field: next as Field } : c)),
               )
             }
           >
             {FIELDS.map((f) => (
-              <option key={f} value={f}>
+              <Select.Item key={f} value={f}>
                 {f}
-              </option>
+              </Select.Item>
             ))}
-          </select>
-          <select
+          </Select>
+          <Select
             value={condition.operator}
-            onChange={(e) =>
+            aria-label="Operator"
+            onValueChange={(next) =>
               setConditions((cs) =>
-                cs.map((c) => (c.id === condition.id ? { ...c, operator: e.target.value as Operator } : c)),
+                cs.map((c) => (c.id === condition.id ? { ...c, operator: next as Operator } : c)),
               )
             }
           >
             {OPERATORS.map((op) => (
-              <option key={op.key} value={op.key}>
+              <Select.Item key={op.key} value={op.key}>
                 {op.label}
-              </option>
+              </Select.Item>
             ))}
-          </select>
+          </Select>
           {condition.operator !== "exists" ? (
             <input
               value={condition.value}

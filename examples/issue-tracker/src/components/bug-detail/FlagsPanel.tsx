@@ -9,6 +9,7 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useCallback, useEffect, useState } from "react";
+import { Select } from "@zeroship/ui";
 
 import { clearFlag, listFlags, setFlag } from "../../api";
 import { errorMessage } from "../rpc";
@@ -98,13 +99,17 @@ function FlagRow({
           </span>
         ))
       )}
-      <select value={status} onChange={(e) => setStatus(e.target.value as FlagStatus)}>
+      <Select
+        value={status}
+        onValueChange={(next) => setStatus(next as FlagStatus)}
+        aria-label={`${flagType.name} status`}
+      >
         {FLAG_STATUSES.filter((s) => s !== "?" || flagType.isRequestable).map((s) => (
-          <option key={s} value={s}>
+          <Select.Item key={s} value={s}>
             {s}
-          </option>
+          </Select.Item>
         ))}
-      </select>
+      </Select>
       {status === "?" ? (
         <span className="flag-requestee">
           {requesteeId ? (

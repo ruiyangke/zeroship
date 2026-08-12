@@ -95,13 +95,14 @@ export function FlagTypesAdmin() {
         </label>
         <label>
           Applies to
-          <select
+          <Select
             value={targetType}
-            onChange={(e) => setTargetType(e.target.value as "bug" | "attachment")}
+            onValueChange={(next) => setTargetType((next as "bug" | "attachment") ?? "bug")}
+            aria-label="Applies to"
           >
-            <option value="bug">bug</option>
-            <option value="attachment">attachment</option>
-          </select>
+            <Select.Item value="bug">bug</Select.Item>
+            <Select.Item value="attachment">attachment</Select.Item>
+          </Select>
         </label>
         <button
           type="button"

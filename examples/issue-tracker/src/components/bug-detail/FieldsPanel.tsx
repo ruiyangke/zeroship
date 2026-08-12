@@ -176,29 +176,34 @@ function MoveControl({
         <div className="inline-form">
           <label>
             Target product
-            <select value={targetProductId} onChange={(e) => void pickProduct(e.target.value)}>
-              <option value="">Select a product</option>
+            <Select
+              value={targetProductId}
+              onValueChange={(next) => void pickProduct(next ?? "")}
+              placeholder="Select a product"
+              aria-label="Target product"
+            >
               {products.map((p) => (
-                <option key={p.id} value={p.id}>
+                <Select.Item key={p.id} value={p.id}>
                   {p.name}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
           <label>
             Target component
-            <select
+            <Select
               value={targetComponentId}
               disabled={!components}
-              onChange={(e) => setTargetComponentId(e.target.value)}
+              onValueChange={(next) => setTargetComponentId(next ?? "")}
+              placeholder="Select a component"
+              aria-label="Target component"
             >
-              <option value="">Select a component</option>
               {components?.map((c) => (
-                <option key={c.id} value={c.id}>
+                <Select.Item key={c.id} value={c.id}>
                   {c.name}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
           <button
             type="button"

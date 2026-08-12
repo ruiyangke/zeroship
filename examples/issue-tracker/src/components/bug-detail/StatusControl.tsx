@@ -4,6 +4,7 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
+import { Select } from "@zeroship/ui";
 import { changeBugStatus, markBugDuplicate, reopenBug, resolveBug } from "../../api";
 import {
   BUG_RESOLUTIONS,
@@ -59,22 +60,25 @@ export function StatusControl({
       <div className="status-control-row">
         <label>
           Status
-          <select
+          <Select
             value={bug.status}
             disabled={busy || targets.length === 0}
-            onChange={(e) => {
-              const next = e.target.value;
-              if (next === bug.status || !isBugStatus(next)) return;
+            aria-label="Status"
+            onValueChange={(next) => {
+              if (!next || next === bug.status || !isBugStatus(next)) return;
               void run(() => changeBugStatus({ id: bug.id, status: next }));
             }}
           >
-            <option value={bug.status}>{bug.status}</option>
+            {/* The current status is listed first so the control can show it,
+                then the states it can legally move to. The workflow decides
+                that set -- this is not every status. */}
+            <Select.Item value={bug.status}>{bug.status}</Select.Item>
             {openTargets.map((t) => (
-              <option key={t} value={t}>
+              <Select.Item key={t} value={t}>
                 {t}
-              </option>
+              </Select.Item>
             ))}
-          </select>
+          </Select>
         </label>
         {/* A VALUE, not a disabled input. Resolution is never typed here --
             it is chosen in the Resolve flow below, which also enforces the
@@ -111,16 +115,17 @@ export function StatusControl({
         <div className="inline-form">
           <label>
             Resolution (required to resolve)
-            <select
+            <Select
               value={resolution}
-              onChange={(e) => setResolution(e.target.value as NonDuplicateResolution)}
+              onValueChange={(next) => setResolution(next as NonDuplicateResolution)}
+              aria-label="Resolution (required to resolve)"
             >
               {NON_DUPLICATE_RESOLUTIONS.map((r) => (
-                <option key={r} value={r}>
+                <Select.Item key={r} value={r}>
                   {r}
-                </option>
+                </Select.Item>
               ))}
-            </select>
+            </Select>
           </label>
           <button
             type="button"

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -134,14 +135,18 @@ export function GroupsAdmin() {
         <div className="field-row">
           <label>
             Add member to
-            <select value={memberGroup} onChange={(e) => setMemberGroup(e.target.value)}>
-              <option value="">Select a group</option>
-              {groups.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
+            <Select
+            value={memberGroup}
+            onValueChange={(next) => setMemberGroup(next ?? "")}
+            placeholder="Select a group"
+            aria-label="Add member to"
+          >
+            {(groups ?? []).map((group) => (
+              <Select.Item key={group.id} value={group.id}>
+                {group.name}
+              </Select.Item>
+            ))}
+          </Select>
           </label>
           <label>
             Find user
@@ -235,25 +240,33 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
       <div className="field-row">
         <label>
           Product
-          <select value={productId} onChange={(e) => setProductId(e.target.value)}>
-            <option value="">Select a product</option>
-            {products.map((product) => (
-              <option key={product.id} value={product.id}>
-                {product.name}
-              </option>
+          <Select
+            value={productId}
+            onValueChange={(next) => setProductId(next ?? "")}
+            placeholder="Select a product"
+            aria-label="Product"
+          >
+            {(products ?? []).map((p) => (
+              <Select.Item key={p.id} value={p.id}>
+                {p.name}
+              </Select.Item>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           Group
-          <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-            <option value="">Select a group</option>
-            {groups.map((group) => (
-              <option key={group.id} value={group.id}>
+          <Select
+            value={groupId}
+            onValueChange={(next) => setGroupId(next ?? "")}
+            placeholder="Select a group"
+            aria-label="Group"
+          >
+            {(groups ?? []).map((group) => (
+              <Select.Item key={group.id} value={group.id}>
                 {group.name}
-              </option>
+              </Select.Item>
             ))}
-          </select>
+          </Select>
         </label>
         <button
           type="button"
