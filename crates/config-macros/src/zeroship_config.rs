@@ -1,11 +1,13 @@
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
     Attribute, Expr, Fields, GenericArgument, Ident, ItemStruct, LitStr, Meta, PathArguments,
     Token, Type, Visibility,
 };
+
+use crate::shared;
 
 struct MacroArgs {
     binary: LitStr,
@@ -134,7 +136,11 @@ struct FieldConfig {
 }
 
 struct ConfigAttribute {
+    /// The canonical name, either written directly or read from the shared table.
     name: LitStr,
+    /// Set when the identity came from `shared = SYMBOL`; carries the required
+    /// wrapper and inner type so the field cannot restate them differently.
+    shared: Option<&'static shared::SharedIdentity>,
     default: Option<Expr>,
     /// `env = false` on a bootstrap control; see [`SupplyClass::Bootstrap`].
     env: Option<syn::LitBool>,
@@ -143,7 +149,8 @@ struct ConfigAttribute {
 impl Parse for ConfigAttribute {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let entries = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-        let mut name = None;
+        let mut name: Option<LitStr> = None;
+        let mut shared: Option<(&'static shared::SharedIdentity, Ident)> = None;
         let mut default = None;
         let mut env = None;
 
@@ -151,7 +158,8 @@ impl Parse for ConfigAttribute {
             let Meta::NameValue(name_value) = entry else {
                 return Err(syn::Error::new_spanned(
                     entry,
-                    "expected `name = \"...\"`, `default = EXPR` or `env = false`",
+                    "expected `name = \"...\"`, `shared = SYMBOL`, `default = EXPR` \
+                     or `env = false`",
                 ));
             };
             let Some(key) = name_value.path.get_ident() else {
@@ -177,7 +185,44 @@ impl Parse for ConfigAttribute {
                             "`name` must be a string literal",
                         ));
                     };
+                    if let Some(identity) = shared::by_canonical(&value.value()) {
+                        return Err(syn::Error::new_spanned(
+                            &value,
+                            format!(
+                                "`{}` is a shared identity; write \
+                                 `#[config(shared = {})]` so its name, class and \
+                                 type come from one place",
+                                identity.canonical, identity.symbol
+                            ),
+                        ));
+                    }
                     name = Some(value);
+                }
+                "shared" => {
+                    let Expr::Path(path) = &name_value.value else {
+                        return Err(syn::Error::new_spanned(
+                            &name_value.value,
+                            "`shared` must be a bare shared-identity symbol",
+                        ));
+                    };
+                    let Some(symbol) = path.path.get_ident() else {
+                        return Err(syn::Error::new_spanned(
+                            &name_value.value,
+                            "`shared` must be a bare shared-identity symbol",
+                        ));
+                    };
+                    let Some(identity) = shared::by_symbol(&symbol.to_string()) else {
+                        return Err(syn::Error::new_spanned(
+                            symbol,
+                            format!(
+                                "unknown shared identity `{symbol}`; known symbols are {}",
+                                shared::known_symbols()
+                            ),
+                        ));
+                    };
+                    if shared.replace((identity, symbol.clone())).is_some() {
+                        return Err(syn::Error::new_spanned(key, "duplicate `shared` argument"));
+                    }
                 }
                 "default" => {
                     if default.replace(name_value.value).is_some() {
@@ -213,19 +258,38 @@ impl Parse for ConfigAttribute {
                 _ => {
                     return Err(syn::Error::new_spanned(
                         key,
-                        "unknown config argument; expected `name`, `default` or `env`",
+                        "unknown config argument; expected `name`, `shared`, `default` \
+                         or `env`",
                     ));
                 }
             }
         }
 
-        Ok(Self {
-            name: name.ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), "missing `name = \"...\"`")
-            })?,
-            default,
-            env,
-        })
+        match (name, shared) {
+            (Some(_), Some((_, symbol))) => Err(syn::Error::new_spanned(
+                symbol,
+                "a field declares `name` or `shared`, never both; a shared \
+                 identity's canonical name lives in the shared table",
+            )),
+            (Some(name), None) => Ok(Self {
+                name,
+                shared: None,
+                default,
+                env,
+            }),
+            (None, Some((identity, symbol))) => Ok(Self {
+                // The span is the symbol, so a canonical-name diagnostic points
+                // at what the author actually wrote.
+                name: LitStr::new(identity.canonical, symbol.span()),
+                shared: Some(identity),
+                default,
+                env,
+            }),
+            (None, None) => Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "missing `name = \"...\"` or `shared = SYMBOL`",
+            )),
+        }
     }
 }
 
@@ -273,6 +337,23 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         let config = field.attrs[config_index].parse_args::<ConfigAttribute>()?;
         validate_canonical(&config.name)?;
         let (class, inner_type) = wrapper_type(&field.ty)?;
+        if let Some(identity) = config.shared {
+            // The shared table owns the class and the resolved type. Restating
+            // either one differently is what gives a single ZEROSHIP_* name two
+            // parse behaviours, so it is refused rather than coalesced later.
+            let declared = field.ty.to_token_stream().to_string();
+            let required = format!("{}<{}>", identity.wrapper, identity.inner);
+            if !shared::type_matches(&declared, &required) {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    format!(
+                        "shared identity `{}` is declared as `{required}`; every \
+                         consumer must spell it identically",
+                        identity.canonical
+                    ),
+                ));
+            }
+        }
         if class == SupplyClass::Secret && config.default.is_some() {
             return Err(syn::Error::new_spanned(
                 &field.attrs[config_index],
@@ -869,13 +950,13 @@ mod tests {
             quote!(binary = "zeroship-control", scope = "control"),
             quote! {
                 pub struct Controls {
-                    #[config(name = "config")]
+                    #[config(shared = CONFIG)]
                     pub config: BootstrapControl<Option<PathBuf>>,
-                    #[config(name = "no_config")]
+                    #[config(shared = NO_CONFIG)]
                     pub no_config: BootstrapControl<bool>,
-                    #[config(name = "check_config")]
+                    #[config(shared = CHECK_CONFIG)]
                     pub check_config: CommandControl<bool>,
-                    #[config(name = "check_config_format", default = CheckFormat::Text)]
+                    #[config(shared = CHECK_CONFIG_FORMAT, default = CheckFormat::Text)]
                     pub check_config_format: CommandControl<CheckFormat>,
                 }
             },
@@ -950,7 +1031,7 @@ mod tests {
                     struct Controls {
                         #[config(name = "worker.workflow_advance_unsigned", env = false)]
                         workflow_advance_unsigned: BootstrapControl<bool>,
-                        #[config(name = "no_config")]
+                        #[config(shared = NO_CONFIG)]
                         no_config: BootstrapControl<bool>,
                     }
                 },
@@ -984,7 +1065,7 @@ mod tests {
                 database_url: Secret<String>
             },
             quote! {
-                #[config(name = "check_config", env = false)]
+                #[config(shared = CHECK_CONFIG, env = false)]
                 check_config: CommandControl<bool>
             },
         ] {
@@ -1004,11 +1085,11 @@ mod tests {
     fn a_default_on_a_flag_or_optional_control_is_rejected() {
         for field in [
             quote! {
-                #[config(name = "no_config", default = true)]
+                #[config(shared = NO_CONFIG, default = true)]
                 no_config: BootstrapControl<bool>
             },
             quote! {
-                #[config(name = "config", default = None)]
+                #[config(shared = CONFIG, default = None)]
                 config: BootstrapControl<Option<PathBuf>>
             },
         ] {
@@ -1044,6 +1125,110 @@ mod tests {
              its env and TOML tiers:\n{output}"
         );
         assert!(output.contains("SourceKind::Toml"));
+    }
+
+    #[test]
+    fn consumers_of_one_shared_identity_may_disagree_about_the_default() {
+        // THE 2026-08-12 AMENDMENT, as an executable claim. Section 4.1 first
+        // required every consumer of a shared identity to agree on its default,
+        // which would have rejected the five declarations Step 2 landed:
+        // `observability.log_filter` defaults to a directive naming the
+        // declaring crate, so no single value is correct for every binary and
+        // the rule had no satisfiable form.
+        //
+        // What must still be identical is what the OPERATOR sees: one canonical
+        // name, one environment spelling, one flag. That is asserted here on
+        // the same pair of expansions that differ in default.
+        let mut projections = Vec::new();
+        for (binary, scope, default) in [
+            ("zeroship-control", "control", "info,zeroship_control=debug"),
+            ("zeroship-gate", "gateway", "info,zeroship_gateway=debug"),
+        ] {
+            let binary = syn::LitStr::new(binary, proc_macro2::Span::call_site());
+            let scope = syn::LitStr::new(scope, proc_macro2::Span::call_site());
+            let default = syn::LitStr::new(default, proc_macro2::Span::call_site());
+            let output = formatted(
+                expand(
+                    quote!(binary = #binary, scope = #scope),
+                    quote! {
+                        struct Controls {
+                            #[config(shared = OBSERVABILITY_LOG_FILTER, default = #default.to_owned())]
+                            log_filter: Operational<String>,
+                        }
+                    },
+                )
+                .expect("a per-binary default on a shared identity must expand"),
+            );
+            assert!(
+                output.contains(&default.value()),
+                "the declared default did not reach the expansion:\n{output}"
+            );
+            projections.push((
+                output.contains("env = \"ZEROSHIP_OBSERVABILITY_LOG_FILTER\""),
+                output.contains("long = \"observability-log-filter\""),
+                output.contains("\"observability.log_filter\""),
+            ));
+        }
+        assert_eq!(projections[0], (true, true, true), "control projections");
+        assert_eq!(
+            projections[0], projections[1],
+            "two consumers of one shared identity projected different names"
+        );
+
+        // Does not cover: that the two binaries' RESOLVED values differ at run
+        // time. That is `tests/config_check_e2e.sh`, which starts both.
+    }
+
+    #[test]
+    fn a_shared_identity_cannot_be_typoed_restated_or_retyped() {
+        // The three ways Step 2's repeated string literals could go wrong, each
+        // paired with the positive control above, which differs only by being
+        // correct and does expand.
+        let cases = [
+            (
+                quote! {
+                    #[config(shared = OBSERVABILITY_LOG_FILTR, default = String::new())]
+                    log_filter: Operational<String>
+                },
+                "unknown shared identity",
+            ),
+            (
+                quote! {
+                    #[config(name = "observability.log_filter", default = String::new())]
+                    log_filter: Operational<String>
+                },
+                "is a shared identity; write",
+            ),
+            (
+                quote! {
+                    #[config(shared = OBSERVABILITY_LOG_FILTER, default = PathBuf::new())]
+                    log_filter: Operational<PathBuf>
+                },
+                "every consumer must spell it identically",
+            ),
+            (
+                quote! {
+                    #[config(shared = OBSERVABILITY_LOG_FILTER, name = "gateway.log_filter")]
+                    log_filter: Operational<String>
+                },
+                "never both",
+            ),
+        ];
+        for (field, expected) in cases {
+            let error = expand(
+                quote!(binary = "zeroship-gate", scope = "gateway"),
+                quote! { struct Controls { #field, } },
+            )
+            .expect_err("a mis-declared shared identity must not expand");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
+
+        // Does not cover: a WRONG entry in the shared table itself. Nothing here
+        // can tell a correct canonical name from an incorrect one; the table is
+        // the authority and only review checks it.
     }
 
     #[test]
