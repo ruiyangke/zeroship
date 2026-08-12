@@ -2899,13 +2899,18 @@ SQL
   elif [ "${LOG_ERR:-0}" -ge 1 ] 2>/dev/null; then
     pass "deployed: an RPC error also reaches the creator's log surface (input-rejection class)"
   else
-    fail "deployed: the RPC error path logged NOTHING the creator can see.
-      fetch-handler.ts:381 calls console.error on this path and the runtime binds
-      console.error to the same callback as console.log (init.rs:3214-3225), which
-      this same step just proved reaches the ring. So either this request did not
-      take the error path at all, or the error rail does not run in the deployed
-      isolate. A creator would see everything they chose to print and nothing
-      about the failures they hit. See #333."
+    fail "deployed: a request REJECTED with $LOG_ERR_CODE left the creator no log line.
+      READ THIS AS WHAT IT IS, NOT AS A DELIVERY FINDING. This arm observes what
+      a creator SEES (nothing) and does NOT establish that the log rail is
+      broken, because it cannot show any JS ran. sdks/bootstrap/src/dispatcher.ts
+      :55-58 records that an unparseable body is rejected by the RUST parser
+      (crates/runtime/src/core/runtime.rs::parse_rpc_body) before the JS
+      dispatcher, and a request that never reached JS printed nothing, so
+      nothing arriving is expected rather than symptomatic. CAVEAT, unresolved:
+      that comment is about a BODY and this probe uses the query string, so
+      which layer rejected THIS request is unverified.
+      THE DIAGNOSTIC ARM IS THE THROW BELOW, where the isolate demonstrably ran.
+      Root cause for that one is handler.rs:459 (#334)."
   fi
 
   # --- THE ERROR CLASS THAT IS THE CREATOR'S OWN BUG ------------------------
@@ -3452,7 +3457,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|the RPC error path logged NOTHING the creator can see|a procedure that THREW left NOTHING the creator can read"}
+GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line|a procedure that THREW left NOTHING the creator can read"}
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
