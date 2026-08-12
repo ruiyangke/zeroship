@@ -14,6 +14,27 @@ stable local inputs consumed by compose, while `origin_scheme`, trusted origins,
 and explicit issuer URLs remain ordinary topology settings. Historical counts
 and observations below describe the code before implementation.
 
+Two deletions went beyond the six behaviours tabulated below, and both were
+relaxations wearing another name:
+
+- `AUTH_INSECURE_DEV`, read by the runtime's 5xx body sanitizer and by
+  `@zeroship/bootstrap`'s fetch handler, which restored verbose error bodies
+  including stack traces. It is the one check that was made unconditional by
+  deleting the hatch rather than by provisioning a local input, because a
+  verbose wire body is not something `dev init` can generate. The diagnostics
+  still reach the server log with the request id.
+- A compiled-in `http://localhost:9092/oauth2` platform-issuer default that
+  applied only while the relaxation flag was set. The setting survives under its
+  own names (`--auth-platform-issuer` / `AUTH_PLATFORM_ISSUER` /
+  `[auth] platform_issuer`) and compose supplies it from `ZEROSHIP_ORIGIN_SCHEME`
+  and `ZEROSHIP_DOMAIN`.
+
+Verified 2026-08-12: `cargo check --workspace` clean; `tests/run_auth_suite.sh`
+561 passed, 0 unexpected skips; both compose gates green (10/0 and 3/0), the
+port-exposure gate going 8/2 and exit 1 when `--dev-insecure` is put back into
+the control service; `docker compose config` exits 0 with a generated
+`deploy/compose/.env` and 1 without it.
+
 ## Relationship to existing work
 
 This proposal takes the naming and supply-set spine as given and adds the
