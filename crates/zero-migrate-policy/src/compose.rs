@@ -876,61 +876,20 @@ impl LayerTag {
 
 // ── layered charter grant queries (crate-internal; consumed by boundary::admit) ──
 
-/// `value(layers, k, o)` — the EFFECTIVE (top-down fall-through) grant value of a
-/// LAYER STACK at `o` (H-4). The first layer (top/innermost first) that COVERS `o`
-/// for `k` (presence) decides; else the knob default. Used by `admit` to read a
-/// (possibly multi-layer) charter's effective value at a witness object.
-pub(crate) fn layered_value_at(
-    layers: &[Layer],
-    default: &KnobValue,
-    key: &KnobKey,
-    o: &ObjectName,
-) -> Result<KnobValue, ComposeError> {
-    for layer in layers {
-        if let Some(km) = layer.grants.keys.get(key) {
-            if km.covers(o) {
-                return km.value_at(o);
-            }
-        }
-    }
-    Ok(default.clone())
-}
-
-/// EVERY grant rule scope of a LAYER STACK for `key` (H-4), each at its own
-/// `effective_scope` (excludes intact) — including rules whose value is at or below
-/// default.
+/// Every grant rule scope of a LAYER STACK for `key` whose value RISES above default,
+/// each at its own `effective_scope` (excludes intact) (H-4).
 ///
-/// These are the boundaries the `admit` escalation check partitions on: it subtracts
-/// them ONE AT A TIME (iterated per-rule `∖`, NEVER a `⊔`-materialized charter side,
-/// C-1) and then compares values at a witness inside each region.
+/// The grant-bearing subset, deliberately. `admit` subtracts these to find the region
+/// no charter rule lifts, and a rule at or below default lifts nothing - counting it
+/// would treat its region as charter-granted. It would also make `All ∖ <mask>`
+/// unrepresentable and turn a precise escalation report into a fail-closed "not
+/// representable", which is safe but says nothing useful about what the draft did
+/// wrong.
 ///
-/// A default-valued rule grants nothing, but it is still a PRESENCE MASK: under the
-/// layer stack's presence-based last-wins, an upper layer's rule decides the effective
-/// value wherever it covers, so a `false` rule punches a hole in a lower layer's
-/// grant. Dropping such a rule here used to leave that hole invisible to the
-/// partition, and the caller samples ONE witness per region — so the witness could
-/// land outside the hole, where the charter still granted, and an untrusted draft
-/// re-granting over the whole universe was admitted. The value comparison alone
-/// cannot recover a boundary the partition never drew.
-pub(crate) fn layered_grant_rule_scopes<'a>(layers: &'a [Layer], key: &KnobKey) -> Vec<&'a Scope> {
-    let mut out: Vec<&Scope> = Vec::new();
-    for layer in layers {
-        if let Some(km) = layer.grants.keys.get(key) {
-            for r in &km.rules {
-                out.push(&r.scope);
-            }
-        }
-    }
-    out
-}
-
-/// The subset of [`layered_grant_rule_scopes`] whose value rises above default.
-///
-/// This is the set the UNCOVERED-region arm subtracts, and it must stay the
-/// grant-bearing subset: a mask grants nothing, so subtracting it would treat its
-/// region as charter-covered. It would also make `All ∖ <mask>` unrepresentable and
-/// turn a precise escalation report into a fail-closed "not representable", which is
-/// safe but says nothing useful about what the draft did wrong.
+/// Masking is a separate question and is answered separately: a rule at or below
+/// default still DECIDES wherever it covers, because the layered query stops at the
+/// first covering layer. `admit` reads each layer's own rules for that, rather than
+/// asking this function, which is why nothing here needs to report a mask.
 pub(crate) fn layered_nondefault_grant_rules<'a>(
     layers: &'a [Layer],
     key: &KnobKey,

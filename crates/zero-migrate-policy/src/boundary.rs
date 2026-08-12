@@ -13,10 +13,12 @@
 //! narrow-only, presence-overridden**: a silent draft inherits the charter's grant; a
 //! draft that NARROWS wins by presence (admitted because a narrow is `⊑` the charter);
 //! a draft that RAISES above default is admitted only where its value is `⊑` the
-//! charter's (II.3.2). Obligations/injects/validates union-up (un-droppable). The
-//! escalation check computes the uncovered region by ITERATED per-charter-rule `∖`
-//! subtraction (never a `⊔`-materialized charter — the C-1 fix), and rejects a
-//! non-representable difference (fail-closed).
+//! charter's (II.3.2). Obligations/injects/validates union-up (un-droppable).
+//!
+//! The escalation check proves each raising draft rule against the layer stack
+//! SYMBOLICALLY - it never samples an object. Region arithmetic is ITERATED per rule
+//! (never a `⊔`-materialized charter - the C-1 fix), and a difference the scope algebra
+//! cannot represent is a refusal, not a pass.
 //!
 //! `admit`'s `charter` is a finalized [`AdmitCharter`] (a [`crate::RootCharter`], a
 //! [`Charter`](crate::compose::Charter) from `finalize_charter`, or an already-composed
@@ -25,9 +27,9 @@
 //! type level (MED).
 
 use crate::compose::{
-    check_inject_collisions, check_validate_vs_inject, layered_grant_rule_scopes,
-    layered_nondefault_grant_rules, layered_value_at, pin_layer_key_to_default, render_scope,
-    rules_of, witness_of, AdmitCharter, ComposeError, EffectivePolicy, GrantModel, Layer, LayerTag,
+    check_inject_collisions, check_validate_vs_inject, layered_nondefault_grant_rules,
+    pin_layer_key_to_default, render_scope, rules_of, AdmitCharter, ComposeError, EffectivePolicy,
+    GrantModel, Layer, LayerTag,
 };
 use crate::knob::KnobKey;
 use crate::registry::PolicyRegistry;
@@ -44,14 +46,14 @@ use crate::PolicyDoc;
 /// The algorithm, pointwise per (key, object) but decided SYMBOLICALLY:
 /// - **Grants — charter-inherited, narrow-only, presence-overridden.** For each grant
 ///   key the draft is admissible iff at every object where the draft RAISES `k` above
-///   default (`grantedScope(draft, k)`) the draft value is `⊑` the charter's LAYERED
-///   effective value. Decided by (1) the UNCOVERED region — `grantedScope(draft,k)`
-///   minus each charter grant rule's `effective_scope`, iterated ONE RULE AT A TIME
-///   (C-1: never a `⊔`-materialized charter), where the charter's value is `default`
-///   so any non-default draft value escalates; and (2) the COVERED region — the draft
-///   value at a witness of each partition `⊑` the charter's layered effective value
-///   there (this arm also catches an upper-charter-layer masking a lower grant to
-///   default). A not-representable `∖` fails closed.
+///   default the draft value is `⊑` the charter's LAYERED effective value. Proved one
+///   RAISING DRAFT RULE at a time against the layer stack, because a join is a least
+///   upper bound and so the join of the covering draft rules is within the charter
+///   exactly when each of them is. Each rule walks the layers top-first: a layer must
+///   lift the rule's value wherever it covers, and everything that layer covers -
+///   including rules at or below default, which grant nothing but still decide - is
+///   retired before falling through. Whatever no layer raises sits at the knob default
+///   and escalates. A not-representable `∖` fails closed.
 /// - **Require/Inject/Validate:** union-up across all layers; a charter rule is never
 ///   dropped or narrowed.
 /// - **Collisions:** a draft inject colliding with a charter inject, or a draft
@@ -115,8 +117,29 @@ pub fn admit(
 
 /// The per-key CHARTER-INHERITED grant admissibility check (II.3.2): at every object
 /// where the draft raises `k` above default, the draft value `⊑` the charter's layered
-/// effective value. Uncovered region by iterated per-charter-rule `∖` (C-1);
-/// covered-region value comparison at a witness (also catches masking).
+/// effective value.
+///
+/// Proved PER DRAFT RULE, symbolically, never by sampling a point.
+///
+/// The identity that makes one rule at a time sufficient: the draft's value at an object
+/// is the JOIN of every draft rule covering it, and a join is a least upper bound, so
+///
+/// ```text
+/// join(v_i) ⊑ c(o)   ⟺   every covering v_i ⊑ c(o)
+/// ```
+///
+/// Forward because each `v_i ⊑ join(v_i)`; backward because a `c(o)` above every `v_i`
+/// is above their least upper bound. So overlapping draft rules need no reconciling:
+/// prove each rule's own value against the charter over its own scope and the join
+/// follows.
+///
+/// This replaced a partition-and-sample check that compared values at ONE witness per
+/// region. Neither side is constant across such a region. A charter whose upper layer
+/// denied `app*` and re-granted `app` was sampled at `app` - the witness of a glob is
+/// built from its literal prefix - so the mask at `appx` was never compared, and a
+/// draft re-granting `app*` was admitted and got back exactly the authority the layer
+/// removed. The draft side varied too: two draft rules inside one charter region meant
+/// admission depended on which was written first.
 fn check_grant_key(
     key: &KnobKey,
     draft: &GrantModel,
@@ -126,93 +149,140 @@ fn check_grant_key(
     let Some(dk) = draft.get(key) else {
         return Ok(()); // draft grants nothing on this key.
     };
-    let draft_granted = dk.granted_scope()?;
-    if matches!(draft_granted, Scope::Nothing) {
-        return Ok(()); // draft raises nothing above default → admissible.
-    }
-
     let def = registry
         .get(key)
         .ok_or_else(|| ComposeError::RegistryOrValueMismatch {
             detail: format!("unknown knob {key}"),
         })?;
 
-    // (1) UNCOVERED region: R := grantedScope(draft,k); for each charter grant rule r
-    //     on k (across layers), R := R ∖ r.effective_scope — ITERATED, per rule, so
-    //     `⊔` never materializes the charter side (C-1). Excludes on each charter rule
-    //     survive (the ∖ construction keeps a subtrahend's holes). A non-representable
-    //     ∖ at any step ⇒ reject (fail-closed).
-    //
-    //     Subtraction order matters, so a step that cannot be represented is DEFERRED
-    //     rather than fatal. `All ∖ app_*` has no glob form, but if a later rule is
-    //     itself `All` the region empties anyway - aborting on the first
-    //     unrepresentable step made admission depend on the order rules happen to sit
-    //     in the layer stack, and refused charters that are plainly admissible (a root
-    //     granting `all` and a layer re-granting a sub-scope at the same value). Retry
-    //     the deferred rules until a pass makes no progress; only then fail closed,
-    //     and only if the region is still non-empty.
-    let uncovered_rules = layered_nondefault_grant_rules(charter_layers, key)?;
-    let charter_rules = layered_grant_rule_scopes(charter_layers, key);
-    let mut r = draft_granted.clone();
-    let mut deferred: Vec<&Scope> = uncovered_rules.clone();
+    for rule in &dk.rules {
+        // A rule at or below the knob default raises nothing, so it cannot escalate.
+        if leq_value(&def.kind, &rule.value, &def.default)? {
+            continue;
+        }
+        prove_rule_within_charter(key, def, &rule.scope, &rule.value, charter_layers)?;
+    }
+    Ok(())
+}
+
+/// Prove one draft grant rule `(scope, value)` is within the charter everywhere it
+/// applies, by walking the layer stack top-first and retiring the region each layer
+/// decides.
+///
+/// A layer DECIDES wherever any of its rules covers, because the query falls through
+/// top-down and stops at the first layer that covers (`layered_value_at`). So per layer:
+/// prove the covered part of the residual satisfies the draft's value, then subtract
+/// everything that layer covers - INCLUDING rules at or below default, which grant
+/// nothing but still mask - and carry the rest to the next layer down. A residual that
+/// survives every layer sees the knob default, which is below any raising value, so a
+/// non-empty residual at the end is an escalation.
+///
+/// Within a layer the value is a join too, so "the layer satisfies `value` here" means
+/// some covering rule is at or above `value` there. That is the same lattice identity
+/// read the other way, and it is why this needs no arrangement of overlapping scopes.
+fn prove_rule_within_charter(
+    key: &KnobKey,
+    def: &crate::knob::KnobDef,
+    scope: &Scope,
+    value: &crate::knob::KnobValue,
+    charter_layers: &[Layer],
+) -> Result<(), ComposeError> {
+    // Scopes an upper layer has already decided. A point one of these covers never
+    // reaches a lower layer, so a lower layer sitting below the draft there is not an
+    // escalation. Carried as a LIST rather than folded into the region, because the
+    // fold is what forces a subtraction the glob algebra often cannot express: `All`
+    // minus `app_*` has no representation, so a residual narrowed layer by layer
+    // refused charters that plainly compose.
+    let mut decided: Vec<&Scope> = Vec::new();
+
+    for layer in charter_layers {
+        let Some(km) = layer.grants.keys.get(key) else {
+            continue; // this layer is silent on the key, so it decides nothing.
+        };
+
+        let mut satisfying: Vec<&Scope> = Vec::new();
+        let mut falling_short: Vec<&Scope> = Vec::new();
+        for r in &km.rules {
+            if leq_value(&def.kind, value, &r.value)? {
+                satisfying.push(&r.scope);
+            } else {
+                falling_short.push(&r.scope);
+            }
+        }
+
+        // Only a rule BELOW the draft's value can produce an escalation, so the
+        // subtraction runs only where one exists. A layer whose every covering rule
+        // satisfies costs nothing and cannot fail to be represented.
+        for short in &falling_short {
+            let suspect = scope.meet(short);
+            if matches!(suspect, Scope::Nothing) {
+                continue;
+            }
+            // Escaping = covered by a rule below the draft, not lifted by a sibling
+            // rule in the same layer, and not already decided further up.
+            let mut exempt: Vec<&Scope> = decided.clone();
+            exempt.extend_from_slice(&satisfying);
+            let Some(escaping) = subtract_each(&suspect, &exempt) else {
+                return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
+            };
+            if !matches!(escaping, Scope::Nothing) {
+                return Err(ComposeError::GrantExceedsCharter {
+                    key: key.clone(),
+                    offending_pattern: render_scope(&escaping),
+                });
+            }
+        }
+
+        for r in &km.rules {
+            decided.push(&r.scope);
+        }
+    }
+
+    // Whatever no charter rule RAISES is at the knob default, which is below any value
+    // that reaches here. A rule at or below default covers without lifting, so it does
+    // not rescue this region - the subtrahends are the raising rules only.
+    let raising = layered_nondefault_grant_rules(charter_layers, key)?;
+    let Some(unraised) = subtract_each(scope, &raising) else {
+        return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
+    };
+    if !matches!(unraised, Scope::Nothing) {
+        return Err(ComposeError::GrantExceedsCharter {
+            key: key.clone(),
+            offending_pattern: render_scope(&unraised),
+        });
+    }
+    Ok(())
+}
+
+/// `region ∖ s` for every `s`, one at a time, never against a `⊔`-materialized union
+/// (C-1). `None` when a step cannot be represented and the residual is still non-empty.
+///
+/// A step the scope algebra cannot express is DEFERRED rather than fatal, because
+/// subtraction order matters: `All ∖ app_*` has no glob form, but a later subtrahend of
+/// `All` empties the region anyway. Failing on the first unrepresentable step made the
+/// answer depend on the order rules happen to sit in, and refused charters that are
+/// plainly admissible. Retry until a pass makes no progress, then fail closed.
+fn subtract_each(region: &Scope, subtrahends: &[&Scope]) -> Option<Scope> {
+    let mut r = region.clone();
+    let mut deferred: Vec<&Scope> = subtrahends.to_vec();
     while !deferred.is_empty() && !matches!(r, Scope::Nothing) {
         let before = deferred.len();
         let mut still_deferred = Vec::with_capacity(before);
-        for c_scope in deferred {
-            match r.difference(c_scope) {
-                Difference::Scope(s) => r = s,
-                Difference::NotRepresentable => still_deferred.push(c_scope),
+        for s in deferred {
+            match r.difference(s) {
+                Difference::Scope(next) => r = next,
+                Difference::NotRepresentable => still_deferred.push(s),
             }
         }
         deferred = still_deferred;
         if deferred.len() == before {
-            // No rule in that pass could be subtracted; another pass cannot help.
-            break;
+            break; // no progress this pass, so another cannot help.
         }
     }
     if !deferred.is_empty() && !matches!(r, Scope::Nothing) {
-        return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
+        return None;
     }
-    if !matches!(r, Scope::Nothing) {
-        // The charter value on the uncovered region is `default` (tightest); the
-        // draft's granted-scope raises above default there ⇒ escalation.
-        return Err(ComposeError::GrantExceedsCharter {
-            key: key.clone(),
-            offending_pattern: render_scope(&r),
-        });
-    }
-
-    // (2) COVERED region: partition the draft's granted scope by each charter grant
-    //     rule's scope (via ⊓) and compare the draft's value to the charter's LAYERED
-    //     effective value at a witness of each region.
-    //
-    //     The partition MUST draw a boundary at every rule, including one whose value
-    //     is at or below default. Such a rule grants nothing, but it masks: under
-    //     presence-based last-wins an upper layer's rule decides the effective value
-    //     wherever it covers. Since this arm samples ONE witness per region, a mask
-    //     that is not its own region is a hole the witness can miss — a root granting
-    //     `all` with a later layer denying `secret` produced a single region whose
-    //     witness sat outside `secret`, so a draft re-granting `all` was admitted and
-    //     got back exactly the authority that layer removed.
-    for c_scope in &charter_rules {
-        let region = draft_granted.meet(c_scope);
-        if matches!(region, Scope::Nothing) {
-            continue;
-        }
-        let Some(witness) = witness_of(&region) else {
-            // A non-empty region we cannot witness concretely: fail closed.
-            return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
-        };
-        let dv = dk.value_at(&witness)?;
-        let cv = layered_value_at(charter_layers, &def.default, key, &witness)?;
-        if !leq_value(&def.kind, &dv, &cv)? {
-            return Err(ComposeError::GrantExceedsCharter {
-                key: key.clone(),
-                offending_pattern: render_scope(&region),
-            });
-        }
-    }
-    Ok(())
+    Some(r)
 }
 
 /// Flatten a charter's layer stack to the rules of one kind (for the draft-vs-charter

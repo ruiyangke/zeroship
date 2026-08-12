@@ -69,6 +69,60 @@ scope = { include = ["app_*"] }
     );
 }
 
+/// A layer that masks a grant off keeps it off, even when the mask has a hole.
+///
+/// The charter's effective value is not constant across the region admission samples:
+/// the upper layer denies `app*` but re-grants `app`, so `app` is true and `appx` is
+/// false. Sampling one point of that region and comparing there admitted a draft that
+/// re-granted the whole of `app*`, handing back exactly the authority the layer removed.
+///
+/// Every knob here is `Bool` and every document goes through the shipped composition, so
+/// this is not a shape a host has to opt into by registering an unusual knob.
+#[test]
+fn a_draft_cannot_recover_a_grant_a_later_layer_masked_off() {
+    const ROOT_ALL: &str = r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+"#;
+    const MASK_WITH_A_HOLE: &str = r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = false
+scope = { include = ["app*"] }
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app"] }
+"#;
+    let raw = KnobKey::parse("sql.raw").expect("sql.raw is a registered key");
+    let masked = ObjectName::table(b"appx".to_vec(), b"t".to_vec());
+
+    // The premise: the charter alone denies at `appx`. Without this the test could pass
+    // against a charter that never removed the grant in the first place.
+    let charter_only = effective_policy_from_charter_layers(&[ROOT_ALL, MASK_WITH_A_HOLE])
+        .expect("the mask composes on its own");
+    assert_eq!(
+        charter_only.grants(&raw, &masked),
+        Some(zero_migrate_policy::KnobValue::Bool(false)),
+        "premise: the upper layer masks sql.raw off at appx"
+    );
+
+    let draft = r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app*"] }
+"#;
+    let err = effective_policy_from_charter_layers(&[ROOT_ALL, MASK_WITH_A_HOLE, draft])
+        .expect_err("a draft re-granting a masked region escalates and must be refused");
+    assert!(
+        err.contains("GrantExceedsCharter"),
+        "the refusal must name the escalation: {err}"
+    );
+}
+
 #[test]
 fn a_layer_inside_the_root_scope_still_composes() {
     // The control. Without it the two refusals above are satisfied by refusing every
