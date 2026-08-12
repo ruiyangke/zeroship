@@ -9,6 +9,8 @@
 //! the standalone process is a deferred extraction target and must not run as
 //! a production scheduler until that loop moves here.
 
+pub mod config;
+
 use std::time::Duration;
 
 use chrono::Utc;

@@ -4,7 +4,6 @@ mod cache;
 mod metrics;
 mod logs;
 
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;

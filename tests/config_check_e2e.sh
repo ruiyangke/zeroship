@@ -149,13 +149,13 @@ control_url = "http://control-from-file:9090"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
-rust_log = "info,zeroship_=debug"
+log_filter = "info,zeroship_=debug"
 log_format = "json"
 TOML
 
 cat >"$TMPDIR/bad-filter.toml" <<'TOML'
 [observability]
-rust_log = '!!!not a valid filter!!!'
+log_filter = '!!!not a valid filter!!!'
 TOML
 
 # A [secrets] overlay whose master_key is a well-formed env REFERENCE. The
@@ -184,7 +184,8 @@ echo "============================================"
 echo ""
 
 echo "=== Build ==="
-if cargo build -p zeroship-control -p zeroship-gateway -p zeroship-auth >"$TMPDIR/build.log" 2>&1; then
+if cargo build -p zeroship-control -p zeroship-gateway -p zeroship-auth \
+    -p zeroship-worker -p zeroship-migrated >"$TMPDIR/build.log" 2>&1; then
     pass "built debug web binaries"
 else
     fail "built debug web binaries"
@@ -196,6 +197,8 @@ echo ""
 CONTROL="$BIN/zeroship-control"
 GATEWAY="$BIN/zeroship-gate"
 AUTH="$BIN/zeroship-auth"
+WORKER="$BIN/zeroship-worker"
+MIGRATED="$BIN/zeroship-migrated"
 
 # --check-config exercises the same mandatory guards as real startup. Supply
 # real, strong inputs so these cases vary only the setting each one names.
@@ -218,6 +221,14 @@ AUTH_COMMON=(
     --db-url postgres://check-config
     --stash-signing-key "$STRONG_HEX"
     --totp-enc-key "$STRONG_HEX"
+)
+WORKER_COMMON=(
+    --control-key "$STRONG_HEX"
+    --worker-key "$STRONG_HEX"
+)
+MIGRATED_COMMON=(
+    --control-key "$STRONG_HEX"
+    --policy-seal-key "$STRONG_HEX"
 )
 
 echo "=== Case 1: overlay-applied ==="
@@ -411,6 +422,74 @@ set -e
 show_last_output
 expect_rejected "LEGACY_MASTER_KEYS / --legacy-master-keys: malformed secret reference" \
     "control rejects a malformed per-entry reference in a LEGACY_MASTER_KEYS comma-list"
+echo ""
+
+echo "=== Case 13: all five server binaries answer --check-config ==="
+# The coverage gap this closes: the build list and the case list above named
+# only control, gateway and auth, so worker's report and migrated's brand-new
+# one were never exercised by a real process.
+for entry in \
+    "control:$CONTROL:${CONTROL_COMMON[*]} ${CONTROL_MASTER[*]}" \
+    "gateway:$GATEWAY:${GATEWAY_COMMON[*]}" \
+    "auth:$AUTH:${AUTH_COMMON[*]}" \
+    "worker:$WORKER:${WORKER_COMMON[*]}" \
+    "migrated:$MIGRATED:${MIGRATED_COMMON[*]}"; do
+    name="${entry%%:*}"
+    rest="${entry#*:}"
+    binary="${rest%%:*}"
+    args="${rest#*:}"
+    # shellcheck disable=SC2086
+    run_cmd "$name-all-five" "$binary" --check-config --config "$TMPDIR/shared.toml" $args
+    show_last_output
+    expect_status 0 "$name exits 0 under --check-config"
+    expect_stdout_contains "config_source = $TMPDIR/shared.toml" \
+        "$name reports the explicit overlay it was given"
+    expect_stdout_contains "log_format = json" \
+        "$name resolves observability.log_format from the overlay"
+done
+echo ""
+
+echo "=== Case 14: --check-config-format json is machine-readable everywhere ==="
+# Also the negative half of the ValueEnum conversion: an unknown format is now
+# rejected by clap rather than silently falling back to text.
+for entry in \
+    "control:$CONTROL:${CONTROL_COMMON[*]} ${CONTROL_MASTER[*]}" \
+    "worker:$WORKER:${WORKER_COMMON[*]}" \
+    "migrated:$MIGRATED:${MIGRATED_COMMON[*]}"; do
+    name="${entry%%:*}"
+    rest="${entry#*:}"
+    binary="${rest%%:*}"
+    args="${rest#*:}"
+    # shellcheck disable=SC2086
+    run_cmd "$name-json" "$binary" --check-config --check-config-format json \
+        --config "$TMPDIR/shared.toml" $args
+    show_last_output
+    expect_status 0 "$name exits 0 with --check-config-format json"
+    expect_stdout_contains '{"' "$name emits a JSON object"
+
+    # shellcheck disable=SC2086
+    run_cmd "$name-bad-format" "$binary" --check-config --check-config-format yaml \
+        --config "$TMPDIR/shared.toml" $args
+    show_last_output
+    expect_status 2 "$name rejects an unknown --check-config-format"
+done
+echo ""
+
+echo "=== Case 15: migrated's --check-config has no side effects ==="
+# migrated used to create its tmp dir, dial the control DSN and bind a listener
+# unconditionally. The dry run must do none of that: point --tmp-dir at a path
+# that does not exist and require it STILL does not exist afterwards.
+MIGRATED_TMP="$TMPDIR/migrated-must-not-exist"
+run_cmd migrated-no-side-effects "$MIGRATED" --check-config \
+    --config "$TMPDIR/shared.toml" --tmp-dir "$MIGRATED_TMP" \
+    --db "postgres://127.0.0.1:1/nonexistent" "${MIGRATED_COMMON[@]}"
+show_last_output
+expect_status 0 "migrated exits 0 without a reachable database"
+if [ -e "$MIGRATED_TMP" ]; then
+    fail "migrated --check-config created $MIGRATED_TMP"
+else
+    pass "migrated --check-config created no directory"
+fi
 echo ""
 
 echo "============================================"

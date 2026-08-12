@@ -40,6 +40,9 @@ cyper = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The generated-controls test parses an overlay fixture to prove a persisted
+# entry cannot enable the unsigned workflow-advance ingress.
+toml = { workspace = true }
 # The faithful four-namespace dispatch test (kv + storage + db + auth) roots a
 # temp LocalFs storage dir + blob dir per run (KV uses the real Redis backend at
 # REDIS_TEST_URL); tempfile gives each test an isolated dir for the FS legs.

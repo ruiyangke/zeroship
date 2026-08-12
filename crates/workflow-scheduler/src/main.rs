@@ -6,54 +6,12 @@
 //! extracted.
 
 use clap::Parser;
-use zeroship_workflow_scheduler::{
-    DEFAULT_TICK_SECS, STANDALONE_SCHEDULER_UNAVAILABLE,
-};
-
-#[derive(Debug, Parser)]
-struct Cli {
-    #[arg(long, env = "WORKFLOW_SCHEDULER_DB", default_value = "")]
-    db: String,
-    #[arg(
-        long = "scheduler-schema",
-        env = "WORKFLOW_SCHEDULER_SCHEMA",
-        // Matches WorkflowSchedulerStore::new and the migration that owns the
-        // tables (db/migrations-ts/20260811000100_workflow_scheduler_store.ts).
-        // They live in the platform schema because the migration charter admits
-        // only ["public", "zeroship"]; the old `workflow_scheduler` schema no
-        // longer exists anywhere.
-        default_value = "zeroship"
-    )]
-    scheduler_schema: String,
-    #[arg(
-        long = "gateway-url",
-        env = "WORKFLOW_SCHEDULER_GATEWAY_URL",
-        default_value = ""
-    )]
-    gateway_url: String,
-    #[arg(
-        long = "control-apply-url",
-        env = "WORKFLOW_SCHEDULER_CONTROL_APPLY_URL",
-        default_value = ""
-    )]
-    control_apply_url: String,
-    #[arg(long = "tick-secs", default_value_t = DEFAULT_TICK_SECS)]
-    tick_secs: u64,
-    #[arg(long = "reaper-interval-secs", default_value_t = 30)]
-    reaper_interval_secs: u64,
-    #[arg(long, default_value_t = 60_000)]
-    near_horizon_ms: i64,
-    #[arg(long, default_value_t = 1_024)]
-    max_loaded_timers: i64,
-    #[arg(long, default_value_t = 64)]
-    max_due_per_tick: usize,
-    #[arg(long, default_value_t = 120_000)]
-    inflight_ttl_ms: i64,
-}
+use zeroship_workflow_scheduler::config::SchedulerCli;
+use zeroship_workflow_scheduler::STANDALONE_SCHEDULER_UNAVAILABLE;
 
 #[compio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = SchedulerCli::parse();
     tracing::error!(
         db_configured = !cli.db.is_empty(),
         scheduler_schema = %cli.scheduler_schema,

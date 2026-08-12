@@ -286,7 +286,7 @@ defined ONCE instead of being repeated as per-service flags:
 - `[auth]` - native OP trust settings: `trusted_oauth_clients` and
   `frame_ancestor_origins`. `AUTH_PUBLIC_URL` stays on the `auth` service env
   because it is the auth-service issuer setting for this deployment.
-- `[observability]` - shared `rust_log` / `log_format` (every service, worker
+- `[observability]` - shared `log_filter` / `log_format` (every service, worker
   included).
 - `[secrets]` - REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
   literal). `control_key`, `master_key`, `worker_key`, `database_url`, and
