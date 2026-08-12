@@ -76,9 +76,9 @@ ZSHIP="$APP/dist/app.zship"
 
 # A port band of its own: auth 9398/8398/8308/5458, errors 9399/8399/8309/5459,
 # kv 9392/8392/8302/3011, storage 9396/8396/8306/3081, stream 9394/8394/8304/3061.
-export CONTROL_PORT="${CONTROL_PORT:-9397}"
-export WORKER_PORT="${WORKER_PORT:-8397}"
-export GATE_PORT="${GATE_PORT:-8307}"
+export ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9397}"
+export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8397}"
+export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8307}"
 export PG_PORT="${PG_PORT:-5457}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devdeploy-env-pg}"
 DEV_PORT="${DEV_PORT:-3097}"   # examples/env-probe ENV_PROBE_API_PORT default
@@ -227,7 +227,7 @@ done
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 25 x 2s count
 # sized on an idle machine (#273). This harness sources e2e_stack.sh at line
 # 121, after its own port block at 79, so the helper is in scope and the
-# library's `: "${CONTROL_PORT:=9120}"` defaults are already no-ops.
+# library's `: "${ZEROSHIP_CONTROL_PORT:=9120}"` defaults are already no-ops.
 #
 # The probe is this harness's own `probe`, unchanged -- it prints the HTTP code
 # and writes the body to dev.json -- wrapped so a 200 is an exit status the
@@ -312,14 +312,14 @@ mint_admin_pat || exit 1
 
 # Create the app FIRST so the vars land before the worker ever loads a bundle
 # (the worker builds its isolate from the env snapshot at load time).
-APP_JSON="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d "{\"name\":\"$APP_SLUG\"}")"
 APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 [ -n "$APP_ID" ] && pass "created app $APP_ID" || { fail "create app: $APP_JSON"; exit 1; }
 
 # The POSITIVE CONTROL: a legitimately-deployed app var.
-vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/vars" \
+vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d "{\"key\":\"$CONTROL_KEY\",\"value\":\"$CONTROL_VAL\"}")"
 [ "$vc" = "204" ] && pass "deployed app var $CONTROL_KEY (HTTP $vc)" \
@@ -328,13 +328,13 @@ vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_
 # THE OPT-IN SECRET LAYER: two secrets, one opted into the expose list and one
 # not. Setting a secret is not the same as exposing it.
 for k in "$SECRET_EXPOSED_KEY" "$SECRET_HIDDEN_KEY"; do
-  sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/secrets" \
+  sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/secrets" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
     -d "{\"key\":\"$k\",\"value\":\"secret-value-for-$k\"}")"
   [ "$sc" = "204" ] && pass "stored secret $k (HTTP $sc)" \
     || fail "could not store secret $k (HTTP $sc) -- the secret-layer arms below are vacuous"
 done
-xc="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/env/expose" \
+xc="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/env/expose" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
   -d "{\"keys\":[\"$SECRET_EXPOSED_KEY\"]}")"
 [ "$xc" = "200" ] || [ "$xc" = "204" ] \
@@ -347,7 +347,7 @@ if [ "$MUTATE" = "shadow-app-id" ]; then
   # layers creator vars OVER it. So a creator var literally named `APP_ID` should
   # win. Deploying one and reading it back is the only way to know whether the
   # documented precedence is the real precedence.
-  sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/vars" \
+  sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
     -d "{\"key\":\"APP_ID\",\"value\":\"zs-shadowed-app-id\"}")"
   echo "  MUTATED: a creator var named APP_ID is deployed (HTTP $sc) -- reported below, not asserted"
@@ -356,13 +356,13 @@ fi
 if [ "$MUTATE" = "deploy-canary" ]; then
   # RED-BEFORE-GREEN for the ABSOLUTE half. ONE variable: the canary's
   # deployment status. Same name, same value, same probe, same assertion.
-  mc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$CONTROL_PORT/api/apps/$APP_ID/vars" \
+  mc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
     -d "{\"key\":\"$CANARY_KEY\",\"value\":\"$CANARY_VAL\"}")"
   echo "  MUTATED: $CANARY_KEY is ALSO deployed as an app var (HTTP $mc) -- the leak assertions must go RED"
 fi
 
-dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
+dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$dep" | grep -q "deploy_hash" && pass "deployed env-probe" \
   || { fail "deploy failed: $dep"; exit 1; }
 
@@ -389,7 +389,7 @@ fi
 # Wait for the gateway to pull the route (an unrouted call is a 404/503).
 ready=0
 for _ in $(seq 1 25); do
-  c="$(probe "http://localhost:$GATE_PORT" "$WORK/deployed.json")"
+  c="$(probe "http://localhost:$ZEROSHIP_GATEWAY_PORT" "$WORK/deployed.json")"
   [ "$c" = "200" ] && { ready=1; break; }
   sleep 2
 done

@@ -135,12 +135,6 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     // the auth domain rather than any one binary, and the overlay already
     // carries that table.
     SharedIdentity {
-        symbol: "AUTH_PROVIDER",
-        canonical: "auth.auth_provider",
-        wrapper: "Operational",
-        inner: "String",
-    },
-    SharedIdentity {
         symbol: "AUTH_PLATFORM_ISSUER",
         canonical: "auth.platform_issuer",
         wrapper: "Operational",
@@ -149,12 +143,6 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     SharedIdentity {
         symbol: "AUTH_PLATFORM_JWKS_URL",
         canonical: "auth.platform_jwks_url",
-        wrapper: "Operational",
-        inner: "String",
-    },
-    SharedIdentity {
-        symbol: "AUTH_SUPABASE_URL",
-        canonical: "auth.supabase_url",
         wrapper: "Operational",
         inner: "String",
     },

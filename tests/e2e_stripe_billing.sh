@@ -119,8 +119,8 @@ sget()  { curl -s "$SAPI/$1" -u "$SK:"; }
 spost() { curl -s -X POST "$SAPI/$1" -u "$SK:" "${@:2}"; }
 jget()  { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);let v=o;for(const k of process.argv[1].split('.').filter(Boolean)){v=v==null?undefined:(k.match(/^\d+$/)?v[+k]:v[k]);}console.log(v==null?'':v)}catch(e){console.log('')}})" "$1"; }
 
-CONTROL_PORT=9181
-CONTROL_URL="http://localhost:$CONTROL_PORT"
+ZEROSHIP_CONTROL_PORT=9181
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WEBHOOK_SECRET="whsec_e2e_$(openssl rand -hex 16)"   # throwaway, per-run
 WORK="$(mktemp -d -t zs-e2e-stripe-XXXXXX)"
 mkdir -p "$WORK/blobs"
@@ -139,7 +139,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # ===========================================================================
 echo ""
@@ -177,7 +177,7 @@ SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &

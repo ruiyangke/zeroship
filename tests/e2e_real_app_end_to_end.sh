@@ -47,9 +47,9 @@ command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 STARTER="$ROOT/examples/starter"; [ -d "$STARTER" ] || { echo "missing examples/starter"; exit 2; }
 
-CONTROL_PORT=9181; WORKER_PORT=8081; GATE_PORT=8071; PG_PORT=5481; RP_PORT=19181
+ZEROSHIP_CONTROL_PORT=9181; ZEROSHIP_WORKER_PORT=8081; ZEROSHIP_GATEWAY_PORT=8071; PG_PORT=5481; RP_PORT=19181
 PGC=zs-e2e-app-pg; RPC=zs-e2e-app-redpanda
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-app-e2e"; APP_HOST="starter.localhost"
 WORK="$(mktemp -d -t zs-e2e-app-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -64,7 +64,7 @@ cleanup(){
   else docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true; rm -rf "$WORK"; echo "  stack down, $WORK cleaned"; fi
 }
 trap cleanup EXIT
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 echo ""; echo "=== Stage 1: BUILD the real app (examples/starter → dist/app.zship via vite) ==="
 ( cd "$STARTER" && pnpm build ) > "$WORK/appbuild.log" 2>&1
@@ -106,7 +106,7 @@ SIGNING_KEY_FILE="$WORK/sk.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --stripe-base-url "http://127.0.0.1:1" --stripe-secret-key "sk_test_unused" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
@@ -114,17 +114,17 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
-  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --config "$CFG_TOML" --control-url "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
-  --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
+USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
   --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 
 echo ""; echo "=== Stage 3: PAT + creator + app '$APP_HOST' + DEPLOY the real .zship ==="
 POLICY_JSON='{"name":"e2e-app","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
@@ -146,22 +146,22 @@ SQL
 sleep 5
 
 echo ""; echo "=== Stage 4: gateway SERVES the deployed app (static assets) ==="
-READY=0; for _ in $(seq 1 30); do echo "$(gw "http://localhost:$GATE_PORT/")" | grep -qi "<!doctype html" && { READY=1; break; }; sleep 1; done
-INDEX="$(gw "http://localhost:$GATE_PORT/")"
+READY=0; for _ in $(seq 1 30); do echo "$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/")" | grep -qi "<!doctype html" && { READY=1; break; }; sleep 1; done
+INDEX="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"
 [ "$READY" = "1" ] && pass "GET / serves the app index.html (real React shell)" || { fail "index.html not served"; tail -15 "$WORK/gate.log"; exit 1; }
 ASSET="$(printf '%s' "$INDEX" | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1)"
 if [ -n "$ASSET" ]; then
-  CODE="$(gw -o /dev/null -w '%{http_code}' "http://localhost:$GATE_PORT$ASSET")"
+  CODE="$(gw -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT$ASSET")"
   [ "$CODE" = "200" ] && pass "hashed client JS asset served ($ASSET → 200)" || fail "asset $ASSET → $CODE"
 else fail "no /assets/*.js referenced in index.html"; fi
 
 echo ""; echo "=== Stage 5: RPC — the deployed app's SERVER FUNCTIONS execute ==="
 # getMessages (query, no input): GET /__zeroship/v1/getMessages
-QMSG="$(gw "http://localhost:$GATE_PORT/__zeroship/v1/getMessages")"
+QMSG="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/getMessages")"
 echo "$QMSG" | grep -q "Build locally" && pass "getMessages QUERY executed in the worker → returned the seeded messages" || { fail "getMessages: ${QMSG:0:160}"; }
 # addMessage (mutation, input {text}): POST superjson body {"json":{"text":...}}
 NEWTXT="deployed-and-metered-$(date +%s)"
-AMSG="$(gw -X POST "http://localhost:$GATE_PORT/__zeroship/v1/addMessage" -H 'content-type: application/json' --data "{\"json\":{\"text\":\"$NEWTXT\"}}")"
+AMSG="$(gw -X POST "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/addMessage" -H 'content-type: application/json' --data "{\"json\":{\"text\":\"$NEWTXT\"}}")"
 # A failed mutation is a FAILURE, not a note. This arm used to be `|| echo`,
 # so a broken addMessage cost one pass and zero failures. RED-PROVEN by sending
 # a body the input schema must reject ({"WRONGFIELD":...}): the response was
@@ -170,7 +170,7 @@ echo "$AMSG" | grep -q "$NEWTXT" \
   && pass "addMessage MUTATION executed (input schema parsed, returned the new message)" \
   || fail "addMessage MUTATION did not execute: ${AMSG:0:200}"
 # getMessages again → the mutation persisted in the worker instance
-QMSG2="$(gw "http://localhost:$GATE_PORT/__zeroship/v1/getMessages")"
+QMSG2="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/getMessages")"
 # NOT AN ASSERTION, and now labelled as such. The starter's store is a
 # MODULE-LEVEL array (examples/starter/src/server.ts:28, pushed at :45), so this
 # only holds when both calls land in the SAME isolate - which the platform does
@@ -189,7 +189,7 @@ fi
 
 echo ""; echo "=== Stage 6: the real app's traffic is METERED → usage_aggregates → a projected CHARGE ==="
 # Drive a batch of real app requests (index + RPC), all metered dispatches.
-for i in $(seq 1 60); do gw -o /dev/null "http://localhost:$GATE_PORT/__zeroship/v1/getMessages"; done
+for i in $(seq 1 60); do gw -o /dev/null "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/getMessages"; done
 # SETTLE the meter before reading it. Polling "is it at least N yet" stops at the
 # first read that clears the floor, which is not the same as the total having
 # stopped moving - and the identity below compares two reads of the SAME

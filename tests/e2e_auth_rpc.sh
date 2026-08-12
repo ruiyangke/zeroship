@@ -48,9 +48,9 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-export CONTROL_PORT=9160
-export WORKER_PORT=8128
-export GATE_PORT=8042
+export ZEROSHIP_CONTROL_PORT=9160
+export ZEROSHIP_WORKER_PORT=8128
+export ZEROSHIP_GATEWAY_PORT=8042
 export PG_PORT=5448
 export PG_CONTAINER="zs-e2e-authrpc-pg"
 
@@ -156,7 +156,7 @@ rpc() {
   # curl can send the production Secure cookie explicitly over this loopback
   # transport, while the gateway still parses the unconditional `__Host-` name.
   [ -n "$cookie" ] && args+=(-H "Cookie: __Host-zeroship_app_session=$cookie" -H "Origin: http://$HOST")
-  local code; code="$(curl "${args[@]}" "http://localhost:$GATE_PORT/__zeroship/v1/$proc")"
+  local code; code="$(curl "${args[@]}" "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/$proc")"
   echo "$code"
 }
 

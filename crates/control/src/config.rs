@@ -172,11 +172,22 @@ pub struct ControlSettings {
     pub origin_scheme: Operational<OriginScheme>,
 
     /// Platform auth provider backend (`platform` or `supabase`).
-    #[config(shared = AUTH_PROVIDER, default = "platform".to_owned())]
+    ///
+    /// CONTROL-SCOPED on purpose. The auth service has a flag with the same
+    /// spelling and the same environment name today, but a DIFFERENT value
+    /// vocabulary: control accepts `platform|supabase` while auth accepts
+    /// `native|supabase`. One canonical identity would therefore mean two
+    /// things behind one operator-visible name, which is the drift this design
+    /// exists to remove rather than to formalise. Unifying them is a value-set
+    /// decision, not a naming one, and belongs with the auth conversion.
+    #[config(name = "control.auth_provider", default = "platform".to_owned())]
     pub auth_provider: Operational<String>,
 
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
-    #[config(shared = AUTH_SUPABASE_URL, default = String::new())]
+    ///
+    /// Keeps the `auth.` canonical path because it is the SAME URL the auth
+    /// service reads; when auth converts, both declare it by shared symbol.
+    #[config(name = "auth.supabase_url", default = String::new())]
     pub supabase_url: Operational<String>,
 
     /// JWKS URL for asymmetric GoTrue JWT verification. Mutually exclusive with

@@ -140,6 +140,8 @@ pub struct ControlSection {
     pub smtp_username: Option<String>,
     /// Directory for in-flight deploy bodies.
     pub deploy_tmp_dir: Option<String>,
+    /// Platform auth provider backend (`platform` or `supabase`).
+    pub auth_provider: Option<String>,
     /// JWKS URL for asymmetric GoTrue JWT verification.
     pub supabase_jwks_url: Option<String>,
     /// GoTrue JWT issuer pinned during Supabase token verification.

@@ -33,9 +33,9 @@ PG_CONTAINER="${PG_CONTAINER:-zs-dw07-pg}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
 PG_DB="${PG_DB:-zeroship_dw07_$(date +%s)_$$}"
-CONTROL_PORT="${CONTROL_PORT:-9130}"
-WORKER_PORT="${WORKER_PORT:-9131}"
-GATE_PORT="${GATE_PORT:-9132}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9130}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-9131}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-9132}"
 SIDE_PORT="${SIDE_PORT:-9133}"
 APP_NAME="dw07-$(date +%s)-$$"
 DBURL="postgres://$PG_USER:$PG_PASS@localhost:$PG_PORT/$PG_DB"
@@ -581,7 +581,7 @@ build_zship "$WORK/workflow.js" "$WORK/workflow.zship"
 pass "built real workflow .zship"
 
 echo "=== DW-07 services ==="
-for port in "$CONTROL_PORT" "$WORKER_PORT" "$GATE_PORT" "$SIDE_PORT"; do
+for port in "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_WORKER_PORT" "$ZEROSHIP_GATEWAY_PORT" "$SIDE_PORT"; do
   lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
@@ -590,30 +590,30 @@ chmod 0600 "$GATEWAY_BROKER_SECRET_FILE"
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-control" \
-  --port "$CONTROL_PORT" \
+  --port "$ZEROSHIP_CONTROL_PORT" \
   --db "$DBURL" \
   --blob-store "$WORK/blobs" \
-  --gateway-url "http://localhost:$GATE_PORT" \
+  --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$CONTROL_PORT/health" "$WORK/control.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control.log"
 
 ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
-  --port "$WORKER_PORT" \
-  --worker-threads 1 \
-  --control "http://localhost:$CONTROL_PORT" \
+  --port "$ZEROSHIP_WORKER_PORT" \
+  --threads 1 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --poll-interval 1 \
   --max-step-blob-bytes 2097152 \
   --workflow-advance-unsigned > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
+wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/health" "$WORK/worker.log"
 
 "$BIN/zeroship-gate" \
-  --port "$GATE_PORT" \
-  --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" \
+  --port "$ZEROSHIP_GATEWAY_PORT" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" \
   --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE" \
@@ -621,7 +621,7 @@ wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
   --poll-interval 1 \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$GATE_PORT/health" "$WORK/gate.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate.log"
 
 echo "=== DW-07 deploy ==="
 "$BIN/dev-provision" \
@@ -657,7 +657,7 @@ DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -A
 pass "deployed app $APP_ID and pinned deploy $DEPLOY_ID"
 
 sleep 3
-curl -sf "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || {
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || {
   fail "warmup request failed"
   tail -80 "$WORK/worker.log" || true
   tail -80 "$WORK/gate.log" || true
@@ -669,8 +669,8 @@ if [ "${ZEROSHIP_DW23_BENCH_ONLY:-0}" = "1" ]; then
   echo "=== DW-23 workflow engine load bench ==="
   ZEROSHIP_DW_E2E=1 \
   CONTROL_TEST_DB="$DBURL" \
-  ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
-  ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
+  ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
   ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
   ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
@@ -695,8 +695,8 @@ fi
 echo "=== DW-07 keystone assertions ==="
 ZEROSHIP_DW_E2E=1 \
 CONTROL_TEST_DB="$DBURL" \
-ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
-ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
+ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
+ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
 ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
@@ -716,8 +716,8 @@ ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
   }
 ZEROSHIP_DW_E2E=1 \
 CONTROL_TEST_DB="$DBURL" \
-ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
-ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
+ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
+ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
 ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \

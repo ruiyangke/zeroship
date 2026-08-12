@@ -66,15 +66,15 @@ PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_golden}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct ports so this never clashes with a running dev stack.
-CONTROL_PORT="${CONTROL_PORT:-9390}"
-WORKER_PORT="${WORKER_PORT:-8390}"
-GATE_PORT="${GATE_PORT:-8300}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9390}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8390}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8300}"
 # Step 10 (the scaffold leg) needs the migration service and a Redis, because
 # the app a creator actually receives uses env.db + env.storage + env.kv. A
 # three-service stack could still measure the 401, but it could not tell a
 # platform 401 from "this harness never gave the app a database" -- and a
 # comparison whose deployed side is crippled by the harness proves nothing.
-MIGRATED_PORT="${MIGRATED_PORT:-9490}"
+ZEROSHIP_MIGRATED_PORT="${ZEROSHIP_MIGRATED_PORT:-9490}"
 REDIS_PORT="${REDIS_PORT:-6390}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
 CONTROL_KEY="gp-ck"
@@ -395,7 +395,7 @@ fi
 # is crippled by the harness, and every divergence step 10 reports would be the
 # harness's, not the platform's.
 step 2 "Bring up the stack"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MIGRATED_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 rm -rf /tmp/gp-bundles /tmp/gp-storage /tmp/gp-migrated-tmp
 mkdir -p /tmp/gp-storage
 
@@ -817,24 +817,24 @@ e2e_export_runtime_secrets "$GP_SECURITY_DIR" || exit 1
 # STILL TRUE, and the reason this is reach rather than blanket coverage: it moves
 # step 2c from 3 crons of 15 to 4. The other eleven still cannot tick in the
 # window and have no cadence knob (only spend_recompute does, via
-# SPEND_RECOMPUTE_INTERVAL). Covering those needs the per-tick differential
+# ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL). Covering those needs the per-tick differential
 # in #327, not another flag.
 
 # `--workers` is NOT optional decoration, and its absence was invisible for as
 # long as this harness existed. crates/control/src/main.rs:81 declares it with
 # `default_value = "http://localhost:8080"`, and this harness runs its worker on
-# $WORKER_PORT (8390). Every other path here goes gateway -> worker and the
+# $ZEROSHIP_WORKER_PORT (8390). Every other path here goes gateway -> worker and the
 # GATEWAY is told the URL explicitly, so control's own worker list had never
 # been exercised by anything -- until step 13 asked control to fetch app logs
 # and got `502 {"error":"internal error"}` with
 # `worker log fetch failed ... "error":"parse logs JSON: EOF"` in its log,
 # because it was reading an empty body from a port nothing listens on.
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
-  --workers "http://localhost:$WORKER_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --audit-retention-check-secs 1 \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
   --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
   >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
@@ -849,7 +849,7 @@ sleep 3
 # ABSENT on the deployed tier and step 10's app would fail for a reason that
 # has nothing to do with what it is measuring.
 gp_start_worker() {
-  "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+  "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --control-key "$CONTROL_KEY" --db "$DB_URL" --kv-url "redis://127.0.0.1:$REDIS_PORT" \
     --storage-url /tmp/gp-storage \
     --blob-store /tmp/gp-bundles --poll-interval 2 >>/tmp/gp-worker.log 2>&1 &
@@ -857,7 +857,7 @@ gp_start_worker() {
   PIDS+=($WORKER_PID)
   local i
   for i in $(seq 1 30); do
-    curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && return 0
+    curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && return 0
     sleep 1
   done
   return 1
@@ -921,16 +921,16 @@ chmod 600 "$GATE_BROKER_SECRET"
 # table does not exist. golden_path starts control + migrated + worker + gateway,
 # so it is the only harness where a creator's rows and the gateway's identity
 # derivation are both live at once.
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store /tmp/gp-bundles \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store /tmp/gp-bundles \
   --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 \
   --signing-key-file "$GP_SIGNING_KEY" --db "$DB_URL" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
-curl -sf "http://localhost:$WORKER_PORT/health"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
-curl -sf "http://localhost:$GATE_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
-curl -sf "http://localhost:$MIGRATED_PORT/health" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
 
 # --- 2b. The OPERATOR config seam: control's DSN through the [secrets] overlay ---
 #
@@ -1093,12 +1093,12 @@ if [ -n "$TOKEN" ]; then
     echo "      Install jq, or unset ZEROSHIP_TOKEN to use the dev-provision arm." >&2
     exit 2
   }
-  APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
+  APP=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $TOKEN" -d "{\"name\":\"$APP_NAME\"}")
   APP_ID=$(echo "$APP" | jq -r '.id'); API_KEY=$(echo "$APP" | jq -r '.api_key')
   [ -n "$APP_ID" ] && [ "$APP_ID" != "null" ] && pass "created app ($APP_ID)" || { fail "create app: $APP"; exit 1; }
 
-  DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$TOKEN" 2>&1)
+  DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$TOKEN" 2>&1)
   echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
 else
   OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
@@ -1110,13 +1110,13 @@ sleep 4  # gateway route-sync poll
 
 # --- 4. The chain works: gateway serves the deployed app ---
 step 4 "Live: gateway serves the deployed app"
-INDEX=$(curl -sf "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
+INDEX=$(curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
 echo "$INDEX" | grep -qi "<!doctype html" && pass "GET / serves the app index.html" || fail "index.html not served (got: ${INDEX:0:80})"
 
 # the hashed JS asset referenced by index.html
 ASSET=$(echo "$INDEX" | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1)
 if [ -n "$ASSET" ]; then
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$GATE_PORT/apps/$APP_NAME$ASSET" -H "X-Api-Key: $API_KEY")
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME$ASSET" -H "X-Api-Key: $API_KEY")
   [ "$code" = "200" ] && pass "client JS asset served ($ASSET → 200)" || fail "asset $ASSET → $code"
 fi
 
@@ -1125,7 +1125,7 @@ fi
 # same path the browser client uses; through the path-routed gateway that's
 # /apps/<name>/__zeroship/v1/<wireId>. getMessages takes no input.
 step 5 "RPC round-trip (server function executes)"
-RPC=$(curl -s "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
+RPC=$(curl -s "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
   -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
 # Assert the SHAPE, not one substring. `grep -q "Build locally"` passed on any
 # response that happened to contain that text -- an error envelope quoting the
@@ -1273,7 +1273,7 @@ fi
 # exercises, so a body sent there is genuinely read.
 BODYCAP_TMP="$(mktemp -d)"
 head -c 1048577 /dev/zero | tr '\0' 'a' > "$BODYCAP_TMP/over1mib.bin"
-BODYCAP_URL="http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
+BODYCAP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
 
 DEV_413=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
   -H 'Content-Type: application/octet-stream' "http://localhost:$DEV_RT_PORT/" 2>/dev/null)
@@ -1438,11 +1438,11 @@ echo "    header cap: baseline -> $HDR_BASE   16384 -> $HDR_AT   16385 -> $HDR_O
 # is in hand the next pass can assert the safe direction.
 gw_hdr_probe() { # gw_hdr_probe <total_header_block_bytes> -> status
   local target="$1" path="/apps/$APP_NAME/__zeroship/v1/getMessages" fixed pad resp
-  fixed=$'GET '"$path"$' HTTP/1.1\r\nHost: localhost:'"$GATE_PORT"$'\r\nConnection: close\r\nX-Pad: \r\n\r\n'
+  fixed=$'GET '"$path"$' HTTP/1.1\r\nHost: localhost:'"$ZEROSHIP_GATEWAY_PORT"$'\r\nConnection: close\r\nX-Pad: \r\n\r\n'
   pad="$(head -c $(( target - ${#fixed} )) /dev/zero | tr '\0' 'x')"
-  exec 3<>"/dev/tcp/127.0.0.1/$GATE_PORT" || { echo "000"; return; }
+  exec 3<>"/dev/tcp/127.0.0.1/$ZEROSHIP_GATEWAY_PORT" || { echo "000"; return; }
   printf 'GET %s HTTP/1.1\r\nHost: localhost:%s\r\nConnection: close\r\nX-Pad: %s\r\n\r\n' \
-    "$path" "$GATE_PORT" "$pad" >&3
+    "$path" "$ZEROSHIP_GATEWAY_PORT" "$pad" >&3
   resp="$(timeout 15 cat <&3)"; exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
   printf '%s' "$resp" | head -1 | awk '{print $2}'
 }
@@ -1920,7 +1920,7 @@ fi
 #
 # Runs LAST because it stops the worker.
 step 8 "Deployed tier: the same RPC when the app's runtime is unavailable"
-DEP_URL="http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
+DEP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
 DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL" -H "X-Api-Key: $API_KEY")
 # Kill the worker BY PID. Freeing the port by listener is the safer idiom for
 # dev ports, but here the gateway is a CLIENT of this port and an over-broad
@@ -2386,7 +2386,7 @@ for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body
 console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_PAT" \
       --data-binary @/tmp/gp-dbtodos9-ir.json)"
     DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
@@ -2409,7 +2409,7 @@ else
   fi
 fi
 
-DB9_BASE="http://localhost:$GATE_PORT/apps/$DB9_APP"
+DB9_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$DB9_APP"
 db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $DB9_API_KEY" "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
 
 DEP_INSERT_VERDICT="not-run"
@@ -2736,7 +2736,7 @@ for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body
 console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
   SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
-    "http://localhost:$MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
+    "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
     --data-binary @/tmp/gp-scaffold-ir.json)"
   SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
@@ -2781,7 +2781,7 @@ sc_tier() { # base auth-header outfile
   printf 'visits.bump\t%s\n'  "$(sc_call "$base" "$hdr" POST visits.bump '{"json":{}}')" >> "$out"
 }
 
-SC_DEP_BASE="http://localhost:$GATE_PORT/apps/$SC_APP"
+SC_DEP_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP"
 SC_DEV_BASE="http://localhost:$SC_V"
 if [ "$SC_READY" -ne 1 ]; then
   fail "the deployed scaffold never became drivable; the dev-vs-deployed comparison did not run"
@@ -2869,7 +2869,7 @@ else
     fi
     if ( cd "$SCAFFOLD" && pnpm build ) >/tmp/gp-scaffold-ctlbuild.log 2>&1 \
        && "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$SC_APP_ID" \
-            --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
+            --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
       sleep 6
       sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY" /tmp/gp-scaffold-ctl.tsv
       SC_BEFORE="$(cut -f2 /tmp/gp-scaffold-dep.tsv | cut -d' ' -f1 | paste -sd, -)"
@@ -2987,7 +2987,7 @@ if [ -z "${SC_PAT:-}" ]; then
   fail "SC_PAT is unset, so the second app cannot be registered - the distinctness check below would compare one row against itself"
 else
   PW_APP="gppairwise"
-  PW_JSON=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+  PW_JSON=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
     -d "{\"name\":\"$PW_APP\"}" 2>/tmp/gp-pairwise-create.log)
   # NO jq HERE, deliberately. The CI job for this harness installs lsof, zstd
@@ -3007,7 +3007,7 @@ else
     fail "could not create the second app for the pairwise check: $(head -c 200 <<<"$PW_JSON")"
   else
     "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$PW_ID" \
-      --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" \
+      --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" \
       >/tmp/gp-pairwise-deploy.log 2>&1 \
       && pass "second app registered through the deploy API ($PW_APP)" \
       || fail "second app deploy failed: $(tail -2 /tmp/gp-pairwise-deploy.log | tr '\n' ' ')"
@@ -3075,7 +3075,7 @@ for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body
 console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
       --data-binary @/tmp/gp-dbtodos-ir.json)"
     DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
@@ -3213,7 +3213,7 @@ ord_tier() { # label base auth-header outfile -> writes "<ordered> <discriminati
 }
 
 ORD_DEV_BASE="http://localhost:$DB_RT"
-ORD_DEP_BASE="http://localhost:$GATE_PORT/apps/$DB_APP"
+ORD_DEP_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$DB_APP"
 ORD_DEV_V=""; ORD_DEP_V=""
 
 if [ "$(http_status "$ORD_DEV_BASE/__zeroship/v1/todos.list")" = "000" ]; then
@@ -3340,7 +3340,7 @@ else
   else
     pass "wall-probe deployed ($WP_APP_ID)"
     sleep 4  # gateway route-sync poll
-    WP_BASE="http://localhost:$GATE_PORT/apps/$WP_APP/__zeroship/v1"
+    WP_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$WP_APP/__zeroship/v1"
     # -m 30 is the CLIENT deadline and must stay well clear of both the 5s
     # deployed budget and the 6s handler, so a timeout here is the SERVER's
     # answer and never curl giving up first.
@@ -3413,7 +3413,7 @@ SQL
   fi
 
   # --- DEPLOYED arm: before, drive one call, after ---------------------------
-  LOG_URL="http://localhost:$CONTROL_PORT/api/apps/$APP_ID/logs"
+  LOG_URL="http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/logs"
   LOG_CODE_A=$(curl -s -o /tmp/gp-logs-a.json -w '%{http_code}' --max-time 20 \
     "$LOG_URL" -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
   LOG_BEFORE=$(grep -oF -- "$GP_LOG_MARK" /tmp/gp-logs-a.json 2>/dev/null | wc -l | tr -d ' ')
@@ -3427,7 +3427,7 @@ SQL
   fi
 
   curl -s -o /dev/null --max-time 15 \
-    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
     -H "X-Api-Key: $API_KEY" 2>/dev/null || true
   command sleep 2
 
@@ -3473,7 +3473,7 @@ SQL
   # ignored and the request may SUCCEED. A red that proves nothing is worse than
   # no arm, so the status now gates the reading below.
   LOG_ERR_CODE=$(curl -s -o /tmp/gp-err-resp.json -w '%{http_code}' --max-time 15 \
-    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages?input=%7Bnot-json" \
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages?input=%7Bnot-json" \
     -H "X-Api-Key: $API_KEY" 2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-e.json --max-time 20 "$LOG_URL" \
@@ -3539,7 +3539,7 @@ SQL
   # asserted the opposite. If LOG_BOOM ever goes non-zero, something routed a
   # handler throw through the framework rail and that is worth understanding.
   LOG_BOOM_CODE=$(curl -s -o /tmp/gp-boom-resp.json -w '%{http_code}' --max-time 15 \
-    "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
     -H "X-Api-Key: $API_KEY" 2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-boom.json --max-time 20 "$LOG_URL" \
@@ -3658,7 +3658,7 @@ else
       Every verdict below would describe the PREVIOUS build, and a mutation of
       this example would silently not apply."
 
-  AN_CREATE_JSON=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+  AN_CREATE_JSON=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
     -d "{\"name\":\"$AN_APP\"}" 2>/tmp/gp-notes-create.log)
   # No jq: this harness's CI image installs lsof, zstd and postgresql-client
@@ -3668,7 +3668,7 @@ else
   if [ -z "$AN_APP_ID" ]; then
     fail "14: could not create the notes app: $(head -c 200 <<<"$AN_CREATE_JSON")"
   elif ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
-         --control="http://localhost:$CONTROL_PORT" --token="$SC_PAT" \
+         --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" \
          >/tmp/gp-notes-deploy.log 2>&1; then
     fail "14: deploy failed: $(tail -2 /tmp/gp-notes-deploy.log | tr '\n' ' ')"
   else
@@ -3690,7 +3690,7 @@ for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body
 console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
       --data-binary @/tmp/gp-notes-ir.json)
     AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
@@ -3746,7 +3746,7 @@ process.stdout.write(await new SignJWT({
         local args=(-s -m 25 -o /tmp/gp-notes.body -w '%{http_code}' -H "Host: $AN_HOST"
                     -X POST -H 'content-type: application/json')
         [ "$ck" != "-" ] && args+=(-H "Cookie: __Host-zeroship_app_session=$ck" -H "Origin: http://$AN_HOST")
-        local code; code=$(curl "${args[@]}" "http://localhost:$GATE_PORT/__zeroship/v1/$proc" -d "{\"json\":$body}")
+        local code; code=$(curl "${args[@]}" "http://localhost:$ZEROSHIP_GATEWAY_PORT/__zeroship/v1/$proc" -d "{\"json\":$body}")
         echo "$code $(cat /tmp/gp-notes.body)"
       }
 
@@ -3845,7 +3845,7 @@ else
   DEL_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
     "select count(*) from information_schema.tables where table_schema like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
   DEL_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-    "http://localhost:$GATE_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
   echo "  before delete: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE gateway=$DEL_SRV_PRE"
 
   if [ "${DEL_ROW_PRE:-0}" = "1" ] && [ "${DEL_TBL_PRE:-0}" -ge 1 ] 2>/dev/null; then
@@ -3900,7 +3900,7 @@ else
 
   # --- THE DELETE, over the real HTTP surface with the creator's own PAT -----
   DEL_BODY=$(curl -s -o /tmp/gp-delete.json -w '%{http_code}' --max-time 20 \
-    -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$SC_APP_ID" \
+    -X DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID" \
     -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
   echo "  DELETE /api/apps/$SC_APP_ID -> $DEL_BODY $(head -c 120 /tmp/gp-delete.json)"
   if [ "$DEL_BODY" = "200" ] && grep -q '"deleted":true' /tmp/gp-delete.json 2>/dev/null; then
@@ -3924,7 +3924,7 @@ else
   DEL_SRV_POST=""
   for _i in $(seq 1 30); do
     DEL_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-      "http://localhost:$GATE_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+      "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
     [ "$DEL_SRV_POST" = "200" ] || break
     command sleep 1
   done

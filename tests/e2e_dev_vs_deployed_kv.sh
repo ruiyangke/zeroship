@@ -77,9 +77,9 @@ PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_devdeploy}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct from golden_path.sh (9390/8390/8300) so both can run at once.
-CONTROL_PORT="${CONTROL_PORT:-9392}"
-WORKER_PORT="${WORKER_PORT:-8392}"
-GATE_PORT="${GATE_PORT:-8302}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9392}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8392}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8302}"
 DEV_PORT="${DEV_PORT:-3011}"
 # VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
 # binds, and the only one the app's vite.config names. Left undeclared until
@@ -282,7 +282,7 @@ done
 ( cd "$APP" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 20 x 2s count
 # sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
-# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# opens with `: "${ZEROSHIP_CONTROL_PORT:=9120}"` and four more of that shape, which only
 # assign when unset, so sourcing it above this harness's own port block would
 # hand it the library's ports.
 #
@@ -311,7 +311,7 @@ for _ in $(seq 1 30); do docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/nu
 docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
   && pass "ephemeral Redis ready on :$REDIS_PORT" || { fail "Redis never became ready"; exit 1; }
 
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
@@ -320,22 +320,22 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without --kv-url the env.kv namespace is absent BY DESIGN and every handler
 # fails loudly (crates/worker/src/main.rs). Omitting it here would look like an
 # app bug, not a harness bug.
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
   --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-for svc in "control:$CONTROL_PORT" "worker:$WORKER_PORT" "gateway:$GATE_PORT"; do
+for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
   curl -sf "http://localhost:${svc##*:}/health" >/dev/null \
     || { fail "${svc%%:*} did not come up"; tail -20 "$WORK/${svc%%:*}.log"; exit 1; }
 done
@@ -347,7 +347,7 @@ API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 sleep 5   # gateway route-sync poll
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
-probe "http://localhost:$GATE_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
 grep -q '"visits":1' "$WORK/deployed.txt" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -5 "$WORK/deployed.txt"; tail -5 "$WORK/worker.log"; }
 

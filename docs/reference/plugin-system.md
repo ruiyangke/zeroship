@@ -50,8 +50,8 @@ s3://bucket/storage?provider=r2&endpoint=https://<acct>.r2.cloudflarestorage.com
 s3://bucket/storage?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true
 ```
 
-Wired on the worker as `--storage-url` / `ZEROSHIP_STORAGE_URL`, and on
-`zeroship serve` as `ZEROSHIP_STORAGE_URL` (default
+Wired on the worker as `--storage-url` / `ZEROSHIP_WORKER_STORAGE_URL`, and on
+`zeroship serve` as `ZEROSHIP_WORKER_STORAGE_URL` (default
 `file://.zeroship/storage`). S3 credentials resolve from the AWS env vars
 (one S3 identity per process, shared with `--blob-store`).
 

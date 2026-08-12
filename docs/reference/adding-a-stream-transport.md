@@ -97,7 +97,7 @@ pub fn register_builtin(registry: &mut StreamRegistry) {
 ```
 
 The control plane builds the selected transport from `--stream-transport` /
-`STREAM_TRANSPORT` and `--stream-config` / `STREAM_CONFIG`.
+`ZEROSHIP_CONTROL_STREAM_TRANSPORT` and `--stream-config` / `ZEROSHIP_CONTROL_STREAM_CONFIG`.
 
 ## Worked Examples
 

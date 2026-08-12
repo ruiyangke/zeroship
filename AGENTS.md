@@ -361,8 +361,8 @@ zeroship serve myapp.js --port 3000
 
 # Run platform (multi-node)
 zeroship-control --port 9090 --db postgres://... --blob-store ./bundles --control-key <k>
-zeroship-worker --port 8080 --worker-threads 16 --control http://localhost:9090 --control-key <k> --blob-store ./bundles
-zeroship-gate    --port 80   --control http://localhost:9090 --control-key <k> --workers http://localhost:8080 --blob-store ./bundles
+zeroship-worker --port 8080 --threads 16 --control-url http://localhost:9090 --control-key <k> --blob-store ./bundles
+zeroship-gate    --port 80   --control-url http://localhost:9090 --control-key <k> --worker-urls http://localhost:8080 --blob-store ./bundles
 
 # Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<PAT>, or ZEROSHIP_TOKEN)
 zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>

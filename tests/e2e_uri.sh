@@ -22,9 +22,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Port offset so this can run alongside the other e2e harnesses.
-export CONTROL_PORT=9150
-export WORKER_PORT=8118
-export GATE_PORT=8032
+export ZEROSHIP_CONTROL_PORT=9150
+export ZEROSHIP_WORKER_PORT=8118
+export ZEROSHIP_GATEWAY_PORT=8032
 export PG_PORT=5446
 export PG_CONTAINER="zs-e2e-uri-pg"
 
@@ -57,7 +57,7 @@ HOST="uri-echo-ux.localhost"
 # can race the cold start. Poll until the echo handler answers with its JSON.
 warm=0
 for i in $(seq 1 40); do
-  if curl -s --path-as-is -H "Host: $HOST" "http://localhost:$GATE_PORT/__warmup" \
+  if curl -s --path-as-is -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT/__warmup" \
        | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(s.includes("pathname")?0:1))'; then
     warm=1; break
   fi
@@ -75,7 +75,7 @@ check() {
     const u = new URL("http://'"$HOST"'" + process.argv[1]);
     process.stdout.write(JSON.stringify({pathname:u.pathname, search:u.search, params:[...u.searchParams.entries()]}));
   ' "$raw")"
-  body="$(curl -s --path-as-is -H "Host: $HOST" "http://localhost:$GATE_PORT$raw")"
+  body="$(curl -s --path-as-is -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT$raw")"
   got="$(printf '%s' "$body" | node -e '
     let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
       try { const o=JSON.parse(s); process.stdout.write(JSON.stringify({pathname:o.pathname, search:o.search, params:o.params})); }
@@ -97,7 +97,7 @@ check() {
 check_canon() {
   local desc="$1" raw="$2" want="$3"
   local body got
-  body="$(curl -s --path-as-is -H "Host: $HOST" "http://localhost:$GATE_PORT$raw")"
+  body="$(curl -s --path-as-is -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT$raw")"
   got="$(printf '%s' "$body" | node -e '
     let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
       try { process.stdout.write(JSON.parse(s).pathname || ""); } catch(e){ process.stdout.write("PARSE_ERR"); }
@@ -118,7 +118,7 @@ check_canon() {
 check_reject() {
   local desc="$1" raw="$2"
   local code
-  code="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is -H "Host: $HOST" "http://localhost:$GATE_PORT$raw")"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --path-as-is -H "Host: $HOST" "http://localhost:$ZEROSHIP_GATEWAY_PORT$raw")"
   if [ "$code" = "400" ]; then
     pass "$desc → 400 rejected"
   else

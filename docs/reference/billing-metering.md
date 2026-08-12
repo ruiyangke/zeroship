@@ -74,9 +74,9 @@ fixtures.
 
 Control builds the stream from:
 
-- `--stream-transport` / `STREAM_TRANSPORT`
-- `--stream-config` / `STREAM_CONFIG`
-- `--spend-recompute-interval` / `SPEND_RECOMPUTE_INTERVAL`
+- `--stream-transport` / `ZEROSHIP_CONTROL_STREAM_TRANSPORT`
+- `--stream-config` / `ZEROSHIP_CONTROL_STREAM_CONFIG`
+- `--spend-recompute-interval` / `ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL`
 
 There is no Postgres raw-event table. Postgres stores config, spend limits,
 spend state, invoice bookkeeping, provider refs, dead letters, and
@@ -88,9 +88,9 @@ Billing providers live under `crates/control/src/metering/provider/`. The
 registry maps a string id to a provider factory. Boot builds a role-addressed
 `BillingStack`:
 
-- `--meter-provider` / `METER_PROVIDER`
-- `--invoicer-provider` / `INVOICER_PROVIDER`
-- `--provider-config` / `PROVIDER_CONFIG`
+- `--meter-provider` / `ZEROSHIP_CONTROL_METER_PROVIDER`
+- `--invoicer-provider` / `ZEROSHIP_CONTROL_INVOICER_PROVIDER`
+- `--provider-config` / `ZEROSHIP_CONTROL_PROVIDER_CONFIG`
 - `--allow-unsupported-billing` / `ALLOW_UNSUPPORTED_BILLING`
 
 Each provider declares its capabilities:
@@ -163,7 +163,7 @@ limit is either the app override in `app_spend_limit` or the plan default.
 stream for the current billing period, computes a full sum per `(app_id, metric)`,
 overwrites the `usage_aggregates` snapshot for that period, and runs the spend
 evaluator. The default recompute cadence is hourly and is configurable with
-`SPEND_RECOMPUTE_INTERVAL`.
+`ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL`.
 
 `crates/control/src/spend.rs` derives `SpendState`:
 
@@ -209,10 +209,10 @@ For production billing:
 
 1. Run a durable stream transport, normally Redpanda, with retention long enough
    for spend recompute and reconciliation.
-2. Configure `STREAM_TRANSPORT=redpanda` and a `STREAM_CONFIG` JSON object with
+2. Configure `ZEROSHIP_CONTROL_STREAM_TRANSPORT=redpanda` and a `ZEROSHIP_CONTROL_STREAM_CONFIG` JSON object with
    broker, topic, and consumer group fields.
-3. Select provider roles with `METER_PROVIDER` and `INVOICER_PROVIDER`.
-4. Put provider config in `PROVIDER_CONFIG` using secret handles, not plaintext
+3. Select provider roles with `ZEROSHIP_CONTROL_METER_PROVIDER` and `ZEROSHIP_CONTROL_INVOICER_PROVIDER`.
+4. Put provider config in `ZEROSHIP_CONTROL_PROVIDER_CONFIG` using secret handles, not plaintext
    secrets.
 5. Keep plan catalog pricing, included quotas, spend-limit defaults, and network
    backstops aligned with the tier you sell.

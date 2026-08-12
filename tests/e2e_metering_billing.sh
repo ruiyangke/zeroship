@@ -94,23 +94,23 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 [ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }
 
 # --- DEDICATED ports + containers (distinct from every other harness) ------
-CONTROL_PORT=9171
-WORKER_PORT=8071
-GATE_PORT=8061
+ZEROSHIP_CONTROL_PORT=9171
+ZEROSHIP_WORKER_PORT=8071
+ZEROSHIP_GATEWAY_PORT=8061
 PG_PORT=5471
 MOCK_PORT=9571
 # zeroship-migrated applies the probe's committed migrations to its per-app
 # schema. Without it env.db has no table and every insert fails -- which is
 # exactly the state this harness shipped in until 2026-08-11, undetected
 # because both env.db guards were unfailable (eda51b973).
-MIGRATED_PORT=9071
+ZEROSHIP_MIGRATED_PORT=9071
 REDPANDA_PORT=19171
 PG_CONTAINER="zs-e2e-billing-pg"
 RP_CONTAINER="zs-e2e-billing-redpanda"
-WORKER_THREADS=2
+ZEROSHIP_WORKER_THREADS=2
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-CONTROL_URL="http://localhost:$CONTROL_PORT"
-MIGRATED_URL="http://localhost:$MIGRATED_PORT"
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+MIGRATED_URL="http://localhost:$ZEROSHIP_MIGRATED_PORT"
 MOCK_URL="http://127.0.0.1:$MOCK_PORT"
 # The worker producer and control's forwarder/recompute consumers share ONE topic.
 RP_BROKERS="127.0.0.1:$REDPANDA_PORT"
@@ -172,7 +172,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Free the ports (a prior aborted run may have left a listener).
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT $MOCK_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $MOCK_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -330,7 +330,7 @@ SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "$MOCK_URL" --stripe-secret-key "sk_test_e2e_billing" \
@@ -346,32 +346,32 @@ curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
 # config comes from --config; only the per-process outbox WAL path is passed
 # separately (two producers on one host must not share one redb file).
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
   --config "$CFG_TOML" \
-  --control "$CONTROL_URL" --db "$DBURL" \
+  --control-url "$CONTROL_URL" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
   && pass "worker healthy (usage outbox → redpanda $USAGE_TOPIC)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
 # gateway — pulls routes (incl. spend_state) every 2s; ALSO a usage producer
 # (gateway_egress_bytes etc.), publishing to the same stream via --config.
 USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
   --config "$CFG_TOML" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
   --gateway-broker-secret-file "$WORK/gateway-broker-secret" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
   --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -479,15 +479,15 @@ REQ_BODY='{"hello":"metering","n":1}'   # measurable ingress body
 READY=0
 for _ in $(seq 1 30); do
   C="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: metering-probe.localhost' \
-        -H 'content-type: application/json' --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/ready")"
+        -H 'content-type: application/json' --data "$REQ_BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/ready")"
   if [ "$C" = "200" ]; then READY=1; break; fi
   sleep 1
 done
 [ "$READY" = "1" ] && pass "gateway route synced + app loadable (probe returns 200)" || { fail "app never became reachable via the gateway"; tail -15 "$WORK/gate.log"; exit 1; }
 # Warm both worker threads so the counted loop doesn't race a cold on-demand load.
-for _ in $(seq 1 $((WORKER_THREADS * 3))); do
+for _ in $(seq 1 $((ZEROSHIP_WORKER_THREADS * 3))); do
   curl -s -o /dev/null -H 'Host: metering-probe.localhost' -H 'content-type: application/json' \
-    --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/warmup" || true
+    --data "$REQ_BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/warmup" || true
 done
 GW_OK=0
 LAST_BODY=""
@@ -497,7 +497,7 @@ for i in $(seq 1 $N_REQ); do
   for _ in 1 2 3; do
     R="$(curl -s -w '\n%{http_code}' -H 'Host: metering-probe.localhost' \
           -H 'content-type: application/json' \
-          --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/$i")"
+          --data "$REQ_BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")"
     CODE="$(echo "$R" | tail -1)"; BODY="$(echo "$R" | head -n -1)"
     [ "$CODE" = "200" ] && { GW_OK=$((GW_OK+1)); LAST_BODY="$BODY"; break; }
     sleep 0.2
@@ -613,13 +613,13 @@ STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_
 # Poll the gateway until it returns 402 for the app (bounded wait).
 GW402=0
 for _ in $(seq 1 15); do
-  C="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: metering-probe.localhost' "http://localhost:$GATE_PORT/probe/blocked")"
+  C="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: metering-probe.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/blocked")"
   if [ "$C" = "402" ]; then GW402=1; break; fi
   sleep 1
 done
 if [ "$GW402" = "1" ]; then
   # Confirm the 402 carries the SPEND_LIMIT code (the gateway's check_spend body).
-  BLK_BODY="$(curl -s -H 'Host: metering-probe.localhost' "http://localhost:$GATE_PORT/probe/blocked")"
+  BLK_BODY="$(curl -s -H 'Host: metering-probe.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/blocked")"
   echo "$BLK_BODY" | grep -q 'SPEND_LIMIT' \
     && pass "gateway returns 402 SPEND_LIMIT for the over-limit app (route-pull → check_spend Block)" \
     || fail "gateway 402 but body lacked SPEND_LIMIT code: $BLK_BODY"

@@ -77,5 +77,5 @@ descriptor.
 
 Both harnesses share one bring-up implementation: `tests/lib/e2e_stack.sh`
 (`stack_up` / `mint_admin_pat` / `deploy_zship` / `stack_down`). The browser
-harness uses a private port band (`GATE_PORT=8022`, etc.) and `*-bx` app slugs
+harness uses a private port band (`ZEROSHIP_GATEWAY_PORT=8022`, etc.) and `*-bx` app slugs
 so it can coexist with the `*-e2e` curl-harness apps on the same host.

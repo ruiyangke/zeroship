@@ -224,8 +224,8 @@ esac
 # ===========================================================================
 # From here on Connect IS enabled — run the full live money flow.
 # ===========================================================================
-CONTROL_PORT=19099
-CONTROL_URL="http://localhost:$CONTROL_PORT"
+ZEROSHIP_CONTROL_PORT=19099
+CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WEBHOOK_SECRET="whsec_e2e_$(openssl rand -hex 16)"   # throwaway, per-run
 WORK="$(mktemp -d -t zs-e2e-connect-XXXXXX)"
 mkdir -p "$WORK/blobs"
@@ -253,7 +253,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # Poll the control DB until a query returns the expected value.
 wait_for_db() {
@@ -297,7 +297,7 @@ SIGNING_KEY_FILE="$WORK/signing-key.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &

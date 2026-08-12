@@ -20,7 +20,7 @@
 
 [auth]
 # Supply the native OP public origin to auth through AUTH_PUBLIC_URL and the
-# matching token issuer to control through AUTH_PLATFORM_ISSUER. This shared
+# matching token issuer to control through ZEROSHIP_AUTH_PLATFORM_ISSUER. This shared
 # overlay defines neither key.
 #
 # First-party OAuth client IDs that skip native OP consent for the first-party

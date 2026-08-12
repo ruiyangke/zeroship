@@ -20,7 +20,7 @@ Current `BlobStore` methods:
 
 ## Implementations
 
-Two shipping backends, selected per process by `--blob-store` / `BLOB_STORE`:
+Two shipping backends, selected per process by `--blob-store` / `ZEROSHIP_BLOB_STORE`:
 
 - a bare path (the dev default, e.g. `./bundles`) → `LocalDiskBlobStore`
 - an `s3://bucket/prefix?region=…` URL → `S3BlobStore` (over `compio-s3`)
@@ -100,7 +100,7 @@ All three services build their store from the SAME `--blob-store` grammar via `z
 The same `compio-s3` client and the same `s3://…` URL grammar back the
 creator-facing `env.storage` namespace (`crates/plugin-storage`). It is a
 **separate** keyspace and a **separate** flag — `--storage-url` on the worker
-(and `ZEROSHIP_STORAGE_URL` for `zeroship serve`) — but resolves credentials
+(and `ZEROSHIP_WORKER_STORAGE_URL` for `zeroship serve`) — but resolves credentials
 from the same AWS env vars (one S3 identity per process). A worker can point
 `--blob-store` and `--storage-url` at different prefixes (or different
 buckets) of the same provider.

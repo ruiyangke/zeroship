@@ -84,9 +84,9 @@ PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_stream}"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
-CONTROL_PORT="${CONTROL_PORT:-9394}"
-WORKER_PORT="${WORKER_PORT:-8394}"
-GATE_PORT="${GATE_PORT:-8304}"
+ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9394}"
+ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8394}"
+ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8304}"
 DEV_PORT="${DEV_PORT:-3061}"
 # VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
 # binds, and the only one the app's vite.config names. Left undeclared until
@@ -292,7 +292,7 @@ done
 ( cd "$APP_DIR" && ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1 ) & PIDS+=($!)
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 20 x 2s count
 # sized on an idle machine (#273). Sourced HERE and not at the top: e2e_stack.sh
-# opens with `: "${CONTROL_PORT:=9120}"` and four more of that shape, which only
+# opens with `: "${ZEROSHIP_CONTROL_PORT:=9120}"` and four more of that shape, which only
 # assign when unset, so sourcing it above this harness's own port block would
 # hand it the library's ports.
 # shellcheck source=/dev/null
@@ -313,7 +313,7 @@ frames "dev" "$WORK/dev.txt"
 headers "dev" "$WORK/dev.txt.hdr"
 
 echo "=== deployed side"
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
@@ -321,21 +321,21 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
-"$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" \
   --blob-store "$WORK/bundles" --poll-interval 2 > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" --control-key "$CONTROL_KEY" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
   --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/bundles" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null && ok "stack healthy" \
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
@@ -343,9 +343,9 @@ KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$KEY" ] && ok "deployed stream-probe" || { no "provision: $OUT"; exit 1; }
 sleep 6
 curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $KEY" \
-  "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
   && ok "deployed app reachable" || no "deployed app did not answer ping"
-drive "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/probe.ticks" "$KEY" "$WORK/deployed.txt"
+drive "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ticks" "$KEY" "$WORK/deployed.txt"
 judge "deployed" "$WORK/deployed.txt"
 frames "deployed" "$WORK/deployed.txt"
 headers "deployed" "$WORK/deployed.txt.hdr"

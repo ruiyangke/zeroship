@@ -76,13 +76,13 @@ docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usa
 PIDS+=($!)
 sleep 3
 
-"$BIN/zeroship-worker" --port 8080 --worker-threads $CORES --control http://localhost:9090 \
+"$BIN/zeroship-worker" --port 8080 --threads $CORES --control-url http://localhost:9090 \
     --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 2
 
-"$BIN/zeroship-gate" --port 8000 --control http://localhost:9090 \
-    --workers http://localhost:8080 --poll-interval 60 > /dev/null 2>&1 &
+"$BIN/zeroship-gate" --port 8000 --control-url http://localhost:9090 \
+    --worker-urls http://localhost:8080 --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
