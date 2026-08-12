@@ -4006,11 +4006,26 @@ gp_close_step
 # constant (26 when a pair is resolved, 28 when a risky one is added).
 # 106 -> 107, same day: step 12 now arms the SECOND cascade blocker
 # (plan_change_events) before its delete, and that arming is itself an asserted
-# outcome. Same delta reasoning as the two raises above. Note this arm asserts
-# SETUP, not product behaviour -- it goes red only if the seed fails to land,
-# which is exactly when the step below would silently stop testing what it
-# claims to test.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-107}"
+# outcome. Note this arm asserts SETUP, not product behaviour -- it goes red only
+# if the seed fails to land, which is exactly when the step below would silently
+# stop testing what it claims to test.
+#
+# 107 -> 108, MEASURED not derived. The three raises above (101 -> 105 -> 106 ->
+# 107) were deltas: counted arms, no full run. A full run on 2026-08-12 settled
+# it and the deltas were right, with one pass of slack left over:
+#   golden path: 108 passed, 15 failed (floor 107)
+#   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
+# 108 is therefore the real number, and this file's convention is that the floor
+# sits EXACTLY at it so a single vanished assertion is caught. All 15 failures
+# are pre-existing and already ticketed: 6 scaffold RPCs dev-200/deployed-401
+# (#260, no auth policy in the template), 2+2 id-ordering divergences (#236,
+# SQLite BINARY vs en_US.utf8, blocked on #255), 3 log-visibility divergences
+# (#332/#333), and 4 from the app-delete cascade (#331).
+#
+# IF A LATER RUN REPORTS 107 rather than 108, do not just lower this back --
+# find which assertion stopped running. The whole point of the exact floor is
+# that the difference is visible.
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-108}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4062,9 +4077,16 @@ echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
 # whether the gate or the platform was wrong. An absolute total rots on every
 # step that lands; +6 and "only step 11 survives" does not.
 echo "  MUTATION: MUTATE_SCAFFOLD_POLICY=1 must clear step 10's SIX comparisons --"
-echo "            passed rises by exactly 6, and the only failures left are step"
-echo "            11's collation reds while #255 is open (measured 2026-08-11:"
-echo "            67/8 unmutated -> 73/2 mutated)."
+echo "            passed rises by exactly 6. That delta is the load-bearing part"
+echo "            and is what to check."
+echo "            The 2026-08-11 measurement was 67/8 unmutated -> 73/2 mutated,"
+echo "            and its 'only step 11 collation reds are left' reading was true"
+echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
+echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
+echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
+echo "            is 108/15, so the mutated arm should read 114/9 -- DERIVED by"
+echo "            subtraction, NOT measured; nobody has run the mutated arm since"
+echo "            the suite grew. If you run it, replace this with the real pair."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
