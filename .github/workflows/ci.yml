@@ -1269,12 +1269,24 @@ jobs:
       # chunked READ path specifically. A creator draining a 1 MiB object
       # chunked on a busy node gets a 500. Wire it once that is settled.
       #
-      # Two follow-ups, same day, so nobody re-runs them: it REPRODUCES on
-      # freshly built worker/gateway/cli binaries (48/6 again, so the earlier
-      # measurement was not an artefact of this tree's stale build), and the
-      # scenario-6 spine's own case/control narrows the remaining unknown to
-      # plugin-storage chunk delivery - dispatch decode and JSON encode are
-      # common to the passing and failing arms, so neither can be the delta.
+      # Three follow-ups, same day, so nobody re-runs them.
+      #
+      # (1) It REPRODUCES on freshly built worker/gateway/cli binaries (48/6
+      # again), so the earlier measurement was not an artefact of a stale build.
+      #
+      # (2) NEITHER HALF EXCEEDS THE BUDGET ALONE - the sum does. Removing ONLY
+      # the `updateChecksum` call from streamGet's drain loop, same 1 MiB, same
+      # 12 busy loops, gives `53 passed, 1 failed` with ZERO "CPU time limit
+      # exceeded", and the one failure is the checksum-mismatch assertion that
+      # mutation must move. So chunk delivery on its own fits, and the spine
+      # measures the checksum at ~30 ms on its own. Do not read this as "chunked
+      # delivery is too expensive" and go optimise it in isolation.
+      #
+      # (3) What the three arms bound, taking the spine's ~30 ms checksum (which
+      # was measured on a DIFFERENT vehicle, so this is inference, not a reading):
+      # chunked delivery is over ~20 ms, buffered `get` is under ~20 ms, and the
+      # 50 ms free-tier budget fits either one plus the checksum but not the
+      # chunked pair. That is the shape any fix has to move.
       # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
       # same measured reason as storage and with a messier signature:
       #
