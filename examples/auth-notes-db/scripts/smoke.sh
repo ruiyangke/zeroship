@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# auth-notes-db smoke — the ownership negative, driven over the real wire.
+# auth-notes-db smoke - the ownership negative, driven over the real wire.
 #
 # Run `pnpm dev` first, then `pnpm smoke` (override ZEROSHIP_URL for another port).
 #
@@ -87,6 +87,19 @@ echo "[2] alice creates a note"
 CREATED=$(rpc alice notes.create '{"title":"Alice private","body":"for alice only"}')
 echo "  notes.create (alice) -> $(status_of "$CREATED") $(body_of "$CREATED")"
 check "notes.create succeeds" bash -c "[ '$(status_of "$CREATED")' = 200 ]"
+# A 500 here is almost always an UNMIGRATED database, not an app bug, and the
+# wire body says only "internal error" so the cause is invisible from here. The
+# dev runtime prints the real reason at boot ("dev schema NOT applied") and the
+# server log carries `db: no such table: default.notes`. Name the likely cause
+# rather than leaving the reader to find it: this exact 500 cost a full
+# investigation on 2026-08-12, and the answer was that `pnpm migrate` had never
+# run because the script did not exist in this package's package.json.
+if [ "$(status_of "$CREATED")" = 500 ]; then
+  echo "  HINT: a 500 here usually means the schema was never applied to the dev"
+  echo "        database. Run 'pnpm migrate' (dev applies migrations as a separate,"
+  echo "        explicit step) and re-run. Check the dev server log for"
+  echo "        'dev schema NOT applied' / 'no such table'."
+fi
 NOTE_ID=$(body_of "$CREATED" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "  alice note id = ${NOTE_ID:-<none>}"
 
@@ -100,9 +113,20 @@ A_GET=$(rpc alice notes.get "{\"id\":\"$NOTE_ID\"}")
 echo "  notes.get (alice, own id) -> $(status_of "$A_GET") $(body_of "$A_GET")"
 check "alice can read her own note by id" bash -c "[ '$(status_of "$A_GET")' = 200 ]"
 
-echo "[4] THE NEGATIVE — bob must not reach alice's note"
+echo "[4] THE NEGATIVE - bob must not reach alice's note"
 B_LIST=$(rpc bob notes.list)
 echo "  notes.list (bob) -> $(status_of "$B_LIST") $(body_of "$B_LIST")"
+# THE STATUS IS PART OF THE ASSERTION, and leaving it out made this check
+# unfailable in the direction that matters. Measured 2026-08-12 on a dev tier
+# whose schema was never applied: bob's list returned
+#   500 {"message":"internal error"}
+# which contains no note id, so the bare `! grep` passed and printed [ok] -
+# reporting "no cross-user leakage" about a request that never reached the
+# database. An app that leaks every row would fail this check; an app that
+# serves nobody passes it. Require the read to have SUCCEEDED first, so the
+# absence of alice's id is evidence about scoping rather than about downtime.
+check "bob's list is a real 200 (not an error that trivially omits the note)" \
+  bash -c "[ '$(status_of "$B_LIST")' = 200 ]"
 check "bob's list does NOT contain alice's note" \
   bash -c "! printf '%s' '$(body_of "$B_LIST")' | grep -q '${NOTE_ID:-__none__}'"
 
@@ -110,8 +134,12 @@ B_GET=$(rpc bob notes.get "{\"id\":\"$NOTE_ID\"}")
 echo "  notes.get (bob, ALICE'S id) -> $(status_of "$B_GET") $(body_of "$B_GET")"
 check "bob reading alice's note by id is refused (404)" \
   bash -c "[ '$(status_of "$B_GET")' = 404 ]"
+# Same class: on the broken run this passed against a 400 "Invalid input" for an
+# EMPTY id - alice's create had failed, so $NOTE_ID was empty and the request
+# never named a note at all. Gate on the 404 so the no-leak claim is made about
+# the refusal this example exists to test.
 check "the refusal leaks no note content" \
-  bash -c "! printf '%s' '$(body_of "$B_GET")' | grep -q 'for alice only'"
+  bash -c "[ '$(status_of "$B_GET")' = 404 ] && ! printf '%s' '$(body_of "$B_GET")' | grep -q 'for alice only'"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

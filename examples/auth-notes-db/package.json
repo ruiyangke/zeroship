@@ -6,6 +6,7 @@
   "description": "Per-user notes: env.auth + env.db + RPC together, with server-side ownership scoping.",
   "scripts": {
     "dev": "vite",
+    "migrate": "zeroship-dev-migrate",
     "gen-types": "vite build --mode development",
     "build": "vite build",
     "smoke": "bash scripts/smoke.sh",
