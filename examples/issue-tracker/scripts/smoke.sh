@@ -393,6 +393,41 @@ bob search.query "{\"where\":$SS_QUERY,\"limit\":200}" | grep -q "$SECRET_BUG" \
 [ "$(code search.query '{"where":{"field":"passwordHash","operator":"eq","value":"x"}}')" = "400" ] \
   && pass "an unsupported search field is rejected (400)" \
   || fail "search.query accepted a field outside the whitelist"
+
+echo "voting"
+# The votes table and the three product columns existed with ZERO server
+# references: the schema described a feature the app did not have.
+VP="$(call products.create "{\"name\":\"Voting $STAMP\",\"description\":\"vote product\"}" | jget 'json.id')"
+VC="$(call components.create "{\"productId\":\"$VP\",\"name\":\"Core\",\"description\":\"c\"}" | jget 'json.id')"
+VV="$(call versions.create "{\"productId\":\"$VP\",\"name\":\"1.0\"}" | jget 'json.id')"
+VB="$(call bugs.create "{\"productId\":\"$VP\",\"componentId\":\"$VC\",\"versionId\":\"$VV\",\"summary\":\"Vote me $STAMP\",\"description\":\"d\"}" | jget 'json.id')"
+
+# Voting is OFF by default (all three columns default to 0), which is the
+# whole reason 0 is the default rather than something permissive.
+[ "$(code votes.cast "{\"bugId\":\"$VB\",\"count\":1}")" = "409" ] \
+  && pass "voting is refused while the product has no vote budget" \
+  || fail "votes.cast succeeded on a product with voting disabled"
+
+# Asserted, not discarded: an update that silently failed here would make
+# every voting check below fail for a reason that has nothing to do with votes.
+UPD="$(code products.update "{\"id\":\"$VP\",\"changes\":{\"votesPerUser\":5,\"maxVotesPerBug\":3,\"votesToConfirm\":2}}")"
+[ "$UPD" = "200" ] && pass "the product vote limits are editable" || fail "products.update rejected the vote limits" "http=$UPD"
+
+[ "$(code votes.cast "{\"bugId\":\"$VB\",\"count\":4}")" = "400" ] \
+  && pass "a vote above maxVotesPerBug is refused" \
+  || fail "maxVotesPerBug is not enforced"
+
+VR="$(call votes.cast "{\"bugId\":\"$VB\",\"count\":2}")"
+[ "$(echo "$VR" | jget 'json.voteCount')" = "2" ] \
+  && pass "voteCount is the SUM of vote quantities, not a row count" \
+  || fail "voteCount wrong after casting 2 votes" "$(echo "$VR" | head -c 120)"
+
+# Bugzilla's auto-confirm: votesToConfirm=2 and the bug was UNCONFIRMED.
+[ "$(echo "$VR" | jget 'json.confirmed')" = "true" ] \
+  && pass "reaching votesToConfirm confirms an UNCONFIRMED bug" \
+  || fail "the bug was not auto-confirmed at the vote threshold"
+[ "$(call bugs.get "{\"id\":\"$VB\"}" | jget 'json.bug.status')" = "CONFIRMED" ] \
+  && pass "the auto-confirmed status is persisted" || fail "status did not persist as CONFIRMED"
 echo "auth posture"
 # Fail-closed: a write with no identity must be refused, not silently accepted.
 [ "$(anon products.create '{"name":"nope","description":"nope"}')" = "401" ] \

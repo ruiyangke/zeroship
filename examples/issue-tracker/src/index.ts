@@ -76,6 +76,11 @@ type ProductRow = SystemRow & {
   defaultMilestone?: string | null;
   allowsUnconfirmed: boolean;
   isActive: boolean;
+  // Bugzilla voting limits. Present in the schema since the rework and
+  // absent from this view, which is why nothing could read them.
+  votesPerUser: number;
+  maxVotesPerBug: number;
+  votesToConfirm: number;
 };
 
 type ComponentRow = SystemRow & {
@@ -155,6 +160,7 @@ type KeywordRow = SystemRow & {
 type BugKeywordRow = SystemRow & { bugId: string; keywordId: string };
 type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
 type CcRow = SystemRow & { bugId: string; userId: string };
+type VoteRow = SystemRow & { bugId: string; userId: string; count: number };
 type ProductGroupRow = SystemRow & { productId: string; groupId: string };
 type GroupMemberRow = SystemRow & { groupId: string; userId: string };
 type GroupRow = SystemRow & {
@@ -257,6 +263,7 @@ type TxDb = {
   bugKeywords: TxCollection<BugKeywordRow>;
   bugDependencies: TxCollection<DependencyRow>;
   bugCc: TxCollection<CcRow>;
+  votes: TxCollection<VoteRow>;
   bugGroups: TxCollection<BugGroupRow>;
   flags: TxCollection<FlagRow>;
   activities: TxCollection<ActivityRow>;
@@ -286,6 +293,7 @@ type AppDb = {
   bugKeywords: Collection<BugKeywordRow>;
   bugDependencies: Collection<DependencyRow>;
   bugCc: Collection<CcRow>;
+  votes: Collection<VoteRow>;
   flagTypes: Collection<FlagTypeRow>;
   flags: Collection<FlagRow>;
   activities: Collection<ActivityRow>;
@@ -2442,6 +2450,9 @@ type ProductPatch = {
   defaultMilestone?: string | null;
   allowsUnconfirmed?: boolean;
   isActive?: boolean;
+  votesPerUser?: number;
+  maxVotesPerBug?: number;
+  votesToConfirm?: number;
 };
 
 export const updateProduct = mutation(
@@ -2456,6 +2467,11 @@ export const updateProduct = mutation(
       "defaultMilestone",
       "allowsUnconfirmed",
       "isActive",
+      // The voting limits are editable, or voting can never be turned on:
+      // every product is created with all three at 0, which means disabled.
+      "votesPerUser",
+      "maxVotesPerBug",
+      "votesToConfirm",
     ];
     if (Object.keys(changes).length === 0) invalid("changes must not be empty");
     if (Object.keys(changes).some((key) => !allowed.includes(key))) invalid("unsupported product field");
@@ -3626,4 +3642,135 @@ export const unrestrictBug = mutation(
     );
   },
   { id: "bugs.unrestrict" },
+);
+
+// ---------------------------------------------------------------------------
+// Voting
+//
+// The `votes` table and the three product columns (votesPerUser,
+// maxVotesPerBug, votesToConfirm) were added for this and then nothing used
+// them: zero server references, so the schema described a feature the app did
+// not have and a migration comment claimed it enabled "the classic
+// votes-auto-confirm flow" that no code performed.
+//
+// Bugzilla's rules, which are the point of the three columns:
+//   - a user spends at most `votesPerUser` votes across a product,
+//   - at most `maxVotesPerBug` of them on any one bug,
+//   - and when a bug reaches `votesToConfirm`, an UNCONFIRMED bug is confirmed.
+// A product with the columns left at 0 has voting disabled, which is why 0 is
+// the default rather than something permissive.
+// ---------------------------------------------------------------------------
+
+export const castVote = mutation(
+  async ({ bugId, count }: { bugId: string; count: number }) => {
+    const actor = await requireActor();
+    const bug = await getRequired(db.bugs, bugId, "Bug");
+    await assertBugAccessible(bug, actor);
+
+    if (!Number.isInteger(count) || count < 0) invalid("count must be a non-negative integer");
+    const product = await getRequired(db.products, bug.productId, "Product");
+    if (product.votesPerUser <= 0) conflict("voting is disabled for this product");
+    if (product.maxVotesPerBug > 0 && count > product.maxVotesPerBug) {
+      invalid(`at most ${product.maxVotesPerBug} votes may be cast on one bug`);
+    }
+
+    return must(
+      await db.transaction(async (tx) => {
+        // The per-product budget counts this user's votes on OTHER bugs in the
+        // same product, so replacing an existing vote frees its own allowance
+        // rather than counting twice.
+        const mine = await readAllTx(tx.votes, { userId: actor.id });
+        const existing = mine.find((row) => row.bugId === bugId) ?? null;
+        const bugIds = mine.map((row) => row.bugId).filter((id) => id !== bugId);
+        const otherBugs: BugRow[] = [];
+        for (const id of bugIds) {
+          const row = await tx.bugs.get(id);
+          if (row) otherBugs.push(row);
+        }
+        const spentElsewhere = otherBugs
+          .filter((other) => other.productId === bug.productId)
+          .reduce((total, other) => {
+            const row = mine.find((entry) => entry.bugId === other.id);
+            return total + (row?.count ?? 0);
+          }, 0);
+        if (spentElsewhere + count > product.votesPerUser) {
+          conflict(
+            `only ${product.votesPerUser} votes are available per user in this product ` +
+              `(${spentElsewhere} already spent elsewhere)`,
+          );
+        }
+
+        if (existing && count === 0) {
+          await tx.votes.delete(existing.id);
+        } else if (existing) {
+          await tx.votes.update(existing.id, { count });
+        } else if (count > 0) {
+          await tx.votes.insert({ bugId, userId: actor.id, count });
+        }
+
+        // voteCount is SUM(count), not COUNT(*) -- a vote row carries a
+        // quantity. Recomputed from the rows rather than incremented, so it
+        // cannot drift away from them.
+        const after = await readAllTx(tx.votes, { bugId });
+        const total = after.reduce((sum, row) => sum + row.count, 0);
+
+        const patch: DbPatch = { voteCount: total };
+        // Bugzilla's auto-confirm: enough votes turn an UNCONFIRMED bug into a
+        // CONFIRMED one. Only from UNCONFIRMED -- votes never move a bug that
+        // is already resolved.
+        const confirms =
+          product.votesToConfirm > 0 &&
+          total >= product.votesToConfirm &&
+          bug.status === "UNCONFIRMED";
+        if (confirms) {
+          patch.status = "CONFIRMED";
+          patch.isConfirmed = true;
+        }
+        const updated = await tx.bugs.update(bugId, patch);
+        if (!updated) notFound("Bug");
+
+        await recordRelatedChange(
+          tx.activities,
+          bugId,
+          actor.id,
+          "votes",
+          String(bug.voteCount),
+          String(total),
+        );
+        if (confirms) {
+          await recordRelatedChange(
+            tx.activities,
+            bugId,
+            actor.id,
+            "status",
+            "UNCONFIRMED",
+            "CONFIRMED",
+          );
+        }
+        return { bugId, count, voteCount: total, confirmed: confirms };
+      }),
+    );
+  },
+  { id: "votes.cast" },
+);
+
+export const listMyVotes = query(
+  async ({}: EmptyInput) => {
+    const identity = requireIdentity();
+    const user = await appUserForIdentity(identity);
+    if (!user) return [];
+    const rows = await readAll(db.votes, { userId: user.id });
+    if (rows.length === 0) return [];
+    const bugs = await readByIds(db.bugs, rows.map((row) => row.bugId));
+    const hidden = new Set(await hiddenBugIds(user));
+    const visible = await visibleProductIds(identity);
+    const byId = new Map(bugs.map((bug) => [bug.id, bug]));
+    return rows
+      .filter((row) => {
+        const bug = byId.get(row.bugId);
+        return bug && !hidden.has(bug.id) && visible.has(bug.productId);
+      })
+      .map((row) => ({ ...row, bug: normalizeBugRow(byId.get(row.bugId)!) }));
+  },
+  { id: "votes.listMine" },
 );

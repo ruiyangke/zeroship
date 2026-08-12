@@ -58,6 +58,8 @@ export default defineApp({
     "rpc:cc.remove": { auth: "user" },
     "rpc:cc.list": { auth: "user" },
     "rpc:cc.listMine": { auth: "user" },
+    "rpc:votes.cast": { auth: "user" },
+    "rpc:votes.listMine": { auth: "user" },
     "rpc:groups.create": { auth: "user" },
     "rpc:groups.list": { auth: "user" },
     "rpc:groups.addMember": { auth: "user" },
