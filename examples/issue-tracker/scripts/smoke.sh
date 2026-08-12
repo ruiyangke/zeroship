@@ -69,14 +69,30 @@ fail() { echo "  FAIL  $1"; [ -n "${2-}" ] && echo "        $2"; FAIL=$((FAIL + 
 # `zeroship serve` child, so it is read back out of that child's environment.
 # ---------------------------------------------------------------------------
 PORT="${URL##*:}"
-SERVE_PID="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -1)"
-if [ -z "$SERVE_PID" ]; then
+SERVE_PIDS="$(lsof -ti "tcp:$PORT" 2>/dev/null)"
+if [ -z "$SERVE_PIDS" ]; then
   echo "nothing is listening on $URL -- start the dev runtime first:  pnpm dev" >&2
   exit 2
 fi
-SECRET="$(tr '\0' '\n' < "/proc/$SERVE_PID/environ" 2>/dev/null | grep '^ZEROSHIP_DEV_AUTH_SECRET=' | cut -d= -f2-)"
+# EVERY pid on the port, not the first. Two processes hold this socket -- the
+# vite parent and the `zeroship serve` child it spawns -- and only the child
+# carries the secret. `head -1` returned whichever lsof happened to list first,
+# so this refused to run whenever that was the parent: a suite that passed
+# 88/88 one hour and declined to start the next, with nothing about the app
+# having changed. e2e/session.ts had the same bug and was fixed; this copy was
+# missed.
+SECRET=""
+CHECKED=""
+for pid in $SERVE_PIDS; do
+  found="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep '^ZEROSHIP_DEV_AUTH_SECRET=' | cut -d= -f2-)"
+  if [ -n "$found" ]; then
+    SECRET="$found"
+    break
+  fi
+  CHECKED="$CHECKED $pid"
+done
 if [ -z "$SECRET" ]; then
-  echo "could not read ZEROSHIP_DEV_AUTH_SECRET from pid $SERVE_PID." >&2
+  echo "no process listening on $URL carries ZEROSHIP_DEV_AUTH_SECRET (checked:$CHECKED)." >&2
   echo "That variable is what makes an authenticated dev request possible; without" >&2
   echo "it every mutation below would 401 and the run would report failures that" >&2
   echo "say nothing about the app. Refusing to run a test that cannot pass." >&2
