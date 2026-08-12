@@ -131,8 +131,15 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
     return (await res.json()).json;
   };
 
-  const me = await rpc("users.me", {});
+  // The product is created FIRST, and `me` read after it, because `users.me`
+  // does NOT provision: it returns id null until the identity has written
+  // something. Reading it first made this spec depend on an EARLIER spec
+  // having done a write -- it passed in a full run and failed under --grep or
+  // sharding, on a fresh database, with a cc.add 400 that says nothing about
+  // provisioning.
   const product = await rpc("products.create", { name: `CC ${RUN}`, description: "cc spec" });
+  const me = await rpc("users.me", {});
+  expect(me.id, "users.me must return a provisioned id after a write").toMatch(/^user_/);
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",
@@ -220,8 +227,10 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
     return (await res.json()).json;
   };
 
-  const me = await rpc("users.me", {});
+  // Product first, `me` after: users.me does not provision (see the CC spec).
   const product = await rpc("products.create", { name: `Notif ${RUN}`, description: "notif spec" });
+  const me = await rpc("users.me", {});
+  expect(me.id, "users.me must return a provisioned id after a write").toMatch(/^user_/);
   const component = await rpc("components.create", {
     productId: product.id,
     name: "Core",

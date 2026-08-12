@@ -53,7 +53,16 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev",
+    // `pnpm migrate` first, because `pnpm dev` does NOT apply committed
+    // migrations. Without it a clean checkout runs these specs against a
+    // database with no tables, and every spec fails on rendered UI errors that
+    // say nothing about the real cause. Measured: 2 tables instead of 24, and
+    // four specs failing with assertion messages about the app.
+    //
+    // `reuseExistingServer` means this whole command is skipped when something
+    // is already listening, so a dev server started by hand still needs its own
+    // `pnpm migrate` -- which is what README's "Run locally" says to do.
+    command: "pnpm migrate && pnpm dev",
     url: baseURL,
     reuseExistingServer: true,
     timeout: 120_000,
