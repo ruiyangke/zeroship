@@ -5,6 +5,7 @@ use std::sync::Arc;
 use ntex::web;
 use ntex::web::types::{Path, State};
 use uuid::Uuid;
+use zeroship_core::readiness::ReadinessGate;
 
 use crate::AppState;
 
@@ -42,8 +43,40 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
 // Handlers
 // ---------------------------------------------------------------------------
 
-pub async fn health() -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&serde_json::json!({"status":"ok"}))
+/// Liveness. Constant 200 by design: it answers "this process is running and
+/// its event loop is not wedged" and MUST NOT touch a dependency. A liveness
+/// probe that fails when Postgres blips gets the container killed for someone
+/// else's outage.
+pub async fn healthz() -> web::HttpResponse {
+    web::HttpResponse::Ok().json(&serde_json::json!({"ok": true}))
+}
+
+/// Readiness. The control plane cannot serve a single API call without
+/// Postgres, so this probes the SHARED long-lived `control_pg` client with a
+/// protocol-level sync - no new connection, no query planning, no table read.
+///
+/// Bounded, cached and single-flighted by [`ReadinessGate`]; the body carries
+/// no DSN, host, or driver error text.
+pub async fn readyz(
+    state: State<Arc<AppState>>,
+    gate: State<Arc<ReadinessGate>>,
+) -> web::HttpResponse {
+    let ready = gate
+        .ready(|| async {
+            match state.control_pg.check_connection().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(error = %error, "control readiness: postgres unreachable");
+                    false
+                }
+            }
+        })
+        .await;
+    if ready {
+        web::HttpResponse::Ok().json(&serde_json::json!({"ready": true}))
+    } else {
+        web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"ready": false}))
+    }
 }
 
 /// Worker-authenticated: return the merged env for a given app as a
