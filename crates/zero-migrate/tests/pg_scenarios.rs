@@ -7973,3 +7973,144 @@ async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// Two pending squashes may not claim the same superseded version.
+///
+/// The source explains why this cannot be left to the all-or-none gate: on a fresh
+/// database neither squash is net-applied, so that gate "sees nothing satisfied and
+/// lets both run", and the second's `up` re-creates what the first already built.
+/// `OverlappingSquashes` is the pre-flight that stops it, and it is the one arm of
+/// the squash family the all-or-none coverage does not reach.
+///
+/// The second arm is the more interesting one. The check deliberately considers
+/// only PENDING squashes — a net-applied squash re-supplied in the set is settled,
+/// and its supersession is already recorded. Drop that condition and re-supplying
+/// yesterday's squash beside a new one reports a bogus overlap, which would make an
+/// ordinary directory unapplyable. So this supplies exactly that shape and requires
+/// the answer to be the all-or-none verdict about the NEW squash instead.
+///
+/// Both arms assert the live tables, because a refusal that had already run one
+/// squash's `up` is the failure the pre-flight exists to prevent.
+#[compio::test]
+async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    use zero_migrate::driver::SqlSession;
+
+    async fn tables(session: &PgDevSession, schema: &str) -> Vec<String> {
+        let rows = session
+            .query(
+                "SELECT table_name FROM information_schema.tables
+                  WHERE table_schema = $1 ORDER BY table_name",
+                &[schema.into()],
+            )
+            .await
+            .expect("list tables");
+        rows.iter()
+            .map(|r| r.try_get::<_, String>("table_name").expect("decode name"))
+            .collect()
+    }
+
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _guard = ensure_project_schema(&session, &cfg).await;
+
+    // Three versions nothing ever applied; they exist only to be superseded.
+    let v1 = MigrationId::derive("ov_v1", tok.as_bytes());
+    let v2 = MigrationId::derive("ov_v2", tok.as_bytes());
+    let v3 = MigrationId::derive("ov_v3", tok.as_bytes());
+
+    let squash = |tag: &str, up: &str, supersedes: Vec<MigrationId>| {
+        let mut m = mig(
+            MigrationId::derive(tag, tok.as_bytes()),
+            "a_squash",
+            &format!(
+                "CREATE TABLE \"{}\".{up} (id bigint PRIMARY KEY)",
+                cfg.project_schema
+            ),
+        );
+        m.supersedes = supersedes;
+        m.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&m));
+        m
+    };
+    // They overlap on `v2`.
+    let first = squash("ov_s1", "ov_alpha", vec![v1.clone(), v2.clone()]);
+    let second = squash("ov_s2", "ov_beta", vec![v2.clone(), v3.clone()]);
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[first.clone(), second.clone()],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("two pending squashes over an overlapping prefix must be refused");
+    match &err {
+        ApplyError::OverlappingSquashes { shared, .. } => {
+            assert_eq!(
+                shared.as_str(),
+                v2.as_str(),
+                "the refusal must name the version both claim"
+            );
+        }
+        other => panic!("expected OverlappingSquashes, got {other:?}"),
+    }
+    assert!(
+        tables(&session, &cfg.project_schema).await.is_empty(),
+        "neither squash may have run"
+    );
+
+    // The control, and the premise for the arm below: one squash alone applies.
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&first),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect("a single squash applies on a fresh database");
+    assert_eq!(
+        tables(&session, &cfg.project_schema).await,
+        vec!["ov_alpha".to_string()],
+        "the squash really built its schema"
+    );
+
+    // ARM 2. `first` is now NET-APPLIED and re-supplied, which is what an ordinary
+    // migrations directory looks like on the next deploy. It must NOT count as a
+    // conflicting squash: only PENDING ones can overlap. The answer must instead be
+    // the all-or-none verdict about `second`, whose superseded set is now partly
+    // satisfied (`v2` via `first`'s edge, `v3` still not).
+    let err = apply(
+        &session,
+        &cfg,
+        &[first.clone(), second.clone()],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("the new squash is still inconsistent, but not as an overlap");
+    match &err {
+        ApplyError::SquashPartialOverlap { version, .. } => {
+            assert_eq!(
+                version.as_str(),
+                second.version.as_str(),
+                "the verdict must be about the NEW squash"
+            );
+        }
+        ApplyError::OverlappingSquashes { .. } => panic!(
+            "a settled squash re-supplied must not read as a conflicting one, or an \
+             ordinary directory stops applying: {err:?}"
+        ),
+        other => panic!("expected SquashPartialOverlap, got {other:?}"),
+    }
+    assert_eq!(
+        tables(&session, &cfg.project_schema).await,
+        vec!["ov_alpha".to_string()],
+        "and the refusal left the applied squash's schema alone"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
