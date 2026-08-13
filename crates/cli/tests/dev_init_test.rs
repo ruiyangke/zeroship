@@ -22,15 +22,17 @@ const SECRET_FILES: [&str; 7] = [
 // STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
 // verifies, so `dev init` no longer manufactures one. See
 // `dev_init_never_generates_a_stripe_webhook_secret`.
-const ENV_KEYS: [&str; 9] = [
-    "AUTH_STASH_SIGNING_KEY",
-    "AUTH_TOTP_ENC_KEY",
-    "GATEWAY_OIDC_SECRET",
-    "MIGRATED_POLICY_SEAL_KEY",
-    "PAIRWISE_SALT",
-    "STASH_SIGNING_KEY",
+// Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
+// declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
+// the tree reads it, so generating it only made an unread slot look configured.
+const ENV_KEYS: [&str; 8] = [
+    "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+    "ZEROSHIP_AUTH_TOTP_ENC_KEY",
     "ZEROSHIP_CONTROL_KEY",
-    "ZEROSHIP_MASTER_KEY",
+    "ZEROSHIP_CONTROL_MASTER_KEY",
+    "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
+    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
+    "ZEROSHIP_PAIRWISE_SALT",
     "ZEROSHIP_WORKER_KEY",
 ];
 
@@ -114,17 +116,17 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         );
     }
 
-    validate_master_key_material("MASTER_KEY", &overlay["ZEROSHIP_MASTER_KEY"])
+    validate_master_key_material("ZEROSHIP_CONTROL_MASTER_KEY", &overlay["ZEROSHIP_CONTROL_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
     validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"])
         .expect("generated worker key must pass the production boot guard");
-    validate_stash_key(&overlay["STASH_SIGNING_KEY"])
+    validate_stash_key(&overlay["ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"])
         .expect("generated gateway stash key must pass the production boot guard");
-    validate_stash_key(&overlay["AUTH_STASH_SIGNING_KEY"])
+    validate_stash_key(&overlay["ZEROSHIP_AUTH_STASH_SIGNING_KEY"])
         .expect("generated auth stash key must pass the production boot guard");
-    validate_pairwise_salt(&overlay["PAIRWISE_SALT"])
+    validate_pairwise_salt(&overlay["ZEROSHIP_PAIRWISE_SALT"])
         .expect("generated pairwise salt must pass the production boot guard");
-    validate_master_key_material("AUTH_TOTP_ENC_KEY", &overlay["AUTH_TOTP_ENC_KEY"])
+    validate_master_key_material("ZEROSHIP_AUTH_TOTP_ENC_KEY", &overlay["ZEROSHIP_AUTH_TOTP_ENC_KEY"])
         .expect("generated TOTP key must pass the production boot guard");
 
     let broker = std::fs::read(secrets_dir.join("broker-secret"))
@@ -133,7 +135,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         .expect("generated broker secret must pass the production boot guard");
 
     let pairwise = std::fs::read(secrets_dir.join("pairwise-salt")).expect("read pairwise-salt");
-    assert_eq!(pairwise, overlay["PAIRWISE_SALT"].as_bytes());
+    assert_eq!(pairwise, overlay["ZEROSHIP_PAIRWISE_SALT"].as_bytes());
     assert!(
         !pairwise.ends_with(b"\n"),
         "pairwise-salt must have no newline"
@@ -238,7 +240,7 @@ fn dev_init_rejects_interpolated_managed_values_without_creating_secrets() {
     let temp = tempfile::tempdir().expect("create temp directory");
     let secrets_dir = temp.path().join("secrets");
     let env_file = temp.path().join("dev.env");
-    let original = b"PAIRWISE_SALT=${PAIRWISE_SALT_FROM_ANOTHER_SOURCE}\n";
+    let original = b"ZEROSHIP_PAIRWISE_SALT=${PAIRWISE_SALT_FROM_ANOTHER_SOURCE}\n";
     std::fs::write(&env_file, original).expect("write interpolated env value");
 
     let output = run_dev_init(&secrets_dir, &env_file);
@@ -293,8 +295,8 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         );
     }
 
-    assert!(gateway.contains("GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
-    assert!(auth.contains("AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
+    assert!(gateway.contains("ZEROSHIP_GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
+    assert!(auth.contains("ZEROSHIP_AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret"));
     assert_eq!(
         compose
             .matches("/etc/zeroship/secrets/broker-secret")
@@ -306,10 +308,11 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     assert!(gateway.contains(shared_mount));
     assert!(auth.contains(shared_mount));
 
-    let required_pairwise = "PAIRWISE_SALT: ${PAIRWISE_SALT:?run zeroship dev init}";
+    let required_pairwise =
+        "ZEROSHIP_PAIRWISE_SALT: ${ZEROSHIP_PAIRWISE_SALT:?run zeroship dev init}";
     assert!(control.contains(required_pairwise));
     assert!(gateway.contains(required_pairwise));
-    assert!(auth.contains("AUTH_PAIRWISE_SALT_FILE: /etc/zeroship/secrets/pairwise-salt"));
+    assert!(auth.contains("ZEROSHIP_AUTH_PAIRWISE_SALT_FILE: /etc/zeroship/secrets/pairwise-salt"));
     assert_eq!(compose.matches(required_pairwise).count(), 2);
 
     let required_control = "ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}";
@@ -325,7 +328,7 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         );
     }
     assert!(
-        migrated.contains("CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}"),
+        migrated.contains(required_control),
         "migrated is not wired to the same generated control key"
     );
     assert_eq!(
@@ -342,7 +345,7 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     // relaxation - control rejects every delivery with 500 when the secret is
     // empty (crates/control/tests/stripe_webhook_test.rs).
     assert!(
-        control.contains("STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}"),
+        control.contains("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}"),
         "STRIPE_WEBHOOK_SECRET must be optional with an empty default"
     );
     assert!(
@@ -350,7 +353,7 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         "no service may REQUIRE a Stripe webhook secret to render compose"
     );
     assert!(migrated.contains(
-        "MIGRATED_POLICY_SEAL_KEY: ${MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
+        "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
     ));
     assert!(migrated.contains(
         "AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2"
