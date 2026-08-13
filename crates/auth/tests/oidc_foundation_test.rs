@@ -34,7 +34,7 @@ fn scopes() -> Vec<String> {
 }
 
 fn test_config(public_url: &str) -> AuthConfig {
-    let mut cfg = AuthConfig::parse_from([
+    AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
@@ -44,8 +44,7 @@ fn test_config(public_url: &str) -> AuthConfig {
         "test-stash-key-not-for-prod-32bytes!",
         "--public-url",
         public_url,
-    ]);
-    cfg
+    ])
 }
 
 fn access_mint<'a>(user_id: &'a str, scopes: &'a [String]) -> AccessTokenMint<'a> {

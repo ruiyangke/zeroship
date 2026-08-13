@@ -83,7 +83,7 @@ pub fn start_authorize_url(
     query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", &cfg.settings.github_redirect_uri.get())
+        .append_pair("redirect_uri", cfg.settings.github_redirect_uri.get())
         .append_pair("scope", "read:user user:email")
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
@@ -134,7 +134,7 @@ pub async fn complete_callback(
         .append_pair("code", code)
         .append_pair("client_id", client_id)
         .append_pair("client_secret", client_secret)
-        .append_pair("redirect_uri", &cfg.settings.github_redirect_uri.get())
+        .append_pair("redirect_uri", cfg.settings.github_redirect_uri.get())
         .append_pair("code_verifier", verifier)
         .finish();
 

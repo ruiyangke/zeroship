@@ -630,7 +630,7 @@ pub async fn relay_inbound(
         &alias,
         &target.real_inbox,
         RELAY_APP_DISPLAY,
-        &cfg.settings.relay_domain.get(),
+        cfg.settings.relay_domain.get(),
         msg.next_hop(),
     );
     match relay_mailer.0.send(db.as_ref(), forward).await {
@@ -699,7 +699,7 @@ async fn emit_bounce_then_ok(
     req: &HttpRequest,
 ) -> HttpResponse {
     let original_sender = &inbound.from_full.email;
-    let bounce = build_bounce(original_sender, reason, &cfg.settings.relay_domain.get());
+    let bounce = build_bounce(original_sender, reason, cfg.settings.relay_domain.get());
     match relay_mailer.0.send(db, bounce).await {
         Ok(_) => {}
         Err(MailerError::Suppressed(_)) => {

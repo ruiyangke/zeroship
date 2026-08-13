@@ -11,14 +11,13 @@ use zeroship_auth::config::AuthConfig;
 use zeroship_auth::identity::magic_link;
 
 fn test_cfg(db_url: &str) -> AuthConfig {
-    let mut cfg = AuthConfig::parse_from([
+    AuthConfig::parse_from([
         "zeroship-auth",
         "--db-url",
         db_url,
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
-    ]);
-    cfg
+    ])
 }
 
 #[allow(clippy::future_not_send)]

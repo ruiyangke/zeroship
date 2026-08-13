@@ -33,14 +33,13 @@ use zeroship_auth::store::users;
 const CORRECT_PASSWORD: &str = "correct link password phrase";
 
 fn test_cfg(db_url: &str) -> AuthConfig {
-    let mut cfg = AuthConfig::parse_from([
+    AuthConfig::parse_from([
         "zeroship-auth",
         "--db-url",
         db_url,
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
-    ]);
-    cfg
+    ])
 }
 
 fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String> {
