@@ -6,7 +6,7 @@
 //!
 //! Grammar:
 //!
-//! - `s3://bucket/prefix?region=…` → [`S3BlobStore`], built from an
+//! - `s3://bucket/prefix?region=...` -> [`S3BlobStore`], built from an
 //!   [`S3Runtime`] the CALLING process resolved. This crate reads no
 //!   environment of its own; see [`S3Runtime`] for why.
 //! - any other value → a bare local filesystem path → [`LocalDiskBlobStore`]
