@@ -40,7 +40,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -66,11 +66,32 @@ const FOREIGN_FLAGS: Readonly<Record<string, string>> = {
   "--flag": "cli.md's own placeholder in 'Value flags accept --flag value'",
 };
 
+/** The READMEs carry CLI instructions too, and are read FIRST.
+ *
+ * This verifier scanned `docs/` alone, which is the smaller half of the surface.
+ * `README.md` is the first file anyone opens, and the three defects this file was
+ * built to catch — a `squash` verb that does not exist, "the CLI has no history
+ * command" when it has one, a `--sql` preview that was never a flag — are exactly
+ * the kind that rot in a README while `docs/` stays current, because a README is
+ * edited by people shipping features rather than people writing documentation.
+ *
+ * CONTRIBUTING.md is deliberately NOT included. It names eight cargo and pnpm
+ * flags (`--workspace`, `--all-targets`, `--no-default-features` …) and no
+ * zero-migrate ones, so adding it would mean eight `FOREIGN_FLAGS` entries for
+ * another tool's build invocations — noise that dilutes the allowlist without
+ * checking a single claim about this CLI. */
+const EXTRA_DOCS = [
+  resolve(HERE, "../../../../README.md"),
+  resolve(HERE, "../../README.md"),
+  resolve(HERE, "../../../zero-migrate/README.md"),
+];
+
 /** `review-log.md` is a historical record, not instructions to follow. */
 function docFiles(): string[] {
   return readdirSync(DOCS)
     .filter((name) => name.endsWith(".md") && name !== "review-log.md")
-    .map((name) => join(DOCS, name));
+    .map((name) => join(DOCS, name))
+    .concat(EXTRA_DOCS.filter((path) => existsSync(path)));
 }
 
 function run(argv: string[]): string {
