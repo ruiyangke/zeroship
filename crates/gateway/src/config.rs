@@ -73,15 +73,25 @@ pub struct GateSettings {
     #[config(shared = PAIRWISE_SALT)]
     pub pairwise_salt: Secret<String>,
 
-    /// Shared platform broker master secret, byte-identical to auth's.
+    /// Platform broker master-secret source FILE, byte-identical to auth's.
     ///
-    /// The gateway derives per-app `oac_` client secrets from this material
-    /// when brokering authorization-code, refresh, and revoke requests to the
-    /// platform OP. It is the MATERIAL, not a path: the consumer only reads the
-    /// bytes and validates their strength, so nothing is lost by resolving it
-    /// like any other secret.
-    #[config(name = "gateway.broker_secret")]
-    pub broker_secret: Secret<String>,
+    /// The gateway derives per-app `oac_` client secrets from these bytes when
+    /// brokering authorization-code, refresh, and revoke requests to the
+    /// platform OP, and auth derives the same per-client secrets from the same
+    /// file. The two derivations must see the SAME BYTES.
+    ///
+    /// A PATH, therefore, for the same two reasons as `signing_key_file`, and
+    /// this field briefly was not. Resolving it as a `Secret<String>` read the
+    /// file through `read_to_string` and stripped one trailing newline, while
+    /// auth's `load_broker_master_secret` reads raw bytes and strips nothing.
+    /// So `openssl rand -base64 48 > secret` gave the gateway 64 bytes and the
+    /// OP 65, and `head -c 32 /dev/urandom > secret` - the recipe auth's own
+    /// documentation gives - is not UTF-8 and failed the gateway outright. It
+    /// also dropped `reject_insecure_permissions`, which has nothing to inspect
+    /// once the material is a `String`. A path to a secret is not itself a
+    /// secret.
+    #[config(name = "gateway.broker_secret_file", default = PathBuf::new())]
+    pub broker_secret_file: Operational<PathBuf>,
 
     /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
     ///
