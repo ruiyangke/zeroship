@@ -10,7 +10,8 @@ use zeroship_core::auth_provider::{
     SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, validate_master_key_material, CheckConfigReport, CheckValue,
+    bootstrap_or_exit, validate_master_key_material, AuthProviderKind, CheckConfigReport,
+    CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -232,18 +233,18 @@ fn build_billing_mailer(
 }
 
 fn build_control_auth_provider(
-    auth_provider: &str,
+    auth_provider: AuthProviderKind,
     supabase: ControlSupabaseAuthConfig,
     platform: ControlPlatformAuthConfig,
 ) -> Result<Arc<AuthProvider>, String> {
-    match control_auth_provider_kind(auth_provider)? {
-        "platform" => {
+    match auth_provider {
+        AuthProviderKind::Native => {
             let platform_config = platform_config_required(platform)?;
             Ok(Arc::new(AuthProvider::Platform(PlatformProvider::new(
                 platform_config,
             ))))
         }
-        "supabase" => {
+        AuthProviderKind::Supabase => {
             if supabase.anon_key.trim().is_empty() {
                 return Err("SUPABASE_ANON_KEY is required for ZEROSHIP_AUTH_PROVIDER=supabase"
                     .to_string());
@@ -266,18 +267,6 @@ fn build_control_auth_provider(
                 legacy,
             ))))
         }
-        other => Err(format!("unsupported auth provider kind: {other}")),
-    }
-}
-
-fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, String> {
-    let normalized = auth_provider.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "" | "platform" => Ok("platform"),
-        "supabase" => Ok("supabase"),
-        other => Err(format!(
-            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected platform|supabase"
-        )),
     }
 }
 
@@ -303,7 +292,8 @@ fn platform_config(
     if platform.issuer.trim().is_empty() {
         if !platform.jwks_url.trim().is_empty() {
             return Err(
-                "AUTH_PLATFORM_ISSUER is required when AUTH_PLATFORM_JWKS_URL is set"
+                "ZEROSHIP_AUTH_PLATFORM_ISSUER is required when \
+                 ZEROSHIP_AUTH_PLATFORM_JWKS_URL is set"
                     .to_string(),
             );
         }
@@ -321,7 +311,7 @@ fn platform_config_required(
     platform: ControlPlatformAuthConfig<'_>,
 ) -> Result<PlatformConfig, String> {
     platform_config(platform)?.ok_or_else(|| {
-        "AUTH_PLATFORM_ISSUER is required for ZEROSHIP_AUTH_PROVIDER=platform".to_string()
+        "ZEROSHIP_AUTH_PLATFORM_ISSUER is required for ZEROSHIP_AUTH_PROVIDER=native".to_string()
     })
 }
 
@@ -398,15 +388,10 @@ fn main() -> std::io::Result<()> {
     let trust_proxy = *settings.trust_proxy.get();
     let origin_scheme = *settings.origin_scheme.get();
 
-    let auth_provider_name = settings.auth_provider.get().clone();
-    let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
-        Ok(kind) => kind,
-        Err(message) => {
-            eprintln!("control: {message}");
-            tracing::error!(error = %message, "control: refusing to start with invalid auth provider");
-            std::process::exit(1);
-        }
-    };
+    // No hand-rolled value parse here any more: the declaration resolves to
+    // `AuthProviderKind`, so clap and the overlay reject an unknown spelling
+    // before this function is reached.
+    let auth_provider_kind = *settings.auth_provider.get();
     let supabase_url = settings.supabase_url.get().clone();
     let supabase_anon_key = cli.supabase_anon_key.clone();
     let supabase_service_role_key = cli.supabase_service_role_key.clone();
@@ -649,10 +634,10 @@ fn main() -> std::io::Result<()> {
     // audit run on the SINGLE `--db` connection (there is no separate auth DB
     // any more). Platform mode requires an explicit native OP issuer; this is
     // deployment topology and must match the issuer embedded in access tokens.
-    if auth_provider_kind == "platform" {
+    if auth_provider_kind == AuthProviderKind::Native {
         let mut missing = Vec::new();
         if auth_platform_issuer.is_empty() {
-            missing.push("--auth-platform-issuer / AUTH_PLATFORM_ISSUER");
+            missing.push("--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER");
         }
         if !missing.is_empty() {
             tracing::error!(
@@ -853,7 +838,7 @@ fn main() -> std::io::Result<()> {
     // selected auth provider still drives the OAuth-bearer arm of the
     // `AuthzGuard` after local PAT verification fails.
     let auth_provider = match build_control_auth_provider(
-        &auth_provider_name,
+        auth_provider_kind,
         ControlSupabaseAuthConfig {
             url: &supabase_url,
             anon_key: &supabase_anon_key,
@@ -1470,26 +1455,64 @@ mod tests {
     }
 
     #[test]
-    fn auth_provider_selector_defaults_to_platform_and_accepts_supabase() {
+    fn auth_provider_selector_defaults_to_native_and_accepts_supabase() {
         let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
         let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
-        assert_eq!(resolved.auth_provider.get(), "platform");
-        assert_eq!(
-            control_auth_provider_kind(resolved.auth_provider.get()),
-            Ok("platform")
-        );
-        assert_eq!(control_auth_provider_kind(""), Ok("platform"));
-        assert_eq!(control_auth_provider_kind("platform"), Ok("platform"));
-        assert_eq!(control_auth_provider_kind("supabase"), Ok("supabase"));
+        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Native);
 
-        let err = control_auth_provider_kind("bogus").unwrap_err();
-        assert!(err.contains("platform|supabase"), "unexpected error: {err}");
+        let cli = ControlCli::try_parse_from(["zeroship-control", "--auth-provider", "supabase"])
+            .expect("parse supabase");
+        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
+    }
+
+    #[test]
+    fn the_retired_platform_spelling_is_rejected_by_the_flag_and_the_overlay() {
+        // `platform` was control's own word for the state now spelled `native`.
+        // Both tiers must refuse it, or the two vocabularies survive the merge
+        // in the one place an operator would not look.
+        let err = ControlCli::try_parse_from([
+            "zeroship-control",
+            "--auth-provider",
+            "platform",
+        ])
+        .map(|_| ())
+        .expect_err("the retired control spelling must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+
+        let overlay: toml::Value = toml::from_str("[auth]\nprovider = \"platform\"\n")
+            .expect("fixture overlay");
+        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
+        let err = ControlSettings::resolve_config(cli.settings, Some(&overlay))
+            .map(|_| ())
+            .expect_err("the retired control spelling must not resolve from the overlay");
+        assert!(
+            format!("{err}").contains("auth.provider"),
+            "the overlay rejection must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn the_shared_variable_reaches_control_from_the_environment() {
+        // The cross-binary half of this - control and auth resolving the SAME
+        // process variable to the same value - is driven end to end against
+        // both real binaries in `tests/config_check_e2e.sh`, which is the only
+        // vector that can observe two processes at once.
+        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
+        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
+        std::env::set_var("ZEROSHIP_AUTH_PROVIDER", "supabase");
+
+        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse control");
+        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
+
+        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
     }
 
     #[test]
     fn supabase_auth_provider_requires_anon_key_and_pinned_mode() {
         let err = build_control_auth_provider(
-            "supabase",
+            AuthProviderKind::Supabase,
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "",
@@ -1507,7 +1530,7 @@ mod tests {
         assert!(err.contains("SUPABASE_ANON_KEY"), "unexpected error: {err}");
 
         let err = build_control_auth_provider(
-            "supabase",
+            AuthProviderKind::Supabase,
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1528,7 +1551,7 @@ mod tests {
         );
 
         let provider = build_control_auth_provider(
-            "supabase",
+            AuthProviderKind::Supabase,
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1546,7 +1569,7 @@ mod tests {
         assert_eq!(provider.issuer(), "https://project.supabase.co/auth/v1");
 
         let provider = build_control_auth_provider(
-            "supabase",
+            AuthProviderKind::Supabase,
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1569,9 +1592,9 @@ mod tests {
     }
 
     #[test]
-    fn platform_auth_provider_requires_issuer_and_uses_default_jwks_url() {
+    fn native_auth_provider_requires_issuer_and_uses_default_jwks_url() {
         let err = build_control_auth_provider(
-            "platform",
+            AuthProviderKind::Native,
             ControlSupabaseAuthConfig {
                 url: "",
                 anon_key: "",
@@ -1586,10 +1609,13 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(err.contains("AUTH_PLATFORM_ISSUER"), "unexpected error: {err}");
+        assert!(
+            err.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"),
+            "unexpected error: {err}"
+        );
 
         let provider = build_control_auth_provider(
-            "platform",
+            AuthProviderKind::Native,
             ControlSupabaseAuthConfig {
                 url: "",
                 anon_key: "",

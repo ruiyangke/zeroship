@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
-    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OriginScheme, OverlaySelector,
+    zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
+    ObservabilityControls, Operational, OriginScheme, OverlaySelector,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -171,17 +171,24 @@ pub struct ControlSettings {
     #[config(shared = ORIGIN_SCHEME, default = OriginScheme::Https)]
     pub origin_scheme: Operational<OriginScheme>,
 
-    /// Platform auth provider backend (`platform` or `supabase`).
+    /// Platform auth provider backend.
     ///
-    /// CONTROL-SCOPED on purpose. The auth service has a flag with the same
-    /// spelling and the same environment name today, but a DIFFERENT value
-    /// vocabulary: control accepts `platform|supabase` while auth accepts
-    /// `native|supabase`. One canonical identity would therefore mean two
-    /// things behind one operator-visible name, which is the drift this design
-    /// exists to remove rather than to formalise. Unifying them is a value-set
-    /// decision, not a naming one, and belongs with the auth conversion.
-    #[config(name = "control.auth_provider", default = "platform".to_owned())]
-    pub auth_provider: Operational<String>,
+    /// SHARED with the auth service, which SERVES the provider whose tokens
+    /// control verifies. One deployment decision, one `ZEROSHIP_AUTH_PROVIDER`,
+    /// one `AuthProviderKind`. It used to be a control-scoped `String` at
+    /// `control.auth_provider` accepting `platform|supabase` against auth's
+    /// `native|supabase`, so the pair could be set to disagree and control
+    /// either widened its trust silently or failed every request at run time.
+    ///
+    /// `native` here means the platform's own OP is the trusted issuer - the
+    /// state control used to spell `platform`.
+    ///
+    /// Dual-issuer trust is NOT a third value: `supabase` PLUS a configured
+    /// `auth.platform_issuer` still derives a `DualIssuerProvider`, exactly as
+    /// before.
+    #[arg(value_enum)]
+    #[config(shared = AUTH_PROVIDER, default = AuthProviderKind::Native)]
+    pub auth_provider: Operational<AuthProviderKind>,
 
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     ///
