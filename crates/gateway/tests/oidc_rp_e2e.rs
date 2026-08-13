@@ -142,6 +142,10 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
         Ok(h == self.hash)
     }
 
+    async fn probe(&self) -> Result<(), zeroship_bundle::BlobError> {
+        Ok(())
+    }
+
     async fn get_blob_to_file(
         &self,
         h: &str,

@@ -17,6 +17,48 @@ fn tmpdir() -> PathBuf {
     dir
 }
 
+// --- readiness probe -------------------------------------------------------
+//
+// `probe` backs the worker's and control plane's `/readyz`. The point of the
+// pair below is the CONTRAST: `has_blob` cannot tell "the blob is absent" from
+// "the blob root is gone", and `probe` must.
+
+#[compio::test]
+async fn probe_is_ok_while_the_blob_root_exists() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+
+    store.probe().await.expect("a live blob root probes clean");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[compio::test]
+async fn probe_fails_once_the_blob_root_is_gone() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    store.probe().await.expect("clean before the root is removed");
+
+    // ONE variable changed: the directory the store was built over. This is
+    // the deleted-volume / unmounted-mountpoint case that a `/readyz` reporting
+    // only process liveness would serve straight through.
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let err = store.probe().await.expect_err("a missing blob root is NOT ready");
+    assert!(matches!(err, BlobError::Io(_)), "unexpected error: {err:?}");
+
+    // The control, and the reason `probe` is its own method: the SAME missing
+    // root answers `Ok(false)` through `has_blob`, indistinguishable from a
+    // blob that was simply never written.
+    let absent = "0".repeat(64);
+    assert!(!store.has_blob(&absent).await.unwrap());
+}
+
+// What these do NOT catch: the S3 backend's probe. `S3BlobStore::probe` HEADs
+// a never-written key and treats 404 as reachable; that arm needs a live
+// endpoint and belongs with the other MinIO-gated tests in
+// crates/bundle/tests/s3_blob_minio.rs.
+
 #[test]
 fn sha256_hex_known_vector() {
     // Empty input → well-known sha256 of zero bytes.

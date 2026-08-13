@@ -716,6 +716,12 @@ mod tests {
             self.put(hash, &buf);
             Ok(PutOutcome::Wrote)
         }
+        async fn probe(&self) -> Result<(), BlobError> {
+            if *self.force_unavailable.lock().unwrap() {
+                return Err(BlobError::Backend("synthetic outage".into()));
+            }
+            Ok(())
+        }
         async fn has_blob(&self, hash: &str) -> Result<bool, BlobError> {
             Ok(self.blobs.lock().unwrap().contains_key(hash))
         }

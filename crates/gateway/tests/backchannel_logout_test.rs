@@ -315,6 +315,10 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
         Ok(false)
     }
 
+    async fn probe(&self) -> Result<(), zeroship_bundle::BlobError> {
+        Ok(())
+    }
+
     async fn get_blob_to_file(
         &self,
         _hash: &str,
