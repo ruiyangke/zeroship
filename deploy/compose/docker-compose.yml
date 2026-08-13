@@ -229,6 +229,18 @@ services:
         --allow-unsupported-billing
         --app-base-domain ${ZEROSHIP_DOMAIN:-zeroship.localhost}
         --signing-key-file /etc/zeroship/secrets/control-signing.pem
+    # READINESS, not liveness: /readyz answers 200 only once Postgres answers,
+    # so `service_healthy` on this service means "can serve API calls", not
+    # "the process bound a port". `curl` is present in the runtime image
+    # (deploy/Dockerfile stage 3 installs ca-certificates + curl); verified by
+    # running it inside the built image, because a CMD-SHELL probe naming a
+    # binary the image lacks fails forever and reads as a broken service.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9090/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     environment:
       # Role-specific DSN + shared secrets, resolved from deploy/ops/zeroship.toml's
       # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
@@ -342,6 +354,15 @@ services:
       zeroship-migrated
         --port 9091
         --bind 0.0.0.0
+    # /readyz opens a Postgres connection on the policy-store DSN - the same
+    # DSN every apply/policy endpoint uses - so unhealthy here means applies
+    # would fail, not merely that the port is closed.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9091/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     ports:
       - "127.0.0.1:9091:9091"
     environment:
@@ -403,6 +424,16 @@ services:
           --poll-interval 3 \
           --auth-ui-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost} \
           --public-url ${ZEROSHIP_ORIGIN_SCHEME:-http}://api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
+    # /readyz is 503 until the route table has actually been pulled from
+    # control, which is what separates "the gateway is up" from "the gateway
+    # can route". `start_period` covers the entrypoint's `sleep 3` plus the
+    # first `--poll-interval 3` cycle.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8000/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 40s
     volumes:
       # Platform key material (Ed25519 signing keys, broker master secret,
       # pairwise salt). The default host directory is explicitly gitignored.
@@ -503,6 +534,16 @@ services:
       - "200"
       - --poll-interval
       - "3"
+    # /readyz needs BOTH of the worker's dependencies: a current control-plane
+    # version poll and a reachable blob store. A worker that cannot read
+    # bundles serves 500s while its port is wide open, which is exactly the
+    # state a port check cannot see.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 40s
     environment:
       # Resolved from deploy/ops/zeroship.toml [secrets] `urn:zeroship:env:<VAR>` refs.
       # Worker DSN = privileged provisioning superuser (see NOTE above); distinct
@@ -615,6 +656,15 @@ services:
       zeroship-auth
         --addr 0.0.0.0:9092
         --relay-forward-mailer stdout
+    # No login, token or consent route works without Postgres, so /readyz
+    # probes it. Liveness stays on /healthz precisely so a database blip does
+    # not get the OP restarted on top of the outage.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9092/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     environment:
       # auth's least-priv DSN, resolved from deploy/ops/zeroship.toml's
       # [secrets].auth_db_url = "urn:zeroship:env:AUTH_DB_URL" reference (auth's
