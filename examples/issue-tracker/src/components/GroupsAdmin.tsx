@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Field, Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -107,10 +107,10 @@ export function GroupsAdmin() {
       </p>
 
       <div className="field-row">
-        <label>
-          New group
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
-        </label>
+        <Field>
+          <Field.Label>New group</Field.Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
+        </Field>
         <button type="button" className="btn primary small" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
         </button>
@@ -149,14 +149,14 @@ export function GroupsAdmin() {
             ))}
           </Select>
           </label>
-          <label>
-            Find user
-            <input
+          <Field>
+            <Field.Label>Find user</Field.Label>
+            <Input
               value={memberQuery}
               onChange={(e) => setMemberQuery(e.target.value)}
               placeholder="name or email"
             />
-          </label>
+          </Field>
           <button type="button" className="btn ghost small" onClick={() => void search()}>
             Search
           </button>

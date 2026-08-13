@@ -9,7 +9,7 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useCallback, useEffect, useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Badge, Select } from "@zeroship/ui";
 
 import { clearFlag, listFlags, setFlag } from "../../api";
 import { errorMessage } from "../rpc";
@@ -77,13 +77,28 @@ function FlagRow({
     <li className="flag-row">
       <span className="flag-name">{flagType.name}</span>
       {mine.length === 0 ? (
-        <span className="badge flag-current-unset">not set</span>
+        <span className="dim">not set</span>
       ) : (
         mine.map((entry) => (
           <span key={entry.flag.id} className="flag-current">
-            <span className={`badge flag-current-${entry.flag.status === "+" ? "plus" : entry.flag.status === "-" ? "minus" : "question"}`}>
+            {/* A real Badge carrying the MEANING. These were spans with
+                flag-current-plus / -minus / -question class names that appear
+                nowhere in the stylesheet, so a granted flag, a denied one and
+                an open request all rendered identically -- the three states
+                the whole feature exists to distinguish. */}
+            <Badge
+              intent={
+                entry.flag.status === "+"
+                  ? "success"
+                  : entry.flag.status === "-"
+                    ? "danger"
+                    : "warning"
+              }
+              variant="soft"
+              size="sm"
+            >
               {entry.flag.status}
-            </span>
+            </Badge>
             {entry.requestee ? <span className="dim"> to {entry.requestee.name}</span> : null}
             {/* Clearing works for ANY live flag now, not only one this panel
                 set, because the id comes from the server rather than from a

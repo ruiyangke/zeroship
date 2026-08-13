@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Checkbox, Input } from "@zeroship/ui";
 import {
   createComponent,
   createMilestone,
@@ -52,9 +53,10 @@ function NewProductForm({ onCreated }: { onCreated: () => void }) {
         void submit();
       }}
     >
-      <input placeholder="Product name" value={name} onChange={(e) => setName(e.target.value)} required />
-      <input placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
-      <input
+      <Input aria-label="Product name" placeholder="Product name" value={name} onChange={(e) => setName(e.target.value)} required />
+      <Input aria-label="Description" placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+      <Input
+        aria-label="Classification"
         placeholder="Classification"
         value={classification}
         onChange={(e) => setClassification(e.target.value)}
@@ -116,8 +118,8 @@ function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onCha
   return (
     <div className="product-editor">
       <div className="inline-form">
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" />
+        <Input value={name} onChange={(e) => setName(e.target.value)} />
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" />
         <label>
           <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
           Active
@@ -204,7 +206,7 @@ function ComponentsAdmin({
         </ul>
       )}
       <div className="inline-form">
-        <input placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input aria-label="New component" placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
         <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
         </button>
@@ -255,7 +257,7 @@ function VersionsAdmin({
         </ul>
       )}
       <div className="inline-form">
-        <input placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input aria-label="New version" placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
         <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
         </button>
@@ -307,7 +309,7 @@ function MilestonesAdmin({
         </ul>
       )}
       <div className="inline-form">
-        <input placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input aria-label="New milestone" placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
         <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
         </button>

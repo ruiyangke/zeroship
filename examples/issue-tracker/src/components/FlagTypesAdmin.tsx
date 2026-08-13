@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { Select } from "@zeroship/ui";
+import { Field, Input, Select } from "@zeroship/ui";
 
 import { createFlagType, listFlagTypes, listProducts } from "../api";
 import { errorMessage } from "./rpc";
@@ -74,10 +74,10 @@ export function FlagTypesAdmin() {
         <p className="state-hint small">Only an administrator can define flag types.</p>
       ) : null}
       <div className="inline-form">
-        <label>
-          New flag type
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="review" />
-        </label>
+        <Field>
+          <Field.Label>New flag type</Field.Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="review" />
+        </Field>
         <label>
           Product
           <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="All products" aria-label="Product" renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}>
