@@ -156,17 +156,17 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   --app-base-domain "localhost" --pairwise-salt "$PAIRWISE_SALT" \
   > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
-  && pass "control healthy" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
+  && pass "control ready" || { fail "control not ready"; tail -30 "$WORK/control.log"; exit 1; }
 
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
   --control-url "$CONTROL_URL" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
-  && pass "worker healthy" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
+  && pass "worker ready" || { fail "worker not ready"; tail -30 "$WORK/worker.log"; exit 1; }
 
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
@@ -177,9 +177,9 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
   --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
   > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$GATE_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$GATE_URL/health" >/dev/null 2>&1 \
-  && pass "gateway healthy" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "$GATE_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$GATE_URL/readyz" >/dev/null 2>&1 \
+  && pass "gateway ready" || { fail "gateway not ready"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 step "Create the human, through the product's own signup"
