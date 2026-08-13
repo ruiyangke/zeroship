@@ -65,14 +65,14 @@ for port in 9090 8080 8000 5100 5101; do
 done
 rm -rf /tmp/zeroship-bench-bundles
 BENCH_SECURITY_DIR="/tmp/zeroship-bench-security-$$"
-SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$BENCH_SECURITY_DIR"
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start platform
-"$BIN/zeroship-control" --port 9090 --db "postgres://postgres:test@localhost:5434/postgres" \
-    --blob-store /tmp/zeroship-bench-bundles --signing-key-file "$SIGNING_KEY_FILE" > /dev/null 2>&1 &
+"$BIN/zeroship-control" --port 9090 \
+    --blob-store /tmp/zeroship-bench-bundles --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
@@ -165,7 +165,7 @@ cat > "$LUA_RPC" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'
 wrk.headers["Content-Type"] = "application/json"
-wrk.headers["Authorization"] = "Bearer $WORKER_KEY"
+wrk.headers["Authorization"] = "Bearer $ZEROSHIP_WORKER_KEY"
 EOF
 
 LUA_GATE=$(mktemp)

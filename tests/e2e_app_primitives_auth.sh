@@ -9,7 +9,7 @@
 #   env.auth identity normally arrives via the gateway's HMAC-signed
 #   `ZeroShip-User` header. For a DIRECT worker /dispatch test (bypassing the
 #   gateway), the worker still requires its generated bearer and verifies the
-#   user-header HMAC with the same generated WORKER_KEY. The harness therefore
+#   user-header HMAC with the same generated ZEROSHIP_WORKER_KEY. The harness therefore
 #   mints a fully formed, request-bound header with that real key:
 #
 #     <base64(userJson)>.<request_id>.<issued_at>.<hmac_sha256_hex(key, signed)>
@@ -118,7 +118,7 @@ sign_user_header() {
     const signed = `${b64}.${rid}.${iat}`;
     const mac = c.createHmac("sha256", workerKey).update(signed).digest("hex");
     process.stdout.write(`${signed}.${mac}`);
-  ' "$user_json" "$request_id" "$WORKER_KEY"
+  ' "$user_json" "$request_id" "$ZEROSHIP_WORKER_KEY"
 }
 
 # POST an envelope to the worker /dispatch for $APP_ID; echo "<body>\n<code>".
@@ -134,14 +134,14 @@ dispatch() {
   if [ -n "$user_json" ]; then
     local hdr; hdr="$(sign_user_header "$user_json" "$rid")"
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-      -H "Authorization: Bearer $WORKER_KEY" \
+      -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
       -H 'content-type: application/octet-stream' \
       -H "x-request-id: $rid" \
       -H "zeroship-user: $hdr" \
       --data-binary @"$frame"
   else
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-      -H "Authorization: Bearer $WORKER_KEY" \
+      -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
       -H 'content-type: application/octet-stream' \
       --data-binary @"$frame"
   fi
@@ -232,23 +232,24 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: env.kv ← --kv-url (Redis), env.auth ← AuthPlugin (always registered).
+# worker: env.kv <- ZEROSHIP_WORKER_KV_URL (Redis), env.auth <- AuthPlugin (always registered).
 # The generated worker key authenticates /dispatch and signs ZeroShip-User,
 # exactly matching the gateway-to-worker trust contract.
+ZEROSHIP_WORKER_KV_URL="$KVURL" \
 "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
-  --kv-url "$KVURL" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -262,8 +263,8 @@ chmod 600 "$WORK/gate-secret"
 
 "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
+  --broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done

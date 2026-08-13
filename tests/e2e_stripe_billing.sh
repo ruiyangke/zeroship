@@ -18,7 +18,7 @@
 #     ─► harness PAYS the finalized invoice on REAL Stripe (POST /v1/invoices/{in}/pay)
 #     ─► harness FETCHES the paid invoice back (real in_/pi_/ch_ shapes)
 #         → constructs the `invoice.paid` event from the REAL object,
-#           HMAC-signs it with the control instance's STRIPE_WEBHOOK_SECRET
+#           HMAC-signs it with the control instance's ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET
 #           (the REAL signature-verification path), POSTs to /internal/webhooks/stripe
 #         → control appends the `charge` invoice_payments row + the pi_/ch_ linkage
 #     ─► refund: POST /api/invoices/{id}/refunds (destination=cash)
@@ -171,13 +171,14 @@ chmod 600 "$WORK/signing-key.pem"
 
 # control — booted against REAL https://api.stripe.com with the operator's TEST
 # secret key (from env; NEVER on the command line where it'd hit /proc/cmdline).
-# The generated CONTROL_KEY gates the /internal/* endpoints. The webhook secret is a known
+# The generated ZEROSHIP_CONTROL_KEY gates the /internal/* endpoints. The webhook secret is a known
 # throwaway so the harness can produce VALID signatures (the REAL verify path).
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
@@ -247,7 +248,7 @@ ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
 SQL
 pass "seeded creator+app+usage (750 priced requests=750c) in closed period $PERIOD_START, Customer=$CUS"
 
-RECON="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON="$(curl -s -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 echo "    reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget billed)"
 [ "$BILLED" = "1" ] && pass "REAL reconcile billed 1 creator (created invoice item + invoice + finalized on REAL Stripe)" \

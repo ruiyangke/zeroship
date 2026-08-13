@@ -14,7 +14,7 @@
 # Prereqs (see docs/runbooks/local-dev.md):
 #   - service/CLI binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
 #   - migration binary: cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
-#   - a Postgres reachable at $DATABASE_URL (default: the compose instance on :5440)
+#   - a Postgres reachable at $GOLDEN_PATH_DSN (default: the compose instance on :5440)
 #   - examples/starter deps installed (pnpm install) so `pnpm build` works
 # ---------------------------------------------------------------------------
 set -uo pipefail
@@ -64,7 +64,7 @@ fi
 PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
 PG_DB="${PG_DB:-zeroship_golden}"
-DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
+DB_URL="${GOLDEN_PATH_DSN:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct ports so this never clashes with a running dev stack.
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9390}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8390}"
@@ -77,9 +77,9 @@ ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8300}"
 ZEROSHIP_MIGRATED_PORT="${ZEROSHIP_MIGRATED_PORT:-9490}"
 REDIS_PORT="${REDIS_PORT:-6390}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
-CONTROL_KEY="gp-ck"
-MASTER_KEY="gp-mk"
-export WORKER_KEY="${WORKER_KEY:-golden-path-worker-key-0123456789abcdef}"
+ZEROSHIP_CONTROL_KEY="gp-ck"
+ZEROSHIP_CONTROL_MASTER_KEY="gp-mk"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-golden-path-worker-key-0123456789abcdef}"
 APP_NAME="starter"
 STARTER="$ROOT/examples/starter"
 ZSHIP="$STARTER/dist/app.zship"
@@ -391,7 +391,7 @@ fi
 # FOUR services since step 10 landed, not three. The scaffold template uses
 # env.db, env.storage and env.kv, so measuring its deployed behaviour needs the
 # migration service (to create the creator's schema the way a real deploy does)
-# and the worker's --db/--kv-url/--storage-url. Without them the deployed side
+# and the worker's DSN, KV URL and storage URL. Without them the deployed side
 # is crippled by the harness, and every divergence step 10 reports would be the
 # harness's, not the platform's.
 step 2 "Bring up the stack"
@@ -755,7 +755,7 @@ ddl_guard=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   || fail "DDL privilege guard reads $ddl_guard of 3: control gained CREATE or CREATEROLE, or the probe stopped discriminating (#320/#321)"
 
 # Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
-# --kv-url is empty (crates/worker/src/main.rs), by design -- so an app calling
+# empty (crates/worker/src/main.rs), by design -- so an app calling
 # @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
 # it, so the harness has to supply one.
 docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
@@ -772,9 +772,10 @@ docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
 GP_SIGNING_KEY=/tmp/gp-signing-key.pem
 openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
 chmod 600 "$GP_SIGNING_KEY"
-SIGNING_KEY_FILE="$GP_SIGNING_KEY"
-GATEWAY_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
 e2e_export_runtime_secrets "$GP_SECURITY_DIR" || exit 1
+e2e_export_database_urls "$DB_URL"
 
 # WHY control gets --audit-retention-check-secs 1 below.
 #
@@ -829,12 +830,11 @@ e2e_export_runtime_secrets "$GP_SECURITY_DIR" || exit 1
 # and got `502 {"error":"internal error"}` with
 # `worker log fetch failed ... "error":"parse logs JSON: EOF"` in its log,
 # because it was reading an empty body from a port nothing listens on.
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --audit-retention-check-secs 1 \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DB_URL" --provision-db "$DB_URL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
   --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
   >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
@@ -845,12 +845,13 @@ sleep 3
 # worker. Step 9 is dev-only and never noticed; step 10 drives the DEPLOYED tier
 # and would have reported the gateway's 502 as a platform divergence.
 #
-# --db/--kv-url/--storage-url: without them env.db / env.kv / env.storage are
+# ZEROSHIP_WORKER_DATABASE_URL / ZEROSHIP_WORKER_KV_URL / --storage-url: without
+# them env.db / env.kv / env.storage are
 # ABSENT on the deployed tier and step 10's app would fail for a reason that
 # has nothing to do with what it is measuring.
 gp_start_worker() {
+  ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
   "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-    --control-key "$CONTROL_KEY" --db "$DB_URL" --kv-url "redis://127.0.0.1:$REDIS_PORT" \
     --storage-url /tmp/gp-storage \
     --blob-store /tmp/gp-bundles --poll-interval 2 >>/tmp/gp-worker.log 2>&1 &
   WORKER_PID=$!
@@ -885,27 +886,23 @@ chmod 600 "$GATE_BROKER_SECRET"
 # revocation paths would measure the db-is-None 401 rather than the real
 # behaviour, and would pass while proving nothing. Give the gateway a DSN first
 # if you need those, and check that both tiers actually reach the database.
-# `--db` is the SECOND half of the same prerequisite, and the key alone is inert
-# without it. The gateway with no DSN sets `db: None` (main.rs:630-642), logs
-# that session validation is disabled, and then 401s every auth-gated request -
-# the SAME observable as no signing key, as a malformed `pws_` subject, and as
-# the wrong cookie name. Four distinct causes, one symptom; that is why each was
-# cleared separately rather than together. Fail-CLOSED, not a hole.
+# THE DSN is the SECOND half of the same prerequisite, and the key alone is
+# inert without it. The gateway with no DSN sets `db: None`, logs that session
+# validation is disabled, and then 401s every auth-gated request - the SAME
+# observable as no signing key, as a malformed `pws_` subject, and as the wrong
+# cookie name. Four distinct causes, one symptom; that is why each was cleared
+# separately rather than together. Fail-CLOSED, not a hole.
 #
-# PASS IT EXPLICITLY EVEN THOUGH THE ARG HAS AN ENV FALLBACK, which is the part
-# worth knowing. main.rs:78 declares `#[arg(long = "db", env = "DATABASE_URL")]`,
-# so an ambient DATABASE_URL configures the gateway just as well - and this
-# harness never sets that variable (line 64 only READS it as a default for
-# $DB_URL). So before this flag, whether the gateway could validate a session
-# depended on the operator's shell. MEASURED 2026-08-12, three arms one variable
-# apart:
-#     no --db, DATABASE_URL unset  -> "session validation disabled"
-#     --db "$DB_URL"               -> "pg connection pool configured"
-#     no --db, DATABASE_URL set    -> "pg connection pool configured"
-# The third arm is why "the flag is required" would have been too strong: the
-# flag makes the DSN deterministic and equal to the one this harness itself
-# uses, rather than inherited from the environment. Ticket #327 names the same
-# prerequisite as "a gateway arm still needs a DSN first".
+# IT ARRIVES BY ENVIRONMENT, not by flag, and that is now the only deployable
+# shape: `gateway.database_url` is secret-classed (a DSN grammar admits
+# userinfo), so its CLI form is a `--database-url-file PATH` and its value form
+# is `ZEROSHIP_GATEWAY_DATABASE_URL`. `e2e_export_database_urls "$DB_URL"` at
+# the top of this step sets it, along with control's, the worker's and
+# migrated's - four distinct names, because four distinct database ROLES. There
+# is no `--db` and no shared `DATABASE_URL` middle name to inherit from the
+# operator's shell any more, which is what the old three-arm measurement here
+# was warning about: whether the gateway could validate a session used to
+# depend on an ambient variable this harness never set.
 #
 # `--signing-key-file` shares the SAME ed25519 key control and migrated already
 # use ($GP_SIGNING_KEY). Without it the gateway has no key to verify an app
@@ -922,9 +919,9 @@ chmod 600 "$GATE_BROKER_SECRET"
 # so it is the only harness where a creator's rows and the gateway's identity
 # derivation are both live at once.
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store /tmp/gp-bundles \
-  --gateway-broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 \
-  --signing-key-file "$GP_SIGNING_KEY" --db "$DB_URL" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
+ --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store /tmp/gp-bundles \
+  --broker-secret-file "$GATE_BROKER_SECRET" --poll-interval 2 \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
@@ -932,79 +929,109 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz"  >/dev/null && pass "wo
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
 curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
 
-# --- 2b. The OPERATOR config seam: control's DSN through the [secrets] overlay ---
+# --- 2b. The OPERATOR config seam: control's DSN through the overlay ---
 #
-# Step 2 hands control its DSN on the COMMAND LINE (`--db "$DB_URL"`), which is
-# the one tier that always worked. Every deployed zeroship stack uses the other
-# one: deploy/ops/zeroship.toml carries
-# `[secrets] database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"` and the
-# compose services set that env var, so the DSN arrives through the FILE tier
-# and `DATABASE_URL` is never set at all. Nothing in this harness -- or in any
-# crate suite, which cannot see a config file it does not mount -- exercised
-# that tier, and the tier was broken: `--db` carried a non-empty clap
-# `default_value`, `obtain_secret` takes its CLI branch on ANY non-empty string,
-# so the compiled default occupied the CLI tier and the file reference was never
-# consulted. Control dialled `postgres://localhost/zeroship` inside its own
-# container, panicked in `Registry::new`, and crash-looped forever while every
-# other binary on the same network connected with the same credentials.
+# Step 2 hands control its DSN through the canonical ENVIRONMENT name, which is
+# how a compose or Kubernetes deployment supplies it. The other deployable tier
+# is the mounted overlay: `[control] database_url = "<dsn>"` in a file that is
+# NOT tracked -- a projected Kubernetes Secret, say -- with no environment name
+# and no flag. That tier has to work, and it is the one no crate suite can see,
+# because a crate suite cannot mount a config file.
 #
-# The three assertions are not three ways of saying one thing:
-#   A. the file tier RESOLVES  - overlay ref + env var, no --db, no DATABASE_URL
-#   B. the overlay was READ    - so a green A cannot be explained by some other
-#                                tier having quietly supplied a working DSN
-#   C. CLI still BEATS file    - the fix moves a default out of the CLI tier; if
-#                                it had inverted the precedence instead, A would
-#                                still be green and only this would catch it
-step 2b "Operator config: control resolves its DSN from the [secrets] overlay"
+# THIS STEP USED TO TEST A TIER THAT NO LONGER EXISTS. It wrote
+# `[secrets] database_url = "urn:zeroship:env:GP_OVERLAY_DB_URL"` and asserted
+# the resolver followed that pointer to a second environment variable. Step 5 of
+# docs/proposals/2026-08-11-config-name-alignment.md deleted BOTH halves: the
+# flat `[secrets]` table (a secret now sits in its component's table, so its
+# location encodes who owns it) and the `urn:zeroship:env:` arm (an env-to-env
+# alias is exactly the second source name the whole proposal exists to remove).
+# A literal in the overlay is now permitted; the plaintext prohibition moved to
+# TRACKED files, where the violation actually happens.
+#
+# Four assertions, and they are not four ways of saying one thing:
+#   A. the file tier RESOLVES   - overlay literal, no flag, no env name
+#   B. the overlay was READ     - so a green A cannot be explained by some other
+#                                 tier having quietly supplied a working DSN
+#   C. env still BEATS file     - the deployable tier a compose stack uses
+#   D. CLI still BEATS file     - via the generated `--database-url-file` path
+#                                 flag, the only CLI form a secret has
+# C and D each change ONE variable against A: same overlay, same everything,
+# one higher-precedence source added, pointing somewhere deliberately dead.
+step 2b "Operator config: control resolves its DSN from the [control] overlay"
 CFG_PORT="${CFG_PORT:-9391}"
 CFG_PORT_B="${CFG_PORT_B:-9392}"
-for p in $CFG_PORT $CFG_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+CFG_PORT_C="${CFG_PORT_C:-9393}"
+for p in $CFG_PORT $CFG_PORT_B $CFG_PORT_C; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 GP_OVERLAY=/tmp/gp-overlay.toml
 cat > "$GP_OVERLAY" <<TOML
-[secrets]
-database_url = "urn:zeroship:env:GP_OVERLAY_DB_URL"
+[control]
+database_url = "$DB_URL"
 TOML
+chmod 600 "$GP_OVERLAY"
+# A DSN this harness can reach nothing on. Used by C and D so a boot that
+# SUCCEEDS is proof the higher tier was ignored.
+GP_DEAD_DSN="postgres://zeroship_nobody:nope@127.0.0.1:1/zeroship_absent"
+GP_DEAD_DSN_FILE=/tmp/gp-dead-dsn
+printf '%s' "$GP_DEAD_DSN" > "$GP_DEAD_DSN_FILE"
+chmod 600 "$GP_DEAD_DSN_FILE"
 
-# `env -u DATABASE_URL` is load-bearing: with it set, the CLI tier legitimately
-# wins and this step would measure nothing.
-env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
+# `env -u ZEROSHIP_CONTROL_DATABASE_URL` is load-bearing: `e2e_export_database_urls`
+# exported it at the top of step 2, and with it set the env tier legitimately
+# wins and assertion A would measure nothing.
+env -u ZEROSHIP_CONTROL_DATABASE_URL \
   "$BIN/zeroship-control" --port "$CFG_PORT" --config "$GP_OVERLAY" \
-  --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+  --blob-store /tmp/gp-bundles \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
 for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 if curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1; then
-  pass "control boots with its DSN from [secrets] database_url (no --db, no DATABASE_URL)"
+  pass "control boots with its DSN from [control] database_url (no flag, no env name)"
 else
-  fail "control did not come up on the [secrets] overlay DSN"
+  fail "control did not come up on the [control] overlay DSN"
   tail -5 /tmp/gp-control-overlay.log
 fi
 grep -q "loaded overlay" /tmp/gp-control-overlay.log \
   && pass "the generated overlay was actually read (control logged it)" \
   || fail "control never logged loading $GP_OVERLAY - assertion A proves nothing"
 
-# One variable changed against the run above: an explicit --db, deliberately
-# unreachable, while the overlay still names a WORKING DSN. CLI must win, so
-# this must NOT come up.
-env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
+# C. One variable changed against A: the canonical ENV name, pointing at a dead
+# DSN, while the overlay still names a working one. Env must win, so this must
+# NOT come up.
+ZEROSHIP_CONTROL_DATABASE_URL="$GP_DEAD_DSN" \
   "$BIN/zeroship-control" --port "$CFG_PORT_B" --config "$GP_OVERLAY" \
-  --db "postgres://postgres:zeroship@127.0.0.1:1/$PG_DB" \
-  --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
+  --blob-store /tmp/gp-bundles \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-envwins.log 2>&1 & PIDS+=($!)
 sleep 6
 if curl -sf "http://localhost:$CFG_PORT_B/readyz" >/dev/null 2>&1; then
-  fail "an explicit --db was ignored in favour of the [secrets] overlay (precedence inverted)"
+  fail "ZEROSHIP_CONTROL_DATABASE_URL ignored in favour of the overlay (precedence inverted)"
 else
-  pass "an explicit --db still beats the [secrets] overlay"
+  pass "ZEROSHIP_CONTROL_DATABASE_URL beats the [control] overlay"
 fi
 # "not healthy after 6s" is ALSO what an unrelated slow start, a busy machine or
 # a binary that died on some earlier config error looks like, so the check above
-# cannot tell "CLI won" from "control never got that far". This one requires the
-# POSITIVE evidence: control must have tried the CLI DSN and failed on it. Both
+# cannot tell "env won" from "control never got that far". This one requires the
+# POSITIVE evidence: control must have tried the dead DSN and failed on it. Both
 # must hold; a green pair is the only reading that means precedence held.
+grep -q "failed to connect to database" /tmp/gp-control-envwins.log \
+  && pass "control demonstrably tried the dead env DSN and failed on it" \
+  || fail "control did not log a connect failure - it never reached the env DSN, so the assertion above is vacuous"
+
+# D. Same again one tier up: the generated `--database-url-file` path flag. This
+# is the ONLY CLI form the DSN has, because a secret must never appear in argv
+# where `ps` shows it to every user on the host.
+env -u ZEROSHIP_CONTROL_DATABASE_URL \
+  "$BIN/zeroship-control" --port "$CFG_PORT_C" --config "$GP_OVERLAY" \
+  --blob-store /tmp/gp-bundles --database-url-file "$GP_DEAD_DSN_FILE" \
+  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
+sleep 6
+if curl -sf "http://localhost:$CFG_PORT_C/readyz" >/dev/null 2>&1; then
+  fail "--database-url-file ignored in favour of the overlay (precedence inverted)"
+else
+  pass "--database-url-file beats the [control] overlay"
+fi
 grep -q "failed to connect to database" /tmp/gp-control-cliwins.log \
-  && pass "control demonstrably tried the unreachable --db DSN and failed on it" \
+  && pass "control demonstrably tried the dead file DSN and failed on it" \
   || fail "control did not log a connect failure - it never reached the CLI DSN, so the assertion above is vacuous"
-for p in $CFG_PORT $CFG_PORT_B; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $CFG_PORT $CFG_PORT_B $CFG_PORT_C; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # --- 2c. The same control, under its REAL role ---
 step 2c "Least privilege: control under zeroship_control matches control under postgres"
@@ -1044,8 +1071,7 @@ if [ "$LP_DSN" = "$DB_URL" ]; then
 else
   for _spec in "lpA:$LP_DSN:$LP_PORT_A" "lpB:$DB_URL:$LP_PORT_B"; do
     _tag="${_spec%%:*}"; _rest="${_spec#*:}"; _dsn="${_rest%:*}"; _port="${_rest##*:}"
-    "$BIN/zeroship-control" --port "$_port" --db "$_dsn" --blob-store /tmp/gp-bundles \
-      --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+    "$BIN/zeroship-control" --port "$_port" --blob-store /tmp/gp-bundles \
       --signing-key-file "$GP_SIGNING_KEY" > "/tmp/gp-$_tag.log" 2>&1 &
     # `disown`, and deliberately NOT PIDS+=. These two are killed a few lines
     # below, inside this step. Registering them for the EXIT trap as well made
@@ -1101,7 +1127,7 @@ if [ -n "$TOKEN" ]; then
   DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$TOKEN" 2>&1)
   echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
 else
-  OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
+  OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
   API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
   [ -n "$APP_ID" ] && [ -n "$API_KEY" ] && pass "dev-provisioned app ($APP_ID)" || { fail "dev-provision: $OUT"; exit 1; }
@@ -1953,7 +1979,7 @@ fi
 # assertion is measuring this step's leftovers. Restarting through
 # gp_start_worker (rather than a second copy of the command line) is what keeps
 # the restored worker identical to the original: a repair that quietly dropped
-# --db would leave step 10 reporting a data-plane failure that this step caused.
+# leave step 10 reporting a data-plane failure that this step caused.
 if gp_start_worker; then
   pass "the worker is back up for the steps that follow (a broken stack is not left behind)"
 else
@@ -2354,7 +2380,7 @@ DB9_BUILD_BYTES=$(wc -c </tmp/gp-dbtodos9-build.log 2>/dev/null | tr -d ' ')
 if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   pass "db-todos builds through the real vite-plugin for the deployed leg ($(du -k "$TODOS/dist/app.zship" | cut -f1)KB)"
 
-  DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
+  DB9_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
   DB9_APP_ID=$(echo "$DB9_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB9_API_KEY=$(echo "$DB9_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
@@ -2687,7 +2713,7 @@ else
 fi
 
 # --- 10c. Deploy it, and give it a schema the way a real deploy does --------
-SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
+SC_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
 SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
 SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
 SC_READY=0
@@ -3052,7 +3078,7 @@ elif ! ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos-build.log 2>&1 || [ ! -f "
   fail "examples/db-todos does not build: $(tail -5 /tmp/gp-dbtodos-build.log | tr '\n' ' ')"
 else
   pass "db-todos builds through the real vite-plugin ($(du -k "$DB_ZSHIP" | cut -f1)KB)"
-  DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
+  DB_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
   DB_APP_ID=$(echo "$DB_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB_API_KEY=$(echo "$DB_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
@@ -3333,7 +3359,7 @@ if ! ( cd "$WP" && pnpm build ) >/tmp/gp-wall-build.log 2>&1 || [ ! -f "$WP_ZSHI
   fail "examples/wall-probe does not build: $(tail -5 /tmp/gp-wall-build.log | tr '\n' ' ')"
 else
   pass "wall-probe builds through the real vite-plugin ($(du -k "$WP_ZSHIP" | cut -f1)KB)"
-  WP_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$WP_APP" --zship "$WP_ZSHIP" 2>&1)
+  WP_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$WP_APP" --zship "$WP_ZSHIP" 2>&1)
   WP_APP_ID=$(echo "$WP_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   if [ -z "$WP_APP_ID" ]; then
     fail "could not provision wall-probe: ${WP_OUT:0:200}"
@@ -4218,12 +4244,12 @@ gp_close_step
 # never asserted -- it is a framework default, not our contract.
 # RAISED 67 -> 70 on 2026-08-11 for step 2b, which adds THREE passes: the
 # [secrets] overlay tier resolving control's DSN, the overlay demonstrably being
-# read, and an explicit --db still beating it. Arithmetic is 67 + 3, and the
+# read, and an explicit beating it. Arithmetic is 67 + 3, and the
 # three were measured on the pre-fix binary too: assertion A was RED there (that
 # is the defect this step exists for) while B and C were green, so the step is
 # discriminating, not merely present.
 # RAISED 70 -> 71 on 2026-08-11 for step 2b's FOURTH assertion, added because the
-# third one ("an explicit --db still beats the overlay") concluded from control
+# third one ("an explicit beats the overlay") concluded from control
 # NOT being healthy, which is equally what a slow start or an unrelated early
 # config death looks like. The fourth requires the positive evidence -- control
 # logged a connect failure, so it demonstrably reached the CLI DSN. Arithmetic is

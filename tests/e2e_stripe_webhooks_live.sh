@@ -14,7 +14,7 @@
 # instance's /internal/webhooks/stripe — the genuine end-to-end path.
 #
 #   stripe listen --print-secret              → capture the STABLE whsec_…
-#     ─► boot zeroship-control with STRIPE_WEBHOOK_SECRET = that secret
+#     ─► boot zeroship-control with ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET = that secret
 #     ─► stripe listen --forward-to $CONTROL/internal/webhooks/stripe (bg)
 #         (Stripe streams every test-mode event to us, REAL-signed)
 #     ─► create real objects (customer + PI + pay) → Stripe DELIVERS
@@ -208,7 +208,7 @@ else
 fi
 
 # Capture a STABLE webhook signing secret BEFORE booting control, so control's
-# STRIPE_WEBHOOK_SECRET == the secret Stripe will sign deliveries with. NEVER
+# ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET == the secret Stripe will sign deliveries with. NEVER
 # echoed. (`stripe listen --print-secret` returns the account's persistent CLI
 # secret; the subsequent `stripe listen --forward-to` reuses the SAME secret.)
 WEBHOOK_SECRET="$(scli listen --print-secret 2>/dev/null | tr -d '[:space:]')"
@@ -224,18 +224,19 @@ chmod 600 "$WORK/signing-key.pem"
 # control — REAL https://api.stripe.com, the operator's TEST secret key (from env,
 # NEVER on argv), and the REAL stripe-listen webhook secret (so Stripe's OWN
 # signature on its OWN delivered events verifies through the production path).
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
-  && pass "control healthy (→ REAL api.stripe.com; STRIPE_WEBHOOK_SECRET = the stripe-listen secret)" \
+  && pass "control healthy (→ REAL api.stripe.com; ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET = the stripe-listen secret)" \
   || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
 # Start the REAL forwarder: Stripe streams every test-mode event to our control,

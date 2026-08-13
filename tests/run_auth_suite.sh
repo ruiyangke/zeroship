@@ -4,7 +4,7 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The auth tests resolve their database from AUTH_DB_URL / PG_TEST_URL and
+# The auth tests resolve their database from ZEROSHIP_AUTH_DATABASE_URL / PG_TEST_URL and
 # return early when neither is set. Cargo captures test output by default, so a
 # skipped test is indistinguishable from a passing one: `cargo test -p
 # zeroship-auth` reports success while test bodies do nothing at all. A suite
@@ -66,7 +66,7 @@ fi
 [ -n "$PSQL" ] && [ -x "$PSQL" ] || { echo "FATAL: no psql found; set \$PSQL" >&2; exit 2; }
 
 DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-export AUTH_DB_URL="$DSN"
+export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
 export PG_TEST_URL="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
@@ -98,7 +98,7 @@ status=0
 cargo test -p zeroship-auth -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
-# Every other AUTH_DB_URL-gated binary in the workspace. These self-skip exactly
+# Every other ZEROSHIP_AUTH_DATABASE_URL-gated binary in the workspace. These self-skip exactly
 # like the auth crate's, and until they were listed here nothing ever ran them
 # with a database: `cargo test --workspace` provisions none, and no other gate
 # names them. Measured on zeroship-authz before adding it - "ok. 1 passed" in
@@ -126,7 +126,7 @@ echo "------------------------------------------------------------------"
 # than taken here. The skip check below now SEES those 13 lines; it tolerates
 # them by an explicit allowlist that names them, so the deferral is stated
 # rather than smuggled in as a gap in the search.
-echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
+echo "==> Other ZEROSHIP_AUTH_DATABASE_URL-gated binaries (authz, mailer, gateway)"
 for spec in \
   "zeroship-authz:" \
   "zeroship-mailer:" \
@@ -171,7 +171,7 @@ echo "------------------------------------------------------------------"
 #   AUTH_TEST_SMTP_SINK - one zeroship-mailer test
 #     (smtp_plaintext_sink_delivers_relay_forward) wants a live SMTP sink at a
 #     host:port this script has no way to stand up. Its two siblings in the same
-#     binary gate only on AUTH_DB_URL and ARE covered; the allowlist matches on
+#     binary gate only on ZEROSHIP_AUTH_DATABASE_URL and ARE covered; the allowlist matches on
 #     the reason rather than the binary precisely so exempting this one does not
 #     blind the gate to the rest of the file.
 SKIP_ALLOWLIST='GATEWAY_ANCHORS_DB_URL|AUTH_TEST_SMTP_SINK'

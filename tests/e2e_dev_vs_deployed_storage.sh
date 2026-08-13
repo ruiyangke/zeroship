@@ -94,8 +94,8 @@ VITE_PORT="${VITE_PORT:-5081}"
 MINIO_PORT="${MINIO_PORT:-9203}"
 MINIO_CONTAINER="zs-devdeploy-storage-minio"
 MINIO_ACCESS="minioadmin"; MINIO_SECRET="minioadmin"; MINIO_BUCKET="zeroship-storage-probe"
-CONTROL_KEY="sp-ck"; MASTER_KEY="sp-mk"
-export WORKER_KEY="${WORKER_KEY:-storageprobe-worker-key-0123456789ab}"
+ZEROSHIP_CONTROL_KEY="sp-ck"; ZEROSHIP_CONTROL_MASTER_KEY="sp-mk"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-storageprobe-worker-key-0123456789ab}"
 APP_NAME="storagep"
 DEPLOYED_STORAGE="${DEPLOYED_STORAGE:-s3}"
 MUTATE="${MUTATE:-none}"
@@ -316,10 +316,11 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { fail "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+e2e_export_database_urls "$DB_URL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+ > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without --storage-url the env.storage namespace is absent BY DESIGN
 # (crates/worker/src/main.rs:386) and every handler fails loudly. Omitting it
@@ -328,13 +329,13 @@ sleep 4
 STORAGE_FLAG=(--storage-url "$STORAGE_ARG")
 [ "$MUTATE" = "no-storage-url" ] && { STORAGE_FLAG=(); echo "  (MUTATION: deployed worker booted with NO --storage-url)"; }
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
+ --blob-store "$WORK/bundles" --poll-interval 2 \
   "${STORAGE_FLAG[@]}" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
-  --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+ --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
+  --broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
 for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
   curl -sf "http://localhost:${svc##*:}/readyz" >/dev/null \
@@ -342,7 +343,7 @@ for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gate
 done
 pass "control + worker + gateway healthy"
 
-OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 [ -n "$API_KEY" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 sleep 6   # gateway route-sync poll

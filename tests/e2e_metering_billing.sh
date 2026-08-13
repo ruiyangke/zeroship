@@ -326,14 +326,16 @@ pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
 # group.id per role). A SHORT --spend-recompute-interval makes usage aggregation
 # deterministic (the recompute drains the stream every 2s). lite is recompute-fed
 # so no forwarder is spawned for it (Meter::accepts_forwarded_events=false).
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_e2e_billing" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --stripe-base-url "$MOCK_URL" --stripe-secret-key "sk_test_e2e_billing" \
+  --stripe-base-url "$MOCK_URL" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 \
  > "$WORK/control.log" 2>&1 &
@@ -348,7 +350,7 @@ curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
   --config "$CFG_TOML" \
-  --control-url "$CONTROL_URL" --db "$DBURL" \
+  --control-url "$CONTROL_URL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -361,9 +363,9 @@ USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
   --config "$CFG_TOML" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
-  --gateway-broker-secret-file "$WORK/gateway-broker-secret" \
+  --broker-secret-file "$WORK/gateway-broker-secret" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -371,7 +373,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
   --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -601,7 +603,7 @@ SL_CODE="$(echo "$SL_JSON" | tail -1)"
 # Force ONE spend sweep on demand (operator-gated internal endpoint) so we
 # don't wait on the 60s cron. This prices the app's current-period usage,
 # derives Block, and persists app_spend_state.
-SR="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile")"
+SR="$(curl -s -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile")"
 echo "    spend sweep result: $SR"
 pass "forced spend sweep via POST /internal/spend/reconcile (operator-gated)"
 
@@ -639,7 +641,7 @@ if [ -n "$SPEND_CENTS" ] && [ "$SPEND_CENTS" -ge 50 ] 2>/dev/null; then
   DEG_CAP=$(( SPEND_CENTS * 100 / 97 ))
   curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$DEG_CAP}"
-  curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
+  curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
   DEG_STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
   if [ "$DEG_STATE" = "degrade" ]; then
     pass "intermediate threshold: cap=\$$DEG_CAP cents puts spend ($SPEND_CENTS cents) in Degrade (throttle, not Block)"
@@ -698,7 +700,7 @@ then pass "seeded closed-period creator+app (period=$(date -u -d @$PERIOD_START 
 
 # Trigger the on-demand reconcile for this period (operator-gated internal).
 # We pass `now`=$NOW_UNIX; the endpoint bills previous_period_start_unix(now).
-RECON="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON="$(curl -s -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 echo "    reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget '.billed')"
 RPERIOD="$(echo "$RECON" | jget '.period_start')"
@@ -760,7 +762,7 @@ INV_TOTAL="$(psql_exec -tA -c "SELECT COALESCE(total_cents,0) FROM zeroship.invo
 [ "$INV_TOTAL" = "750" ] && pass "finalized invoice total = 750 cents (750 requests × 1¢)" || fail "expected invoice total 750, got '$INV_TOTAL'"
 
 # --- idempotency: a SECOND trigger creates NO new items ---------------------
-RECON2="$(curl -s -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
+RECON2="$(curl -s -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
 BILLED2="$(echo "$RECON2" | jget '.billed')"
 [ "$BILLED2" = "0" ] && pass "second reconcile is a no-op (billed=0) — per-period idempotency" || fail "expected billed=0 on re-trigger, got '$BILLED2' ($RECON2)"
 MOCK_REQS2="$(curl -s "$MOCK_URL/__mock/requests")"

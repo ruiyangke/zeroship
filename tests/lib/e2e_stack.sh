@@ -138,6 +138,10 @@ stack_workspace() {
   : > "$PIDFILE"
   DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 
+  # Per-service database DSNs. `--db` is gone from every binary: a DSN admits
+  # userinfo, so it is secret-classed and secrets never travel through argv.
+  e2e_export_database_urls "$DBURL" || return 1
+
   # Control/gateway PAT + session signing key. `mint_admin_pat` signs the
   # harness PAT with THIS key, so a harness that starts its own control MUST
   # pass `--signing-key-file "$WORK/signing-key.pem"` or every admin call
@@ -167,9 +171,9 @@ stack_workspace() {
   # Keep the explicit signing/broker files above because PAT minting consumes
   # them. Generate every other mandatory service input and export it through
   # the binaries' normal CLI/env configuration surface.
-  SIGNING_KEY_FILE="$WORK/signing-key.pem"
-  GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-  GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+  ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+  ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+  ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
   e2e_export_runtime_secrets "$WORK" || return 1
 
   export WORK PIDFILE DBURL PG_CONTAINER
@@ -247,7 +251,9 @@ stack_up() {
   for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
   # --- control --------------------------------------------------------------
-  "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  # Every credential arrives through the canonical environment names exported by
+  # `stack_workspace`; only non-secret operational values are on the line.
+  "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
@@ -257,7 +263,7 @@ stack_up() {
 
   # --- worker ---------------------------------------------------------------
   "$E2E_BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
-    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -267,9 +273,9 @@ stack_up() {
   # --- gateway --------------------------------------------------------------
   "$E2E_BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-    --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+    --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
     --signing-key-file "$WORK/signing-key.pem" \
-    --gateway-broker-secret-file "$WORK/gate-secret" \
+    --broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -283,7 +289,7 @@ stack_up() {
 mint_admin_pat() {
   local policy_json policy_hash owner tokid exp pg_database pat_signing_key
   pg_database="${E2E_PG_DATABASE:-zeroship}"
-  pat_signing_key="${SIGNING_KEY_FILE:-$WORK/signing-key.pem}"
+  pat_signing_key="${ZEROSHIP_CONTROL_SIGNING_KEY_FILE:-$WORK/signing-key.pem}"
   policy_json='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
   policy_hash="$(node -e '
 const {createHash}=require("crypto");

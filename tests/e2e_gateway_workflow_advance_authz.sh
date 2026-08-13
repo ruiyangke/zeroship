@@ -144,7 +144,7 @@ db_recent_queued_run() {
 create_run() {
   local out code rid token
   out="$WORK/create.out"
-  token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
+  token="$(ZEROSHIP_CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.ZEROSHIP_CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   code="$(curl -s --max-time 20 -o "$out" -w '%{http_code}' \
     -X POST "http://127.0.0.1:$ZEROSHIP_CONTROL_PORT/internal/workflows/ProbeWorkflow/runs" \
     -H "authorization: Bearer $token" \
@@ -168,7 +168,7 @@ create_run() {
 run_state() {
   local rid="$1" out token
   out="$WORK/state.out"
-  token="$(CONTROL_KEY="$CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
+  token="$(ZEROSHIP_CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" APP_ID="$APP_ID" node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.env.ZEROSHIP_CONTROL_KEY).update(process.env.APP_ID).digest("hex"))')"
   curl -s --max-time 15 -o "$out" -w '' \
     "http://127.0.0.1:$ZEROSHIP_CONTROL_PORT/internal/workflows/runs/$rid" \
     -H "authorization: Bearer $token" \
@@ -301,8 +301,9 @@ else
 fi
 
 e2e_export_runtime_secrets "$WORK" || exit 1
+e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" \
-  --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
+  --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -312,7 +313,7 @@ start_worker() {
   local extra="$1"
   ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
     --port "$ZEROSHIP_WORKER_PORT" --threads 1 \
-    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+    --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --poll-interval 1 --max-step-blob-bytes 2097152 \
  $extra > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
@@ -323,14 +324,14 @@ start_worker "--workflow-advance-unsigned"
 "$BIN/zeroship-gate" \
   --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
-  --db "$DBURL" --poll-interval 1 > "$WORK/gate.log" 2>&1 &
+  --blob-cache-disk-root "$WORK/blob-cache" --broker-secret-file "$GBS" \
+ --poll-interval 1 > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate.log"
 
 echo "=== deploy + enable workflows ==="
 "$BIN/dev-provision" \
-  --db "$DBURL" --blob-store "$WORK/blobs" --name "$APP_NAME" \
+ --blob-store "$WORK/blobs" --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out" 2>&1 \
   || { fail "dev-provision failed"; cat "$WORK/provision.out"; exit 1; }
 APP_ID="$(awk -F= '/^app_id=/{print $2}' "$WORK/provision.out")"
@@ -453,7 +454,7 @@ echo "############ PHASE 2 -- worker WITHOUT the flag (deploy/compose reality) #
 kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
 # control + gateway are down now too (kill_pids kills all). Rebring them.
 "$BIN/zeroship-control" \
-  --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/blobs" \
+  --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -462,8 +463,8 @@ start_worker ""   # no --workflow-advance-unsigned
 "$BIN/zeroship-gate" \
   --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
-  --db "$DBURL" --poll-interval 1 > "$WORK/gate2.log" 2>&1 &
+  --blob-cache-disk-root "$WORK/blob-cache" --broker-secret-file "$GBS" \
+ --poll-interval 1 > "$WORK/gate2.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate2.log"
 sleep 3
