@@ -65,7 +65,7 @@ down control and deletes the test-mode connected accounts it minted on exit.
 ## Secrets handling
 
 - Reads `STRIPE_TEST_SECRET_KEY` (`sk_test_…`) from the **environment only**;
-  never prints/writes/commits it; passes it to control via the `STRIPE_SECRET_KEY`
+  never prints/writes/commits it; passes it to control via the `ZEROSHIP_CONTROL_STRIPE_SECRET_KEY`
   env var (not argv, so it never lands in `/proc/<pid>/cmdline`).
 - The webhook signing secret is a per-run throwaway; the harness HMAC-SHA256-signs
   its own real-shaped events with it (the REAL `/internal/webhooks/stripe` verify

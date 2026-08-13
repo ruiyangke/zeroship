@@ -55,7 +55,7 @@ sourced, no PG :5440, no docker, missing tools) so it is CI-safe. It
   `STRIPE_TEST_PUBLISHABLE_KEY` (`pk_test_…`). The harness reads them from the
   **environment only** — it never prints them, never writes them to disk, never
   bakes them into any artifact, and passes the secret key to control via the
-  `STRIPE_SECRET_KEY` env var (NOT a command-line flag, so it never lands in
+  `ZEROSHIP_CONTROL_STRIPE_SECRET_KEY` env var (NOT a command-line flag, so it never lands in
   `/proc/<pid>/cmdline`).
 - The webhook signing secret is a throwaway `whsec_e2e_<random>` generated per
   run, used to produce valid signatures for the **real** verification path.

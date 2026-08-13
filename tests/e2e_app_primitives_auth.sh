@@ -24,7 +24,8 @@
 #   1. Ephemeral Postgres + deploy/ops/postgres-init.sql + the full platform migration set
 #      (control needs a DB for app CRUD + deploy).
 #   2. Throwaway Redis (auth-notes scopes notes in env.kv → Redis backend).
-#   3. control + worker + gateway with generated keys; worker gets `--kv-url`.
+#   3. control + worker + gateway with generated keys; the worker gets
+#      ZEROSHIP_WORKER_KV_URL.
 #   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + permission_tokens
 #      row), exactly as the sibling harnesses do.
 #   5. Create + deploy examples/auth-notes.
