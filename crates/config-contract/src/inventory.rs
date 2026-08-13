@@ -1222,19 +1222,20 @@ struct AlphaSettings {
         let body = r#"
 pub struct FileConfig {
     pub origin_scheme: Option<OriginScheme>,
-    pub secrets: SecretSection,
-}
-pub struct SecretSection {
     pub control_key: Option<String>,
+    pub control: ControlSection,
+}
+pub struct ControlSection {
+    pub port: Option<u16>,
     pub database_url: Option<String>,
 }
 "#;
         let leaves = OverlayLeaves::from_source("file.rs", body).expect("parse");
         assert_eq!(
             leaves.paths(),
-            ["origin_scheme", "secrets.control_key", "secrets.database_url"]
+            ["control.database_url", "control.port", "control_key", "origin_scheme"]
         );
-        assert_eq!(leaves.join_by_field("control_key"), Some("secrets.control_key"));
+        assert_eq!(leaves.join_by_field("database_url"), Some("control.database_url"));
         assert_eq!(leaves.join_by_field("port"), None);
     }
 
@@ -1242,8 +1243,8 @@ pub struct SecretSection {
     fn the_overlay_join_is_reported_as_a_heuristic() {
         let leaves = OverlayLeaves::from_source(
             "file.rs",
-            "pub struct FileConfig { pub secrets: SecretSection }\n\
-             pub struct SecretSection { pub control_key: Option<String> }\n",
+            "pub struct FileConfig { pub control: ControlSection }\n\
+             pub struct ControlSection { pub control_key: Option<String> }\n",
         )
         .expect("parse");
         let body = r#"
@@ -1256,7 +1257,7 @@ struct DemoCli {
 "#;
         let report = scan_sources(&source("crates/demo/src/main.rs", body), &leaves).expect("scan");
         let rows = &report.rows;
-        assert_eq!(rows[0].toml, "secrets.control_key");
+        assert_eq!(rows[0].toml, "control.control_key");
         assert_eq!(
             rows[0].toml_evidence,
             TomlEvidence::LeafNameMatch,

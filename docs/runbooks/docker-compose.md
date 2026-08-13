@@ -187,9 +187,9 @@ checks in the local topology.
 `ZEROSHIP_AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
 is `http://auth.zeroship.localhost` and a TLS-terminating deployment can set the
 public scheme to `https`. Discovery and token `iss` use that URL plus `/oauth2`.
-The DB DSN comes from
-`[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
-the service's `AUTH_DB_URL` env), not a literal `--db-url`. The shared
+The DB DSN comes from auth's canonical secret name
+`ZEROSHIP_AUTH_DATABASE_URL`; there is no `--db-url` value flag, because a secret
+gets a `--database-url-file PATH` flag and nothing else. The shared
 `deploy/ops/zeroship.toml` overlay supplies `trusted_oauth_clients` and
 `frame_ancestor_origins`.
 
@@ -288,16 +288,20 @@ defined ONCE instead of being repeated as per-service flags:
   because it is the auth-service issuer setting for this deployment.
 - `[observability]` - shared `log_filter` / `log_format` (every service, worker
   included).
-- `[secrets]` - REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
-  literal). `control_key`, `master_key`, `worker_key`, `database_url`, and
-  `auth_db_url` are resolved per-binary from each service's `environment:` block,
-  so the command lines carry no literal `--control-key` / `--master-key` /
-  `--worker-key` / `--db` / `--db-url`. The single `database_url` reference points
-  every binary at `ZEROSHIP_DATABASE_URL`; each service sets its OWN role-specific
-  DSN under that name (control -> `zeroship_control`, gateway -> `zeroship_gateway`,
-  worker -> the privileged `postgres` provisioning superuser), so one shared
-  reference resolves to distinct per-role DSNs. `auth` uses its own
-  `AUTH_DB_URL` (the `auth_db_url` slot, flag `--db-url`).
+- There is NO `[secrets]` table. A secret sits at its canonical path beside its
+  operational siblings, so location encodes sharing: `control_key`, `worker_key`
+  and `pairwise_salt` are root keys because several binaries read the one value,
+  while `[control] master_key` and each service's `database_url` belong to one
+  binary. A value is either the secret itself or a `urn:zeroship:file:<path>`
+  reference; the env-to-env form that made the old table an alias hop is gone,
+  and so are the Vault and AWS Secrets Manager forms, which always failed at
+  boot. A literal is permitted, but never in a TRACKED file.
+- Each service now supplies its secrets under its OWN canonical environment
+  names - `ZEROSHIP_CONTROL_KEY`, `ZEROSHIP_CONTROL_DATABASE_URL`,
+  `ZEROSHIP_GATEWAY_DATABASE_URL`, `ZEROSHIP_WORKER_DATABASE_URL`,
+  `ZEROSHIP_AUTH_DATABASE_URL` - so one shared spelling no longer stands for four
+  role-specific DSNs. The command lines carry no secret value flags at all,
+  because none are generated.
 
 For local compose, the referenced scalar secret values come from the gitignored
 `.env` written by `zeroship dev init`. In particular, one generated
