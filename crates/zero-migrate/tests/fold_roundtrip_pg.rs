@@ -1206,3 +1206,61 @@ async fn index_storage_parameter_lifecycle() {
     )
     .await;
 }
+
+#[compio::test]
+async fn standalone_sequence_lifecycle() {
+    // Standalone sequences are MODELLED in `SchemaSnapshot::sequences`, so the fold
+    // oracle can speak about them — unlike triggers, functions and policies, which
+    // the snapshot documents as "absent from catalog snapshots and excluded from
+    // structural equality" and where a roundtrip would compare nothing to nothing.
+    //
+    // Nothing exercised them. `createSequence` and `alterSequence` appear in no
+    // fold test, so every attribute the fold believes about a sequence — increment,
+    // bounds, cache, cycle, ownership — has been compared against a live PostgreSQL
+    // catalog exactly never.
+    //
+    // The attributes are the point. A create/drop pair would round-trip on a fold
+    // that modelled a sequence as nothing but a name; these stages move each field
+    // the op can set, including the two that have a null-means-something encoding
+    // (`minValue`/`maxValue`, where `null` renders NO MINVALUE / NO MAXVALUE rather
+    // than omitting the clause) and the ownership tie, which PostgreSQL records on
+    // the OWNING COLUMN rather than on the sequence.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "standalone_sequence_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"seq_owner","columns":[
+          {"name":"id","type":"bigInt","nullable":false},
+          {"name":"ticket","type":"bigInt","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createSequence","name":"ticket_seq","as":"bigInt",
+         "increment":1,"start":100,"minValue":1,"maxValue":9000,
+         "cache":1,"cycle":false},
+        {"op":"alterSequence","name":"ticket_seq","increment":5},
+        {"op":"alterSequence","name":"ticket_seq","maxValue":null},
+        {"op":"alterSequence","name":"ticket_seq","cycle":true},
+        {"op":"alterSequence","name":"ticket_seq",
+         "ownedBy":{"table":"seq_owner","column":"ticket"}},
+        {"op":"alterSequence","name":"ticket_seq","ownedBy":null},
+        {"op":"dropSequence","name":"ticket_seq"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "standalone sequence lifecycle",
+        source,
+        &[
+            ("create the owning table", 1),
+            ("create the sequence with explicit bounds", 2),
+            ("alter the increment", 3),
+            ("drop the maximum (NO MAXVALUE)", 4),
+            ("turn cycling on", 5),
+            ("tie ownership to a column", 6),
+            ("release ownership (OWNED BY NONE)", 7),
+            ("drop the sequence", 8),
+        ],
+        lifecycle_policy,
+    )
+    .await;
+}
