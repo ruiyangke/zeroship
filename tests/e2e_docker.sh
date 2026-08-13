@@ -90,8 +90,8 @@ sleep 5
 # --- Health ---
 echo ""
 echo "=== Test 1: Health ==="
-curl -sf "$CONTROL/health" > /dev/null && pass "control" || fail "control"
-curl -sf "$GATE/health" > /dev/null && pass "gateway" || fail "gateway"
+curl -sf "$CONTROL/readyz" > /dev/null && pass "control" || fail "control"
+curl -sf "$GATE/readyz" > /dev/null && pass "gateway" || fail "gateway"
 RUNNING=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
 [ "$RUNNING" -eq "$NUM_WORKERS" ] && pass "$RUNNING workers running" || fail "expected $NUM_WORKERS workers, got $RUNNING"
 

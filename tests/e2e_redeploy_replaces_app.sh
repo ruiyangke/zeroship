@@ -103,7 +103,7 @@ openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null && ok "stack healthy" \
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
 rpc() {

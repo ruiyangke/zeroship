@@ -251,8 +251,8 @@ stack_up() {
     --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
     && _stk_ok "control healthy" || { _stk_bad "control unhealthy"; tail -20 "$WORK/control.log"; return 1; }
 
   # --- worker ---------------------------------------------------------------
@@ -260,8 +260,8 @@ stack_up() {
     --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
     --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
     && _stk_ok "worker healthy" || { _stk_bad "worker unhealthy"; tail -20 "$WORK/worker.log"; return 1; }
 
   # --- gateway --------------------------------------------------------------
@@ -272,8 +272,8 @@ stack_up() {
     --gateway-broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-  curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
+  for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+  curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
     && _stk_ok "gateway healthy" || { _stk_bad "gateway unhealthy"; tail -20 "$WORK/gate.log"; return 1; }
 
   return 0

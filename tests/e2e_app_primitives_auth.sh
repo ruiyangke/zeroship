@@ -240,8 +240,8 @@ e2e_export_runtime_secrets "$WORK" || exit 1
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: env.kv ← --kv-url (Redis), env.auth ← AuthPlugin (always registered).
 # The generated worker key authenticates /dispatch and signs ZeroShip-User,
@@ -251,8 +251,8 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pas
   --kv-url "$KVURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (kv configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy (kv configured)" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
 # Broker master secret. cd54028e7 made the gateway refuse to start without one,
 # and this harness was never updated, so it has been unable to get past "gateway
@@ -266,8 +266,8 @@ chmod 600 "$WORK/gate-secret"
   --gateway-broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -829,11 +829,11 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control did not come up"; tail -30 "$WORK/control.log"; exit 1; }
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 \
   && pass "zeroship-migrated healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 # The worker needs --db: without it the env.db namespace is absent BY DESIGN
@@ -842,16 +842,16 @@ curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null 2>&1 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
   --db "$DBURL" --blob-store "$WORK/bundles" --poll-interval 2 \
  > "$WORK/worker.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker did not come up"; tail -30 "$WORK/worker.log"; exit 1; }
 
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --blob-store "$WORK/bundles" --gateway-broker-secret-file "$WORK/gate-secret" \
   --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
 
 OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \

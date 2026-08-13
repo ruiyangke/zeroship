@@ -221,7 +221,7 @@ run_bench "Raw runtime (1 worker)" "http://localhost:5100/rpc" "$LUA_RPC"
 run_bench "Raw runtime ($CORES workers)" "http://localhost:5101/rpc" "$LUA_RPC"
 run_bench "Worker direct ($CORES threads)" "http://localhost:8080/dispatch/$APP_ID" "$LUA_RPC"
 run_bench "Full pipeline (gate→worker→V8)" "http://localhost:8000/apps/bench/rpc" "$LUA_GATE"
-run_bench "Gateway health (no V8)" "http://localhost:8000/health" "$LUA_RPC"
+run_bench "Gateway healthz (no V8)" "http://localhost:8000/healthz" "$LUA_RPC"
 
 echo ""
 echo "  Detailed latency (full pipeline):"

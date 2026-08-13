@@ -555,7 +555,7 @@ start_zeroship_stack() {
     --app-base-domain zeroship.localhost \
     >"$WORK/control.log" 2>&1 &
   PIDS+=("$!")
-  wait_http "$CONTROL_URL/health" "control healthy with Supabase provider"
+  wait_http "$CONTROL_URL/readyz" "control healthy with Supabase provider"
 
   "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
     --control-url "$CONTROL_URL" \
@@ -566,7 +566,7 @@ start_zeroship_stack() {
     --poll-interval 2 \
     >"$WORK/worker.log" 2>&1 &
   PIDS+=("$!")
-  wait_http "http://localhost:$ZEROSHIP_WORKER_PORT/health" "worker healthy"
+  wait_http "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" "worker healthy"
 
   "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" \
     --control-url "$CONTROL_URL" \
@@ -579,7 +579,7 @@ start_zeroship_stack() {
     --poll-interval 2 \
     >"$WORK/gate.log" 2>&1 &
   PIDS+=("$!")
-  wait_http "$GATE_URL/health" "gateway healthy"
+  wait_http "$GATE_URL/readyz" "gateway healthy"
 }
 
 refresh_gotrue_session() {

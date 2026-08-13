@@ -154,11 +154,11 @@ for _ in $(seq 1 30); do
   # Liveness first: a dead forward and a slow one both look like a failed
   # curl, and only one of them is worth waiting on.
   kill -0 "$TUNNEL_PID" 2>/dev/null || fail "the ssh forward exited before it was ready"
-  if curl -fsS -o /dev/null --max-time 3 "$CONTROL/health" 2>/dev/null; then ready=1; break; fi
+  if curl -fsS -o /dev/null --max-time 3 "$CONTROL/readyz" 2>/dev/null; then ready=1; break; fi
   sleep 1
 done
-[ "$ready" = 1 ] || fail "control plane did not answer /health through the forward within 30s"
-echo "ok  control plane answered /health through the forward"
+[ "$ready" = 1 ] || fail "control plane did not answer /readyz through the forward within 30s"
+echo "ok  control plane answered /readyz through the forward"
 
 # ------------------------------------------------------------------- deploy
 say "deploying app $APP_ID"
