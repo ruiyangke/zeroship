@@ -425,6 +425,26 @@ function parseArgs(argv: string[]): Args {
   if (args.strict && args.command !== "status") {
     throw new CliError("flag --strict is only valid with status");
   }
+  // `--json` selects a machine-readable reply, and three commands have none:
+  // `new` writes a file, `apply` and `resolve` report progress as prose. Silently
+  // accepting it there is worse than it sounds - the command succeeds, stdout
+  // carries the human summary, and the pipeline that piped it into a parser gets
+  // a syntax error naming the summary rather than the flag. Refused here for the
+  // same reason every flag above is: the CLI already tells an operator which
+  // commands a flag belongs to, and this was the one that did not.
+  if (
+    args.json &&
+    args.command !== "lint" &&
+    args.command !== "plan" &&
+    args.command !== "status" &&
+    args.command !== "rollback" &&
+    args.command !== "history" &&
+    args.command !== "version"
+  ) {
+    throw new CliError(
+      "flag --json is only valid with lint, plan, status, rollback, history, or version",
+    );
+  }
   if (
     args.registryPath !== undefined &&
     args.command !== "lint" &&
