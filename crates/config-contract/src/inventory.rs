@@ -326,6 +326,7 @@ pub fn scan_sources(
     let mut fatal = Vec::new();
     let mut findings = Vec::new();
     let mut structs = 0usize;
+    let flattened = flattened_owners(sources);
 
     for (path, source) in sources {
         let file = match syn::parse_file(source) {
@@ -352,6 +353,17 @@ pub fn scan_sources(
                     generated_rows(item_struct, path, &package, &binary, &mut rows, &mut findings);
                 }
                 StructKind::Clap { consumer } => {
+                    // A `#[derive(Args)]` container carries no `#[command(name)]`
+                    // of its own, so without this its rows would be attributed to
+                    // "-" and silently drop out of every per-binary count.
+                    let consumer = if consumer == UNKNOWN_CONSUMER {
+                        flattened
+                            .get(&item_struct.ident.to_string())
+                            .cloned()
+                            .unwrap_or(consumer)
+                    } else {
+                        consumer
+                    };
                     clap_rows(item_struct, path, &package, &consumer, overlay, &mut rows);
                 }
             }
@@ -420,6 +432,64 @@ enum StructKind {
     Generated { binary: String },
     /// Derives clap's `Parser` or `Args`.
     Clap { consumer: String },
+}
+
+/// The consumer written when nothing names the binary.
+const UNKNOWN_CONSUMER: &str = "-";
+
+/// Map each `#[command(flatten)]`-ed struct TYPE to the binary that flattens it.
+///
+/// A `#[derive(Args)]` container is a normal clap idiom for grouping arguments,
+/// and it never carries `#[command(name = "...")]` - the parent's name is the
+/// command. Attributing its fields by type is what keeps them inside their
+/// binary's row count instead of landing in an unattributed "-" bucket.
+///
+/// Ambiguity fails SAFE rather than silently picking one: a type flattened by
+/// two different binaries is left unattributed, because guessing would put real
+/// rows under a binary that may not declare them.
+fn flattened_owners(sources: &[(String, String)]) -> BTreeMap<String, String> {
+    let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (_, source) in sources {
+        let Ok(file) = syn::parse_file(source) else {
+            continue;
+        };
+        for item in &file.items {
+            let syn::Item::Struct(item_struct) = item else {
+                continue;
+            };
+            let Some(StructKind::Clap { consumer }) = struct_kind(item_struct) else {
+                continue;
+            };
+            if consumer == UNKNOWN_CONSUMER {
+                continue;
+            }
+            let Fields::Named(named) = &item_struct.fields else {
+                continue;
+            };
+            for field in &named.named {
+                if !field.attrs.iter().any(is_container_attr) {
+                    continue;
+                }
+                if let Type::Path(path) = &field.ty
+                    && let Some(segment) = path.path.segments.last()
+                {
+                    owners
+                        .entry(segment.ident.to_string())
+                        .or_default()
+                        .insert(consumer.clone());
+                }
+            }
+        }
+    }
+    owners
+        .into_iter()
+        .filter_map(|(ty, consumers)| {
+            (consumers.len() == 1).then(|| {
+                let only = consumers.into_iter().next().expect("one consumer");
+                (ty, only)
+            })
+        })
+        .collect()
 }
 
 fn struct_kind(item: &ItemStruct) -> Option<StructKind> {
@@ -909,6 +979,69 @@ struct DemoCli {
         let blob = rows.iter().find(|row| row.field == "blob_store").expect("blob row");
         assert_eq!(blob.flag, "--blob-store");
         assert_eq!(blob.env, "BLOB_STORE");
+    }
+
+    #[test]
+    fn a_flattened_args_container_is_attributed_to_the_binary_that_flattens_it() {
+        // The failure this guards: a `#[derive(Args)]` group carries no
+        // `#[command(name)]`, so its rows landed under the "-" consumer and
+        // vanished from every per-binary count. An audit whose worklist is
+        // "rows for binary X" then reports X complete while X's arguments are
+        // still hand-spelled somewhere else in the file.
+        let body = r#"
+#[derive(Clone, Args)]
+struct DemoSecrets {
+    #[arg(long, env = "DEMO_DB_URL")]
+    db_url: String,
+}
+
+#[derive(Parser)]
+#[command(name = "zeroship-demo")]
+struct DemoCli {
+    #[command(flatten)]
+    secrets: DemoSecrets,
+}
+"#;
+        let report =
+            scan_sources(&source("crates/demo/src/main.rs", body), &no_overlay()).expect("scan");
+        let db = report
+            .rows
+            .iter()
+            .find(|row| row.field == "db_url")
+            .expect("db_url row");
+        assert_eq!(db.consumer, "zeroship-demo");
+
+        // The one-variable control: the SAME Args struct with nothing flattening
+        // it stays unattributed. Without this, the assertion above would also
+        // pass on an implementation that stamped every Args struct with the last
+        // binary name it happened to see.
+        let orphan = r#"
+#[derive(Clone, Args)]
+struct OrphanSecrets {
+    #[arg(long, env = "ORPHAN_DB_URL")]
+    db_url: String,
+}
+
+#[derive(Parser)]
+#[command(name = "zeroship-demo")]
+struct DemoCli {
+    #[arg(long, env = "DEMO_PORT")]
+    port: u16,
+}
+"#;
+        let report =
+            scan_sources(&source("crates/demo/src/main.rs", orphan), &no_overlay()).expect("scan");
+        let db = report
+            .rows
+            .iter()
+            .find(|row| row.field == "db_url")
+            .expect("db_url row");
+        assert_eq!(db.consumer, "-");
+
+        // Does NOT cover a type flattened by two binaries under the same name in
+        // different crates; that case is deliberately left unattributed by
+        // `flattened_owners` rather than resolved, and nothing in the tree hits
+        // it today.
     }
 
     #[test]
