@@ -381,8 +381,11 @@ curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: auth.<domain>' \
 curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: auth.<domain>' \
   http://127.0.0.1/login                                       # 200
 
-# control, loopback only
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9090/health   # 200
+# control, loopback only. /readyz (not /healthz) is the one worth curling
+# here: it answers 200 only once control can reach Postgres, so a 503 tells
+# you the container is up and the database is not. /healthz is a constant
+# 200 and only proves the process is alive.
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9090/readyz   # 200
 
 # control must NOT answer on the public interface
 curl -sS -m 6 http://<public-ip>:9090/    # expect connection refused
