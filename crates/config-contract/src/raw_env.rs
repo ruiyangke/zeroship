@@ -1,25 +1,111 @@
-//! Cfg-independent source fallback for undeclared Rust environment reads.
+//! Cfg-independent source gate for undeclared Rust environment reads.
 //!
-//! Step 1 exercises this scanner on fixtures only. The workspace-wide compiler
-//! lint and tracked-file gate remain later migration work because current live
-//! readers have not been converted yet.
+//! Two things share this module because they are the same walk over the same
+//! syntax tree: the GATE that Section 4.5 of
+//! `docs/proposals/2026-08-11-config-name-alignment.md` requires, and the
+//! INVENTORY that says how many reads of each class exist right now. Keeping
+//! them together means the number in a report and the number the gate enforces
+//! cannot drift, and it means the conversion can be measured while it is in
+//! progress rather than only after it finishes.
+//!
+//! Why a source scan at all, when Clippy's `disallowed_methods` already denies
+//! the four raw methods: the lint only sees code the current cfg activates. A
+//! read behind a disabled feature compiles out and the lint says nothing, while
+//! a different feature selection ships it. This parses the file, so a disabled
+//! cfg is still source.
+//!
+//! What it does NOT do. It cannot see a read inside a dependency, a read behind
+//! a macro this crate does not expand, or a name assembled at run time. The
+//! first is out of scope by design (`libs/*` and `crates/*` are first-party;
+//! vendored code is not ours to rewrite), the second has no instance today, and
+//! the third is why the typed accessors take a key rather than a `&str`.
 
 use std::collections::BTreeSet;
 
 use syn::visit::{self, Visit};
-use syn::{ExprPath, ItemUse, Macro, UseTree};
+use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
+use syn::{Attribute, Expr, ExprCall, ExprPath, ItemUse, Lit, Macro, Meta, Token, UseTree};
 use thiserror::Error;
 
 const RAW_METHODS: &[&str] = &["var", "var_os", "vars", "vars_os"];
 
-/// The typed accessor that `read_config_env!` wraps.
+/// The typed accessors the registering macros wrap.
 ///
-/// Calling it directly reads the environment WITHOUT emitting a `ReadSite`, so
-/// it is the one way to hold a typed key and still stay invisible to the
-/// registry. Banning it is what makes "every read is enumerable" true rather
-/// than merely conventional. The accessor's own defining module is exempt; that
-/// exemption is applied by the caller, not by this scanner.
-const REGISTRATION_BYPASS: &str = "read_typed_env";
+/// Calling one directly reads the environment WITHOUT emitting a read site, so
+/// these are the ways to hold a typed key and still stay invisible to the
+/// registry. Banning them is what makes "every read is enumerable" true rather
+/// than merely conventional. Their own defining module is exempt by path.
+const REGISTRATION_BYPASSES: &[&str] = &[
+    "read_typed_env",
+    "read_declared_env_value",
+    "read_declared_env_os_value",
+    "read_process_env_snapshot_value",
+];
+
+/// Build inputs a build script may read raw.
+///
+/// These are compiler and Cargo inputs, not process startup configuration:
+/// they exist only while the crate is being compiled, no operator sets them,
+/// and there is no process for a typed consumer marker to name. Section 4.5
+/// exempts them explicitly. The list is exact rather than a `CARGO_` prefix
+/// test plus a wildcard, so adding one is a visible edit.
+const BUILD_INPUTS: &[&str] = &[
+    "OUT_DIR",
+    "TARGET",
+    "HOST",
+    "PROFILE",
+    "NUM_JOBS",
+    "OPT_LEVEL",
+    "DEBUG",
+    "RUSTC",
+    "RUSTDOC",
+];
+
+/// The exact path of the one module allowed to touch `std::env`.
+pub const CENTRAL_ACCESSOR: &str = "crates/core/src/config/env.rs";
+
+/// The exact tail every sealed library test-key module must have.
+///
+/// Section 4.5 permits `libs/<crate>/tests/common/env.rs` and nothing else.
+/// `libs/*` are publishable and zeroship-independent, so they cannot depend on
+/// the core config types; a sealed local enum is the substitute, and pinning it
+/// to one path is what stops "sealed accessor" becoming a phrase any file can
+/// claim by writing a comment.
+pub const SEALED_LIB_TEST_MODULE: &str = "tests/common/env.rs";
+
+/// What the gate permits in one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRole {
+    /// Ordinary first-party source: no raw access of any kind.
+    Ordinary,
+    /// `crates/core/src/config/env.rs`: raw access is the point of the file.
+    CentralAccessor,
+    /// `libs/<crate>/tests/common/env.rs`: raw access inside its accessor only.
+    SealedLibraryTest,
+    /// A build script: the exact [`BUILD_INPUTS`] names, read raw.
+    BuildScript,
+}
+
+impl FileRole {
+    /// Classify a repository-relative path.
+    ///
+    /// Path-driven on purpose. A role that a file could assert about itself -
+    /// an attribute, a marker comment - would be a role any file could claim.
+    #[must_use]
+    pub fn for_path(path: &str) -> Self {
+        if path == CENTRAL_ACCESSOR {
+            return Self::CentralAccessor;
+        }
+        if path.starts_with("libs/") && path.ends_with(SEALED_LIB_TEST_MODULE) {
+            return Self::SealedLibraryTest;
+        }
+        if path == "build.rs" || path.ends_with("/build.rs") {
+            return Self::BuildScript;
+        }
+        Self::Ordinary
+    }
+}
 
 /// One cfg-independent raw environment access found in Rust source.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -39,9 +125,40 @@ pub enum RawEnvViolation {
     /// The typed accessor was called without the registering macro.
     #[error("typed environment read bypasses ReadSite registration: {0}")]
     UnregisteredRead(String),
+    /// The disallowed-method lint was locally silenced outside the exempt paths.
+    #[error("illicit allow of the raw-environment lint: {0}")]
+    IllicitAllow(String),
+    /// A declared key named something that is not an environment spelling.
+    #[error("declared environment key has an invalid name: {0}")]
+    InvalidKeyName(String),
+    /// An `external`-class key claimed a zeroship-owned name.
+    #[error("external-class key claims a zeroship-owned name: {0}")]
+    MisclassifiedKey(String),
     /// The scan covered no source at all, so a clean result proves nothing.
     #[error("raw environment scan examined zero source files")]
     EmptyScan,
+}
+
+/// One declared non-config key found in source, for the classification report.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeclaredKeySite {
+    /// Repository-relative file the key literal appears in.
+    pub file: String,
+    /// Constructor used, and therefore the stated class.
+    pub class: String,
+    /// The literal environment name.
+    pub name: String,
+}
+
+/// What one scan found, beyond pass or fail.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RawEnvReport {
+    /// Files examined.
+    pub files: usize,
+    /// Every declared non-config key literal, in file order.
+    pub declared_keys: Vec<DeclaredKeySite>,
+    /// Raw accesses permitted by the file's role, for the exemption ledger.
+    pub permitted_raw: Vec<String>,
 }
 
 #[derive(Default)]
@@ -109,39 +226,197 @@ fn inspect_import(prefix: &[String], original: &str, local: &str, imports: &mut 
 
 struct Reads<'a> {
     imports: &'a Imports,
+    role: FileRole,
     violations: Vec<RawEnvViolation>,
+    declared_keys: Vec<(String, String)>,
+    permitted_raw: Vec<String>,
 }
 
 impl<'ast> Visit<'ast> for Reads<'_> {
-    fn visit_expr_path(&mut self, path: &'ast ExprPath) {
-        let segments = path
-            .path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
-        if is_raw_path(&segments, self.imports) {
-            self.violations
-                .push(RawEnvViolation::Read(segments.join("::")));
+    /// Handle a raw read at the CALL, not at the callee path.
+    ///
+    /// The build-script exemption depends on the literal argument, which only
+    /// exists here. Descending into the callee afterwards would report the same
+    /// read a second time from `visit_expr_path`, so this arm walks the
+    /// arguments itself and deliberately does not visit `call.func`.
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        let raw_callee = match call.func.as_ref() {
+            Expr::Path(path) => {
+                let segments = path_segments(path);
+                if let Some(class) = declared_key_class(&segments)
+                    && let Some(name) = first_string_literal(call)
+                {
+                    self.declared_keys.push((class, name));
+                }
+                is_raw_path(&segments, self.imports).then(|| segments.join("::"))
+            }
+            _ => None,
+        };
+        if let Some(joined) = raw_callee {
+            let literal = first_string_literal(call);
+            if self.role == FileRole::BuildScript
+                && literal
+                    .as_deref()
+                    .is_some_and(|name| BUILD_INPUTS.contains(&name))
+            {
+                self.permitted_raw
+                    .push(format!("{joined}({})", literal.unwrap_or_default()));
+            } else {
+                let line = call.func.span().start().line;
+                self.violations
+                    .push(RawEnvViolation::Read(format!("{line}: {joined}")));
+            }
+            for argument in &call.args {
+                self.visit_expr(argument);
+            }
+            return;
         }
-        if segments.last().is_some_and(|last| last == REGISTRATION_BYPASS) {
-            self.violations
-                .push(RawEnvViolation::UnregisteredRead(segments.join("::")));
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast ExprPath) {
+        let segments = path_segments(path);
+        let line = path.span().start().line;
+        if is_raw_path(&segments, self.imports) {
+            self.violations.push(RawEnvViolation::Read(format!(
+                "{line}: {}",
+                segments.join("::")
+            )));
+        }
+        if segments
+            .last()
+            .is_some_and(|last| REGISTRATION_BYPASSES.contains(&last.as_str()))
+        {
+            self.violations.push(RawEnvViolation::UnregisteredRead(format!(
+                "{line}: {}",
+                segments.join("::")
+            )));
         }
         visit::visit_expr_path(self, path);
     }
 
+    /// Look INSIDE a macro invocation, not just at its name.
+    ///
+    /// `syn`'s default walk stops at the token stream, so
+    /// `assert!(std::env::var(NAME).is_err())` was invisible to this scanner
+    /// until 2026-08-12: `crates/plugin-storage/src/limits.rs:198` was a real
+    /// raw read that the file's other read shadowed in every count. A gate
+    /// whose blind spot is "wrap it in `assert!`" is not a gate.
+    ///
+    /// Most macro bodies parse as a comma-separated expression list, so the
+    /// first arm re-uses the ordinary expression walk and keeps exact spans.
+    /// When they do not - a macro taking a type, a match arm, arbitrary tokens
+    /// - the fallback is a TOKEN TEXT test, which cannot resolve aliases and
+    /// has no line number, but fails loudly rather than passing silently.
     fn visit_macro(&mut self, mac: &'ast Macro) {
-        let name = mac.path.segments.last().map(|segment| segment.ident.to_string());
+        let name = mac
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
         if matches!(name.as_deref(), Some("env" | "option_env"))
             && mac.tokens.to_string().contains("ZEROSHIP_")
         {
             self.violations.push(RawEnvViolation::CompileTime(
-                name.unwrap_or_else(|| "environment macro".to_owned()),
+                name.clone().unwrap_or_else(|| "environment macro".to_owned()),
             ));
+        }
+        if let Ok(arguments) =
+            mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        {
+            for argument in &arguments {
+                self.visit_expr(argument);
+            }
+        } else if let Some(spelling) = raw_spelling_in_tokens(&mac.tokens.to_string()) {
+            self.violations.push(RawEnvViolation::Read(format!(
+                "in {} macro body: {spelling}",
+                name.unwrap_or_else(|| "unnamed".to_owned())
+            )));
         }
         visit::visit_macro(self, mac);
     }
+
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if self.role == FileRole::Ordinary && silences_raw_env_lint(attribute) {
+            self.violations.push(RawEnvViolation::IllicitAllow(
+                "clippy::disallowed_methods".to_owned(),
+            ));
+        }
+        visit::visit_attribute(self, attribute);
+    }
+}
+
+/// Find a raw-read spelling in a token stream that would not parse as Rust.
+///
+/// Token streams print with spaces around `::`, so the patterns are written
+/// that way. This sees only the literal `std::env::<method>` and `libc::getenv`
+/// spellings: an alias imported elsewhere in the file is beyond a text test,
+/// which is why it is the FALLBACK and not the mechanism.
+fn raw_spelling_in_tokens(tokens: &str) -> Option<String> {
+    let flat = tokens.replace(' ', "");
+    for method in RAW_METHODS {
+        let spelling = format!("std::env::{method}");
+        if flat.contains(&spelling) {
+            return Some(spelling);
+        }
+    }
+    flat.contains("libc::getenv")
+        .then(|| "libc::getenv".to_owned())
+}
+
+fn path_segments(path: &ExprPath) -> Vec<String> {
+    path.path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
+fn first_string_literal(call: &ExprCall) -> Option<String> {
+    match call.args.first()? {
+        Expr::Lit(literal) => match &literal.lit {
+            Lit::Str(value) => Some(value.value()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Recognize `DeclaredEnvKey::<class>("NAME")` however it is spelled.
+fn declared_key_class(segments: &[String]) -> Option<String> {
+    let [.., type_name, method] = segments else {
+        return None;
+    };
+    if type_name != "DeclaredEnvKey" {
+        return None;
+    }
+    matches!(
+        method.as_str(),
+        "external" | "test" | "dev" | "cli" | "build" | "creator"
+    )
+    .then(|| method.clone())
+}
+
+/// Whether an attribute silences the raw-environment lint.
+///
+/// Matches `allow`, `expect` and the tool-namespaced spellings, because all
+/// three suppress the diagnostic and only one of them is the obvious one.
+fn silences_raw_env_lint(attribute: &Attribute) -> bool {
+    let path = attribute.path();
+    let is_suppression = path.is_ident("allow")
+        || path.is_ident("expect")
+        || path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "allow" || segment.ident == "expect");
+    if !is_suppression {
+        return false;
+    }
+    let Meta::List(list) = &attribute.meta else {
+        return false;
+    };
+    let tokens = list.tokens.to_string().replace(' ', "");
+    tokens.contains("clippy::disallowed_methods")
 }
 
 fn is_raw_path(segments: &[String], imports: &Imports) -> bool {
@@ -165,78 +440,189 @@ fn is_raw_path(segments: &[String], imports: &Imports) -> bool {
 
 /// Reject direct, imported, aliased, cfg-disabled, or helper-hidden raw reads.
 ///
-/// The argument to `std::env::var` is deliberately irrelevant: a helper that
-/// accepts `&str` is still a read and is caught even when no environment-name
-/// literal exists in this source.
+/// The argument to `std::env::var` is deliberately irrelevant outside a build
+/// script: a helper that accepts `&str` is still a read and is caught even when
+/// no environment-name literal exists in this source.
 ///
 /// # Errors
 ///
 /// Returns every violation found, or a parse error if the input is not Rust.
 pub fn check_rust_source(source: &str) -> Result<(), Vec<RawEnvViolation>> {
-    let file = syn::parse_file(source)
-        .map_err(|error| vec![RawEnvViolation::Parse(error.to_string())])?;
+    check_rust_source_with_role(source, FileRole::Ordinary).map(|_| ())
+}
+
+/// Check one source under an explicit role, returning what it declared.
+///
+/// # Errors
+///
+/// Returns every violation the role does not permit.
+pub fn check_rust_source_with_role(
+    source: &str,
+    role: FileRole,
+) -> Result<RawEnvReport, Vec<RawEnvViolation>> {
+    let file =
+        syn::parse_file(source).map_err(|error| vec![RawEnvViolation::Parse(error.to_string())])?;
     let mut imports = Imports::default();
     imports.visit_file(&file);
 
-    let read_violations = {
+    let reads = {
         let mut reads = Reads {
             imports: &imports,
+            role,
             violations: Vec::new(),
+            declared_keys: Vec::new(),
+            permitted_raw: Vec::new(),
         };
         reads.visit_file(&file);
-        reads.violations
+        (reads.violations, reads.declared_keys, reads.permitted_raw)
     };
+    let (read_violations, declared_keys, permitted_raw) = reads;
 
     let mut violations = imports.violations;
     violations.extend(read_violations);
+
+    // The two exempt roles are exempt from RAW ACCESS, not from everything: a
+    // registration bypass or a compile-time zeroship read is still a violation
+    // there, because neither has anything to do with why the exemption exists.
+    if matches!(
+        role,
+        FileRole::CentralAccessor | FileRole::SealedLibraryTest
+    ) {
+        violations.retain(|violation| {
+            !matches!(
+                violation,
+                RawEnvViolation::Read(_)
+                    | RawEnvViolation::Import(_)
+                    | RawEnvViolation::IllicitAllow(_)
+            )
+        });
+    }
+
+    let mut report = RawEnvReport {
+        files: 1,
+        declared_keys: declared_keys
+            .into_iter()
+            .map(|(class, name)| DeclaredKeySite {
+                file: String::new(),
+                class,
+                name,
+            })
+            .collect(),
+        permitted_raw,
+    };
+
+    for key in &report.declared_keys {
+        if !is_env_spelling(&key.name) {
+            violations.push(RawEnvViolation::InvalidKeyName(format!(
+                "{}::{}",
+                key.class, key.name
+            )));
+        }
+        if key.class == "external" && key.name.starts_with("ZEROSHIP_") {
+            violations.push(RawEnvViolation::MisclassifiedKey(key.name.clone()));
+        }
+    }
+
     violations.sort_by_key(ToString::to_string);
     violations.dedup();
     if violations.is_empty() {
-        Ok(())
+        report.declared_keys.sort();
+        Ok(report)
     } else {
         Err(violations)
     }
 }
 
+/// Whether a literal is a plausible environment-variable spelling.
+///
+/// Mirrors `zeroship_core::config::is_valid_env_name`. It is restated rather
+/// than imported because this crate scans SOURCE: the value being checked is a
+/// string literal lifted out of a syntax tree, not a value the core crate ever
+/// sees, and adding the dependency would not make the two agree by force.
+#[must_use]
+pub fn is_env_spelling(name: &str) -> bool {
+    !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 /// Scan a whole set of named sources, refusing to report a clean empty run.
 ///
 /// [`check_rust_source`] answers "is THIS file clean?", which is silently true
-/// for a file set that a broken enumeration left empty. The gate that later
-/// walks `git ls-files` must call this instead, so a glob that stops matching
-/// fails loudly rather than reporting zero violations.
+/// for a file set that a broken enumeration left empty. The gate that walks
+/// `git ls-files` must call this instead, so a glob that stops matching fails
+/// loudly rather than reporting zero violations.
 ///
 /// # Errors
 ///
 /// Returns [`RawEnvViolation::EmptyScan`] for an empty set, otherwise every
 /// violation found, each prefixed with its source name.
 pub fn check_sources(sources: &[(String, String)]) -> Result<usize, Vec<RawEnvViolation>> {
+    scan_sources_by_role(sources).map(|report| report.files)
+}
+
+/// Scan a named source set, applying each file's path-derived role.
+///
+/// # Errors
+///
+/// Returns [`RawEnvViolation::EmptyScan`] for an empty set, otherwise every
+/// violation found, each prefixed with its source name.
+pub fn scan_sources_by_role(
+    sources: &[(String, String)],
+) -> Result<RawEnvReport, Vec<RawEnvViolation>> {
     if sources.is_empty() {
         return Err(vec![RawEnvViolation::EmptyScan]);
     }
     let mut violations = Vec::new();
+    let mut report = RawEnvReport {
+        files: sources.len(),
+        ..RawEnvReport::default()
+    };
     for (name, source) in sources {
-        if let Err(found) = check_rust_source(source) {
-            violations.extend(found.into_iter().map(|violation| match violation {
-                RawEnvViolation::Parse(detail) => {
-                    RawEnvViolation::Parse(format!("{name}: {detail}"))
-                }
-                RawEnvViolation::Import(detail) => {
-                    RawEnvViolation::Import(format!("{name}: {detail}"))
-                }
-                RawEnvViolation::Read(detail) => RawEnvViolation::Read(format!("{name}: {detail}")),
-                RawEnvViolation::CompileTime(detail) => {
-                    RawEnvViolation::CompileTime(format!("{name}: {detail}"))
-                }
-                RawEnvViolation::UnregisteredRead(detail) => {
-                    RawEnvViolation::UnregisteredRead(format!("{name}: {detail}"))
-                }
-                RawEnvViolation::EmptyScan => RawEnvViolation::EmptyScan,
-            }));
+        match check_rust_source_with_role(source, FileRole::for_path(name)) {
+            Ok(found) => {
+                report
+                    .declared_keys
+                    .extend(found.declared_keys.into_iter().map(|mut key| {
+                        key.file.clone_from(name);
+                        key
+                    }));
+                report
+                    .permitted_raw
+                    .extend(found.permitted_raw.into_iter().map(|raw| format!("{name}: {raw}")));
+            }
+            Err(found) => violations.extend(found.into_iter().map(|violation| prefix(name, violation))),
         }
     }
     if violations.is_empty() {
-        Ok(sources.len())
+        Ok(report)
     } else {
         Err(violations)
+    }
+}
+
+fn prefix(name: &str, violation: RawEnvViolation) -> RawEnvViolation {
+    match violation {
+        RawEnvViolation::Parse(detail) => RawEnvViolation::Parse(format!("{name}: {detail}")),
+        RawEnvViolation::Import(detail) => RawEnvViolation::Import(format!("{name}: {detail}")),
+        RawEnvViolation::Read(detail) => RawEnvViolation::Read(format!("{name}: {detail}")),
+        RawEnvViolation::CompileTime(detail) => {
+            RawEnvViolation::CompileTime(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::UnregisteredRead(detail) => {
+            RawEnvViolation::UnregisteredRead(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::IllicitAllow(detail) => {
+            RawEnvViolation::IllicitAllow(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::InvalidKeyName(detail) => {
+            RawEnvViolation::InvalidKeyName(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::MisclassifiedKey(detail) => {
+            RawEnvViolation::MisclassifiedKey(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::EmptyScan => RawEnvViolation::EmptyScan,
     }
 }

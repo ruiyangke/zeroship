@@ -1,18 +1,22 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zeroship_config_contract::inventory::{
-    collect_rust_sources, format_tsv, scan_sources, OverlayLeaves,
+    collect_rust_sources, collect_tracked_rust_sources, format_tsv, scan_sources, OverlayLeaves,
 };
 use zeroship_config_contract::metadata::check_workspace;
+use zeroship_config_contract::raw_env::{scan_sources_by_role, RawEnvViolation};
 
 const USAGE: &str = "usage: zeroship-config-contract \
-[check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR]]";
+[check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR] \
+| raw-env [--root DIR]]";
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         None | Some("check-metadata") => check_metadata(args.get(1).map(PathBuf::from)),
         Some("inventory") => inventory(&args[1..]),
+        Some("raw-env") => raw_env(&args[1..]),
         Some(other) => {
             eprintln!("{USAGE}; got {other:?}");
             std::process::exit(2);
@@ -30,6 +34,92 @@ fn check_metadata(manifest: Option<PathBuf>) {
         Err(errors) => {
             for error in errors {
                 eprintln!("config contract: {error}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Report every remaining raw environment access and every declared key.
+///
+/// This is the Step 4 worklist and, once it reaches zero violations, the
+/// evidence that the gate in `crates/config-contract/tests/` can be believed.
+/// Rows go to stdout, counts to stderr, so a redirected run keeps a clean list.
+fn raw_env(args: &[String]) {
+    let mut root = PathBuf::from(".");
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--root" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("{USAGE}");
+                    std::process::exit(2);
+                };
+                root = PathBuf::from(value);
+                index += 2;
+            }
+            other => {
+                eprintln!("{USAGE}; got {other:?}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let sources = match collect_tracked_rust_sources(&root) {
+        Ok(sources) => sources,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("config raw-env: {error}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    match scan_sources_by_role(&sources) {
+        Ok(report) => {
+            let mut classes: BTreeMap<&str, usize> = BTreeMap::new();
+            for key in &report.declared_keys {
+                *classes.entry(key.class.as_str()).or_default() += 1;
+                println!("declared\t{}\t{}\t{}", key.class, key.name, key.file);
+            }
+            for permitted in &report.permitted_raw {
+                println!("permitted-raw\t-\t-\t{permitted}");
+            }
+            eprintln!(
+                "config raw-env: {} tracked files, 0 violations, {} declared keys, \
+                 {} role-permitted raw accesses",
+                report.files,
+                report.declared_keys.len(),
+                report.permitted_raw.len()
+            );
+            for (class, count) in classes {
+                eprintln!("config raw-env: class {class}: {count}");
+            }
+        }
+        Err(violations) => {
+            let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+            for violation in &violations {
+                let kind = match violation {
+                    RawEnvViolation::Read(_) => "read",
+                    RawEnvViolation::Import(_) => "import",
+                    RawEnvViolation::CompileTime(_) => "compile-time",
+                    RawEnvViolation::UnregisteredRead(_) => "unregistered",
+                    RawEnvViolation::IllicitAllow(_) => "illicit-allow",
+                    RawEnvViolation::InvalidKeyName(_) => "invalid-key-name",
+                    RawEnvViolation::MisclassifiedKey(_) => "misclassified-key",
+                    RawEnvViolation::Parse(_) => "parse",
+                    RawEnvViolation::EmptyScan => "empty-scan",
+                };
+                *kinds.entry(kind).or_default() += 1;
+                println!("violation\t{kind}\t{violation}");
+            }
+            eprintln!(
+                "config raw-env: {} tracked files, {} violations",
+                sources.len(),
+                violations.len()
+            );
+            for (kind, count) in kinds {
+                eprintln!("config raw-env: {kind}: {count}");
             }
             std::process::exit(1);
         }
