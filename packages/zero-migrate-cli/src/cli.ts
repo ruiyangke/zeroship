@@ -1341,8 +1341,33 @@ export function resolvePendingVersion(reply: StatusReply, migrationName: string)
     );
   }
   if (!reply.pending.includes(plans[0].version)) {
+    // "Not pending" is true but reads as "never ran", because everywhere else in
+    // this CLI pending means not yet applied. The states that actually land here
+    // are the opposite: an operator who resolved once and is retrying, or a
+    // pipeline replaying a step. Naming the real state keeps a retry from looking
+    // like a lost deploy.
+    const name = JSON.stringify(migrationName);
+    const version = plans[0].version;
+    if (reply.aborted.includes(version)) {
+      throw new CliError(
+        `migration ${name} had its online rename rolled back already; there is nothing left to resolve`,
+      );
+    }
+    if (reply.rolledBack.includes(version)) {
+      throw new CliError(
+        `migration ${name} has been rolled back; there is no outstanding online rename to resolve`,
+      );
+    }
+    if (reply.applied.includes(version)) {
+      // Covers both "already committed" and "never had a rename at all". The two
+      // are indistinguishable from here -- a resolved contract leaves no trace in
+      // the status reply -- so the wording is chosen to be true of both.
+      throw new CliError(
+        `migration ${name} is fully applied; there is no outstanding online rename to resolve`,
+      );
+    }
     throw new CliError(
-      `migration ${JSON.stringify(migrationName)} is not pending`,
+      `migration ${name} is not pending (state: ${plans[0].state})`,
     );
   }
   const stepVersions = new Set(plans[0].steps.map((step) => step.version));
