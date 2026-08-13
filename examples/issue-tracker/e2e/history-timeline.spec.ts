@@ -82,10 +82,26 @@ test("the history names who changed what, grouped per edit", async ({
   // the generic splitter as "Reporter Id" until it was mapped.
   await expect(page.locator(".history-timeline")).not.toContainText("Reporter Id");
 
-  // Creation writes one row per field; they are one edit and render as one
-  // event rather than fourteen.
+  // Creation writes one row per field. It renders as ONE event, folded, so
+  // the real changes are not buried under fourteen "unset to" lines.
   const creation = events.filter({ hasText: "Alice Dev" }).first();
-  await expect(creation.locator(".history-changes > li").nth(3)).toBeVisible();
+  const fold = creation.locator("details.history-creation");
+  await expect(fold, "creation is folded rather than listed in full").toHaveCount(1);
+  await expect(fold.locator("summary")).toContainText(/\d+ fields set on creation/);
+  await expect(
+    creation.locator(".history-changes > li").nth(3),
+    "and its rows are not on screen while folded",
+  ).toBeHidden();
+
+  // Folded, NOT dropped. Opening it shows every row the server recorded --
+  // this is the assertion that keeps the fold honest, because hiding history
+  // to tidy a page would be a worse bug than the one being fixed.
+  await fold.locator("summary").click();
+  await expect(
+    creation.locator(".history-changes > li").nth(3),
+    "expanding reveals the rows, so nothing was hidden from the log",
+  ).toBeVisible();
+  await expect(creation).toContainText("Summary");
 
   await bobCtx.close();
 });

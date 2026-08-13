@@ -133,16 +133,16 @@ export function HistoryPanel({
     <ol className="history-timeline">
       {events.map((event, index) => {
         const who = personName(event.actorId, people, "Someone");
-        return (
-          <li key={index} className="history-event">
-            <Avatar size="sm" fallback={initials(who)} aria-hidden="true" />
-            <div className="history-event-body">
-              <p className="history-event-head">
-                <span className="history-actor">{who}</span>
-                <span className="history-when" title={formatDate(event.changedAt)}>
-                  {timeAgo(event.changedAt)}
-                </span>
-              </p>
+        /**
+         * Filing a bug writes a row per field, so the first event is fourteen
+         * lines of "unset to X" and every real change starts below them. It
+         * is FOLDED, not dropped: the rows are all still here, one click away,
+         * because a history that quietly omits things is worse than a long
+         * one. Detected rather than assumed -- the first event whose changes
+         * all came from nothing is the creation.
+         */
+        const isCreation = index === 0 && event.changes.every((c) => !c.oldValue);
+        const changeList = (
               <ul className="history-changes">
                 {event.changes.map((change, changeIndex) => (
                   <li key={changeIndex}>
@@ -155,6 +155,27 @@ export function HistoryPanel({
                   </li>
                 ))}
               </ul>
+        );
+        return (
+          <li key={index} className="history-event">
+            <Avatar size="sm" fallback={initials(who)} aria-hidden="true" />
+            <div className="history-event-body">
+              <p className="history-event-head">
+                <span className="history-actor">{who}</span>
+                <span className="history-when" title={formatDate(event.changedAt)}>
+                  {isCreation ? "filed this bug" : null} {timeAgo(event.changedAt)}
+                </span>
+              </p>
+              {isCreation ? (
+                <details className="history-creation">
+                  <summary>
+                    {event.changes.length} fields set on creation
+                  </summary>
+                  {changeList}
+                </details>
+              ) : (
+                changeList
+              )}
             </div>
           </li>
         );

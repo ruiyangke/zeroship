@@ -948,3 +948,14 @@ tbody tr:hover { background: var(--surface-2); }
 .history-from { color: var(--ink-faint); text-decoration: line-through; }
 .history-arrow { color: var(--ink-faint); font-size: 0.78rem; }
 .history-to { color: var(--ink); font-weight: 500; }
+
+/* The creation event, folded. Everything is still in the DOM and one click
+   away -- a history that quietly omits rows is worse than a long one. */
+.history-creation > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  list-style-position: outside;
+}
+.history-creation > summary:hover { color: var(--accent); }
+.history-creation[open] > summary { margin-block-end: 0.4rem; }
