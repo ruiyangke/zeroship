@@ -1,23 +1,36 @@
 //! Control-mediated OAuth device flow for platform deploy tokens.
 //!
-//! Control owns the RFC 8628 pending-grant rows and the polling discipline; the
-//! auth service owns issuance. Once an approving bearer arrives, control
-//! resolves the platform principal, caps the requested scopes to that
-//! principal's `principal_grants`, asks the OP to mint a platform access token,
-//! encrypts that one-time token on the grant row, and deletes the row when the
-//! CLI polls. Rows written here carry `provider = 'platform'`.
+//! This is the flow `zeroship login` drives. Control owns the RFC 8628 pending
+//! rows and the polling discipline; the auth service owns issuance. Rows
+//! written here carry `provider = 'platform'`
+//! ([`zeroship_core::device_grant::PLATFORM_PROVIDER`]).
+//!
+//! Three steps, and the split between them is deliberate:
+//!
+//! 1. `/api/device/auth` mints the pending row and returns the user code plus
+//!    the `/device` page's absolute URL, derived from the configured platform
+//!    issuer so the URL the CLI prints is one the deployment actually serves.
+//! 2. Approval BINDS A PRINCIPAL to the row and nothing else. Two vehicles
+//!    reach it: a signed-in browser at the auth service's `/device` page, which
+//!    writes the row directly (it holds the session, and `principal_id` is a
+//!    `zeroship.users` id both services share), and `/api/device/approve` for a
+//!    Supabase deployment, where the browser holds a GoTrue bearer instead of a
+//!    zeroship session.
+//! 3. `/api/device/token` mints. The CLI's poll is what resolves the
+//!    principal's `zeroship.principal_grants`, caps the requested scopes to
+//!    them, asks the OP for a platform access token and hands it over.
+//!
+//! Minting at poll time rather than at approval time is what lets a browser
+//! approve without being able to mint: the approving vehicle needs no control
+//! credential, no master key, and no way to reach the OP's internal mint. It
+//! also means no access token is ever written to a row, so the grant table
+//! holds no secret at rest.
 //!
 //! This is NOT the OP's own device grant. `crates/auth/src/oidc/device_token.rs`
 //! implements RFC 8628 natively over the same `zeroship.device_grants` table
-//! under `provider = 'op'`, and the auth service's `/device` page drives that
-//! one. The `provider` column is what keeps the two apart.
-//!
-//! Known gap: the `verification_uri` this module returns points at that same
-//! `/device` page, and only its `AuthProviderKind::Supabase` arm posts back to
-//! `/api/device/approve`. On a platform-only deployment - the shipped default -
-//! nothing renders a page that can approve a `provider = 'platform'` row, so
-//! `zeroship login` gets a user code the browser leg cannot redeem. The
-//! endpoints below work; the browser leg does not exist yet.
+//! under `provider = 'op'`, and its approved rows are redeemed at the OP's
+//! `/oauth2/token` for an OIDC token. The `provider` column keeps the two
+//! apart, and the auth service's `/device` page dispatches on it.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,26 +41,42 @@ use chrono::{DateTime, Duration, Utc};
 use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, State};
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroship_core::auth::extract_bearer;
 use zeroship_core::auth_provider::{ProviderAuthz, VerifiedToken, VerifyTokenError};
-use zeroship_core::crypto;
+use zeroship_core::device_grant::{self, PLATFORM_PROVIDER};
 
 use crate::{identity_bridge, AppState};
 
 const DEVICE_CODE_BYTES: usize = 32;
 const DEVICE_TTL_SECS: i64 = 600;
 const POLL_INTERVAL_SECS: i64 = 5;
-const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_ATTEMPTS: usize = 8;
-const DEVICE_ACCESS_TOKEN_AAD_PREFIX: &[u8] =
-    b"zs:control:device_grant:platform_access_token:v1\0";
 const PLATFORM_MINT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const PLATFORM_TOKEN_ENDPOINT: &str = "/internal/platform-token";
 const DEPLOY_TOKEN_SCOPES: [&str; 3] = ["apps:deploy", "apps:read", "apps:write"];
+
+/// Lifetime of the deploy token `zeroship login` ends up holding.
+///
+/// The OP's default access-token lifetime is 15 minutes
+/// (`crates/auth/src/oidc/issuer.rs`), which is right for a browser session
+/// that can refresh silently and wrong for a CLI: this flow issues no refresh
+/// token, so a 15-minute deploy token means a human runs `zeroship login`
+/// again before most first deploys finish. A working day is the unit that
+/// matches the credential's actual use.
+///
+/// What bounds it: the token's `aud` is control's OAuth audience, so the
+/// gateway and app runtime do not accept it; its scope is capped to the
+/// principal's stored grants intersected with [`DEPLOY_TOKEN_SCOPES`], so it
+/// carries no admin or billing authority; and the CLI writes it 0600. What
+/// does NOT bound it is server-side revocation: `zeroship.token_revocations`
+/// is only ever written for per-app RP clients with a pairwise subject
+/// (`crates/control/src/oauth_grants_handlers.rs`), never for `zeroship-cli`
+/// with a principal subject, so nothing can kill this token early today.
+const DEPLOY_TOKEN_TTL_SECS: i64 = 12 * 60 * 60;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthRequest {
@@ -130,23 +159,34 @@ pub async fn device_auth(
     if client_id.is_empty() || client_id.len() > 128 {
         return bad_request("invalid_client_id");
     }
+    // Resolved BEFORE the first insert. A grant whose verification URI cannot
+    // be derived is a grant no human can approve, and leaving the row behind
+    // would only give the CLI something to poll forever.
+    let Some(verification_uri) = verification_uri(&state) else {
+        tracing::error!(
+            platform_issuer = state.auth_provider.platform_issuer().unwrap_or(""),
+            "control: platform issuer does not yield a /device page URL"
+        );
+        return internal_error();
+    };
 
     let scope = body.scope.as_deref().map(str::trim).filter(|s| !s.is_empty());
     for _ in 0..USER_CODE_ATTEMPTS {
         let device_code = generate_device_code();
         let device_code_hash = sha256_hex(&device_code);
-        let user_code = generate_user_code();
+        let user_code = device_grant::generate_user_code(&mut rand::rngs::OsRng);
         let inserted = match state
             .control_pg
             .query_opt(
                 "INSERT INTO zeroship.device_grants \
                     (device_code_hash, user_code, provider, scope, expires_at) \
-                 VALUES ($1, $2, 'platform', $3, NOW() + ($4::TEXT)::INTERVAL) \
+                 VALUES ($1, $2, $3, $4, NOW() + ($5::TEXT)::INTERVAL) \
                  ON CONFLICT DO NOTHING \
                  RETURNING user_code",
                 &[
                     &device_code_hash,
                     &user_code,
+                    &PLATFORM_PROVIDER,
                     &scope,
                     &format!("{DEVICE_TTL_SECS} seconds"),
                 ],
@@ -161,7 +201,6 @@ pub async fn device_auth(
         };
 
         if inserted.is_some() {
-            let verification_uri = verification_uri(&state);
             let verification_uri_complete =
                 verification_uri_complete(&verification_uri, &user_code);
             return web::HttpResponse::Ok().json(&DeviceAuthResponse {
@@ -179,6 +218,16 @@ pub async fn device_auth(
     internal_error()
 }
 
+/// Approve a pending platform grant with an explicit bearer.
+///
+/// This is the SUPABASE deployment's browser leg: the `/device` page there runs
+/// a GoTrue sign-in in the browser and posts the resulting bearer here, because
+/// the auth service holds no zeroship session for that user. On a platform-only
+/// deployment the browser is signed in to the auth service itself and the
+/// `/device` page binds the principal directly, without this endpoint.
+///
+/// Approval binds a principal and nothing more. The scope cap and the mint
+/// happen in [`device_token`], on the CLI's poll.
 pub async fn device_approve(
     state: State<Arc<AppState>>,
     req: web::HttpRequest,
@@ -194,75 +243,14 @@ pub async fn device_approve(
         Err(resp) => return resp,
     };
 
-    let user_code = normalize_user_code(&body.user_code);
-    if user_code.is_empty() {
+    let user_code = device_grant::normalize_user_code(&body.user_code);
+    if !device_grant::valid_user_code(&user_code) {
         return bad_request("invalid_user_code");
     }
-
-    let row = match state
-        .control_pg
-        .query_opt(
-            "SELECT device_code_hash, scope \
-             FROM zeroship.device_grants \
-             WHERE user_code = $1 \
-               AND provider = 'platform' \
-               AND status = 'pending' \
-               AND expires_at > NOW()",
-            &[&user_code],
-        )
-        .await
-    {
-        Ok(row) => row,
-        Err(err) => {
-            tracing::error!(error = %err, "control: device grant approve lookup failed");
-            return internal_error();
-        }
-    };
-    let Some(row) = row else {
-        return bad_request("invalid_user_code");
-    };
-    let device_code_hash: String = row.get("device_code_hash");
-    let requested_scope: Option<String> = row.get("scope");
 
     let principal_id = match device_approval_principal(&state, &verified).await {
         Ok(principal_id) => principal_id,
         Err(resp) => return resp,
-    };
-
-    let scopes = match deploy_scopes_for_principal(&state, principal_id, requested_scope.as_deref())
-        .await
-    {
-        Ok(scopes) => scopes,
-        Err(resp) => return resp,
-    };
-    let minted = match mint_platform_deploy_token(&state, principal_id, &scopes).await {
-        Ok(minted) => minted,
-        Err(resp) => return resp,
-    };
-    if minted.expires_in == 0 || minted.scope != scopes.join(" ") {
-        tracing::error!(
-            expires_in = minted.expires_in,
-            response_scope = %minted.scope,
-            expected_scope = %scopes.join(" "),
-            "control: platform token mint response metadata mismatch"
-        );
-        return internal_error();
-    }
-    if let Err(resp) =
-        verify_minted_platform_deploy_token(&state, principal_id, &scopes, &minted.access_token)
-            .await
-    {
-        return resp;
-    }
-
-    let key = crypto::derive_key(state.master_key.expose_secret());
-    let aad = device_access_token_aad(&device_code_hash);
-    let access_token_enc = match crypto::encrypt(&key, &aad, minted.access_token.as_bytes()) {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::error!(error = %err, "control: device access-token encrypt failed");
-            return internal_error();
-        }
     };
 
     let updated = match state
@@ -270,12 +258,12 @@ pub async fn device_approve(
         .execute(
             "UPDATE zeroship.device_grants \
              SET principal_id = $1, \
-                 platform_access_token_enc = $2, \
                  status = 'approved' \
-             WHERE device_code_hash = $3 \
+             WHERE user_code = $2 \
+               AND provider = $3 \
                AND status = 'pending' \
                AND expires_at > NOW()",
-            &[&principal_id, &access_token_enc, &device_code_hash],
+            &[&principal_id, &user_code, &PLATFORM_PROVIDER],
         )
         .await
     {
@@ -327,11 +315,11 @@ pub async fn device_token(
     };
     let row = match tx
         .query_opt(
-            "SELECT status, expires_at, last_polled_at, principal_id, platform_access_token_enc \
+            "SELECT status, expires_at, last_polled_at, principal_id, scope \
              FROM zeroship.device_grants \
-             WHERE device_code_hash = $1 AND provider = 'platform' \
+             WHERE device_code_hash = $1 AND provider = $2 \
              FOR UPDATE",
-            &[&device_code_hash],
+            &[&device_code_hash, &PLATFORM_PROVIDER],
         )
         .await
     {
@@ -413,37 +401,82 @@ pub async fn device_token(
             oauth_error(StatusCode::BAD_REQUEST, "access_denied")
         }
         "approved" => {
-            let Some(access_token_enc) = row.get::<_, Option<Vec<u8>>>("platform_access_token_enc")
-            else {
-                tracing::error!("control: approved device grant missing platform access token");
-                let _ = tx.rollback().await;
-                return internal_error();
-            };
             let Some(principal_id) = row.get::<_, Option<uuid::Uuid>>("principal_id") else {
                 tracing::error!("control: approved device grant missing principal_id");
                 let _ = tx.rollback().await;
                 return internal_error();
             };
-            let key = crypto::derive_key(state.master_key.expose_secret());
-            let aad = device_access_token_aad(&device_code_hash);
-            let access_token = match crypto::decrypt(&key, &aad, &access_token_enc)
-                .and_then(|plain| String::from_utf8(plain).map_err(|_| crypto::CryptoError::Decrypt))
+            let requested_scope: Option<String> = row.get("scope");
+
+            // A principal reaching this point has completed an interactive
+            // approval, which is the platform's definition of a creator. The
+            // grants are seeded once, marked by the identity link, so an
+            // operator who later revokes one does not get it back on the next
+            // login.
+            if let Err(resp) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        principal_id = %principal_id,
+                        "control: creator grant provisioning failed"
+                    );
+                    internal_error()
+                })
             {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::error!(error = %err, "control: device access-token decrypt failed");
+                let _ = tx.rollback().await;
+                return resp;
+            }
+
+            let scopes = match deploy_scopes_for_principal(
+                &tx,
+                principal_id,
+                requested_scope.as_deref(),
+            )
+            .await
+            {
+                Ok(scopes) => scopes,
+                Err(resp) => {
                     let _ = tx.rollback().await;
-                    return internal_error();
+                    return resp;
                 }
             };
-            let (expires_in, scope) = match platform_token_metadata(&access_token) {
-                Some(metadata) => metadata,
-                None => {
-                    tracing::error!("control: stored platform access token metadata parse failed");
+            // The mint is a bounded local call to the OP made while this row is
+            // still locked, so the grant stays exactly-once: a second poll
+            // blocks until this transaction resolves, and a failed mint rolls
+            // back to `approved` for the CLI's next poll rather than burning
+            // the grant.
+            let minted = match mint_platform_deploy_token(&state, principal_id, &scopes).await {
+                Ok(minted) => minted,
+                Err(resp) => {
                     let _ = tx.rollback().await;
-                    return internal_error();
+                    return resp;
                 }
             };
+            if minted.expires_in == 0 || minted.scope != scopes.join(" ") {
+                tracing::error!(
+                    expires_in = minted.expires_in,
+                    response_scope = %minted.scope,
+                    expected_scope = %scopes.join(" "),
+                    "control: platform token mint response metadata mismatch"
+                );
+                let _ = tx.rollback().await;
+                return internal_error();
+            }
+            if let Err(resp) = verify_minted_platform_deploy_token(
+                &state,
+                principal_id,
+                &scopes,
+                &minted.access_token,
+            )
+            .await
+            {
+                let _ = tx.rollback().await;
+                return resp;
+            }
+            let access_token = minted.access_token;
+            let expires_in = minted.expires_in;
+            let scope = minted.scope;
             if let Err(err) = tx
                 .execute(
                     "DELETE FROM zeroship.device_grants WHERE device_code_hash = $1",
@@ -462,7 +495,7 @@ pub async fn device_token(
             web::HttpResponse::Ok().json(&DeviceTokenResponse {
                 access_token,
                 token_type: "Bearer",
-                provider: "platform",
+                provider: PLATFORM_PROVIDER,
                 expires_in,
                 scope,
                 principal_id: principal_id.to_string(),
@@ -476,15 +509,6 @@ pub async fn device_token(
     }
 }
 
-#[must_use]
-pub fn device_access_token_aad(device_code_hash: &str) -> Vec<u8> {
-    let mut aad =
-        Vec::with_capacity(DEVICE_ACCESS_TOKEN_AAD_PREFIX.len() + device_code_hash.len());
-    aad.extend_from_slice(DEVICE_ACCESS_TOKEN_AAD_PREFIX);
-    aad.extend_from_slice(device_code_hash.as_bytes());
-    aad
-}
-
 /// This flow needs the PLATFORM OP, and nothing else.
 ///
 /// Everything downstream is platform-shaped: the grant row is written with
@@ -494,14 +518,23 @@ pub fn device_access_token_aad(device_code_hash: &str) -> Vec<u8> {
 /// precondition.
 ///
 /// The one Supabase-shaped arm downstream is the `GoTrueRole` branch of
-/// `device_approval_principal`, and it is not reachable from here: it needs a
-/// bearer GoTrue itself signed, which cannot verify unless a Supabase provider
-/// is configured, and it carries its own `supabase_url` guard regardless.
+/// [`device_approval_principal`], and it is not reachable from here. That is a
+/// property of the trusted SET, re-derived after `LegacyAuthProvider` was
+/// replaced by `AuthProvider::new(Vec<ConfiguredProvider>)`: the only producer
+/// of `ProviderAuthz::GoTrueRole` is `ConfiguredProvider::Supabase`
+/// (`crates/core/src/auth_provider/supabase.rs`), and `supabase_url()` answers
+/// `Some` for exactly the sets that hold a `ConfiguredProvider::Supabase`
+/// element. So a bearer that verifies as `GoTrueRole` proves the element is in
+/// the set, and the `supabase_url` guard inside that arm cannot be the branch
+/// that fires. Set SIZE does not change this - a set holding both backends
+/// still answers `Some` - which is why the argument survived the refactor even
+/// though its old form ("`LegacyAuthProvider` has one variant with a
+/// non-optional URL") named a type that no longer exists.
 ///
 /// So requiring a Supabase URL here protected nothing and blocked the shipped
-/// default. `ZEROSHIP_AUTH_PROVIDER` unset or `platform` builds
-/// `AuthProvider::Platform`, whose `supabase_url()` is `None` by construction,
-/// so `/api/device/auth` answered 400 on every default deployment and
+/// default. `ZEROSHIP_AUTH_PROVIDER` unset or `platform` builds a one-element
+/// platform set, whose `supabase_url()` is `None` by construction, so
+/// `/api/device/auth` answered 400 on every default deployment and
 /// `zeroship login` could not start. The clause is a leftover from
 /// `ensure_supabase_provider`, which this function replaced when the flow
 /// stopped being GoTrue-bound.
@@ -514,13 +547,12 @@ fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResp
 }
 
 async fn deploy_scopes_for_principal(
-    state: &AppState,
+    pg: &(impl compio_postgres::GenericClient + ?Sized),
     principal_id: uuid::Uuid,
     requested_scope: Option<&str>,
 ) -> Result<Vec<String>, web::HttpResponse> {
     let requested = requested_deploy_scope_set(requested_scope);
-    let rows = state
-        .control_pg
+    let rows = pg
         .query(
             "SELECT grant_name \
              FROM zeroship.principal_grants \
@@ -575,14 +607,26 @@ async fn mint_platform_deploy_token(
     let Some(platform_issuer) = state.auth_provider.platform_issuer() else {
         return Err(unsupported_provider());
     };
-    let url = format!("{}{}", platform_issuer.trim_end_matches('/'), PLATFORM_TOKEN_ENDPOINT);
+    // The mint route is mounted on the auth service's ROOT config
+    // (`crates/auth/src/server.rs` calls `oidc::device_token::configure(cfg)`
+    // outside the `/oauth2` scope), while the issuer this is derived from
+    // carries that scope. Appending the path to the issuer addressed
+    // `{public}/oauth2/internal/platform-token`, which 404s.
+    let Some(op_public_url) = device_grant::op_public_url(platform_issuer) else {
+        tracing::error!(
+            platform_issuer = %platform_issuer,
+            "control: platform issuer is not an OP issuer, so its mint endpoint cannot be derived"
+        );
+        return Err(internal_error());
+    };
+    let url = format!("{op_public_url}{PLATFORM_TOKEN_ENDPOINT}");
     let principal_id_string = principal_id.to_string();
     let body = PlatformMintRequest {
         principal_id: &principal_id_string,
         audience: &state.expected_oauth_audience,
         client_id: "zeroship-cli",
         scopes,
-        ttl_secs: None,
+        ttl_secs: Some(DEPLOY_TOKEN_TTL_SECS),
     };
     let body = serde_json::to_vec(&body).map_err(|err| {
         tracing::error!(error = %err, "control: platform token mint request encode failed");
@@ -685,22 +729,6 @@ async fn verify_minted_platform_deploy_token(
     Ok(())
 }
 
-fn platform_token_metadata(access_token: &str) -> Option<(u64, String)> {
-    let payload = access_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let exp = claims.get("exp")?.as_i64()?;
-    let scope = claims
-        .get("scope")
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    let now = Utc::now().timestamp();
-    Some((exp.saturating_sub(now).max(0) as u64, scope))
-}
-
 /// Verify the explicit bearer used for device approval.
 ///
 /// A verified platform OAuth access token or a verified GoTrue access token
@@ -717,7 +745,7 @@ async fn verified_device_approval_bearer(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let Some(token) = extract_bearer(header) else {
-        return Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"})));
+        return Err(unauthorized());
     };
     let verified = state
         .auth_provider
@@ -727,12 +755,10 @@ async fn verified_device_approval_bearer(
             VerifyTokenError::InactiveToken
             | VerifyTokenError::MissingSubject
             | VerifyTokenError::MissingIssuer
-            | VerifyTokenError::UnknownIssuer(_) => {
-                web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
-            }
+            | VerifyTokenError::UnknownIssuer(_) => unauthorized(),
             VerifyTokenError::PlatformVerification(err) => {
                 tracing::warn!(error = %err, "control: device approve platform bearer verify failed");
-                web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
+                unauthorized()
             }
         })?;
 
@@ -744,7 +770,7 @@ async fn verified_device_approval_bearer(
     if accepted {
         Ok(verified)
     } else {
-        Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"})))
+        Err(unauthorized())
     }
 }
 
@@ -753,11 +779,15 @@ async fn device_approval_principal(
     verified: &VerifiedToken,
 ) -> Result<uuid::Uuid, web::HttpResponse> {
     match &verified.provider_authz {
-        ProviderAuthz::OAuthScope(_) => uuid::Uuid::parse_str(&verified.provider_subject)
-            .map_err(|_| {
-                web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
-            }),
+        ProviderAuthz::OAuthScope(_) => {
+            uuid::Uuid::parse_str(&verified.provider_subject).map_err(|_| unauthorized())
+        }
         ProviderAuthz::GoTrueRole(_) => {
+            // LIVE, not dead: `verified` is only `GoTrueRole` when a Supabase
+            // element verified it, and that element is what makes
+            // `supabase_url()` answer `Some`, so this `else` cannot fire for a
+            // bearer that got this far. It stays because the coupling lives in
+            // another crate and nothing in the type system carries it.
             let Some(supabase_url) = state.auth_provider.supabase_url() else {
                 return Err(unsupported_provider());
             };
@@ -808,55 +838,35 @@ fn generate_device_code() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn generate_user_code() -> String {
-    let mut rng = rand::rngs::OsRng;
-    let mut chars = [0_u8; 8];
-    for ch in &mut chars {
-        let idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        *ch = USER_CODE_ALPHABET[idx];
-    }
-    format!(
-        "{}{}{}{}-{}{}{}{}",
-        chars[0] as char,
-        chars[1] as char,
-        chars[2] as char,
-        chars[3] as char,
-        chars[4] as char,
-        chars[5] as char,
-        chars[6] as char,
-        chars[7] as char
-    )
-}
-
-fn normalize_user_code(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .flat_map(char::to_uppercase)
-        .collect()
-}
-
 fn sha256_hex(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     hex::encode(digest)
 }
 
-fn verification_uri(state: &AppState) -> String {
-    let scheme = state.app_scheme();
-    let domain = state.app_base_domain.trim();
-    let domain = if domain.is_empty() {
-        "zeroship.ai"
-    } else {
-        domain
-    };
-    format!("{scheme}://auth.{domain}/device")
+/// Absolute URL of the page a human opens to approve the grant.
+///
+/// Derived from the CONFIGURED platform issuer, not from `app_base_domain`.
+/// The old `{scheme}://auth.{app_base_domain}/device` was a guess about where
+/// the auth service lives: it is right only when the deployment happens to
+/// front the OP at `auth.` under the app domain, and it ignored
+/// `ZEROSHIP_AUTH_PLATFORM_ISSUER` entirely - the one value that is already
+/// required to name the OP and is already validated at boot. Deriving it means
+/// the URL the CLI prints is served by the same origin whose tokens control
+/// verifies, by construction.
+fn verification_uri(state: &AppState) -> Option<String> {
+    let issuer = state.auth_provider.platform_issuer()?;
+    let public_url = device_grant::op_public_url(issuer)?;
+    Some(format!("{public_url}/device"))
 }
 
 fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String {
     let mut url = url::Url::parse(verification_uri).expect("verification URI is absolute");
     url.query_pairs_mut().append_pair("user_code", user_code);
     url.to_string()
+}
+
+fn unauthorized() -> web::HttpResponse {
+    web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
 }
 
 fn unsupported_provider() -> web::HttpResponse {
