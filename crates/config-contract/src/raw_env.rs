@@ -240,6 +240,44 @@ struct Reads<'a> {
     raw_literal_arguments: Vec<String>,
 }
 
+impl Reads<'_> {
+    /// Record a key declared inline by one of the reading macros.
+    ///
+    /// `declared_env!(class, "NAME", Consumer)` and its `_os` twin carry the
+    /// class as the first argument; `test_env!("NAME")` and its `_os` twin are
+    /// `test` by definition. Anything else is left alone.
+    fn collect_macro_declared_key(
+        &mut self,
+        macro_name: Option<&str>,
+        arguments: &Punctuated<Expr, Token![,]>,
+    ) {
+        let (class, name_index) = match macro_name {
+            Some("declared_env" | "declared_env_os") => {
+                let Some(Expr::Path(path)) = arguments.first() else {
+                    return;
+                };
+                let Some(class) = path.path.get_ident().map(ToString::to_string) else {
+                    return;
+                };
+                (class, 1)
+            }
+            Some("test_env" | "test_env_os") => ("test".to_owned(), 0),
+            _ => return,
+        };
+        if !matches!(
+            class.as_str(),
+            "external" | "test" | "dev" | "cli" | "build" | "creator" | "platform"
+        ) {
+            return;
+        }
+        if let Some(Expr::Lit(literal)) = arguments.get(name_index)
+            && let Lit::Str(value) = &literal.lit
+        {
+            self.declared_keys.push((class, value.value()));
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for Reads<'_> {
     /// Handle a raw read at the CALL, not at the callee path.
     ///
@@ -336,6 +374,13 @@ impl<'ast> Visit<'ast> for Reads<'_> {
         if let Ok(arguments) =
             mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
         {
+            // The ONE-LINE reading macros declare their key inline, so the
+            // `DeclaredEnvKey::<class>("NAME")` call the census looks for does
+            // not exist until macro expansion - which a source scan never sees.
+            // Missing this made the census report 5 platform-class names when
+            // the tree had many more, all of them in the ergonomic spelling
+            // every conversion was told to prefer.
+            self.collect_macro_declared_key(name.as_deref(), &arguments);
             for argument in &arguments {
                 self.visit_expr(argument);
             }
@@ -419,7 +464,10 @@ fn declared_key_class(segments: &[String]) -> Option<String> {
     let [.., type_name, method] = segments else {
         return None;
     };
-    if type_name != "DeclaredEnvKey" {
+    // A FAMILY prefix counts too: it is a declared, classified name shape, and
+    // leaving it out would make the census under-report exactly the open-ended
+    // case that is hardest to see.
+    if type_name != "DeclaredEnvKey" && type_name != "DeclaredEnvFamily" {
         return None;
     }
     matches!(
@@ -696,6 +744,64 @@ pub fn scan_sources_by_role(
         Ok(report)
     } else {
         Err(violations)
+    }
+}
+
+/// Collect every declared key literal, whatever else the sources violate.
+///
+/// [`scan_sources_by_role`] drops its report when it finds a violation, which
+/// is right for a gate and wrong for a census: while tracked blockers remain,
+/// the class counts would be unavailable exactly when someone might add to
+/// them. This walks the same syntax trees and answers only "which keys are
+/// declared, in which class".
+///
+/// # Errors
+///
+/// Returns a parse error for any source that is not Rust, and refuses an empty
+/// set for the same reason [`scan_sources_by_role`] does.
+pub fn collect_declared_keys(
+    sources: &[(String, String)],
+) -> Result<Vec<DeclaredKeySite>, Vec<RawEnvViolation>> {
+    if sources.is_empty() {
+        return Err(vec![RawEnvViolation::EmptyScan]);
+    }
+    let mut keys = Vec::new();
+    let mut errors = Vec::new();
+    for (name, source) in sources {
+        let file = match syn::parse_file(source) {
+            Ok(file) => file,
+            Err(error) => {
+                errors.push(RawEnvViolation::Parse(format!("{name}: {error}")));
+                continue;
+            }
+        };
+        let imports = Imports::default();
+        let mut reads = Reads {
+            imports: &imports,
+            role: FileRole::Ordinary,
+            violations: Vec::new(),
+            declared_keys: Vec::new(),
+            permitted_raw: Vec::new(),
+            raw_reads: 0,
+            raw_literal_arguments: Vec::new(),
+        };
+        reads.visit_file(&file);
+        keys.extend(
+            reads
+                .declared_keys
+                .into_iter()
+                .map(|(class, key)| DeclaredKeySite {
+                    file: name.clone(),
+                    class,
+                    name: key,
+                }),
+        );
+    }
+    if errors.is_empty() {
+        keys.sort();
+        Ok(keys)
+    } else {
+        Err(errors)
     }
 }
 

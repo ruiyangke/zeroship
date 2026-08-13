@@ -150,25 +150,12 @@ crate::declare_env_consumer!(
 /// `bunyan`. Unknown values fall back to `pretty`. When the env var
 /// is unset, we auto-detect: TTY stderr -> `pretty`, otherwise
 /// `json` (production-friendly).
-// WHY AN `unsafe_code` ALLOW ON A FUNCTION WITH NO `unsafe` IN IT.
-// `declared_env!` links each read site into linkme's `DECLARED_ENV_READS`, and
-// a distributed-slice element is a `static` carrying `#[link_section]`, which
-// rustc's `unsafe_code` lint denies (the workspace sets `unsafe_code = "deny"`).
-// Every other crate in the tree gets this for free, because there the expansion
-// comes from an EXTERNAL macro and the lint does not fire in external macro
-// output; inside `zeroship-core` the macro is local, so the deny reaches it.
-// Measured: without this attribute `cargo check -p zeroship-core --all-targets`
-// fails with two "declaration of a static with `link_section`" errors pointing
-// at the two calls below.
-// The scope is this function, so it cannot silence a real `unsafe` block
-// elsewhere, and there is no `unsafe` block here to silence.
-#[allow(unsafe_code)]
 pub fn init_tracing(default_filter: &str) {
     let filter = resolve_log_filter(
         crate::declared_env!(external, "RUST_LOG", TracingInitConsumer),
         default_filter,
     );
-    let format = crate::declared_env!(platform, "ZEROSHIP_LOG_FORMAT", TracingInitConsumer)
+    let format = crate::declared_env!(cli, "ZEROSHIP_LOG_FORMAT", TracingInitConsumer)
         .and_then(|raw| LogFormat::from_str(&raw).ok())
         .unwrap_or(LogFormat::Auto);
 
