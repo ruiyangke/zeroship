@@ -314,15 +314,26 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
   assert.equal(ops[5].existenceGuard, "ifExists");
 });
 
-test("INDEX: drop ignores author-declared uniqueness", () => {
+// Was "INDEX: drop ignores author-declared uniqueness", asserting the recorder
+// silently swallowed `unique` on a drop. It is now refused, along with every other
+// unknown key on an authoring call - the note that `as any` was needed to write it
+// at all is the tell: TypeScript already rejected this, and only the runtime let it
+// through. See the unknown-key refusal in `ops.ts`.
+test("INDEX: drop REFUSES author-declared uniqueness rather than ignoring it", () => {
+  assert.throws(
+    () => record(() => {
+      table("users").index("users_email_uniq").drop({ unique: true } as any);
+    }),
+    /does not accept "unique"/,
+    "an unknown key on a drop must be refused, not silently dropped",
+  );
+  // The supported shape still records, so the refusal is about the KEY and not
+  // about `drop` having become strict in some broader way.
   const ops = record(() => {
-    table("users").index("users_email_uniq").drop({ unique: true } as any);
+    table("users").index("users_email_uniq").drop({ ifExists: true });
   });
-  assert.deepEqual(ops[0], {
-    op: "dropIndex",
-    name: "users_email_uniq",
-    table: "users",
-  });
+  assert.equal(ops[0].op, "dropIndex");
+  assert.equal(ops[0].name, "users_email_uniq");
 });
 
 test("GUARD: no guard option ⇒ existenceGuard omitted", () => {

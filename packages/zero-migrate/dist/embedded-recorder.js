@@ -1230,6 +1230,7 @@ function enumType(name) {
       return handle;
     },
     drop(dropArgs = {}) {
+      rejectUnknownKeys(dropArgs, DROP_ENUM_KEYS, `enumType("${name}").drop(...)`);
       recordDropEnum(name, dropArgs);
       return handle;
     },
@@ -1249,6 +1250,7 @@ function __pgDomain(name) {
       return handle;
     },
     drop(args = {}) {
+      rejectUnknownKeys(args, DROP_DOMAIN_KEYS, `domain("${name}").drop(...)`);
       recordDropDomain(name, args);
       return handle;
     },
@@ -1345,6 +1347,7 @@ function __pgSequence(name) {
       return handle;
     },
     drop(args = {}) {
+      rejectUnknownKeys(args, DROP_SEQUENCE_KEYS, `sequence("${name}").drop(...)`);
       recordDropSequence(name, args);
       return handle;
     },
@@ -2500,6 +2503,16 @@ var RENAME_TABLE_KEYS = ["to", "ifExists", "schema"];
 var ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"];
 var DROP_COLUMN_KEYS = ["ifExists", "schema"];
 var RENAME_COLUMN_KEYS = ["to", "type", "schema"];
+var DROP_TABLE_KEYS = ["ifExists", "cascade", "schema"];
+var DROP_VIEW_KEYS = ["ifExists", "materialized", "schema"];
+var CREATE_VIEW_KEYS = ["as", "columns", "replace", "materialized", "schema"];
+var DROP_SEQUENCE_KEYS = ["schema", "ifExists"];
+var DROP_ENUM_KEYS = ["schema", "ifExists"];
+var DROP_DOMAIN_KEYS = ["schema", "ifExists"];
+var INDEX_DROP_KEYS = ["ifExists", "schema", "concurrently"];
+var INSERT_KEYS = ["rows", "onConflict", "schema"];
+var UPDATE_KEYS = ["set", "where", "schema"];
+var DELETE_KEYS = ["where", "limit", "schema"];
 var INDEX_ADD_KEYS = [
   "on",
   "unique",
@@ -3528,6 +3541,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       return handle;
     },
     drop(args = {}) {
+      rejectUnknownKeys(args, DROP_TABLE_KEYS, `table("${name}").drop(...)`);
       recordDropTable(name, {
         ifExists: args.ifExists,
         cascade: args.cascade,
@@ -3826,6 +3840,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, INDEX_DROP_KEYS, `table("${name}").index("${idxName}").drop(...)`);
           terminateSelector(id);
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
@@ -3844,14 +3859,17 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
     },
     // Table data (no existence guard; schema rides on args)
     insert(args) {
+      rejectUnknownKeys(args, INSERT_KEYS, `table("${name}").insert(...)`);
       recordInsert(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
     update(args) {
+      rejectUnknownKeys(args, UPDATE_KEYS, `table("${name}").update(...)`);
       recordUpdate(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
     delete(args) {
+      rejectUnknownKeys(args, DELETE_KEYS, `table("${name}").delete(...)`);
       recordDel(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
@@ -3938,6 +3956,7 @@ function view(name, opts = {}) {
   const dfltColumns = opts.columns;
   const handle = {
     create(args) {
+      rejectUnknownKeys(args, CREATE_VIEW_KEYS, `view("${name}").create(...)`);
       recordCreateView(name, {
         ...args,
         schema: pickSchema(args, dflt),
@@ -3946,6 +3965,7 @@ function view(name, opts = {}) {
       return handle;
     },
     drop(args = {}) {
+      rejectUnknownKeys(args, DROP_VIEW_KEYS, `view("${name}").drop(...)`);
       recordDropView(name, {
         ifExists: args.ifExists,
         materialized: args.materialized,
