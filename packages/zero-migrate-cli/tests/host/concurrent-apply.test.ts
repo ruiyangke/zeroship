@@ -44,10 +44,9 @@
 // What remains here is only the window before the objects exist at all, which is
 // why the second test below deliberately starts from a fresh project.
 //
-// The second test records that as TODAY's behaviour and is written to fail when
-// it improves. Deciding which catalog error codes are benign enough to swallow is
-// the judgement in that fix - swallow too broadly and a real failure is hidden -
-// so it is recorded rather than improvised.
+// The last test covers the other half of the same window: a non-read-only
+// `status` bootstraps the journal too, so fixing only the deploy verbs left a
+// reader able to break a deploy. Both now take their lock first.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
@@ -106,12 +105,26 @@ scope = { include = [${JSON.stringify(schema)}] }
   return work;
 }
 
-function spawnApply(work: string, schema: string): Promise<{ code: number | null; err: string }> {
+function spawnApply(work: string, schema: string) {
+  return spawnVerb(work, schema, "apply");
+}
+
+/** `status` bootstraps the journal too when it is not read-only, which is why it
+ *  belongs in a file about the bootstrap race. */
+function spawnStatus(work: string, schema: string) {
+  return spawnVerb(work, schema, "status");
+}
+
+function spawnVerb(
+  work: string,
+  schema: string,
+  verb: "apply" | "status",
+): Promise<{ code: number | null; err: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(
       process.execPath,
       [
-        "--import", "tsx", CLI_BIN, "apply",
+        "--import", "tsx", CLI_BIN, verb,
         "--dir", join(work, "migrations"),
         "--database-url", pgUrl(),
         "--policy", join(work, "policy.toml"),
@@ -183,7 +196,7 @@ test("racing applies never double-apply: one wins, the journal holds each versio
   }
 });
 
-test("TODAY a racing first deploy can fail with a raw PostgreSQL catalog error", async (ctx) => {
+test("a racing first deploy no longer fails with a raw PostgreSQL catalog error", async (ctx) => {
   const client = await connectLivePg(ctx);
   if (!client) return;
 
@@ -232,6 +245,69 @@ test("TODAY a racing first deploy can fail with a raw PostgreSQL catalog error",
         `no raw PostgreSQL catalog error may reach the operator; got: ${result.err}`,
       );
     }
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+/** A reader racing a deploy on a FRESH project, which is the other half of the same
+ *  bootstrap window and was left open when the deploy verbs were fixed.
+ *
+ *  A non-read-only `status` bootstraps the journal too. Serializing only the deploy
+ *  verbs left that bootstrap racing, and the raw catalog error landed on the DEPLOY
+ *  as readily as on the status - measured four times out of four, once with `apply`
+ *  itself exiting 1. Fixing one verb pair while another verb could still break a
+ *  deploy is not a fix, which is why this arm exists rather than a note saying
+ *  status was out of scope.
+ *
+ *  `status` still never waits: it takes the lock without blocking and returns the
+ *  busy reply when a deploy holds it. Both outcomes are legitimate here, so the
+ *  assertion is on the ERROR SHAPE rather than on the exit code - demanding
+ *  status=0 would forbid the busy reply, which is the correct answer for a reader
+ *  that arrived mid-deploy.
+ *
+ *  What may NOT happen is either process surfacing PostgreSQL's own catalog error,
+ *  and the deploy must still land its table. */
+test("a status racing a first deploy breaks neither", async (ctx) => {
+  const client = await connectLivePg(ctx);
+  if (!client) return;
+
+  const schema = uniqueNamespace("concurrent_status");
+  const meta = `${schema}_migrations`;
+  const work = project(schema);
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+
+    const [applied, status] = await Promise.all([
+      spawnApply(work, schema),
+      spawnStatus(work, schema),
+    ]);
+
+    for (const [label, result] of [
+      ["apply", applied],
+      ["status", status],
+    ] as const) {
+      assert.doesNotMatch(
+        result.err,
+        /duplicate key value violates unique constraint "pg_|tuple concurrently updated|already exists/,
+        `${label} must not surface a raw PostgreSQL catalog error: ${result.err}`,
+      );
+    }
+
+    // The deploy is the one that must not be collateral damage.
+    assert.equal(applied.code, 0, `the deploy must survive a concurrent status; ${applied.err}`);
+    const { rows } = await client.query(
+      `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1`,
+      [schema],
+    );
+    assert.equal(rows[0].n, 12, "and it must still have created every one of its tables");
   } finally {
     await client
       .query(

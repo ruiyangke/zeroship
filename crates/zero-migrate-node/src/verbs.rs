@@ -711,12 +711,15 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     read_only: bool,
 ) -> std::result::Result<StatusReply, String> {
     let charter_refs = charter_layer_refs(charter_layers);
-    if !read_only {
-        backend
-            .ensure_journal(cfg)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+    // The lock comes first here too. A non-read-only status BOOTSTRAPS the journal,
+    // and bootstrapping before the lock left it racing a concurrent deploy on a
+    // fresh project: measured four times out of four, and the raw catalog error
+    // landed on the DEPLOY as readily as on the status. Fixing only the deploy
+    // verbs left a status able to break a deploy.
+    //
+    // Still non-blocking: a contended acquisition returns the busy reply having
+    // bootstrapped nothing, which is the honest answer for a reader that arrived
+    // mid-deploy.
     match backend
         .try_acquire_project_lock(cfg)
         .await
@@ -728,6 +731,14 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     }
 
     let result = async {
+        // Inside the bracket: the release runs after this block, so bootstrapping
+        // outside it would leak the lock whenever the bootstrap failed.
+        if !read_only {
+            backend
+                .ensure_journal(cfg)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let snapshot = backend
             .snapshot_schema(cfg)
             .await
@@ -814,10 +825,8 @@ pub async fn legacy_status_with_locked_backend<B: MigrationBackend>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> std::result::Result<StatusReply, String> {
-    backend
-        .ensure_journal(cfg)
-        .await
-        .map_err(|error| error.to_string())?;
+    // Lock before bootstrap, for the reason the plan-aware verb above documents:
+    // bootstrapping first races a concurrent deploy on a fresh project.
     match backend
         .try_acquire_project_lock(cfg)
         .await
@@ -829,6 +838,11 @@ pub async fn legacy_status_with_locked_backend<B: MigrationBackend>(
     }
 
     let result = async {
+        // Inside the bracket, so a bootstrap failure still releases the lock.
+        backend
+            .ensure_journal(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
         let status = zero_migrate::ops::status::status_via_backend_locked(backend, cfg, migrations)
             .await
             .map_err(|error| error.to_string())?;
