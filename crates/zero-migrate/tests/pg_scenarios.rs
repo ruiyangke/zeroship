@@ -7336,3 +7336,219 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// A contract whose expand is not journaled is refused, and a contract that
+/// declares no expand at all is refused fail-closed.
+///
+/// The contract half of an online rename DROPS the dual-write trigger and then the
+/// source column. It is only safe because the expand half already created the
+/// destination column and backfilled it. Run a contract whose expand never landed
+/// and the drop takes the only copy of the data with it.
+///
+/// `check_expand_contract_gate` is what stands between those, and it had no test:
+/// `ExpandNotApplied` appears in the tree only at its definition and inside the
+/// gate itself.
+///
+/// Two arms, because the gate refuses for two different reasons and the second is
+/// a deliberate fail-closed the source calls out: a contract with an EMPTY
+/// `depends_on` "would otherwise pass vacuously", since the loop that checks the
+/// expand has nothing to iterate. That arm is the one a plausible refactor breaks,
+/// and it cannot be reached by supplying a well-formed rename.
+///
+/// Both arms assert the SOURCE COLUMN AND ITS DATA, not just the error. A refusal
+/// that still ran the contract would be the whole failure, and it is silent - the
+/// column is gone and the value with it.
+///
+/// The control applies the expand first and then the very same contract, without
+/// which both refusals hold equally on a build where a contract never applies.
+#[compio::test]
+async fn a_contract_whose_expand_never_landed_is_refused() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    use zero_migrate::driver::SqlSession;
+
+    let base = mig(
+        MigrationId::derive("gate_base", tok.as_bytes()),
+        "create_gate_users",
+        &format!(
+            "CREATE TABLE \"{}\".gate_users (id bigint PRIMARY KEY, email text)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("create the table");
+    session
+        .batch(&format!(
+            "INSERT INTO \"{}\".gate_users (id, email) VALUES (1, 'only@example.test')",
+            cfg.project_schema
+        ))
+        .await
+        .expect("seed the value the contract would destroy");
+
+    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "gate_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author the rename");
+
+    /// The seeded value, as the database holds it. `None` once the column is gone.
+    async fn source_value(session: &PgDevSession, schema: &str) -> Option<String> {
+        if !column_exists(session, schema, "gate_users", "email").await {
+            return None;
+        }
+        let row = session
+            .query_one(
+                &format!("SELECT email FROM \"{schema}\".gate_users WHERE id = 1"),
+                &[],
+            )
+            .await
+            .expect("read the source column");
+        row.try_get::<_, Option<String>>("email")
+            .expect("decode email")
+    }
+
+    // ARM 1. The contract alone, its expand never applied. This is the cross-deploy
+    // shape: deploy N+1 arrives carrying only the contract.
+    let err = apply(
+        &session,
+        &cfg,
+        &plan.contract,
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a contract whose expand never landed must be refused");
+    match &err {
+        ApplyError::ExpandNotApplied { version, expand } => {
+            assert!(
+                plan.contract
+                    .iter()
+                    .any(|m| m.version.as_str() == version.as_str()),
+                "the refusal must name one of the supplied contract steps: {version}"
+            );
+            assert!(
+                !expand.is_empty(),
+                "the refusal must name the expand it wanted"
+            );
+        }
+        other => panic!("expected ExpandNotApplied, got {other:?}"),
+    }
+    assert_eq!(
+        source_value(&session, &cfg.project_schema).await.as_deref(),
+        Some("only@example.test"),
+        "the refused contract must not have dropped the source column"
+    );
+
+    // ARM 2. A contract that declares no expand at all. The gate's loop would have
+    // nothing to iterate, so without the explicit empty check this passes
+    // vacuously.
+    //
+    // The step chosen here is the DROP COLUMN, deliberately. The other contract
+    // step drops the dual-write trigger, and with no expand applied there is no
+    // trigger to drop - `DROP TRIGGER IF EXISTS` makes a vacuous pass on that step
+    // physically harmless, so an arm built on it would report the guard as
+    // load-bearing while demonstrating nothing. This step is the one that takes the
+    // data.
+    let drop_column_step = plan
+        .contract
+        .iter()
+        .find(|m| m.up.contains("DROP COLUMN"))
+        .expect("the contract half includes the source-column drop");
+    let mut undeclared = drop_column_step.clone();
+    undeclared.depends_on.clear();
+    let err = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&undeclared),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a contract declaring no expand must be refused");
+    match &err {
+        ApplyError::ExpandNotApplied { version, expand } => {
+            assert_eq!(version.as_str(), undeclared.version.as_str());
+            assert!(
+                expand.contains("none declared"),
+                "the refusal must say the contract declared no expand, got {expand:?}"
+            );
+        }
+        other => panic!("expected ExpandNotApplied for the undeclared contract, got {other:?}"),
+    }
+    assert_eq!(
+        source_value(&session, &cfg.project_schema).await.as_deref(),
+        Some("only@example.test"),
+        "the vacuous-pass guard must also leave the column alone"
+    );
+
+    // THE CONTROL. Apply the expand, then the very same contract steps that were
+    // refused twice above. Now they are safe, and they run.
+    let engine = MigrationEngine::new();
+    let backend = PostgresBackend::new_generic(&session);
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                plan.clone(),
+            ))],
+            &["gate_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the expand applies");
+    assert_eq!(
+        source_value(&session, &cfg.project_schema).await.as_deref(),
+        Some("only@example.test"),
+        "the expand leaves the source column in place"
+    );
+    apply(
+        &session,
+        &cfg,
+        &plan.contract,
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect("with the expand journaled the same contract applies");
+    assert_eq!(
+        source_value(&session, &cfg.project_schema).await,
+        None,
+        "and it is the contract, once safe, that drops the source column"
+    );
+    let carried: String = session
+        .query_one(
+            &format!(
+                "SELECT email_address FROM \"{}\".gate_users WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read the destination column")
+        .try_get("email_address")
+        .expect("decode email_address");
+    assert_eq!(
+        carried, "only@example.test",
+        "the value survived into the destination the refusals were protecting"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
