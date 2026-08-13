@@ -622,3 +622,50 @@ tbody tr:hover { background: var(--surface-2); }
 .field-row-compact button { opacity: 0; transition: opacity 0.12s; }
 .field-row-compact:hover button,
 .field-row-compact:focus-within button { opacity: 1; }
+
+/* ── dashboard ───────────────────────────────────────────────────────── */
+/* Card chrome, matching the bug page's panels. These sections were the only
+   grouped content in the app rendered as bare text on the page background. */
+.dashboard-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+/* BOUNDED, for the same reason the group list is: an unbounded inbox pushes
+   the rest of the dashboard -- my bugs, the people I watch, saved searches --
+   off the bottom of the page. Fifty notifications is a screen and a half of
+   bullets before anything else begins. The count is stated because a scroll
+   container hides how much is inside it. */
+.notification-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-block-size: 22rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.notification-list > li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid transparent;
+}
+/* Unread is the state worth seeing at a glance; read fades back. */
+.notification-list > li.unread {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+.notification-list > li.read { color: var(--ink-faint); }
+.notification-list > li.read a { color: var(--ink-2); }
+.notification-body {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
