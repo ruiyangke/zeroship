@@ -4,8 +4,7 @@
 //! a fresh connection (via the `connect` helper), spawns the connection
 //! driver onto compio's runtime, and exercises one slice of the API.
 //!
-//! Every test works inside a private schema of its own (see `require    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())pg`), so
+//! Every test works inside a private schema of its own (see `require_pg`), so
 //! the suite runs at full parallelism against one database.
 //!
 //! Run with:

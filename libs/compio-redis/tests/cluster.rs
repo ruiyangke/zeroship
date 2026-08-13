@@ -1,5 +1,4 @@
-//! Clu    common::env::get(common::env::TestEnvKey::DragonflyClusterSeeds)
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())ter integration tests against a live 3-node Dragonfly.
+//! Cluster integration tests against a live 3-node Dragonfly.
 //!
 //! Bring up the cluster first:
 //!   docker compose -f deploy/compose/cluster.yml up -d
