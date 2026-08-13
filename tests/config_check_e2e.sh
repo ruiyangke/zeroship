@@ -495,6 +495,67 @@ else
 fi
 echo ""
 
+echo "=== Case 16: ONE auth-provider variable reaches BOTH auth and control ==="
+# The reason the merge exists. `ZEROSHIP_AUTH_PROVIDER=native` used to be
+# settable alongside `ZEROSHIP_CONTROL_AUTH_PROVIDER=supabase`: with a platform
+# issuer configured control silently widened its trust to accept both issuers,
+# and without one every authenticated request failed at REQUEST time. Neither
+# state was reported at boot. Two processes are the only vector that can
+# observe the agreement, so it is asserted here rather than in a unit test.
+run_cmd control-shared-provider env ZEROSHIP_AUTH_PROVIDER=supabase \
+    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
+show_last_output
+expect_status 0 "control exits 0 with the shared provider variable"
+expect_stdout_contains "auth_provider = supabase" "control reads ZEROSHIP_AUTH_PROVIDER"
+echo ""
+
+run_cmd auth-shared-provider env ZEROSHIP_AUTH_PROVIDER=supabase \
+    "$AUTH" --check-config "${AUTH_COMMON[@]}" \
+    --supabase-url https://project.supabase.co --supabase-anon-key anon
+show_last_output
+expect_status 0 "auth exits 0 with the shared provider variable"
+expect_stdout_contains "auth_provider = supabase" "auth reads the SAME ZEROSHIP_AUTH_PROVIDER"
+echo ""
+
+# The one-variable control for the pair above: with the variable UNSET both
+# binaries must report the same compiled default. Without this, two binaries
+# that ignored the variable and happened to default to `supabase` would pass.
+run_cmd control-default-provider "$CONTROL" --check-config \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
+show_last_output
+expect_stdout_contains "auth_provider = native" "control defaults to native, not supabase"
+echo ""
+
+run_cmd auth-default-provider "$AUTH" --check-config "${AUTH_COMMON[@]}"
+show_last_output
+expect_stdout_contains "auth_provider = native" "auth defaults to native, not supabase"
+echo ""
+
+echo "=== Case 17: the retired control-scoped provider spellings are refused ==="
+# `platform` was control's word for the state now spelled `native`, and
+# `[control] auth_provider` was its overlay key. Both must be gone, not
+# tolerated: a deployment that still carries either has to be told so at boot.
+run_cmd control-retired-provider-value env ZEROSHIP_AUTH_PROVIDER=platform \
+    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
+show_last_output
+expect_rejected "platform" "control rejects the retired provider value"
+echo ""
+
+cat >"$TMPDIR/retired-control-provider.toml" <<'TOML'
+[control]
+auth_provider = "platform"
+TOML
+run_cmd control-retired-provider-key "$CONTROL" --check-config \
+    --config "$TMPDIR/retired-control-provider.toml" \
+    "${CONTROL_COMMON[@]}" "${CONTROL_MASTER[@]}" \
+    --auth-platform-issuer http://platform.test/oauth2
+show_last_output
+expect_rejected "auth_provider" "control rejects the retired [control] auth_provider key"
+echo ""
+
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"
@@ -507,11 +568,12 @@ fi
 # run that asserted NOTHING would print "0 passed, 0 failed" and exit 0 -- the
 # shape already fixed in #279, #285, #294 and #316. The number is MEASURED, not
 # chosen: a full run on 2026-08-12 reported exactly 29, and 55 after cases
-# 13-15 extended coverage to worker and migrated on the same day.
+# 13-15 extended coverage to worker and migrated on the same day. Cases 16-17
+# (the shared auth-provider variable) took a measured run to 63.
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-55}"
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-63}"
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2

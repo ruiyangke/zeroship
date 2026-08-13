@@ -225,8 +225,11 @@ Audit: `ZEROSHIP_CONTROL_AUDIT_RETENTION_MONTHS` `ZEROSHIP_CONTROL_AUDIT_RETENTI
 Mail: `ZEROSHIP_CONTROL_MAILER` `CONTROL_RESEND_API_KEY` `ZEROSHIP_CONTROL_SMTP_HOST`
 `ZEROSHIP_CONTROL_SMTP_PORT` `ZEROSHIP_CONTROL_SMTP_USERNAME` `CONTROL_SMTP_PASSWORD`
 
+Provider selection: `ZEROSHIP_AUTH_PROVIDER` (`native` or `supabase`) - the same
+variable the auth service reads, see the shared table below
+
 Supabase (alternate auth provider): `ZEROSHIP_CONTROL_SUPABASE_JWKS_URL` `ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER`
-`SUPABASE_JWT_SECRET` `SUPABASE_SERVICE_ROLE_KEY`
+`SUPABASE_JWT_SECRET` `SUPABASE_SERVICE_ROLE_KEY` `SUPABASE_ANON_KEY`
 
 ### gateway (`crates/gateway`)
 
@@ -297,7 +300,7 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | `ZEROSHIP_ORIGIN_SCHEME` | control, gateway |
 | `ZEROSHIP_CONFIG`, `ZEROSHIP_NO_CONFIG` | auth, control, gateway, migrated, worker |
 | `ZEROSHIP_TRUST_PROXY` | control, gateway |
-| `ZEROSHIP_CONTROL_AUTH_PROVIDER` | control only. Auth has a SEPARATE identity, `ZEROSHIP_AUTH_PROVIDER` (`auth.provider`), because the two accept DIFFERENT value sets (`platform|supabase` against `native|supabase`); one name meaning two things is the drift this alignment removes rather than formalises |
+| `ZEROSHIP_AUTH_PROVIDER` | auth, control. `native` or `supabase`, one value for both: auth SERVES the provider and control VERIFIES its tokens. `native` means the platform's own OP is the issuer. Control used to have a separate `ZEROSHIP_CONTROL_AUTH_PROVIDER` spelling that state `platform`, so the pair could be set to disagree; it is gone, as is its `[control] auth_provider` overlay key |
 | `ZEROSHIP_AUTH_SUPABASE_URL` | auth, control |
 | `ZEROSHIP_AUTH_SUPABASE_ANON_KEY` | auth. Control reads the same deployment value through its own still-unconverted `SUPABASE_ANON_KEY`; the secret conversion joins them |
 | `HOSTNAME` | control, gateway, worker |
