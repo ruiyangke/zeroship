@@ -20,10 +20,9 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector,
+    Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -87,6 +86,14 @@ pub struct SchedulerSettings {
     #[config(name = "workflow_scheduler.tick_secs", default = DEFAULT_TICK_SECS)]
     pub tick_secs: Operational<u64>,
 
+    // Secrets last within the table, by convention.
+    /// `PostgreSQL` DSN for the scheduler timer and inflight tables.
+    ///
+    /// Secret-classed by grammar: a DSN admits userinfo. Its only flag is
+    /// `--database-url-file`, so the DSN cannot reach a process argument list.
+    #[config(name = "workflow_scheduler.database_url")]
+    pub database_url: Secret<String>,
+
     /// Interval in seconds between inflight-lease reaper sweeps.
     #[config(name = "workflow_scheduler.reaper_interval_secs", default = 30)]
     pub reaper_interval_secs: Operational<u64>,
@@ -128,31 +135,12 @@ impl ObservabilityControls for SchedulerSettings {
     }
 }
 
-/// zeroship-workflow-scheduler startup configuration.
-///
-/// No `#[derive(Debug)]`: `db` is a raw DSN awaiting the `Secret<T>` conversion.
-#[derive(Parser)]
-#[command(name = "zeroship-workflow-scheduler")]
-pub struct SchedulerCli {
-    /// `PostgreSQL` DSN for the scheduler store.
-    ///
-    /// STILL HAND-SPELLED. This is credential-bearing, so it belongs to the
-    /// `Secret<T>` conversion, where its clap carrier becomes a `--db-file`
-    /// path and its value moves to the canonical environment name.
-    #[arg(long, env = "WORKFLOW_SCHEDULER_DB", default_value = "", hide_env_values = true)]
-    pub db: String,
-
-    /// Every operational value, generated from one declaration above.
-    #[command(flatten)]
-    pub settings: SchedulerSettingsSources,
-}
-
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
     use zeroship_core::config::GeneratedConfig;
 
-    use super::{SchedulerCli, SchedulerSettings, SchedulerSettingsSources};
+    use super::{SchedulerSettings, SchedulerSettingsSources};
 
     #[test]
     fn the_hand_spelled_scheduler_env_family_is_gone() {
@@ -173,14 +161,32 @@ mod tests {
         }
         assert!(envs.contains(&"ZEROSHIP_WORKFLOW_SCHEDULER_GATEWAY_URL".to_owned()));
 
-        // The one-variable control: `db` is deliberately NOT converted, and its
-        // old name is expected to still be there. Without this the assertion
-        // above would also pass on a build where nothing had an env at all.
-        let db_env = SchedulerCli::command()
-            .get_arguments()
-            .find(|arg| arg.get_id() == "db")
-            .and_then(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()));
-        assert_eq!(db_env, Some("WORKFLOW_SCHEDULER_DB".to_owned()));
+        // The DSN was the last hand-spelled name here, and the last consumer of
+        // the `WORKFLOW_SCHEDULER_*` family. It is converted now, so the
+        // assertion above covers it too - and the family must be GONE, not
+        // merely unused: a deployment still setting WORKFLOW_SCHEDULER_DB has to
+        // find that out, and nothing else in this binary would tell it.
+        //
+        // The DSN is read through the SPECS, not through clap: a secret carries
+        // no `env` on its clap carrier, because putting one there would give a
+        // secret a clap-visible value source. Deriving the name set from the
+        // Command alone therefore CANNOT see a secret, which is exactly the
+        // blind spot this line closes.
+        let declared = SchedulerSettings::SPECS
+            .iter()
+            .filter_map(|spec| spec.env_name())
+            .collect::<Vec<_>>();
+        assert!(declared.contains(&"ZEROSHIP_WORKFLOW_SCHEDULER_DATABASE_URL".to_owned()));
+        for env in envs.iter().chain(declared.iter()) {
+            assert!(
+                !env.starts_with("WORKFLOW_SCHEDULER_"),
+                "the unprefixed family survives: {env}"
+            );
+        }
+        let error =
+            SchedulerSettingsSources::try_parse_from(["zeroship-workflow-scheduler", "--db", "x"])
+                .expect_err("the DSN value flag must not exist");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

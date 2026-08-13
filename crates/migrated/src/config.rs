@@ -8,10 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector,
+    Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -74,6 +73,38 @@ pub struct MigratedSettings {
     /// JWKS URL for the platform OP. Defaults to `{issuer}/.well-known/jwks.json`.
     #[config(shared = AUTH_PLATFORM_JWKS_URL, default = String::new())]
     pub auth_platform_jwks_url: Operational<String>,
+
+    /// PEM/PKCS#8 signing key FILE for PAT verification.
+    ///
+    /// A PATH, not key material, and it stays one. The loader sniffs PEM versus
+    /// DER and refuses a group- or world-readable file; reading the contents
+    /// into an in-memory secret would drop the permission check and make a DER
+    /// key unrepresentable. A path to a secret is not itself a secret.
+    #[config(name = "migrated.signing_key_file", default = PathBuf::new())]
+    pub signing_key_file: Operational<PathBuf>,
+
+    // Secrets last within the table, by convention. Each generates ONE
+    // `--<name>-file` path flag and no value flag, so none of them can reach a
+    // process argument list.
+    /// `PostgreSQL` DSN for control-plane authz data.
+    ///
+    /// Secret-classed by grammar: a DSN admits userinfo, so the type cannot
+    /// depend on whether a particular deployment's value happens to carry a
+    /// password.
+    #[config(name = "migrated.database_url")]
+    pub database_url: Secret<String>,
+
+    /// Privileged `PostgreSQL` DSN used to provision/apply per-app migrations.
+    #[config(name = "migrated.provision_database_url")]
+    pub provision_database_url: Secret<String>,
+
+    /// Admin/control API shared secret.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
+    /// HMAC key used to seal server-composed migration policy profiles.
+    #[config(name = "migrated.policy_seal_key")]
+    pub policy_seal_key: Secret<String>,
 }
 
 impl OverlaySelector for MigratedSettingsSources {
@@ -96,65 +127,19 @@ impl ObservabilityControls for MigratedSettings {
     }
 }
 
-/// zeroship-migrated startup configuration.
-///
-/// Only the credential-bearing fields remain; every operational value is
-/// generated above. No `#[derive(Debug)]`: what is left IS the raw-secret set.
-#[derive(Parser)]
-#[command(name = "zeroship-migrated")]
-pub struct MigratedCli {
-    /// PostgreSQL DSN for control-plane authz data.
-    #[arg(
-        long = "db",
-        env = "DATABASE_URL",
-        default_value = "postgres://localhost/zeroship",
-        hide_env_values = true
-    )]
-    pub db: String,
-
-    /// Privileged PostgreSQL DSN used to provision/apply per-app migrations.
-    #[arg(
-        long = "provision-db",
-        env = "PROVISION_DATABASE_URL",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pub provision_db: String,
-
-    /// Admin/control API shared secret, reserved for convergence with the service mesh wiring.
-    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
-    pub control_key: String,
-
-    /// PEM/PKCS#8 signing key file for PAT verification.
-    #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
-    pub signing_key_file: String,
-
-    /// HMAC key used to seal server-composed migration policy profiles.
-    #[arg(
-        long = "policy-seal-key",
-        env = "MIGRATED_POLICY_SEAL_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pub policy_seal_key: String,
-
-    /// Every operational value, generated from one declaration above.
-    #[command(flatten)]
-    pub settings: MigratedSettingsSources,
-}
 
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{MigratedCli, MigratedSettingsSources};
+    use super::MigratedSettingsSources;
 
     #[test]
     fn migrated_now_carries_the_same_bootstrap_controls_as_its_siblings() {
         // Before this conversion migrated had no --config, no --no-config and
         // no --check-config at all, which is why tests/config_check_e2e.sh
         // could not exercise it.
-        let cli = MigratedCli::try_parse_from([
+        let sources = MigratedSettingsSources::try_parse_from([
             "zeroship-migrated",
             "--check-config",
             "--no-config",
@@ -162,8 +147,8 @@ mod tests {
             "json",
         ])
         .expect("controls parse");
-        assert!(cli.settings.check_config);
-        assert!(cli.settings.no_config);
+        assert!(sources.check_config);
+        assert!(sources.no_config);
 
         // Does not cover what main.rs then does with them; that is asserted end
         // to end by tests/config_check_e2e.sh, which runs the real binary.
@@ -177,5 +162,43 @@ mod tests {
         ])
         .expect_err("deleted --dev-insecure flag must be rejected");
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    // Secrets get a PATH flag and no value flag, so material never reaches an
+    // argument list. The negative half is the point: the value spellings that
+    // existed before this conversion must be GONE, not merely discouraged.
+    #[test]
+    fn a_secret_has_a_path_flag_and_no_value_flag() {
+        let sources = MigratedSettingsSources::try_parse_from([
+            "zeroship-migrated",
+            "--policy-seal-key-file",
+            "/run/secrets/seal",
+            "--control-key-file",
+            "/run/secrets/control",
+        ])
+        .expect("path flags parse");
+        assert_eq!(
+            sources.policy_seal_key.as_deref(),
+            Some(std::path::Path::new("/run/secrets/seal"))
+        );
+        assert_eq!(
+            sources.control_key.as_deref(),
+            Some(std::path::Path::new("/run/secrets/control"))
+        );
+
+        for value_flag in ["--policy-seal-key", "--control-key", "--db", "--provision-db"] {
+            let error =
+                MigratedSettingsSources::try_parse_from(["zeroship-migrated", value_flag, "x"])
+                    .expect_err("a secret value flag must not exist");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{value_flag} still parses"
+            );
+        }
+
+        // Does NOT cover whether the paths are ever READ. Under --check-config
+        // they must not be, and that is asserted in core against the resolver
+        // and end to end by tests/config_check_e2e.sh.
     }
 }
