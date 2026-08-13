@@ -8,14 +8,15 @@
 
 use clap::Parser;
 use zeroship_core::config::{bootstrap_or_exit, CheckConfigReport, CheckValue};
-use zeroship_workflow_scheduler::config::{SchedulerCli, SchedulerSettings, DEFAULT_LOG_FILTER};
+use zeroship_workflow_scheduler::config::{
+    SchedulerSettings, SchedulerSettingsSources, DEFAULT_LOG_FILTER,
+};
 use zeroship_workflow_scheduler::STANDALONE_SCHEDULER_UNAVAILABLE;
 
 #[compio::main]
 async fn main() {
-    let cli = SchedulerCli::parse();
     let (settings, boot) = bootstrap_or_exit::<SchedulerSettings>(
-        cli.settings,
+        SchedulerSettingsSources::parse(),
         DEFAULT_LOG_FILTER,
         "workflow-scheduler",
     );
@@ -28,7 +29,10 @@ async fn main() {
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(boot.log_format.to_string()));
-        report.field("db_configured", CheckValue::Secret(!cli.db.is_empty()));
+        report.field(
+            "db_configured",
+            CheckValue::Secret(settings.database_url.is_configured()),
+        );
         report.field("schema", CheckValue::Plain(settings.schema.get().clone()));
         report.field(
             "gateway_url",
@@ -75,7 +79,7 @@ async fn main() {
     }
 
     tracing::error!(
-        db_configured = !cli.db.is_empty(),
+        db_configured = settings.database_url.is_configured(),
         schema = %settings.schema.get(),
         gateway_url = %settings.gateway_url.get(),
         control_apply_url = %settings.control_apply_url.get(),

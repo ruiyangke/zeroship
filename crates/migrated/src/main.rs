@@ -10,7 +10,7 @@ use zeroship_core::config::{
     bootstrap_or_exit, CheckConfigReport, CheckValue,
 };
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
-use zeroship_migrated::config::{MigratedCli, MigratedSettings, DEFAULT_LOG_FILTER};
+use zeroship_migrated::config::{MigratedSettings, MigratedSettingsSources, DEFAULT_LOG_FILTER};
 use zeroship_migrated::policy::ManagedPolicyConfig;
 use zeroship_migrated::MigrationServiceState;
 
@@ -18,9 +18,11 @@ use zeroship_migrated::MigrationServiceState;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = MigratedCli::parse();
-    let (settings, boot) =
-        bootstrap_or_exit::<MigratedSettings>(cli.settings, DEFAULT_LOG_FILTER, "migrated");
+    let (settings, boot) = bootstrap_or_exit::<MigratedSettings>(
+        MigratedSettingsSources::parse(),
+        DEFAULT_LOG_FILTER,
+        "migrated",
+    );
     let check_config = *settings.check_config.get();
     let tmp_dir = settings.tmp_dir.get().clone();
 
@@ -39,22 +41,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(boot.log_format.to_string()));
         report.field("tmp_dir", CheckValue::Plain(tmp_dir.display().to_string()));
-        report.field("db_configured", CheckValue::Secret(!cli.db.is_empty()));
+        report.field(
+            "db_configured",
+            CheckValue::Secret(settings.database_url.is_configured()),
+        );
         report.field(
             "provision_db_configured",
-            CheckValue::Secret(!cli.provision_db.trim().is_empty()),
+            CheckValue::Secret(settings.provision_database_url.is_configured()),
         );
         report.field(
             "control_key_configured",
-            CheckValue::Secret(!cli.control_key.is_empty()),
+            CheckValue::Secret(settings.control_key.is_configured()),
         );
         report.field(
             "signing_key_file_configured",
-            CheckValue::Secret(!cli.signing_key_file.is_empty()),
+            CheckValue::Secret(!settings.signing_key_file.get().as_os_str().is_empty()),
         );
         report.field(
             "policy_seal_key_configured",
-            CheckValue::Secret(!cli.policy_seal_key.is_empty()),
+            CheckValue::Secret(settings.policy_seal_key.is_configured()),
         );
         report.field(
             "policy_ceiling_version",
@@ -78,16 +83,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if cli.provision_db.trim().is_empty() {
+    // Every secret below is the RESOLVED material: on this path the run is not
+    // a dry run, so `resolve_secret_sources` has already dereferenced the path
+    // flag or the file reference that supplied it.
+    let database_url = settings.database_url.expose_str().to_owned();
+    let provision_database_url = settings.provision_database_url.expose_str().to_owned();
+    if provision_database_url.trim().is_empty() {
         tracing::error!(
-            "migrated: --provision-db / PROVISION_DATABASE_URL is required for per-app schema provisioning"
+            "migrated: --provision-database-url-file / ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL is required for per-app schema provisioning"
         );
         std::process::exit(1);
     }
 
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let control_key_present = !cli.control_key.is_empty();
+    let control_key_present = settings.control_key.is_configured();
     tracing::info!(
         bind = %settings.bind.get(),
         port = *settings.port.get(),
@@ -95,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tmp_dir = %tmp_dir.display(),
         "starting zeroship-migrated"
     );
-    let pat_issuer = match build_pat_issuer(&cli.signing_key_file) {
+    let pat_issuer = match build_pat_issuer(settings.signing_key_file.get()) {
         Ok(issuer) => Arc::new(issuer),
         Err(message) => {
             eprintln!("migrated: {message}");
@@ -123,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let policy_config = match build_policy_config(
-        &cli.policy_seal_key,
+        settings.policy_seal_key.expose_str(),
         *settings.policy_ceiling_version.get(),
     ) {
         Ok(config) => config,
@@ -142,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             let (control_pg, control_conn) =
-                compio_postgres::connect(&cli.db, NoTls).await.map_err(|err| {
+                compio_postgres::connect(&database_url, NoTls).await.map_err(|err| {
                     tracing::error!(error = %err, "migrated: control-pg connect failed");
                     std::io::Error::other(err.to_string())
                 })?;
@@ -169,8 +179,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
 
             let state = Arc::new(MigrationServiceState::new(
-                cli.provision_db,
-                cli.db,
+                provision_database_url,
+                database_url,
                 tmp_dir,
                 authenticator,
                 policy_config,
@@ -194,8 +204,8 @@ fn build_policy_config(
 ) -> Result<ManagedPolicyConfig, String> {
     if policy_seal_key.is_empty() {
         return Err(
-            "--policy-seal-key / MIGRATED_POLICY_SEAL_KEY is required for shared-infra \
-             migration policy sealing."
+            "--policy-seal-key-file / ZEROSHIP_MIGRATED_POLICY_SEAL_KEY is required for \
+             shared-infra migration policy sealing."
                 .to_string(),
         );
     }
@@ -226,16 +236,16 @@ fn build_auth_provider(
     Ok(AuthProvider::platform(PlatformProvider::new(config)))
 }
 
-fn build_pat_issuer(signing_key_file: &str) -> Result<zeroship_authn::PatIssuer, String> {
-    if signing_key_file.is_empty() {
+fn build_pat_issuer(signing_key_file: &std::path::Path) -> Result<zeroship_authn::PatIssuer, String> {
+    if signing_key_file.as_os_str().is_empty() {
         return Err(
-            "--signing-key-file / SIGNING_KEY_FILE is required for PAT verification."
+            "--signing-key-file / ZEROSHIP_MIGRATED_SIGNING_KEY_FILE is required for PAT \
+             verification."
                 .to_string(),
         );
     }
 
-    let signing_key =
-        zeroship_authn::load_signing_key_from_path(std::path::Path::new(signing_key_file))
+    let signing_key = zeroship_authn::load_signing_key_from_path(signing_key_file)
             .map_err(|err| format!("failed to load PAT signing key: {err}"))?;
     zeroship_authn::PatIssuer::new(&signing_key)
         .map_err(|err| format!("failed to initialize PAT issuer: {err}"))
@@ -249,9 +259,10 @@ mod tests {
 
     #[test]
     fn pat_signing_key_refuses_missing() {
-        let err = build_pat_issuer("").expect_err("missing signing key must fail closed");
+        let err = build_pat_issuer(std::path::Path::new(""))
+            .expect_err("missing signing key must fail closed");
 
-        assert!(err.contains("--signing-key-file / SIGNING_KEY_FILE"));
+        assert!(err.contains("--signing-key-file / ZEROSHIP_MIGRATED_SIGNING_KEY_FILE"));
     }
 
     #[test]
@@ -259,7 +270,7 @@ mod tests {
         let err = build_policy_config("", 1)
             .expect_err("missing policy seal key must fail closed");
 
-        assert!(err.contains("--policy-seal-key / MIGRATED_POLICY_SEAL_KEY"));
+        assert!(err.contains("--policy-seal-key-file / ZEROSHIP_MIGRATED_POLICY_SEAL_KEY"));
     }
 
     #[test]
@@ -284,7 +295,7 @@ mod tests {
     /// `crates/control/src/main.rs` for why a list would defeat the point.
     fn env_names_migrated_reads() -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
-        let command = <MigratedCli as clap::CommandFactory>::command();
+        let command = <MigratedSettingsSources as clap::CommandFactory>::command();
         for arg in command.get_arguments() {
             if let Some(env) = arg.get_env() {
                 names.insert(env.to_string_lossy().into_owned());
@@ -323,7 +334,7 @@ mod tests {
 
         let diagnostics = [
             build_auth_provider("", "").expect_err("missing issuer must fail closed"),
-            build_pat_issuer("").expect_err("missing signing key must fail closed"),
+            build_pat_issuer(std::path::Path::new("")).expect_err("missing signing key must fail closed"),
             build_policy_config("", 1).map(|_| ()).expect_err("missing seal key must fail closed"),
         ];
         for diagnostic in diagnostics {
