@@ -7776,3 +7776,200 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
     drop_schemas(&session, &full_cfg).await;
     drop_schemas(&session, &fresh_cfg).await;
 }
+
+/// The repeatable/versioned well-formedness pre-flight, over a live database.
+///
+/// `check_repeatable_wellformed` rejects three authoring shapes before the
+/// partition and before any execution. None of its three variants appeared
+/// anywhere in the tree outside the executor.
+///
+/// The first names its own hazard: a `repeatable` carrying `supersedes` is not
+/// merely odd, it is silently WRONG - "the partition routes it into the repeatable
+/// phase and its `supersedes` is silently dropped (never gated)", so the squash
+/// all-or-none gate never sees it and the superseded versions are never checked
+/// against what is applied.
+///
+/// The third exists to REPLACE a misleading error rather than to add one. A
+/// once-only migration depending on a repeatable can never be ordered, because
+/// repeatables run after all versioned migrations; without this check the
+/// repeatable is partitioned out of the set the ordering sees and the author gets
+/// `MissingDependency` - "your dependency does not exist" - about a migration
+/// sitting right there in the directory. So that arm asserts the error is the
+/// dedicated one AND that it is not `MissingDependency`; an arm that only accepted
+/// "some error" would pass on the exact regression this guards.
+///
+/// EVERY ARM SUPPLIES A WELL-FORMED COMPANION and requires that its table was NOT
+/// created. "Nothing applied" is vacuous when the batch holds only the malformed
+/// migration - the companion is what makes it mean the whole batch was refused
+/// before execution, which is what "pre-flight" claims.
+///
+/// The control applies a well-formed repeatable, without which all three refusals
+/// hold equally on a build where a repeatable never applies.
+#[compio::test]
+async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _guard = ensure_project_schema(&session, &cfg).await;
+
+    // A well-formed once-only migration that creates `companion`. Every arm
+    // supplies it, and no arm may let it run.
+    let companion = mig(
+        MigrationId::derive("rw_companion", tok.as_bytes()),
+        "create_companion",
+        &format!(
+            "CREATE TABLE \"{}\".companion (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    let reseal = |m: &mut Migration| {
+        m.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(m));
+    };
+
+    // ARM 1: a repeatable that also claims to supersede something.
+    let mut squashing_repeatable = mig(
+        MigrationId::derive("rw_sq", tok.as_bytes()),
+        "repeatable_that_squashes",
+        &format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\".rw_one (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    squashing_repeatable.flags.repeatable = true;
+    squashing_repeatable.supersedes = vec![companion.version.clone()];
+    reseal(&mut squashing_repeatable);
+
+    // ARM 2: a repeatable carrying a down.
+    let mut repeatable_with_down = mig(
+        MigrationId::derive("rw_down", tok.as_bytes()),
+        "repeatable_with_down",
+        &format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\".rw_two (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    repeatable_with_down.flags.repeatable = true;
+    repeatable_with_down.down = Some(format!(
+        "DROP TABLE IF EXISTS \"{}\".rw_two",
+        cfg.project_schema
+    ));
+    reseal(&mut repeatable_with_down);
+
+    // ARM 3: a once-only migration depending on a repeatable in the same set.
+    let mut plain_repeatable = mig(
+        MigrationId::derive("rw_rep", tok.as_bytes()),
+        "an_ordinary_repeatable",
+        &format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\".rw_three (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    plain_repeatable.flags.repeatable = true;
+    reseal(&mut plain_repeatable);
+    let mut dependent = mig(
+        MigrationId::derive("rw_dep", tok.as_bytes()),
+        "once_only_depending_on_a_repeatable",
+        &format!(
+            "CREATE TABLE \"{}\".rw_four (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    dependent.depends_on = vec![plain_repeatable.version.clone()];
+    reseal(&mut dependent);
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[companion.clone(), squashing_repeatable.clone()],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a repeatable carrying supersedes must be refused");
+    assert!(
+        matches!(&err, ApplyError::RepeatableCannotSquash { version }
+            if version.as_str() == squashing_repeatable.version.as_str()),
+        "expected RepeatableCannotSquash, got {err:?}"
+    );
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "companion").await,
+        "the refusal must precede execution of the whole batch"
+    );
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[companion.clone(), repeatable_with_down.clone()],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a repeatable carrying a down must be refused");
+    assert!(
+        matches!(&err, ApplyError::RepeatableHasDown { version }
+            if version.as_str() == repeatable_with_down.version.as_str()),
+        "expected RepeatableHasDown, got {err:?}"
+    );
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "companion").await,
+        "the refusal must precede execution of the whole batch"
+    );
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[
+            companion.clone(),
+            plain_repeatable.clone(),
+            dependent.clone(),
+        ],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a once-only migration depending on a repeatable must be refused");
+    match &err {
+        ApplyError::OnceOnlyDependsOnRepeatable {
+            version,
+            dependency,
+        } => {
+            assert_eq!(version.as_str(), dependent.version.as_str());
+            assert_eq!(dependency.as_str(), plain_repeatable.version.as_str());
+        }
+        // The whole point of this variant: without it the author is told the
+        // dependency does not exist, about a migration sitting in the same set.
+        ApplyError::MissingDependency { .. } => panic!(
+            "the dedicated error must beat MissingDependency, which would send the \
+             author looking for a migration that is right there: {err:?}"
+        ),
+        other => panic!("expected OnceOnlyDependsOnRepeatable, got {other:?}"),
+    }
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "companion").await,
+        "the refusal must precede execution of the whole batch"
+    );
+
+    // THE CONTROL. The same repeatable, well-formed, alongside the same companion.
+    apply(
+        &session,
+        &cfg,
+        &[companion.clone(), plain_repeatable.clone()],
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect("a well-formed repeatable applies");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "companion").await,
+        "the companion runs once nothing in the batch is malformed"
+    );
+    assert!(
+        table_exists(&session, &cfg.project_schema, "rw_three").await,
+        "and the repeatable itself really ran"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
