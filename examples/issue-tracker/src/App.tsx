@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
 import { useAsync } from "./components/rpc";
+import { EmptyState } from "./components/StateViews";
 import { BugDetailPage } from "./pages/BugDetail";
 import { BugListPage } from "./pages/BugList";
 import { DashboardPage } from "./pages/Dashboard";
@@ -18,7 +19,8 @@ export type Route =
   | { name: "new-bug" }
   | { name: "dashboard" }
   | { name: "products" }
-  | { name: "reports" };
+  | { name: "reports" }
+  | { name: "not-found"; path: string };
 
 export type RouteName = Route["name"];
 
@@ -39,7 +41,11 @@ function parseHash(hash: string): Route {
     case "reports":
       return { name: "reports" };
     default:
-      return { name: "bugs" };
+      // NOT a silent fall back to the bug list. An unknown hash used to render
+      // Bugs, so a mistyped or stale link answered with a plausible page and
+      // never said it had not found the one you asked for -- the worst kind of
+      // wrong, because nothing looks wrong.
+      return { name: "not-found", path: hash || "#/" };
   }
 }
 
@@ -51,6 +57,30 @@ function useHashRoute(): Route {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
   return route;
+}
+
+/**
+ * The page for a hash that matches nothing.
+ *
+ * It names the path it could not resolve. "Page not found" alone leaves you
+ * guessing whether the link was wrong or the app is broken; showing the hash
+ * back tells you which, and is the difference between a typo you can fix and
+ * a bug you would report.
+ */
+function NotFoundPage({ path }: { path: string }) {
+  return (
+    <div className="page">
+      <EmptyState
+        title="No page here"
+        hint={
+          <>
+            Nothing is routed at <code>{path}</code>. Try the{" "}
+            <a href="#/bugs">bug list</a>.
+          </>
+        }
+      />
+    </div>
+  );
 }
 
 function renderRoute(route: Route): ReactNode {
@@ -67,6 +97,8 @@ function renderRoute(route: Route): ReactNode {
       return <ProductsAdminPage />;
     case "reports":
       return <ReportsPage />;
+    case "not-found":
+      return <NotFoundPage path={route.path} />;
   }
 }
 
