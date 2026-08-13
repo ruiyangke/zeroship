@@ -76,6 +76,20 @@ function CommentRow({
     }
   };
 
+  /**
+   * Leave the editor without saving, and forget what was typed.
+   *
+   * There was no way out but the button labelled "Edit", and taking it kept
+   * the draft: reopening showed your abandoned changes sitting there looking
+   * like the comment's text. Discarding is the whole point of cancelling, so
+   * it is one function and both exits call it.
+   */
+  const cancelEditing = () => {
+    setDraft(comment.body);
+    setEditing(false);
+    setError(null);
+  };
+
   const togglePrivate = async () => {
     setBusy(true);
     setError(null);
@@ -140,7 +154,7 @@ function CommentRow({
             size="small"
             disabled={busy}
             aria-label={`Edit comment ${comment.commentNumber}`}
-            onClick={() => setEditing((v) => !v)}
+            onClick={() => (editing ? cancelEditing() : setEditing(true))}
           >
             Edit
           </Button>
@@ -162,9 +176,20 @@ function CommentRow({
       {editing ? (
         <div className="comment-edit">
           <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
-          <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
-            Save
-          </Button>
+          <Cluster gap={2} align="center">
+            <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
+              Save
+            </Button>
+            <Button
+              variant="plain"
+              size="small"
+              disabled={busy}
+              aria-label={`Cancel editing comment ${comment.commentNumber}`}
+              onClick={cancelEditing}
+            >
+              Cancel
+            </Button>
+          </Cluster>
         </div>
       ) : (
         <div className="comment-body">
