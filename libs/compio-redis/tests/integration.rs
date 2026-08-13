@@ -10,7 +10,7 @@ use compio_redis::{Client, Pool};
 mod common;
 
 fn test_url() -> Option<String> {
-    std::env::var("REDIS_TEST_URL").ok()
+    common::env::get(common::env::TestEnvKey::RedisTestUrl)
 }
 
 #[compio::test]

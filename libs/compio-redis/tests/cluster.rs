@@ -1,4 +1,5 @@
-//! Cluster integration tests against a live 3-node Dragonfly.
+//! Clu    common::env::get(common::env::TestEnvKey::DragonflyClusterSeeds)
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())ter integration tests against a live 3-node Dragonfly.
 //!
 //! Bring up the cluster first:
 //!   docker compose -f deploy/compose/cluster.yml up -d
@@ -13,8 +14,8 @@ use compio_redis::ClusterClient;
 mod common;
 
 fn seeds() -> Option<Vec<String>> {
-    std::env::var("DRAGONFLY_CLUSTER_SEEDS").ok().map(|s|
-        s.split(',').map(|x| x.trim().to_string()).collect())
+    common::env::get(common::env::TestEnvKey::DragonflyClusterSeeds)
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
 }
 
 fn seeds_refs(v: &[String]) -> Vec<&str> {
@@ -159,7 +160,7 @@ async fn non_cluster_redis_behavior_is_bounded() {
     //     fails with ClusterBootstrap.
     // We don't assert a specific variant — just that the failure is
     // observable and doesn't hang.
-    let Some(url) = std::env::var("REDIS_TEST_URL").ok() else {
+    let Some(url) = common::env::get(common::env::TestEnvKey::RedisTestUrl) else {
         common::skip("skip: REDIS_TEST_URL not set");
         return;
     };

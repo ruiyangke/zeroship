@@ -7,7 +7,11 @@
 //! identical is the MARKER TEXT: one search over a run log has to find every
 //! skip in the workspace, whichever side of that line it came from.
 
+pub mod env;
+
 use std::io::Write;
+
+use env::TestEnvKey;
 
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
@@ -19,7 +23,7 @@ pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
 
 pub fn require_live_backends() -> bool {
     matches!(
-        std::env::var(REQUIRE_LIVE_BACKENDS_ENV).ok().as_deref(),
+        env::get(TestEnvKey::RequireLiveBackends).as_deref(),
         Some("1")
     )
 }
