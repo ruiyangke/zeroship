@@ -123,7 +123,7 @@ pub async fn enroll(
         }
     }
 
-    let key = match totp::key_from_config(&cfg.secrets.totp_enc_key) {
+    let key = match totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "totp enc key misconfigured");
@@ -218,7 +218,7 @@ pub async fn confirm(
         return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
     }
 
-    let key = match totp::key_from_config(&cfg.secrets.totp_enc_key) {
+    let key = match totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "totp enc key misconfigured");
@@ -391,7 +391,7 @@ async fn verify_reauth(
 ) -> bool {
     // TOTP-code proof.
     if let Some(code) = code.filter(|c| !c.trim().is_empty()) {
-        if let Ok(key) = totp::key_from_config(&cfg.secrets.totp_enc_key) {
+        if let Ok(key) = totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
             if let Ok(secret) = totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
                 if totp::verify_code(&secret, code) {
                     return true;

@@ -16,6 +16,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{AccessTokenMint, Issuer};
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
 use zeroship_auth::server;
+use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_api_key;
@@ -111,8 +112,8 @@ impl Fixture {
         write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
 
         let mut cfg = test_auth_config(&db_url);
-        cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
-        cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
+        cfg.settings.refresh_hash_key_file = Operational::new(hash_key_file);
+        cfg.settings.refresh_idem_key_file = Operational::new(idem_key_file);
         let cfg = Arc::new(cfg);
         let cfg_state = cfg.clone();
         let db_state = db.clone();

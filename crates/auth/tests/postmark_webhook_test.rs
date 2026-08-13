@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::web;
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_mailer::suppressions;
 
 /// Build an `AuthConfig` for the webhook tests. Only the
@@ -29,23 +29,20 @@ use zeroship_mailer::suppressions;
 /// `parse_from` means new fields added in future phases land with
 /// their defaults — no fixture-sync churn.
 fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
-    let mut args: Vec<String> = vec![
-        "zeroship-auth".to_string(),
-        // Required by clap (no default on `--db-url`). Webhook tests
-        // bring their own pg client and only use AuthConfig for the
-        // basic-auth comparison, so any value parses.
-        "--db-url".to_string(),
-        String::new(),
-    ];
+    let mut args: Vec<String> = vec!["zeroship-auth".to_string()];
     if let Some(u) = user {
         args.push("--postmark-webhook-user".to_string());
         args.push(u.to_string());
     }
+    let mut cfg = AuthConfig::parse_from(args);
+    // The password is a secret and so has no value flag. Supplying it in the
+    // shape an in-memory literal resolves to keeps BOTH arms of this fixture
+    // representable: `None` stays the unsupplied secret the handler must 401 on.
     if let Some(p) = pass {
-        args.push("--postmark-webhook-password".to_string());
-        args.push(p.to_string());
+        cfg.settings.postmark_webhook_password =
+            Secret::supplied(SourceKind::Env, Some(p.to_string()));
     }
-    AuthConfig::parse_from(args)
+    cfg
 }
 
 /// Boot PG + register the `/webhooks/postmark` route. Returns `None` if

@@ -22,23 +22,40 @@ fn auth_bin() -> &'static str {
 /// Run the binary with a wiped environment (only PATH/HOME survive, mirroring the
 /// `env -i` discipline in `tests/config_check_e2e.sh`), capturing status+stdout.
 fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    run_auth_with_db("postgres://check-config", args)
+}
+
+/// [`run_auth`] with an explicit DSN for the secret-classed database URL.
+fn run_auth_with_db(
+    db_url: &str,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
     let path =
         zeroship_core::declared_env!(external, "PATH", zeroship_core::config::TestHarness)
             .unwrap_or_default();
     let home =
         zeroship_core::declared_env!(external, "HOME", zeroship_core::config::TestHarness)
             .unwrap_or_default();
+    // Secrets reach the process through their canonical environment names.
+    // There is no value flag to pass one on: a `Secret<T>` generates only a
+    // `-file` PATH flag, so credential material never enters an argument
+    // vector. An in-memory literal in the environment is resolved in BOTH
+    // modes, which is what keeps the strength guards running under
+    // --check-config.
     let out = Command::new(auth_bin())
-        .args([
-            "--stash-signing-key",
-            "test-stash-key-not-for-prod-32bytes!",
-            "--totp-enc-key",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        ])
         .args(args)
         .env_clear()
         .env("PATH", path)
         .env("HOME", home)
+        .env(
+            "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+            "test-stash-key-not-for-prod-32bytes!",
+        )
+        .env(
+            "ZEROSHIP_AUTH_TOTP_ENC_KEY",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .env("ZEROSHIP_AUTH_DATABASE_URL", db_url)
         .output()
         .expect("spawn zeroship-auth");
     (
@@ -57,8 +74,6 @@ fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
 fn check_config_short_circuits_before_relay_smtp_validation() {
     let (status, stdout, stderr) = run_auth(&[
         "--check-config",
-        "--db-url",
-        "postgres://check-config",
         // Explicit default — make the SMTP-host requirement unambiguous.
         "--relay-forward-mailer=smtp",
     ]);
@@ -89,8 +104,6 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
 fn check_config_short_circuits_before_transactional_smtp_validation() {
     let (status, stdout, stderr) = run_auth(&[
         "--check-config",
-        "--db-url",
-        "postgres://check-config",
         "--mailer=smtp",
         // Relay set to stdout so ONLY the transactional SMTP requirement is in play.
         "--relay-forward-mailer=stdout",
@@ -119,12 +132,11 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
 /// dry-run early-return, not deleted.
 #[test]
 fn real_boot_still_enforces_relay_smtp_host() {
-    let (status, stdout, stderr) = run_auth(&[
-        // NOTE: no --check-config — this is the real boot path.
-        "--db-url",
+    let (status, stdout, stderr) = run_auth_with_db(
         "postgres://127.0.0.1:1/unreachable-on-purpose",
-        "--relay-forward-mailer=smtp",
-    ]);
+        // NOTE: no --check-config - this is the real boot path.
+        &["--relay-forward-mailer=smtp"],
+    );
 
     assert!(
         !status.success(),

@@ -108,7 +108,7 @@ pub async fn start(
         String::new(),
         native_return_to,
     );
-    let cookie_value = stash.encode(cfg.secrets.stash_signing_key.as_bytes());
+    let cookie_value = stash.encode(cfg.settings.stash_signing_key.expose_str().as_bytes());
 
     let mut resp = HttpResponse::Found();
     resp.header(
@@ -153,7 +153,7 @@ pub async fn callback(
         .await;
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
-    let Some(stash) = OAuthStash::decode(&stash_blob, cfg.secrets.stash_signing_key.as_bytes()) else {
+    let Some(stash) = OAuthStash::decode(&stash_blob, cfg.settings.stash_signing_key.expose_str().as_bytes()) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -253,7 +253,7 @@ pub async fn callback(
         db.as_ref(),
         &profile,
         resume,
-        cfg.secrets.stash_signing_key.as_bytes(),
+        cfg.settings.stash_signing_key.expose_str().as_bytes(),
     )
     .await
     {

@@ -2,21 +2,19 @@
 
 use std::sync::Arc;
 
-use clap::Parser;
 use ntex::http::header::SET_COOKIE;
 use ntex::web;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::server;
+use zeroship_core::config::{Secret, SourceKind};
 
 fn test_config() -> Arc<AuthConfig> {
+    // Secrets carry no value flag; supply each in the shape an in-memory
+    // literal resolves to (see crates/auth/tests/common/mod.rs).
     let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
-        "--db-url",
-        "postgres://postgres:zeroship@localhost:5440/zeroship_p5d_test",
-        "--stash-signing-key",
-        "test-stash-key-not-for-prod-32bytes!",
         "--google-client-id",
         "test-google-client",
         "--github-client-id",
@@ -28,6 +26,14 @@ fn test_config() -> Arc<AuthConfig> {
         "--public-url",
         "http://auth.test",
     ]);
+    cfg.settings.database_url = Secret::supplied(
+        SourceKind::Env,
+        Some("postgres://postgres:zeroship@localhost:5440/zeroship_p5d_test".to_owned()),
+    );
+    cfg.settings.stash_signing_key = Secret::supplied(
+        SourceKind::Env,
+        Some("test-stash-key-not-for-prod-32bytes!".to_owned()),
+    );
     Arc::new(cfg)
 }
 

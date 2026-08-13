@@ -79,7 +79,7 @@ pub async fn run(cfg: Arc<AuthConfig>) {
     let interval_secs = *cfg.settings.audit_retention_check_secs.get();
     tracing::info!(interval_secs, "audit_retention cron starting");
     loop {
-        if let Err(e) = tick(&cfg.secrets.db_url).await {
+        if let Err(e) = tick(cfg.settings.database_url.expose_str()).await {
             tracing::error!(error = %e, "audit_retention tick failed");
         }
         compio::time::sleep(Duration::from_secs(interval_secs)).await;

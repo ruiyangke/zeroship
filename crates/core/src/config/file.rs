@@ -341,19 +341,25 @@ pub struct AuthSection {
     pub database_url: Option<String>,
     /// HMAC key for short-lived stash cookies.
     pub stash_signing_key: Option<String>,
-    /// Dedicated pairwise-salt secret for auth-issued subject identifiers.
-    pub pairwise_salt: Option<String>,
+    /// Pairwise-salt source FILE for auth-issued subject identifiers.
+    ///
+    /// A PATH, like every key file below it. The loaders read raw BYTES and
+    /// refuse a group- or world-readable file; a string leaf would reject
+    /// non-UTF-8 key material and would strip a trailing newline that
+    /// `derive_pairwise_salt` currently hashes, silently changing every derived
+    /// value. A path to a secret is not itself a secret.
+    pub pairwise_salt_file: Option<std::path::PathBuf>,
     /// TOTP at-rest encryption key (AES-256-GCM, >=32 decoded bytes).
     pub totp_enc_key: Option<String>,
-    /// Shared platform broker master secret. Must be byte-identical to the
-    /// gateway's.
-    pub broker_secret: Option<String>,
-    /// PREVIOUS broker master secret, accepted during a broker-secret roll.
-    pub broker_secret_previous: Option<String>,
-    /// Key hashing stored refresh tokens.
-    pub refresh_hash_key: Option<String>,
-    /// Key deriving refresh-rotation idempotency identifiers.
-    pub refresh_idem_key: Option<String>,
+    /// Shared platform broker master-secret FILE. Its bytes must be identical
+    /// to the gateway's broker secret.
+    pub broker_secret_file: Option<std::path::PathBuf>,
+    /// PREVIOUS broker master-secret FILE, accepted during a broker-secret roll.
+    pub broker_secret_previous_file: Option<std::path::PathBuf>,
+    /// Refresh-token HMAC keyring FILE (a multi-line `version:key` document).
+    pub refresh_hash_key_file: Option<std::path::PathBuf>,
+    /// Refresh-rotation idempotency AEAD key source FILE.
+    pub refresh_idem_key_file: Option<std::path::PathBuf>,
     /// Supabase service-role key used for admin lookups.
     pub supabase_service_role_key: Option<String>,
     /// HS256 GoTrue JWT secret. Mutually exclusive with the JWKS URL.

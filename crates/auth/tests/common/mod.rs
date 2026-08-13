@@ -20,13 +20,13 @@ pub mod mock_provider;
 
 use std::sync::Arc;
 
-use clap::Parser;
 use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
+use zeroship_core::config::{Secret, SourceKind};
 
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
@@ -59,18 +59,22 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
 /// Extra settings arrive as flags rather than as field writes, because a
 /// resolved `Operational<T>` has no setter: a test that reached past the
 /// resolver would be configuring a shape production never produces.
+///
+/// Secrets are the deliberate exception. A `Secret<T>` has NO value flag by
+/// construction - the whole point of the conversion is that credential material
+/// never reaches an argument vector - so a fixture can supply one only through a
+/// file, an environment variable, or the in-memory shape both of those resolve
+/// to. Files would need per-test temp-dir custody and the environment is
+/// process-global (a sibling test running concurrently would see it), so the
+/// fixture writes the resolved shape directly: `SourceKind::Env` with material,
+/// which is byte-for-byte what `ZEROSHIP_AUTH_STASH_SIGNING_KEY=<literal>`
+/// produces.
 #[allow(dead_code)]
 pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     let mut args: Vec<&str> = Vec::from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
-        "--db-url",
-        db_url,
-        "--stash-signing-key",
-        "test-stash-key-not-for-prod-32bytes!",
-        "--totp-enc-key",
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         // Admit the console origin so the framed login routes (/login, /signup,
         // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
         // model test pins this NEW contract.
@@ -85,7 +89,20 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     ]);
     args.extend_from_slice(extra);
     // `parse_from` runs the generated resolver, exactly as real boot does.
-    AuthConfig::parse_from(args)
+    let mut cfg = AuthConfig::parse_from(args);
+    cfg.settings.database_url = test_secret(db_url);
+    cfg.settings.stash_signing_key = test_secret("test-stash-key-not-for-prod-32bytes!");
+    cfg.settings.totp_enc_key =
+        test_secret("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    cfg
+}
+
+/// A secret in the shape an in-memory literal resolves to. See
+/// [`test_auth_config_with`] for why a fixture supplies secrets this way.
+#[allow(dead_code)]
+#[must_use]
+pub fn test_secret(material: &str) -> Secret<String> {
+    Secret::supplied(SourceKind::Env, Some(material.to_owned()))
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────

@@ -256,7 +256,7 @@ async fn post_native(
 /// against the signed copy.
 #[must_use]
 pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpResponse {
-    let cookie = stash.encode(cfg.secrets.stash_signing_key.as_bytes());
+    let cookie = stash.encode(cfg.settings.stash_signing_key.expose_str().as_bytes());
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
         return_to: &stash.return_to,
@@ -406,7 +406,7 @@ pub async fn post_2fa(
 
     // 2. Decode + verify the factor-1 challenge cookie.
     let Some(stash) = totp_challenge::parse_cookie(cookie_header)
-        .and_then(|raw| TotpChallenge::decode(&raw, cfg.secrets.stash_signing_key.as_bytes()))
+        .and_then(|raw| TotpChallenge::decode(&raw, cfg.settings.stash_signing_key.expose_str().as_bytes()))
     else {
         return redirect_to_login(&return_to);
     };
@@ -460,7 +460,7 @@ pub async fn post_2fa(
     };
 
     // 5a. Try the TOTP code first.
-    let key = match totp::key_from_config(&cfg.secrets.totp_enc_key) {
+    let key = match totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "totp enc key misconfigured");

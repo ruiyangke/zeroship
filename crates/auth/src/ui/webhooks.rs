@@ -93,7 +93,7 @@ pub async fn postmark(
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
         cfg.postmark_webhook_user(),
-        cfg.secrets.postmark_webhook_password.as_deref(),
+        cfg.settings.postmark_webhook_password.expose_secret().map(String::as_str),
     ) else {
         tracing::warn!("postmark webhook hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();
@@ -424,7 +424,7 @@ pub async fn relay_inbound(
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
         cfg.relay_inbound_user(),
-        cfg.secrets.relay_inbound_password.as_deref(),
+        cfg.settings.relay_inbound_password.expose_secret().map(String::as_str),
     ) else {
         tracing::warn!("relay-inbound hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();

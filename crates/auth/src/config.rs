@@ -2,12 +2,14 @@
 //!
 //! Three types, one job each:
 //!
-//! * [`AuthSettings`] is the generated declaration. Every operational value the
-//!   auth service resolves is spelled ONCE here, as a canonical name; its flag,
-//!   its `ZEROSHIP_AUTH_*` environment name and its overlay path are projected
-//!   from that name rather than written out again.
-//! * [`AuthCli`] is the command line: the generated carrier plus the secrets
-//!   that are still hand-spelled until the secret conversion converts them.
+//! * [`AuthSettings`] is the generated declaration. Every value the auth service
+//!   resolves - operational, secret and command control alike - is spelled ONCE
+//!   here, as a canonical name; its flag, its `ZEROSHIP_AUTH_*` environment name
+//!   and its overlay path are projected from that name rather than written out
+//!   again. A `Secret<T>` field generates a `-file` PATH flag and nothing else,
+//!   so no credential can travel through this process's argument vector.
+//! * [`AuthCli`] is the command line: the generated carrier under the binary's
+//!   own command name.
 //! * [`AuthConfig`] is the RESOLVED configuration the rest of the crate reads.
 //!   It exists because resolution is not purely mechanical here: the
 //!   frame-ancestor allowlist is filtered fail-closed against the issuer host
@@ -15,10 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser};
+use clap::Parser;
 use zeroship_core::config::{
     zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
     ConfigResolveError, GeneratedConfig, ObservabilityControls, Operational, OverlaySelector,
+    Secret,
 };
 use zeroship_core::observability::LogFormat;
 use zeroship_mailer::SmtpTls;
@@ -60,6 +63,14 @@ pub struct AuthSettings {
     #[config(name = "auth.addr", default = "127.0.0.1:9092".to_owned())]
     pub addr: Operational<String>,
 
+    /// `PostgreSQL` DSN for the auth service.
+    ///
+    /// Secret-classed on its GRAMMAR, not on whether a given value happens to
+    /// carry a password: a DSN admits userinfo, so one spelling of it must be
+    /// treated as credential-bearing everywhere.
+    #[config(name = "auth.database_url")]
+    pub database_url: Secret<String>,
+
     /// Platform auth provider backend.
     ///
     /// The canonical name is `auth.provider`, NOT `auth.auth_provider`: the
@@ -88,12 +99,55 @@ pub struct AuthSettings {
     /// `[auth]` rather than `[secrets]`. The visible consequence is that
     /// `--check-config` now prints whether it is set AND its value, like any
     /// other operational value.
-    #[config(name = "auth.supabase_anon_key", default = String::new())]
+    #[config(shared = AUTH_SUPABASE_ANON_KEY, default = String::new())]
     pub supabase_anon_key: Operational<String>,
+
+    /// Standard-Webhooks symmetric secret for `GoTrue`'s Send Email hook.
+    ///
+    /// Set this to the same `v1,whsec_<base64>` value supplied to `GoTrue` via
+    /// `GOTRUE_HOOK_SEND_EMAIL_SECRETS`. When unset, the hook endpoint
+    /// fail-closes with 401.
+    #[config(name = "auth.gotrue_email_hook_secret")]
+    pub gotrue_email_hook_secret: Secret<String>,
 
     /// Control-plane base URL used by browser-mediated auth flows.
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
     pub control_url: Operational<String>,
+
+    /// Shared internal control-plane bearer key. Auth uses this only to gate
+    /// control -> auth internal OP mint calls; it is never exposed to browser
+    /// flows.
+    ///
+    /// SHARED: one key authenticates the whole internal control surface, so
+    /// every consumer reads the same `ZEROSHIP_CONTROL_KEY` and the same
+    /// root-level overlay path.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
+    /// HMAC key (>=32 bytes) used to sign the short-lived federation stash
+    /// cookie (`__Host-zsidp_google_stash` etc.). A weak or absent value lets an
+    /// attacker forge stash cookies and bypass the `OAuth` state/PKCE check, so
+    /// production deployments MUST set it. There is no compiled default - a
+    /// secret cannot have one - and the startup strength guard rejects an unset
+    /// key with its own message.
+    #[config(name = "auth.stash_signing_key")]
+    pub stash_signing_key: Secret<String>,
+
+    /// AES-256-GCM key material for encrypting the TOTP shared secret at rest
+    /// (ISS-11). MUST decode (hex or base64url) to >=32 bytes - validated at
+    /// boot by `validate_master_key_material`, identical to the bundle/master
+    /// key posture. A weak or absent key means an attacker with DB read access
+    /// recovers every user's TOTP seed and can mint valid codes, so production
+    /// MUST set it. The encryption AAD binds the row's `user_id`, so a
+    /// ciphertext lifted onto another user's row fails to decrypt.
+    ///
+    /// OPERATOR NOTE: this is a DEDICATED key, NOT derived from the
+    /// stash/pairwise secrets, so 2FA seeds rotate independently of the
+    /// session-signing material. Rotating it without re-encrypting existing
+    /// `totp_credentials` rows invalidates every enrolled secret (users must
+    /// re-enroll).
+    #[config(name = "auth.totp_enc_key")]
+    pub totp_enc_key: Secret<String>,
 
     /// Console origin(s) allowed to FRAME the login/signup/consent documents.
     ///
@@ -110,6 +164,10 @@ pub struct AuthSettings {
     /// not registered (auth still boots).
     #[config(name = "auth.google_client_id", default = String::new())]
     pub google_client_id: Operational<String>,
+
+    /// Google OAuth 2.0 client secret. Unset leaves the Google arm disabled.
+    #[config(name = "auth.google_client_secret")]
+    pub google_client_secret: Secret<String>,
 
     /// Redirect URI registered with Google. Must match the value configured in
     /// the Google Cloud Console exactly.
@@ -159,6 +217,10 @@ pub struct AuthSettings {
     #[config(name = "auth.github_client_id", default = String::new())]
     pub github_client_id: Operational<String>,
 
+    /// GitHub OAuth App client secret. Unset leaves the GitHub arm disabled.
+    #[config(name = "auth.github_client_secret")]
+    pub github_client_secret: Secret<String>,
+
     /// Callback URL registered on the GitHub OAuth App. Must match what's set
     /// in the app's settings.
     #[config(
@@ -200,6 +262,10 @@ pub struct AuthSettings {
     #[config(name = "auth.mailer", default = "stdout".to_owned())]
     pub mailer: Operational<String>,
 
+    /// Resend API key (required when `--mailer=resend`).
+    #[config(name = "auth.resend_api_key")]
+    pub resend_api_key: Secret<String>,
+
     /// SMTP relay hostname (required when `--mailer=smtp`). Empty means unset.
     #[config(name = "auth.smtp_host", default = String::new())]
     pub smtp_host: Operational<String>,
@@ -212,6 +278,10 @@ pub struct AuthSettings {
     /// Empty means unset.
     #[config(name = "auth.smtp_username", default = String::new())]
     pub smtp_username: Operational<String>,
+
+    /// SMTP password (paired with `--smtp-username`).
+    #[config(name = "auth.smtp_password")]
+    pub smtp_password: Secret<String>,
 
     /// Transport encryption for the transactional SMTP leg:
     /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
@@ -266,6 +336,10 @@ pub struct AuthSettings {
     #[config(name = "auth.relay_inbound_user", default = String::new())]
     pub relay_inbound_user: Operational<String>,
 
+    /// HTTP Basic-auth password paired with [`Self::relay_inbound_user`].
+    #[config(name = "auth.relay_inbound_password")]
+    pub relay_inbound_password: Secret<String>,
+
     /// Relay-forward mailer driver: `smtp` (default - the forward path needs
     /// envelope-from control) | `stdout` (dev terminal). `resend` is REJECTED
     /// for this role (it cannot pin envelope-from, sub-spec §3.2/§5.2a). This
@@ -289,6 +363,10 @@ pub struct AuthSettings {
     #[config(name = "auth.relay_smtp_username", default = String::new())]
     pub relay_smtp_username: Operational<String>,
 
+    /// Relay-forward SMTP password (paired with `--relay-smtp-username`).
+    #[config(name = "auth.relay_smtp_password")]
+    pub relay_smtp_password: Secret<String>,
+
     /// Transport encryption for the relay-forward SMTP leg:
     /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
     /// `plaintext` (no TLS). Dev sinks (mailpit on :1025) use `plaintext`;
@@ -304,6 +382,80 @@ pub struct AuthSettings {
     /// succeed.
     #[config(name = "auth.postmark_webhook_user", default = String::new())]
     pub postmark_webhook_user: Operational<String>,
+
+    /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
+    /// See that field for the rationale.
+    #[config(name = "auth.postmark_webhook_password")]
+    pub postmark_webhook_password: Secret<String>,
+
+    // ---- key FILES ------------------------------------------------------
+    //
+    // Every field below names a PATH and stays `Operational<PathBuf>`, which is
+    // NOT an oversight: a path to a secret is not itself a secret, and each of
+    // these loaders does two things an in-memory `Secret<String>` cannot.
+    //
+    // 1. It reads RAW BYTES (`std::fs::read`) because the material may not be
+    //    UTF-8 - a PKCS#8 DER key, a 32-byte random salt, a raw broker master
+    //    secret. Routing that through a `String` would reject the documented
+    //    generation recipe (`head -c 32 /dev/urandom > file`), and the newline
+    //    trim every string-tier secret gets would silently change the value the
+    //    salt and broker derivations hash.
+    // 2. It calls `reject_insecure_permissions(path)` - the group/world-readable
+    //    refusal that mirrors OpenSSH's treatment of a private key. That check
+    //    has nothing to look at once the material is a string in memory, so
+    //    converting these would DELETE a live protection.
+    //
+    // See `oidc/signing.rs` (`load_ed25519_from_path`, `load_pairwise_salt_secret`,
+    // `load_broker_master_secret`) and `oidc/refresh.rs` (`read_secret_file`,
+    // `load_hash_keyring`). An empty path means "unset"; read each through the
+    // matching [`AuthConfig`] accessor, which returns `None` for one.
+    /// Platform OP Ed25519 private signing key file (PEM/PKCS#8 or DER).
+    ///
+    /// Required on real boot. The key is loaded into auth-service memory and
+    /// never stored in Postgres; `zeroship.signing_keys` receives only the
+    /// matching public JWK metadata.
+    #[config(name = "auth.signing_key_file", default = PathBuf::new())]
+    pub signing_key_file: Operational<PathBuf>,
+
+    /// Platform OP pairwise subject salt source file.
+    ///
+    /// Required on real boot. The file contents are fed through
+    /// `derive_pairwise_salt`, then used with `(user_id, sector_identifier)` to
+    /// mint cross-app-unlinkable `pws_...` subjects.
+    #[config(name = "auth.pairwise_salt_file", default = PathBuf::new())]
+    pub pairwise_salt_file: Operational<PathBuf>,
+
+    /// Platform broker master-secret source file.
+    ///
+    /// Required on real boot. Brokered `OAuth` clients do not store per-client
+    /// secret hashes; the OP derives a per-client broker secret from this
+    /// >=256-bit master secret and the `client_id`, then verifies the gateway's
+    /// presented secret on the authorization-code grant.
+    #[config(name = "auth.broker_secret_file", default = PathBuf::new())]
+    pub broker_secret_file: Operational<PathBuf>,
+
+    /// Previous platform broker master-secret source file for rotation.
+    ///
+    /// Optional. During a rolling rotation, code exchanges may authenticate
+    /// against either the current or previous broker master secret. Remove this
+    /// after every gateway has rolled to the current secret.
+    #[config(name = "auth.broker_secret_previous_file", default = PathBuf::new())]
+    pub broker_secret_previous_file: Operational<PathBuf>,
+
+    /// Refresh-token HMAC keyring file.
+    ///
+    /// The OP stores only HMAC-SHA256 refresh-token verifiers in Postgres.
+    /// This file is the out-of-DB keyring used to mint/verify those hashes, and
+    /// it is a MULTI-LINE `version:key` document, not one opaque value.
+    #[config(name = "auth.refresh_hash_key_file", default = PathBuf::new())]
+    pub refresh_hash_key_file: Operational<PathBuf>,
+
+    /// Refresh-token idempotency-cache AEAD key source file.
+    ///
+    /// Used only to seal the bounded lost-response retry cache stored on a
+    /// rotated predecessor row.
+    #[config(name = "auth.refresh_idem_key_file", default = PathBuf::new())]
+    pub refresh_idem_key_file: Operational<PathBuf>,
 
     /// Cron tick interval in seconds. Default 86400 (24 h). Operators
     /// drop this to seconds in staging/integration tests so a cron
@@ -340,189 +492,18 @@ impl ObservabilityControls for AuthSettings {
     }
 }
 
-/// The auth secrets still spelled by hand.
-///
-/// Every field here is credential-bearing and therefore belongs to the SECRET
-/// conversion, not this one: a `Secret<T>` declaration replaces the value flag
-/// with a generated `-file` path flag so the material never reaches an argument
-/// list. Converting them here would change the flag surface twice. They are
-/// flattened into [`AuthCli`] and MOVED into [`AuthConfig`], so each is spelled
-/// exactly once. `zeroship-auth --check-config` reports each by presence only,
-/// and [`AuthConfig`]'s hand-written `Debug` redacts every one.
-#[derive(Clone, Args)]
-pub struct AuthSecretSources {
-    /// `PostgreSQL` DSN.
-    #[arg(long, env = "AUTH_DB_URL", hide_env_values = true)]
-    pub db_url: String,
-
-    /// Standard-Webhooks symmetric secret for GoTrue's Send Email hook.
-    /// Set this to the same `v1,whsec_<base64>` value supplied to GoTrue via
-    /// `GOTRUE_HOOK_SEND_EMAIL_SECRETS`. When unset, the hook endpoint
-    /// fail-closes with 401.
-    #[arg(
-        long = "gotrue-email-hook-secret",
-        env = "AUTH_GOTRUE_EMAIL_HOOK_SECRET",
-        hide_env_values = true
-    )]
-    pub gotrue_email_hook_secret: Option<String>,
-
-    /// Shared internal control-plane bearer key. Auth uses this only to gate
-    /// control -> auth internal OP mint calls; it is never exposed to browser
-    /// flows.
-    #[arg(
-        long = "control-key",
-        env = "CONTROL_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pub control_key: String,
-
-    /// HMAC key (≥32 bytes recommended) used to sign the short-lived
-    /// federation stash cookie (`__Host-zsidp_google_stash` etc.). A weak
-    /// or default value lets an attacker forge stash cookies and bypass
-    /// the OAuth state/PKCE check, so production deployments MUST set
-    /// this explicitly. The empty default keeps secret material out of
-    /// `--help` and is rejected by the startup strength guard.
-    #[arg(
-        long,
-        env = "AUTH_STASH_SIGNING_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pub stash_signing_key: String,
-
-    /// AES-256-GCM key material for encrypting the TOTP shared secret at rest
-    /// (ISS-11). Sourced like every other auth secret (CLI/env > `[secrets]`
-    /// file reference). MUST decode (hex or base64url) to ≥32 bytes — validated
-    /// at boot by `validate_master_key_material`, identical to the bundle/master
-    /// key posture. A weak or absent key means an attacker with DB read access
-    /// recovers every user's TOTP seed and can mint valid codes, so production
-    /// MUST set it. The empty default keeps secret material out of `--help`
-    /// and is rejected by the startup strength guard. The encryption AAD binds
-    /// the row's `user_id`, so a
-    /// ciphertext lifted onto another user's row fails to decrypt.
-    ///
-    /// OPERATOR NOTE (flagged for review): this is a DEDICATED key, NOT derived
-    /// from the stash/pairwise secrets, so 2FA seeds rotate independently of the
-    /// session-signing material. Rotating it without re-encrypting existing
-    /// `totp_credentials` rows invalidates every enrolled secret (users must
-    /// re-enroll); add it to the `[secrets]` rotation grace path when key
-    /// rotation lands.
-    #[arg(
-        long = "totp-enc-key",
-        env = "AUTH_TOTP_ENC_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pub totp_enc_key: String,
-
-    /// Google OAuth 2.0 client secret.
-    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET", hide_env_values = true)]
-    pub google_client_secret: Option<String>,
-
-    /// GitHub OAuth App client secret.
-    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET", hide_env_values = true)]
-    pub github_client_secret: Option<String>,
-
-    /// SMTP password (paired with `--smtp-username`).
-    #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
-    pub smtp_password: Option<String>,
-
-    /// Resend API key (required when `--mailer=resend`).
-    #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
-    pub resend_api_key: Option<String>,
-
-    /// Platform OP Ed25519 private signing key file (PEM/PKCS#8 or DER).
-    ///
-    /// Required on real boot. The key is loaded into auth-service memory and
-    /// never stored in Postgres; `zeroship.signing_keys` receives only the
-    /// matching public JWK metadata.
-    #[arg(long = "auth-signing-key-file", env = "AUTH_SIGNING_KEY_FILE")]
-    pub auth_signing_key_file: Option<PathBuf>,
-
-    /// Platform OP pairwise subject salt source file.
-    ///
-    /// Required on real boot. The file contents are fed through
-    /// `derive_pairwise_salt`, then used with `(user_id, sector_identifier)` to
-    /// mint cross-app-unlinkable `pws_...` subjects.
-    #[arg(long = "auth-pairwise-salt-file", env = "AUTH_PAIRWISE_SALT_FILE")]
-    pub auth_pairwise_salt_file: Option<PathBuf>,
-
-    /// Platform broker master-secret source file.
-    ///
-    /// Required on real boot. Brokered OAuth clients do not store per-client
-    /// secret hashes; the OP derives a per-client broker secret from this
-    /// ≥256-bit master secret and the client_id, then verifies the gateway's
-    /// presented secret on the authorization-code grant.
-    #[arg(long = "auth-broker-secret-file", env = "AUTH_BROKER_SECRET_FILE")]
-    pub auth_broker_secret_file: Option<PathBuf>,
-
-    /// Previous platform broker master-secret source file for rotation.
-    ///
-    /// Optional. During a rolling rotation, code exchanges may authenticate
-    /// against either the current or previous broker master secret. Remove this
-    /// after every gateway has rolled to the current secret.
-    #[arg(
-        long = "auth-broker-secret-previous-file",
-        env = "AUTH_BROKER_SECRET_PREVIOUS_FILE"
-    )]
-    pub auth_broker_secret_previous_file: Option<PathBuf>,
-
-    /// Refresh-token HMAC keyring file.
-    ///
-    /// The OP stores only HMAC-SHA256 refresh-token verifiers in Postgres.
-    /// This file is the out-of-DB keyring used to mint/verify those hashes.
-    #[arg(long = "refresh-hash-key-file", env = "REFRESH_HASH_KEY_FILE")]
-    pub refresh_hash_key_file: Option<PathBuf>,
-
-    /// Refresh-token idempotency-cache AEAD key source file.
-    ///
-    /// Used only to seal the bounded lost-response retry cache stored on a
-    /// rotated predecessor row.
-    #[arg(long = "refresh-idem-key-file", env = "REFRESH_IDEM_KEY_FILE")]
-    pub refresh_idem_key_file: Option<PathBuf>,
-
-    /// HTTP Basic-auth password paired with [`Self::relay_inbound_user`].
-    #[arg(
-        long = "relay-inbound-password",
-        env = "AUTH_RELAY_INBOUND_PASSWORD",
-        hide_env_values = true
-    )]
-    pub relay_inbound_password: Option<String>,
-
-    /// Relay-forward SMTP password (paired with `--relay-smtp-username`).
-    #[arg(
-        long = "relay-smtp-password",
-        env = "AUTH_RELAY_SMTP_PASSWORD",
-        hide_env_values = true
-    )]
-    pub relay_smtp_password: Option<String>,
-
-    /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
-    /// See that field for the rationale.
-    #[arg(
-        long,
-        env = "AUTH_POSTMARK_WEBHOOK_PASSWORD",
-        hide_env_values = true
-    )]
-    pub postmark_webhook_password: Option<String>,
-}
-
 /// zeroship-auth command line.
 ///
-/// No `Debug`: [`AuthSecretSources`] carries raw credential material, and a
-/// derived `Debug` here would print it. The resolved [`AuthConfig`] has a
-/// hand-written redacting impl instead.
-#[derive(Clone, Parser)]
+/// `Debug` is safe to derive now: the generated carrier holds operational
+/// values and, for every secret, a file PATH - never the material in it. The
+/// hand-written redacting impl this type used to need went with the
+/// hand-spelled secret carrier.
+#[derive(Clone, Debug, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthCli {
-    /// Every operational value, generated from one declaration above.
+    /// Every value an auth launch resolves, generated from one declaration.
     #[command(flatten)]
     pub settings: AuthSettingsSources,
-
-    /// The secrets awaiting the secret conversion.
-    #[command(flatten)]
-    pub secrets: AuthSecretSources,
 }
 
 
@@ -631,13 +612,18 @@ fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
 /// type - it is enforced by every consumer reading the accessor, which is what
 /// `frame_ancestor_origins_are_filtered_before_any_consumer_sees_them` in this
 /// module's tests pins.
-#[derive(Clone)]
+///
+/// `Debug` is DERIVED. It used to be hand-written with a per-field
+/// `<redacted>` list, which is a list someone has to remember to extend; now
+/// every credential-bearing field is a `Secret<T>`, and that type cannot format
+/// its material - not the value, not a prefix, not its length. The one entry
+/// that survived the deletion in spirit is `supabase_anon_key`, which is
+/// deliberately NOT redacted: it is served to every browser that loads the
+/// GoTrue login, so calling it secret would claim a protection it does not have.
+#[derive(Clone, Debug)]
 pub struct AuthConfig {
-    /// Every operational value, resolved from CLI, environment, overlay, default.
+    /// Every resolved value: operational, secret, and command control.
     pub settings: AuthSettings,
-
-    /// The secrets, moved off the command line unchanged.
-    pub secrets: AuthSecretSources,
 
     /// Frame-ancestor origins AFTER the concrete + same-site filter.
     frame_ancestor_origins: Vec<String>,
@@ -659,10 +645,7 @@ impl AuthConfig {
     /// # Errors
     ///
     /// Returns a message naming the missing Supabase inputs.
-    pub fn from_resolved(
-        settings: AuthSettings,
-        secrets: AuthSecretSources,
-    ) -> Result<Self, String> {
+    pub fn from_resolved(settings: AuthSettings) -> Result<Self, String> {
         // The auth issuer host the SameSite=Strict `__Host-zsidp_csrf` cookie is
         // scoped to. Every admitted frame-ancestor MUST be same-site (eTLD+1)
         // with it (review finding I7) - otherwise the Strict cookie is withheld
@@ -690,7 +673,6 @@ impl AuthConfig {
 
         let resolved = Self {
             settings,
-            secrets,
             frame_ancestor_origins,
         };
 
@@ -740,7 +722,7 @@ impl AuthConfig {
     pub fn try_from_cli(cli: AuthCli, overlay: Option<&toml::Value>) -> Result<Self, String> {
         let settings = AuthSettings::resolve_config(cli.settings, overlay)
             .map_err(|err: ConfigResolveError| err.to_string())?;
-        Self::from_resolved(settings, cli.secrets)
+        Self::from_resolved(settings)
     }
 
     /// Parse and resolve with no overlay, panicking on invalid input.
@@ -859,6 +841,42 @@ impl AuthConfig {
         self.settings.public_url.get().trim_end_matches('/').to_string()
     }
 
+    /// Platform OP Ed25519 signing key file; `None` when unset.
+    #[must_use]
+    pub fn signing_key_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.signing_key_file.get())
+    }
+
+    /// Pairwise-subject salt source file; `None` when unset.
+    #[must_use]
+    pub fn pairwise_salt_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.pairwise_salt_file.get())
+    }
+
+    /// Broker master-secret source file; `None` when unset.
+    #[must_use]
+    pub fn broker_secret_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.broker_secret_file.get())
+    }
+
+    /// PREVIOUS broker master-secret source file; `None` outside a rotation.
+    #[must_use]
+    pub fn broker_secret_previous_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.broker_secret_previous_file.get())
+    }
+
+    /// Refresh-token HMAC keyring file; `None` when unset.
+    #[must_use]
+    pub fn refresh_hash_key_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.refresh_hash_key_file.get())
+    }
+
+    /// Refresh idempotency-cache AEAD key file; `None` when unset.
+    #[must_use]
+    pub fn refresh_idem_key_file(&self) -> Option<&Path> {
+        non_empty_path(self.settings.refresh_idem_key_file.get())
+    }
+
     /// Public issuer URL for the self-contained OAuth/OIDC provider.
     ///
     /// Protocol endpoints are mounted under the fixed `/oauth2` prefix so the
@@ -882,47 +900,12 @@ fn non_empty(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-impl std::fmt::Debug for AuthConfig {
-    /// Hand-written so secrets (DSN, stash/OAuth/SMTP/Resend keys, webhook
-    /// creds) never appear in `{:?}` output. The derive would print raw
-    /// `String` secrets in plaintext (S2), so it is deliberately absent.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthConfig")
-            .field("settings", &self.settings)
-            .field("frame_ancestor_origins", &self.frame_ancestor_origins)
-            .field("db_url", &"<redacted>")
-            .field("supabase_anon_key", &"<redacted>")
-            .field("gotrue_email_hook_secret", &"<redacted>")
-            .field("control_key", &"<redacted>")
-            .field("stash_signing_key", &"<redacted>")
-            .field("totp_enc_key", &"<redacted>")
-            .field("google_client_secret", &"<redacted>")
-            .field("github_client_secret", &"<redacted>")
-            .field("smtp_password", &"<redacted>")
-            .field("resend_api_key", &"<redacted>")
-            .field(
-                "auth_signing_key_file",
-                &self.secrets.auth_signing_key_file,
-            )
-            .field(
-                "auth_pairwise_salt_file",
-                &self.secrets.auth_pairwise_salt_file,
-            )
-            .field(
-                "auth_broker_secret_file",
-                &self.secrets.auth_broker_secret_file,
-            )
-            .field(
-                "auth_broker_secret_previous_file",
-                &self.secrets.auth_broker_secret_previous_file,
-            )
-            .field("refresh_hash_key_file", &self.secrets.refresh_hash_key_file)
-            .field("refresh_idem_key_file", &self.secrets.refresh_idem_key_file)
-            .field("postmark_webhook_password", &"<redacted>")
-            .field("relay_inbound_password", &"<redacted>")
-            .field("relay_smtp_password", &"<redacted>")
-            .finish_non_exhaustive()
-    }
+/// Treat an empty operational path as "unset", for the same reason as
+/// [`non_empty`]: `Operational<PathBuf>` always has a compiled default, so the
+/// empty path is how a key FILE says nobody supplied one. No trim here - a path
+/// is not a token, and whitespace can be part of a real one.
+fn non_empty_path(value: &Path) -> Option<&Path> {
+    (!value.as_os_str().is_empty()).then_some(value)
 }
 
 #[cfg(test)]
@@ -947,12 +930,12 @@ mod tests {
     }
 
     fn test_config() -> AuthConfig {
-        AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
+        AuthConfig::parse_from(["zeroship-auth"])
     }
 
     /// Resolve a command line against a `[auth]` overlay fragment.
     fn resolve_with(args: &[&str], toml_text: &str) -> AuthConfig {
-        let mut argv = Vec::from(["zeroship-auth", "--db-url", "postgres://test"]);
+        let mut argv = Vec::from(["zeroship-auth"]);
         argv.extend_from_slice(args);
         AuthConfig::try_parse_and_resolve(argv, Some(&overlay(toml_text)))
             .expect("resolve auth config")
@@ -985,16 +968,76 @@ mod tests {
         // gateway and worker read ONE variable for the control-plane URL.
         assert!(envs.contains(&"ZEROSHIP_CONTROL_URL".to_owned()));
 
-        // The one-variable control: the secrets are deliberately NOT converted,
-        // and their old names are expected to still be there. Without this the
-        // assertion above would also pass on a build where the settings carrier
-        // had no environment names at all.
-        let secret_envs = AuthCli::command()
+        // The whole command line, not just the settings carrier: after the
+        // secret conversion there is no second flatten to hide an old name in,
+        // and every pre-conversion `AUTH_*` spelling is gone rather than
+        // retained as a working alias.
+        let all_envs = AuthCli::command()
             .get_arguments()
             .filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()))
             .collect::<Vec<_>>();
-        assert!(secret_envs.contains(&"AUTH_DB_URL".to_owned()));
-        assert!(secret_envs.contains(&"AUTH_STASH_SIGNING_KEY".to_owned()));
+        for retired in [
+            "AUTH_DB_URL",
+            "AUTH_STASH_SIGNING_KEY",
+            "AUTH_TOTP_ENC_KEY",
+            "CONTROL_KEY",
+            "AUTH_SIGNING_KEY_FILE",
+            "AUTH_PAIRWISE_SALT_FILE",
+            "AUTH_BROKER_SECRET_FILE",
+            "REFRESH_HASH_KEY_FILE",
+            "REFRESH_IDEM_KEY_FILE",
+        ] {
+            assert!(
+                !all_envs.iter().any(|env| env == retired),
+                "{retired} survived the conversion as a working alias"
+            );
+        }
+        // The one-variable control for the loop above: the file-PATH settings
+        // DO carry an environment name, at the canonical spelling. Without it,
+        // a build that dropped those arguments entirely would also pass.
+        assert!(all_envs.contains(&"ZEROSHIP_AUTH_SIGNING_KEY_FILE".to_owned()));
+    }
+
+    // A `Secret<T>` generates a `-file` PATH flag and NO value flag. That is the
+    // property that keeps credential material out of this process's argument
+    // vector, where any other user on the box can read it from /proc.
+    #[test]
+    fn no_secret_has_a_value_flag_and_each_has_a_file_flag() {
+        let command = AuthCli::command();
+        let longs = command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_owned))
+            .collect::<Vec<_>>();
+
+        for (value_flag, file_flag) in [
+            ("db-url", "database-url-file"),
+            ("database-url", "database-url-file"),
+            ("stash-signing-key", "stash-signing-key-file"),
+            ("totp-enc-key", "totp-enc-key-file"),
+            ("control-key", "control-key-file"),
+            ("google-client-secret", "google-client-secret-file"),
+            ("github-client-secret", "github-client-secret-file"),
+            ("smtp-password", "smtp-password-file"),
+            ("resend-api-key", "resend-api-key-file"),
+            ("gotrue-email-hook-secret", "gotrue-email-hook-secret-file"),
+            ("relay-inbound-password", "relay-inbound-password-file"),
+            ("relay-smtp-password", "relay-smtp-password-file"),
+            ("postmark-webhook-password", "postmark-webhook-password-file"),
+        ] {
+            assert!(
+                !longs.iter().any(|long| long == value_flag),
+                "--{value_flag} would carry secret material through argv"
+            );
+            assert!(
+                longs.iter().any(|long| long == file_flag),
+                "--{file_flag} is missing, so the secret has no CLI source at all"
+            );
+        }
+
+        // Does NOT cover the environment tier: a secret's canonical env name is
+        // read by the generated resolver, not by clap, so it is deliberately
+        // absent from this metadata. `--check-config` against a set variable is
+        // what shows it works, in tests/config_check_e2e.sh.
     }
 
     #[test]
@@ -1054,8 +1097,6 @@ mod tests {
         let err = AuthConfig::try_parse_and_resolve(
             [
                 "zeroship-auth",
-                "--db-url",
-                "postgres://test",
                 "--provider",
                 "supabase",
             ],
@@ -1071,8 +1112,6 @@ mod tests {
     fn supabase_provider_resolves_with_required_fields() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--provider",
             "supabase",
             "--supabase-url",
@@ -1132,43 +1171,58 @@ supabase_anon_key = "anon-file-key"
 
     // ---- secret strength guards (unchanged policy) ---------------------
 
-    use zeroship_core::config::validate_stash_key;
+    use zeroship_core::config::{validate_secret_material, validate_stash_key, SourceKind};
 
+    /// A secret in the shape an in-memory literal (env or TOML) resolves to.
+    fn supplied(material: &str) -> Secret<String> {
+        Secret::supplied(SourceKind::Env, Some(material.to_owned()))
+    }
+
+    // The guard reads the RESOLVED secret through `validate_secret_material`
+    // now rather than a plain `String`, so these three cases pin that the
+    // wrapper softened none of them.
     #[test]
-    fn stash_key_empty_default_is_rejected() {
+    fn stash_key_unset_is_rejected() {
         let cfg = test_config();
-        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
+        assert!(!cfg.settings.stash_signing_key.is_configured());
+        assert!(
+            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_err()
+        );
     }
 
     #[test]
     fn stash_key_short_is_rejected() {
         let mut cfg = test_config();
-        cfg.secrets.stash_signing_key = "a".repeat(20);
-        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
+        cfg.settings.stash_signing_key = supplied(&"a".repeat(20));
+        assert!(
+            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_err()
+        );
     }
 
     #[test]
     fn stash_key_strong_is_accepted() {
         let mut cfg = test_config();
-        cfg.secrets.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
-        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_ok());
+        cfg.settings.stash_signing_key = supplied("0123456789abcdef0123456789abcdef");
+        assert!(
+            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_ok()
+        );
     }
 
-    // The key has no clap `default_value`, so no shared sentinel can leak in
-    // `--help`; operators and local tooling must supply real generated input.
+    // A `Secret<T>` cannot declare a compiled default - the macro refuses one -
+    // so there is no sentinel to leak in `--help` and nothing to mistake for a
+    // configured key. An unsupplied secret exposes NO material at all, which is
+    // a stronger statement than the empty string this used to assert.
     #[test]
-    fn stash_key_default_is_empty() {
+    fn an_unsupplied_stash_key_exposes_no_material() {
         let cfg = test_config();
-        assert_eq!(cfg.secrets.stash_signing_key, "");
-        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
+        assert_eq!(cfg.settings.stash_signing_key.expose_secret(), None);
+        assert_eq!(cfg.settings.stash_signing_key.source(), None);
     }
 
     #[test]
     fn dev_insecure_flag_is_rejected() {
         let err = AuthCli::try_parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--dev-insecure",
         ])
         .map(|_| ())
@@ -1183,9 +1237,11 @@ supabase_anon_key = "anon-file-key"
         let old = zeroship_core::test_env_os!("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
 
+        // No supply tier turns on for it, so both keys stay unconfigured and
+        // the startup guards still reject them.
         let cfg = test_config();
-        assert_eq!(cfg.secrets.stash_signing_key, "");
-        assert_eq!(cfg.secrets.totp_enc_key, "");
+        assert!(!cfg.settings.stash_signing_key.is_configured());
+        assert!(!cfg.settings.totp_enc_key.is_configured());
 
         restore_env("ZEROSHIP_DEV_INSECURE", old);
     }
@@ -1194,8 +1250,6 @@ supabase_anon_key = "anon-file-key"
     fn old_insecure_dev_flag_is_rejected() {
         let err = AuthCli::try_parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--insecure-dev",
         ])
         .map(|_| ())
@@ -1216,8 +1270,6 @@ supabase_anon_key = "anon-file-key"
     fn smtp_tls_accepts_plaintext_value_on_cli() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--smtp-tls",
             "plaintext",
             "--relay-smtp-tls",
@@ -1231,8 +1283,6 @@ supabase_anon_key = "anon-file-key"
     fn smtp_tls_accepts_implicit_and_starttls_values() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--smtp-tls=implicit",
             "--relay-smtp-tls=starttls",
         ]);
@@ -1244,8 +1294,6 @@ supabase_anon_key = "anon-file-key"
     fn smtp_tls_rejects_unknown_mode() {
         let err = AuthCli::try_parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--smtp-tls",
             "sslv3",
         ])
@@ -1267,8 +1315,6 @@ supabase_anon_key = "anon-file-key"
     fn old_smtp_starttls_flag_is_rejected() {
         let err = AuthCli::try_parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--smtp-starttls",
         ])
         .map(|_| ())
@@ -1282,8 +1328,6 @@ supabase_anon_key = "anon-file-key"
     fn frame_ancestor_origins_cli_comma_split_and_repeatable() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--public-url",
             "https://auth.zeroship.ai",
             "--frame-ancestor-origins",
@@ -1347,8 +1391,6 @@ supabase_anon_key = "anon-file-key"
     fn frame_ancestor_origins_rejects_wildcards_and_non_concrete() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             // Same-site issuer so this test isolates the wildcard/non-concrete
             // rejection (not the I7 same-site drop).
             "--public-url",
@@ -1428,8 +1470,6 @@ frame_ancestor_origins = [
     fn frame_ancestor_origins_cli_drops_non_same_site() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--public-url",
             "https://auth.zeroship.ai",
             "--frame-ancestor-origins",
@@ -1470,8 +1510,6 @@ frame_ancestor_origins = ["http://localhost:5173", "https://console.zeroship.ai"
     fn frame_ancestor_origins_are_filtered_before_any_consumer_sees_them() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
             "--public-url",
             "https://auth.zeroship.ai",
             "--frame-ancestor-origins",
@@ -1565,4 +1603,66 @@ frame_ancestor_origins = ["http://localhost:5173", "https://console.zeroship.ai"
         assert!(!is_same_site_with_issuer("not-a-url", "auth.zeroship.ai"));
     }
 
+    // ---- redaction ------------------------------------------------------
+
+    // `AuthConfig` used to carry a hand-written `Debug` with a per-field
+    // `<redacted>` list, and a list is a thing someone forgets to extend: the
+    // field added in the next patch prints in full and nothing says so. The
+    // derive is safe now only because `Secret<T>` itself cannot format its
+    // material, so this test drives the DERIVED impl over a config whose
+    // secrets all carry a distinctive sentinel.
+    //
+    // "Redacted" is asserted three ways, because each is a different mistake a
+    // future impl could make: printing the value, printing a PREFIX of it (the
+    // "first 4 chars are fine" habit), and printing its LENGTH (which narrows a
+    // brute force and, for a short key, is most of the secret).
+    #[test]
+    fn the_debug_of_a_resolved_config_leaks_no_secret_value_prefix_or_length() {
+        const SENTINEL: &str = "quartzine-vellichor-sprocketful-lagniappe-widdershins";
+
+        let mut cfg = test_config();
+        cfg.settings.database_url = supplied(SENTINEL);
+        cfg.settings.stash_signing_key = supplied(SENTINEL);
+        cfg.settings.totp_enc_key = supplied(SENTINEL);
+        cfg.settings.control_key = supplied(SENTINEL);
+        cfg.settings.google_client_secret = supplied(SENTINEL);
+        cfg.settings.smtp_password = supplied(SENTINEL);
+        let rendered = format!("{cfg:?}");
+
+        assert!(
+            !rendered.contains(SENTINEL),
+            "the secret value itself reached Debug output:\n{rendered}"
+        );
+        // Every prefix of three characters or more. Three, not one: a single
+        // letter is in any English word the struct prints.
+        for length in 3..=SENTINEL.len() {
+            let prefix = &SENTINEL[..length];
+            assert!(
+                !rendered.contains(prefix),
+                "a {length}-character prefix of the secret reached Debug output:\n{rendered}"
+            );
+        }
+        // The length. 53 is not a value any other field in this fixture holds,
+        // so a hit here is the secret's size and not a coincidence.
+        assert_eq!(SENTINEL.len(), 53);
+        assert!(
+            !rendered.contains("53"),
+            "the secret's length reached Debug output:\n{rendered}"
+        );
+        // The one-variable control: the SAME struct, the SAME formatting call,
+        // and the secret's SOURCE tier does appear. Without it, a Debug impl
+        // that printed nothing at all would satisfy every assertion above.
+        assert!(
+            rendered.contains("Secret(configured from Env)"),
+            "the source tier must still be reported:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Secret(<unset>)"),
+            "an unsupplied secret must be visibly unset:\n{rendered}"
+        );
+
+        // Does NOT cover `--check-config` output, which is built by hand in
+        // main.rs from `is_configured()` rather than from this impl, nor a
+        // secret reaching a tracing field at a call site.
+    }
 }

@@ -195,7 +195,7 @@ async fn post_consent_accept_native(
     }
 
     let requested_scopes = sort_dedup_scopes(&ctx.request.scopes);
-    let lock_conn = match open_dedicated_auth_pg(&cfg.secrets.db_url).await {
+    let lock_conn = match open_dedicated_auth_pg(cfg.settings.database_url.expose_str()).await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!(error = %e, client_id = %ctx.client.client_id, "native oauth grant lock connection failed");

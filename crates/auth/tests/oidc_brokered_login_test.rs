@@ -19,6 +19,7 @@ use zeroship_auth::oidc::{
     AccessTokenClaims, BrokerSecrets, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
 use zeroship_auth::server;
+use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 
@@ -131,8 +132,8 @@ impl Fixture {
             b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         );
         write_owner_only(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-        cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
-        cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
+        cfg.settings.refresh_hash_key_file = Operational::new(hash_key_file);
+        cfg.settings.refresh_idem_key_file = Operational::new(idem_key_file);
         let cfg = Arc::new(cfg);
         let cfg_state = cfg.clone();
         let db_state = db.clone();

@@ -28,13 +28,13 @@ use uuid::Uuid;
 
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::oidc_verify::JwksCache;
 
 mod common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
 use common::{
-    location, native_authorize_return_to, read_set_cookie, test_auth_config,
-    test_auth_config_with, CookieJar,
+    location, native_authorize_return_to, read_set_cookie, test_auth_config_with, CookieJar,
 };
 
 #[ntex::test]
@@ -108,7 +108,8 @@ async fn google_federation_creates_new_user() {
             &mock.google_issuer(),
         ],
     );
-    cfg_inner.secrets.google_client_secret = Some("mock-google-secret".into());
+    cfg_inner.settings.google_client_secret =
+        Secret::supplied(SourceKind::Env, Some("mock-google-secret".to_owned()));
     let cfg = Arc::new(cfg_inner);
     let google_jwks = Arc::new(JwksCache::new(cfg.settings.google_jwks_url.get()));
 
@@ -343,7 +344,8 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
             &mock.google_issuer(),
         ],
     );
-    cfg_inner.secrets.google_client_secret = Some("mock-google-secret".into());
+    cfg_inner.settings.google_client_secret =
+        Secret::supplied(SourceKind::Env, Some("mock-google-secret".to_owned()));
     let cfg = Arc::new(cfg_inner);
     let google_jwks = Arc::new(JwksCache::new(cfg.settings.google_jwks_url.get()));
 
