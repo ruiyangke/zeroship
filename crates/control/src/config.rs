@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
     zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
-    ObservabilityControls, Operational, OriginScheme, OverlaySelector,
+    ObservabilityControls, Operational, OriginScheme, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -243,6 +243,91 @@ pub struct ControlSettings {
         default = crate::cron::audit_retention::DEFAULT_CHECK_SECS
     )]
     pub audit_retention_check_secs: Operational<u64>,
+
+    /// Supabase anon API key used for GoTrue browser/session API calls.
+    ///
+    /// Shared with the auth service, which drives the browser-side login
+    /// against the same project. OPERATIONAL, not secret: Supabase publishes
+    /// this key to browsers by design, so redacting it would claim a protection
+    /// the value does not have.
+    #[config(shared = AUTH_SUPABASE_ANON_KEY, default = String::new())]
+    pub supabase_anon_key: Operational<String>,
+
+    /// PEM/PKCS#8 signing key FILE for PAT issuance.
+    ///
+    /// A PATH, not key material, and it stays one. `load_signing_key_from_path`
+    /// sniffs PEM versus DER and refuses a group- or world-readable file;
+    /// reading the contents into an in-memory secret would drop the permission
+    /// check and make a DER key unrepresentable. A path to a secret is not
+    /// itself a secret.
+    #[config(name = "control.signing_key_file", default = PathBuf::new())]
+    pub signing_key_file: Operational<PathBuf>,
+
+    // Secrets last within the table, by convention. Each generates ONE
+    // `--<name>-file` path flag and NO value flag, so no secret below can reach
+    // a process argument list, and each carries its canonical environment name
+    // and its canonical overlay path.
+    /// `PostgreSQL` DSN for control-plane data.
+    ///
+    /// Secret-classed by grammar: a DSN admits userinfo, so the type cannot
+    /// depend on whether a particular deployment's value carries a password.
+    /// There is deliberately no compiled default - a secret default would put
+    /// credential material in the binary, and `ConfigSpec::secret` has no
+    /// parameter for one.
+    #[config(name = "control.database_url")]
+    pub database_url: Secret<String>,
+
+    /// Admin/control API shared secret, read by five binaries.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
+    /// Shared secret for worker admin endpoints.
+    #[config(shared = WORKER_KEY)]
+    pub worker_key: Secret<String>,
+
+    /// Master key used for control-plane encrypted env/secrets.
+    #[config(name = "control.master_key")]
+    pub master_key: Secret<String>,
+
+    /// Comma-separated previous master keys accepted during a key rotation.
+    ///
+    /// ONE secret holding a list, not a list of secrets. Each entry used to be
+    /// resolvable as its own reference, which meant a comma inside a resolved
+    /// value changed the parse; the whole value is now resolved once and split
+    /// once, so an entry is always a literal key.
+    #[config(name = "control.legacy_master_keys")]
+    pub legacy_master_keys: Secret<String>,
+
+    /// Dedicated PERMANENT pairwise-salt secret, identical on gateway and
+    /// control and never rotated without a per-app `pws_` migration.
+    #[config(shared = PAIRWISE_SALT)]
+    pub pairwise_salt: Secret<String>,
+
+    /// Stripe webhook signing secret.
+    #[config(name = "control.stripe_webhook_secret")]
+    pub stripe_webhook_secret: Secret<String>,
+
+    /// Stripe secret API key (`sk_...`) for outbound calls.
+    #[config(name = "control.stripe_secret_key")]
+    pub stripe_secret_key: Secret<String>,
+
+    /// Billing-notification SMTP password.
+    #[config(name = "control.smtp_password")]
+    pub smtp_password: Secret<String>,
+
+    /// Billing-notification Resend API key, required when the mailer is
+    /// `resend`.
+    #[config(name = "control.resend_api_key")]
+    pub resend_api_key: Secret<String>,
+
+    /// Supabase service-role key used for admin lookups while provisioning
+    /// identity links.
+    #[config(name = "auth.supabase_service_role_key")]
+    pub supabase_service_role_key: Secret<String>,
+
+    /// HS256 GoTrue JWT secret. Mutually exclusive with the Supabase JWKS URL.
+    #[config(name = "auth.supabase_jwt_secret")]
+    pub supabase_jwt_secret: Secret<String>,
 }
 
 impl OverlaySelector for ControlSettingsSources {

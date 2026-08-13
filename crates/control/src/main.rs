@@ -27,176 +27,7 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Single-binary dev fallback DSN. NOT a clap `default_value` — see the `--db`
-/// field doc: a non-empty clap default occupies `obtain_secret`'s CLI tier and
-/// silently shadows the `[secrets] database_url` reference. It is applied after
-/// both higher tiers come up empty.
-const DEFAULT_DB_URL: &str = "postgres://localhost/zeroship";
-
-/// zeroship control-plane startup configuration.
-///
-/// Only the credential-bearing fields remain here; every operational value is
-/// generated in `zeroship_control::config`.
-#[derive(Parser)]
-#[command(name = "zeroship-control")]
-struct ControlCli {
-    /// `PostgreSQL` DSN for control-plane data.
-    ///
-    /// The default is EMPTY, and it has to be: `obtain_secret`'s contract is
-    /// "`cli` is the clap-merged CLI/env value (`""` when unset)", and it takes
-    /// the CLI branch on ANY non-empty string. A compiled-in `default_value`
-    /// here is indistinguishable from an operator-supplied `--db`, so it wins
-    /// over the `[secrets] database_url` reference and the file tier can never
-    /// be reached. The compiled fallback is applied AFTER `obtain_secret`,
-    /// which is the only place it can sit without shadowing the file tier
-    /// (precedence: CLI/env > `[secrets]` reference > default).
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
-    db: String,
-
-    /// Admin/control API shared secret.
-    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
-    control_key: String,
-
-    /// Master key used for control-plane encrypted env/secrets.
-    #[arg(long = "master-key", env = "MASTER_KEY", default_value = "", hide_env_values = true)]
-    master_key: String,
-
-    /// Shared secret for worker admin endpoints.
-    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
-    worker_key: String,
-
-    /// PEM/PKCS#8 signing key file for PAT issuance.
-    #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
-    signing_key_file: String,
-
-    /// Stripe webhook signing secret.
-    #[arg(
-        long = "stripe-webhook-secret",
-        env = "STRIPE_WEBHOOK_SECRET",
-        default_value = "",
-        hide_env_values = true
-    )]
-    stripe_webhook_secret: String,
-
-    /// Stripe secret API key (`sk_...`) for outbound calls (the billing
-    /// reconciler + `billing/setup`). Operations that need Stripe reject an
-    /// empty value; webhook verification uses its separate signing secret.
-    #[arg(
-        long = "stripe-secret-key",
-        env = "STRIPE_SECRET_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    stripe_secret_key: String,
-
-    /// SMTP password (optional).
-    #[arg(long = "smtp-password", env = "CONTROL_SMTP_PASSWORD")]
-    smtp_password: Option<String>,
-
-    /// Resend API key - required when the mailer is `resend`.
-    #[arg(long = "resend-api-key", env = "CONTROL_RESEND_API_KEY")]
-    resend_api_key: Option<String>,
-
-    /// Comma-separated previous master keys accepted during key rotation.
-    #[arg(
-        long = "legacy-master-keys",
-        env = "LEGACY_MASTER_KEYS",
-        default_value = "",
-        hide_env_values = true
-    )]
-    legacy_master_keys: String,
-
-    /// Supabase anon API key used for GoTrue browser/session API calls.
-    #[arg(
-        long = "supabase-anon-key",
-        env = "SUPABASE_ANON_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    supabase_anon_key: String,
-
-    /// Supabase service-role key. Optional in this read-side slice; P-S2 uses it
-    /// for admin lookups while provisioning identity links.
-    #[arg(
-        long = "supabase-service-role-key",
-        env = "SUPABASE_SERVICE_ROLE_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    supabase_service_role_key: String,
-
-    /// HS256 GoTrue JWT secret. Mutually exclusive with the Supabase JWKS URL.
-    #[arg(
-        long = "supabase-jwt-secret",
-        env = "SUPABASE_JWT_SECRET",
-        default_value = "",
-        hide_env_values = true
-    )]
-    supabase_jwt_secret: String,
-
-    /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
-    /// app's `pws_` per-app identity anchor - independent of the rotatable
-    /// stash key. MUST be identical to the gateway's value and MUST NOT be
-    /// rotated without a per-app `pws_` migration. Prefer
-    /// `--pairwise-salt-file` in production.
-    #[arg(
-        long = "pairwise-salt",
-        env = "PAIRWISE_SALT",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pairwise_salt: String,
-
-    /// Path to a file holding the dedicated pairwise-salt secret. Takes
-    /// precedence over `--pairwise-salt` / `PAIRWISE_SALT` when set.
-    #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
-    pairwise_salt_file: String,
-
-    /// Every operational value, generated from one declaration in
-    /// `zeroship_control::config`.
-    #[command(flatten)]
-    settings: ControlSettingsSources,
-}
-
-// S2: hand-written `Debug` that redacts every raw-secret field. The derive is
-// intentionally dropped so a stray `{:?}` (e.g. in a clap parse error or a test
-// `.unwrap_err()`) can never echo a DSN, master key, control key, worker key,
-// Stripe secrets, console OIDC secrets, or legacy master keys.
-impl std::fmt::Debug for ControlCli {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ControlCli")
-            .field("db", &"<redacted>")
-            .field("control_key", &"<redacted>")
-            .field("master_key", &"<redacted>")
-            .field("worker_key", &"<redacted>")
-            .field("signing_key_file", &self.signing_key_file)
-            .field("stripe_webhook_secret", &"<redacted>")
-            .field("stripe_secret_key", &"<redacted>")
-            .field("smtp_password", &"<redacted>")
-            .field("resend_api_key", &"<redacted>")
-            .field("legacy_master_keys", &"<redacted>")
-            .field("supabase_anon_key", &"<redacted>")
-            .field("supabase_service_role_key", &"<redacted>")
-            .field("supabase_jwt_secret", &"<redacted>")
-            .field("pairwise_salt", &"<redacted>")
-            .field("pairwise_salt_file", &self.pairwise_salt_file)
-            .field("settings", &self.settings)
-            .finish()
-    }
-}
-
-/// Resolve the dedicated pairwise-salt secret (mirrors the gateway). Precedence:
-///   1. `--pairwise-salt-file` / `PAIRWISE_SALT_FILE` (read verbatim, trim a
-///      trailing newline) — keeps the value out of the process table,
-///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ overlay).
-///
-/// A configured-but-unreadable file is fatal — a misconfigured prod salt must
-/// fail loudly, not silently fall through to the dev default.
-/// Build the billing-notification mailer from `--mailer` (default stdout), mirroring
-/// auth's `build_mailer`. Returns a `String` error (consumed at the boot call site,
-/// which logs + exits) when a selected driver's required creds are missing.
 fn build_billing_mailer(
-    cli: &ControlCli,
     settings: &ControlSettings,
 ) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
     use zeroship_mailer::{
@@ -216,20 +47,49 @@ fn build_billing_mailer(
                 host,
                 port: *settings.smtp_port.get(),
                 username: (!username.is_empty()).then_some(username),
-                password: cli.smtp_password.clone(),
+                // The RESOLVED material, or None when nothing supplied it.
+                // `expose_secret` returning an Option is what keeps "unset"
+                // distinguishable from "supplied and empty" at this boundary.
+                password: settings.smtp_password.expose_secret().cloned(),
                 tls: SmtpTls::Starttls,
             })
             .map_err(|e| format!("smtp mailer: {e}"))?;
             Ok(Arc::new(driver))
         }
         "resend" => {
-            let api_key = cli.resend_api_key.clone().ok_or_else(|| {
-                "CONTROL_RESEND_API_KEY is required when --mailer=resend".to_string()
-            })?;
+            let api_key = settings
+                .resend_api_key
+                .expose_secret()
+                .cloned()
+                .ok_or_else(|| {
+                    "ZEROSHIP_CONTROL_RESEND_API_KEY / --resend-api-key-file is required \
+                     when --mailer=resend"
+                        .to_string()
+                })?;
             Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
         }
         other => Err(format!("unknown mailer: {other:?}; use stdout|smtp|resend")),
     }
+}
+
+/// Split the resolved legacy-master-key list into its entries.
+///
+/// ONE secret holding a comma-list, not a list of secrets. A dry run that never
+/// read the material yields no entries, which is correct: there is nothing to
+/// validate and nothing to decrypt with.
+fn split_legacy_master_keys(
+    legacy_master_keys: &zeroship_core::config::Secret<String>,
+) -> Vec<String> {
+    legacy_master_keys
+        .expose_secret()
+        .map(|csv| {
+            csv.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How the native-mode boot guard names the platform issuer input.
@@ -253,8 +113,11 @@ fn build_control_auth_provider(
         }
         AuthProviderKind::Supabase => {
             if supabase.anon_key.trim().is_empty() {
-                return Err("SUPABASE_ANON_KEY is required for ZEROSHIP_AUTH_PROVIDER=supabase"
-                    .to_string());
+                return Err(
+                    "ZEROSHIP_AUTH_SUPABASE_ANON_KEY is required for \
+                     ZEROSHIP_AUTH_PROVIDER=supabase"
+                        .to_string(),
+                );
             }
             let config = SupabaseConfig::new(
                 supabase.url,
@@ -336,47 +199,24 @@ fn empty_string_as_none(value: &str) -> Option<String> {
     }
 }
 
-fn resolve_pairwise_salt(
-    salt_file: &str,
-    salt_value: &str,
-    file_ref: Option<&str>,
-    check_config: bool,
-) -> String {
-    if !salt_file.is_empty() {
-        return std::fs::read_to_string(salt_file)
-            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, path = %salt_file, "control: cannot read --pairwise-salt-file");
-                std::process::exit(1);
-            });
-    }
-    zeroship_core::config::obtain_secret(
-        "PAIRWISE_SALT / --pairwise-salt",
-        salt_value,
-        file_ref,
-        check_config,
-    )
-}
-
 fn main() -> std::io::Result<()> {
     // Control uses cyper for provider/admin calls (Supabase identity bridge,
     // Stripe reconciliation). Install the workspace's selected rustls provider
     // before any outbound client can be constructed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let cli = ControlCli::parse();
-    // The generated sources are taken out of the parser first; everything left
-    // on `cli` is a secret awaiting the Secret<T> conversion.
-    let sources = cli.settings.clone();
+    // ONE declaration, one parser. There is no second hand-written struct
+    // holding the credentials any more, so there is no second place a flag, an
+    // environment name or an overlay path can be spelled.
     let (settings, boot) = bootstrap_or_exit::<ControlSettings>(
-        sources,
+        ControlSettingsSources::parse(),
         zeroship_control::config::DEFAULT_LOG_FILTER,
         "control",
     );
     // Billing notifier mailer (PR-6): built from the resolved mailer setting.
     // An unknown driver or missing creds refuses to boot.
     let billing_mailer: Arc<dyn zeroship_mailer::Mailer> =
-        match build_billing_mailer(&cli, &settings) {
+        match build_billing_mailer(&settings) {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!(
@@ -389,10 +229,6 @@ fn main() -> std::io::Result<()> {
     let mailer_kind = settings.mailer.get().clone();
     let check_config = *settings.check_config.get();
     let file = &boot.overlay.config;
-    // `[secrets]` file-overlay tier for the secret-reference resolver. Cloned once
-    // up front so individual `obtain_secret` calls can borrow the per-field refs
-    // (CLI/env > [secrets] file ref > default) without re-borrowing `boot`.
-    let file_secrets = boot.overlay.config.secrets.clone();
     // `[metering]` file-overlay tier for the billing stream (CLI/env > file).
     let file_metering = boot.overlay.config.metering.clone();
     let filter = &boot.log_filter;
@@ -405,9 +241,12 @@ fn main() -> std::io::Result<()> {
     // before this function is reached.
     let auth_provider_kind = *settings.auth_provider.get();
     let supabase_url = settings.supabase_url.get().clone();
-    let supabase_anon_key = cli.supabase_anon_key.clone();
-    let supabase_service_role_key = cli.supabase_service_role_key.clone();
-    let supabase_jwt_secret = cli.supabase_jwt_secret.clone();
+    let supabase_anon_key = settings.supabase_anon_key.get().clone();
+    // The resolved material, or "" when this run has none. Under --check-config
+    // a file-sourced secret deliberately has none, which is why the report below
+    // asks `is_configured()` instead of looking at the string.
+    let supabase_service_role_key = settings.supabase_service_role_key.expose_str().to_owned();
+    let supabase_jwt_secret = settings.supabase_jwt_secret.expose_str().to_owned();
     let supabase_jwks_url = settings.supabase_jwks_url.get().clone();
     let supabase_jwt_issuer = settings.supabase_jwt_issuer.get().clone();
     // The overlay tier these two used to reach by hand is now the generated
@@ -424,33 +263,15 @@ fn main() -> std::io::Result<()> {
 
     let port = *settings.port.get();
     let bind_host = settings.bind.get().clone();
-    // Secret-bearing inputs (the fields `ControlCli::Debug` redacts) are resolved
-    // through the shared secret-reference resolver. On the real boot path a
-    // `urn:zeroship:{env,file,...}` / `arn:aws:secretsmanager:...` reference is
-    // dereferenced to its value; under `--check-config` only the reference FORMAT
-    // is validated (no env/file/network side effects) and the raw ref string is
-    // kept for the read-only report. A literal secret passes through byte-for-byte
-    // in both modes. The DSN field (`--db`) carries a password, so it goes
-    // through the same path. Pure file-PATH fields (`--signing-key-file`,
-    // `--builder-client-secret-file`) name a file to read and are NOT resolved here.
-    let db_url = zeroship_core::config::obtain_secret(
-        "DATABASE_URL / --db",
-        &cli.db,
-        file_secrets.database_url.as_deref(),
-        check_config,
-    );
-    // The compiled fallback, applied only once BOTH higher tiers came up empty.
-    // `--check-config` is a read-only report of what was CONFIGURED, so it keeps
-    // the empty string rather than substituting a default nobody supplied. That
-    // arm is currently unobservable — the report does not print the DSN, and the
-    // two binaries' `--check-config` output was diffed byte-for-byte (timestamps
-    // aside) across this change. It is here so the guard is already right if the
-    // DSN is ever added to the report, NOT because it fixes anything today.
-    let db_url = if db_url.is_empty() && !check_config {
-        DEFAULT_DB_URL.to_string()
-    } else {
-        db_url
-    };
+    // Every secret is already resolved by the generated declaration, in one
+    // place, with one precedence: the `-file` path flag, then the canonical
+    // environment name, then the canonical overlay path. The material is
+    // dereferenced ONLY on a real boot, so under `--check-config` a file-sourced
+    // secret is `is_configured()` with no material at all. That replaces the
+    // arrangement where a check run held the raw `urn:` REFERENCE in the same
+    // local a boot run held the secret, and every strength guard had to remember
+    // to ask which one it was looking at.
+    let db_url = settings.database_url.expose_str().to_owned();
     let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store (control writes deploys through the SAME
     // store gateway/worker read), bare path → local disk (dev default).
@@ -463,89 +284,26 @@ fn main() -> std::io::Result<()> {
         }
     };
     let blob_store_is_remote = store_url.is_remote();
-    let control_key = zeroship_core::config::obtain_secret(
-        "CONTROL_KEY / --control-key",
-        &cli.control_key,
-        file_secrets.control_key.as_deref(),
-        check_config,
-    );
-    let master_key = zeroship_core::config::obtain_secret(
-        "MASTER_KEY / --master-key",
-        &cli.master_key,
-        file_secrets.master_key.as_deref(),
-        check_config,
-    );
+    let control_key = settings.control_key.expose_str().to_owned();
+    let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
-    let worker_key = zeroship_core::config::obtain_secret(
-        "WORKER_KEY / --worker-key",
-        &cli.worker_key,
-        file_secrets.worker_key.as_deref(),
-        check_config,
-    );
-    let signing_key_file = cli.signing_key_file;
-    let stripe_webhook_secret = zeroship_core::config::obtain_secret(
-        "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
-        &cli.stripe_webhook_secret,
-        file_secrets.stripe_webhook_secret.as_deref(),
-        check_config,
-    );
-    let stripe_secret_key = zeroship_core::config::obtain_secret(
-        "STRIPE_SECRET_KEY / --stripe-secret-key",
-        &cli.stripe_secret_key,
-        file_secrets.stripe_secret_key.as_deref(),
-        check_config,
-    );
+    let worker_key = settings.worker_key.expose_str().to_owned();
+    let signing_key_file = settings.signing_key_file.get().clone();
+    let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
+    let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
-    // Comma-separated list of previous master keys, tried as fallbacks on decrypt
-    // failure during a rotation grace period. A CLI/env value is a comma-list where
-    // EACH entry may be a literal or its own secret reference (resolved per entry); an
-    // absent CLI/env value falls back to a single `[secrets]` file reference that
-    // dereferences to a comma-list string (entries are then literal).
-    let legacy_label = "LEGACY_MASTER_KEYS / --legacy-master-keys";
-    let legacy_keys: Vec<String> = if cli.legacy_master_keys.is_empty() {
-        let csv = zeroship_core::config::obtain_secret(
-            legacy_label,
-            "",
-            file_secrets.legacy_master_keys.as_deref(),
-            check_config,
-        );
-        // In --check-config the file reference is only format-validated (csv is then
-        // the raw ref, which must not be split); split only a resolved/literal value.
-        if check_config && zeroship_core::config::is_secret_ref(&csv) {
-            Vec::new()
-        } else {
-            csv.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        }
-    } else {
-        cli.legacy_master_keys
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|entry| {
-                if check_config {
-                    zeroship_core::config::validate_secret_ref_or_exit(legacy_label, entry);
-                    entry.to_owned()
-                } else {
-                    zeroship_core::config::resolve_secret_or_exit(legacy_label, entry)
-                }
-            })
-            .collect()
-    };
+    // Previous master keys, tried as fallbacks on decrypt failure during a
+    // rotation grace period. ONE secret holding a comma-list, resolved once and
+    // split once. Each entry used to be resolvable as its OWN reference, which
+    // meant the parse depended on whether a resolved value contained a comma;
+    // now an entry is always a literal key.
+    let legacy_keys: Vec<String> = split_legacy_master_keys(&settings.legacy_master_keys);
     let deploy_tmp_dir_str = settings.deploy_tmp_dir.get().clone();
-    // Dedicated pairwise-salt secret (auth-sdk §6.2). MUST match the gateway's
-    // value — both derive the per-app `pws_`. `--pairwise-salt-file` wins over
-    // the inline value / overlay reference.
-    let pairwise_salt = resolve_pairwise_salt(
-        &cli.pairwise_salt_file,
-        &cli.pairwise_salt,
-        file_secrets.pairwise_salt.as_deref(),
-        check_config,
-    );
+    // Dedicated pairwise-salt secret (auth-sdk 6.2). MUST match the gateway's
+    // value: both derive the per-app `pws_`. One declaration now, so the
+    // file-wins-over-value dance is gone - the only flag IS the path flag.
+    let pairwise_salt = settings.pairwise_salt.expose_str().to_owned();
     let expected_oauth_audience = settings.oauth_audience.get().clone();
     let app_base_domain = settings.app_base_domain.get().clone();
     let spend_recompute_interval = *settings.spend_recompute_interval.get();
@@ -561,30 +319,34 @@ fn main() -> std::io::Result<()> {
         std::path::PathBuf::from(&deploy_tmp_dir_str)
     };
 
-    // S3 / L6: control authenticates the worker admin log fan-out with
-    // WORKER_KEY. The same key gates the worker's dispatch bearer AND keys the
+    // S3 / L6: control authenticates the worker admin log fan-out with the
+    // worker key. The same key gates the worker's dispatch bearer AND keys the
     // per-request ZeroShip-User HMAC, so it carries the >=32-byte strength floor
-    // (empty and present-but-weak values are rejected). Skipped for a
-    // secret REFERENCE under --check-config (the local is then the raw ref
-    // string, which would wrongly fail the length check); it runs on the
-    // resolved value at real boot.
-    if !check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
-        if let Err(message) = zeroship_core::config::validate_worker_key(&worker_key) {
-            eprintln!("control: {message}");
-            tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
-            std::process::exit(1);
-        }
+    // (empty and present-but-weak values are rejected).
+    //
+    // Every strength guard below goes through `validate_secret_material`, which
+    // runs the validator on the RESOLVED material whenever this run has any. The
+    // old `if !check_config || !is_secret_ref(..)` conditional existed only
+    // because a check run held the reference TEXT in the value's place; nothing
+    // does that now, so the branch is gone rather than restated.
+    if let Err(message) = zeroship_core::config::validate_secret_material(
+        &settings.worker_key,
+        zeroship_core::config::validate_worker_key,
+    ) {
+        eprintln!("control: {message}");
+        tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
+        std::process::exit(1);
     }
 
     let mut missing = Vec::new();
-    if master_key.is_empty() {
-        missing.push("--master-key / MASTER_KEY");
+    if !settings.master_key.is_configured() {
+        missing.push("--master-key-file / ZEROSHIP_CONTROL_MASTER_KEY");
     }
-    if control_key.is_empty() {
-        missing.push("--control-key / CONTROL_KEY");
+    if !settings.control_key.is_configured() {
+        missing.push("--control-key-file / ZEROSHIP_CONTROL_KEY");
     }
-    if signing_key_file.is_empty() {
-        missing.push("--signing-key-file / SIGNING_KEY_FILE");
+    if signing_key_file.as_os_str().is_empty() {
+        missing.push("--signing-key-file / ZEROSHIP_CONTROL_SIGNING_KEY_FILE");
     }
     if !missing.is_empty() {
         tracing::error!(
@@ -593,30 +355,27 @@ fn main() -> std::io::Result<()> {
         );
         std::process::exit(1);
     }
-    // Strength guards run on the RESOLVED value at real boot. During
-    // `--check-config` a secret REFERENCE is still the raw `urn:`/`arn:`
-    // string (not yet dereferenced), so skip the strength check for a ref - it
-    // would wrongly fail length/entropy on the reference text. A literal is
-    // checked in both modes.
-    if !check_config || !zeroship_core::config::is_secret_ref(&master_key) {
-        if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key) {
-            tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+    if let Err(message) = zeroship_core::config::validate_secret_material(
+        &settings.master_key,
+        |material| validate_master_key_material("MASTER_KEY", material),
+    ) {
+        tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+        std::process::exit(1);
+    }
+    // The list is one secret, so its ENTRIES are always material by the time
+    // they are split: either the run resolved the whole value, or it is a dry
+    // run that read nothing and `legacy_keys` is empty.
+    for (idx, legacy_key) in legacy_keys.iter().enumerate() {
+        let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+        if let Err(message) = validate_master_key_material(&label, legacy_key) {
+            tracing::error!(
+                error = %message,
+                "control: refusing to start with weak legacy master key"
+            );
             std::process::exit(1);
         }
     }
-    for (idx, legacy_key) in legacy_keys.iter().enumerate() {
-        let label = format!("LEGACY_MASTER_KEYS[{idx}]");
-        if !check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
-            if let Err(message) = validate_master_key_material(&label, legacy_key) {
-                tracing::error!(
-                    error = %message,
-                    "control: refusing to start with weak legacy master key"
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    if stripe_webhook_secret.is_empty() {
+    if !settings.stripe_webhook_secret.is_configured() {
         // Not fatal: operators may run without Stripe. Every webhook will
         // reject with 500, so warn before Stripe-side retries reveal it.
         tracing::warn!(
@@ -632,12 +391,12 @@ fn main() -> std::io::Result<()> {
     //
     // The dedicated pairwise-salt secret must be strong and stable. It seeds
     // the permanent per-app `pws_` anchor and must equal the gateway's value.
-    // Skip the strength check when `--check-config` holds a raw reference.
-    if !check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
-        if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
-            tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
-            std::process::exit(1);
-        }
+    if let Err(message) = zeroship_core::config::validate_secret_material(
+        &settings.pairwise_salt,
+        zeroship_core::config::validate_pairwise_salt,
+    ) {
+        tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
+        std::process::exit(1);
     }
 
     // Control plane resource-server prerequisites. The console is now a
@@ -683,15 +442,19 @@ fn main() -> std::io::Result<()> {
         report.field("supabase_url", CheckValue::Plain(supabase_url.clone()));
         report.field(
             "supabase_anon_key_configured",
+            // Presence only, unchanged. The anon key is operational by
+            // classification (Supabase publishes it to browsers), but a report
+            // that started PRINTING a value it used to withhold would be a new
+            // disclosure introduced by a refactor, which is not this step.
             CheckValue::Secret(!supabase_anon_key.is_empty()),
         );
         report.field(
             "supabase_service_role_key_configured",
-            CheckValue::Secret(!supabase_service_role_key.is_empty()),
+            CheckValue::Secret(settings.supabase_service_role_key.is_configured()),
         );
         report.field(
             "supabase_jwt_secret_configured",
-            CheckValue::Secret(!supabase_jwt_secret.is_empty()),
+            CheckValue::Secret(settings.supabase_jwt_secret.is_configured()),
         );
         report.field("supabase_jwks_url", CheckValue::Plain(supabase_jwks_url.clone()));
         report.field(
@@ -748,7 +511,7 @@ fn main() -> std::io::Result<()> {
         );
         report.field(
             "pairwise_salt_configured",
-            CheckValue::Secret(!pairwise_salt.is_empty()),
+            CheckValue::Secret(settings.pairwise_salt.is_configured()),
         );
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
@@ -1441,10 +1204,10 @@ mod tests {
     #[test]
     fn control_blob_store_flag_uses_unified_name() {
         let cli =
-            ControlCli::try_parse_from(["zeroship-control", "--blob-store", "/tmp/blob-root"])
+            ControlSettingsSources::try_parse_from(["zeroship-control", "--blob-store", "/tmp/blob-root"])
                 .expect("blob-store flag should parse");
 
-        assert_eq!(cli.settings.blob_store.as_deref(), Some("/tmp/blob-root"));
+        assert_eq!(cli.blob_store.as_deref(), Some("/tmp/blob-root"));
     }
 
     #[test]
@@ -1458,19 +1221,19 @@ mod tests {
         // hand-written resolve_origin_scheme helper this used to call is gone.
         let overlay: toml::Value =
             toml::from_str("origin_scheme = \"https\"\n").expect("fixture overlay");
-        let env = ControlCli::try_parse_from(["zeroship-control"]).expect("parse env topology");
+        let env = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse env topology");
         let resolved =
-            ControlSettings::resolve_config(env.settings, Some(&overlay)).expect("resolve");
+            ControlSettings::resolve_config(env, Some(&overlay)).expect("resolve");
         assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
 
-        let cli = ControlCli::try_parse_from([
+        let cli = ControlSettingsSources::try_parse_from([
             "zeroship-control",
             "--origin-scheme",
             "https",
         ])
         .expect("parse CLI topology");
         let flagged =
-            ControlSettings::resolve_config(cli.settings, Some(&overlay)).expect("resolve");
+            ControlSettings::resolve_config(cli, Some(&overlay)).expect("resolve");
         assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
 
         restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old);
@@ -1478,13 +1241,13 @@ mod tests {
 
     #[test]
     fn auth_provider_selector_defaults_to_native_and_accepts_supabase() {
-        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse defaults");
+        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
         assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Native);
 
-        let cli = ControlCli::try_parse_from(["zeroship-control", "--auth-provider", "supabase"])
+        let cli = ControlSettingsSources::try_parse_from(["zeroship-control", "--auth-provider", "supabase"])
             .expect("parse supabase");
-        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
         assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
     }
 
@@ -1493,7 +1256,7 @@ mod tests {
         // `platform` was control's own word for the state now spelled `native`.
         // Both tiers must refuse it, or the two vocabularies survive the merge
         // in the one place an operator would not look.
-        let err = ControlCli::try_parse_from([
+        let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",
             "--auth-provider",
             "platform",
@@ -1504,8 +1267,8 @@ mod tests {
 
         let overlay: toml::Value = toml::from_str("[auth]\nprovider = \"platform\"\n")
             .expect("fixture overlay");
-        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        let err = ControlSettings::resolve_config(cli.settings, Some(&overlay))
+        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse defaults");
+        let err = ControlSettings::resolve_config(cli, Some(&overlay))
             .map(|_| ())
             .expect_err("the retired control spelling must not resolve from the overlay");
         assert!(
@@ -1524,8 +1287,8 @@ mod tests {
         let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
         std::env::set_var("ZEROSHIP_AUTH_PROVIDER", "supabase");
 
-        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse control");
-        let resolved = ControlSettings::resolve_config(cli.settings, None).expect("resolve");
+        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse control");
+        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
         assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
 
         restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
@@ -1640,7 +1403,7 @@ mod tests {
     /// failure this test exists to catch.
     fn env_names_control_reads() -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
-        let command = <ControlCli as clap::CommandFactory>::command();
+        let command = <ControlSettingsSources as clap::CommandFactory>::command();
         for arg in command.get_arguments() {
             if let Some(env) = arg.get_env() {
                 names.insert(env.to_string_lossy().into_owned());
@@ -1799,7 +1562,7 @@ mod tests {
 
     #[test]
     fn control_rejects_removed_bundles_flag() {
-        let err = ControlCli::try_parse_from([
+        let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",
             "--bundles",
             "/tmp/bundle-root",
@@ -1819,7 +1582,7 @@ mod tests {
 
     #[test]
     fn control_rejects_removed_relaxation_flag() {
-        let err = ControlCli::try_parse_from(["zeroship-control", "--dev-insecure"])
+        let err = ControlSettingsSources::try_parse_from(["zeroship-control", "--dev-insecure"])
             .expect_err("removed flag must be unknown");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
@@ -1858,109 +1621,138 @@ mod tests {
         assert!(resolved.contains("b"));
     }
 
-    // Secret-reference resolver wiring. The resolution/validation helpers live in
-    // `zeroship_core::config::secrets` (fully tested there). These assert control's
-    // wiring contract: literals pass through byte-identically, the strength-guard
-    // skip is gated on `is_secret_ref`, and malformed references are rejected.
 
-    // (a) A literal secret resolves to itself byte-for-byte through the public
-    // resolver — control must keep literal behavior unchanged on the boot path.
+    // The secret SURFACE. Every credential control takes is a `--<name>-file`
+    // path flag; the value spellings that carried the material in argv are gone.
+    // A process argument list is world-readable on Linux, so this is the whole
+    // reason a secret's flag differs from an operational one's.
     #[test]
-    fn literal_secret_resolves_to_itself() {
-        let literal = "00".repeat(32); // a typical 32-byte-hex master key literal
-        assert_eq!(
-            zeroship_core::config::resolve_secret(&literal).expect("literal resolves"),
-            literal
-        );
-        // A DSN literal (carries a password) is likewise unchanged.
-        let dsn = "postgres://user:pass@db.internal:5432/zeroship";
-        assert_eq!(
-            zeroship_core::config::resolve_secret(dsn).expect("dsn literal resolves"),
-            dsn
-        );
+    fn every_control_secret_takes_a_path_flag_and_no_value_flag() {
+        use clap::CommandFactory as _;
+
+        let command = ControlSettingsSources::command();
+        let flags = command
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for expected in [
+            "control-key-file",
+            "worker-key-file",
+            "master-key-file",
+            "database-url-file",
+            "pairwise-salt-file",
+            "legacy-master-keys-file",
+            "stripe-secret-key-file",
+            "stripe-webhook-secret-file",
+        ] {
+            assert!(flags.contains(&expected.to_owned()), "missing --{expected}");
+        }
+        for gone in [
+            "control-key",
+            "worker-key",
+            "master-key",
+            "db",
+            "pairwise-salt",
+            "legacy-master-keys",
+            "stripe-secret-key",
+            "stripe-webhook-secret",
+            "supabase-jwt-secret",
+        ] {
+            assert!(
+                !flags.contains(&gone.to_owned()),
+                "--{gone} still exists; a secret must not have a value flag"
+            );
+        }
+
+        // Does NOT cover the ENV tier: a secret carries no `env` on its clap
+        // carrier by design, so a Command scan cannot see one. The specs are
+        // where that name lives, and the next test reads them.
     }
 
-    // (b) The boolean that gates each strength guard: under --check-config a
-    // *referenced* secret SKIPS the strength check (the local is the raw ref
-    // string), while a *literal* still triggers it. At real boot the guard always
-    // runs. This is exactly `!check_config || !is_secret_ref(value)`.
+    // The environment projection, from the declaration rather than from clap.
+    // The bare pre-conversion family must be gone: a deployment still exporting
+    // MASTER_KEY has to find that out, and nothing else here would tell it.
     #[test]
-    fn check_config_skips_strength_guard_for_reference_only() {
-        let is_ref = zeroship_core::config::is_secret_ref;
-        let guard_runs = |check_config: bool, value: &str| !check_config || !is_ref(value);
+    fn every_control_secret_projects_one_canonical_environment_name() {
+        use zeroship_core::config::GeneratedConfig as _;
 
-        let reference = "urn:zeroship:env:MASTER_KEY";
-        let literal = "00".repeat(32);
+        let declared = ControlSettings::SPECS
+            .iter()
+            .filter_map(|spec| spec.env_name())
+            .collect::<Vec<_>>();
+        for expected in [
+            "ZEROSHIP_CONTROL_KEY",
+            "ZEROSHIP_WORKER_KEY",
+            "ZEROSHIP_CONTROL_MASTER_KEY",
+            "ZEROSHIP_CONTROL_DATABASE_URL",
+            "ZEROSHIP_PAIRWISE_SALT",
+        ] {
+            assert!(declared.contains(&expected.to_owned()), "missing {expected}");
+        }
+        for name in &declared {
+            assert!(
+                name.starts_with("ZEROSHIP_"),
+                "{name} is not a canonical projection"
+            );
+        }
+        for gone in ["MASTER_KEY", "DATABASE_URL", "CONTROL_KEY", "WORKER_KEY"] {
+            assert!(
+                !declared.contains(&(*gone).to_owned()),
+                "the bare name {gone} survives"
+            );
+        }
 
-        // check-config + reference -> guard SKIPPED (would wrongly fail on ref text).
-        assert!(!guard_runs(true, reference));
-        // check-config + literal -> guard RUNS (literal must still be strength-checked).
-        assert!(guard_runs(true, &literal));
-        // real boot -> guard always RUNS, ref or literal (value is already resolved).
-        assert!(guard_runs(false, reference));
-        assert!(guard_runs(false, &literal));
+        // Does NOT cover whether the environment is actually READ at that name;
+        // that is the generated resolver's `read_config_env!` and is exercised
+        // end to end by tests/config_check_e2e.sh.
     }
 
-    // (c) A malformed reference (reserved `urn:zeroship:` scheme, unknown backend)
-    // is rejected by the format-only validator the check-config path uses.
+    // A resolved secret publishes presence and nothing else. The sentinel is
+    // long and distinctive so a leak of any substring would show, and the
+    // length is checked separately because "17 characters" is itself a leak.
     #[test]
-    fn malformed_reference_is_rejected() {
-        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:nope:x").is_err());
-        // A well-formed reference and a plain literal both validate.
-        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
-        assert!(zeroship_core::config::validate_secret_ref(&"00".repeat(32)).is_ok());
+    fn a_resolved_secret_never_renders_its_material() {
+        use zeroship_core::config::{Secret, SourceKind};
+
+        const SENTINEL: &str = "control-master-key-sentinel-7f3a91c0e5";
+        let secret = Secret::supplied(SourceKind::Env, Some(SENTINEL.to_owned()));
+        let rendered = format!("{secret:?}");
+
+        assert!(secret.is_configured());
+        for length in 4..=SENTINEL.len() {
+            assert!(
+                !rendered.contains(&SENTINEL[..length]),
+                "Debug leaked a {length}-char prefix: {rendered}"
+            );
+        }
+        assert!(!rendered.contains(&SENTINEL.len().to_string()));
+
+        // Does NOT cover a caller that calls expose_secret and prints the result
+        // itself. The e2e sentinel case is what covers the assembled report.
     }
 
-    // (d) The `[secrets]` file tier. Control now obtains every secret via
-    // `obtain_secret(label, cli, file_secrets.<field>.as_deref(), check_config)`.
-    // This pins the two wiring guarantees that would regress if the file tier were
-    // dropped or the precedence inverted:
-    //   1. an empty CLI/env value falls back to the `[secrets]` file reference, and
-    //   2. a present CLI/env value WINS over the file entry.
-    // Resolution itself (env/file deref) lives in core; here we use a real env-backed
-    // reference end-to-end so the fallback actually produces a value.
+    // The legacy-master-key list is ONE secret holding a comma-list, not a list
+    // of secrets. A dry run that read no material must yield no entries, because
+    // there is nothing to strength-check and nothing to decrypt with.
     #[test]
-    fn secrets_file_tier_used_when_cli_empty_and_cli_wins_over_file() {
-        // Serialize against any other env-touching test in this binary.
-        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_GUARD.lock().expect("env guard");
+    fn the_legacy_master_key_list_splits_material_and_nothing_else() {
+        use zeroship_core::config::{Secret, SourceKind};
 
-        let key = format!("ZEROSHIP_CONTROL_SECRETS_TIER_{}", std::process::id());
-        let file_ref = format!("urn:zeroship:env:{key}");
-        std::env::set_var(&key, "value-from-file-tier");
-
-        // Mirror control's wiring exactly: a `SecretSection` carries the file ref.
-        let file_secrets = zeroship_core::config::SecretSection {
-            master_key: Some(file_ref.clone()),
-            ..Default::default()
-        };
-
-        // (1) Empty CLI/env => the [secrets] file reference is consulted and resolved
-        //     (real-boot path, check_config = false).
-        let resolved = zeroship_core::config::obtain_secret(
-            "MASTER_KEY / --master-key",
-            "",
-            file_secrets.master_key.as_deref(),
-            false,
-        );
+        let key = "00".repeat(32);
+        let csv = format!("{key}, {key} ,");
         assert_eq!(
-            resolved, "value-from-file-tier",
-            "empty CLI must fall back to the [secrets] file reference"
+            split_legacy_master_keys(&Secret::supplied(SourceKind::Env, Some(csv))),
+            vec![key.clone(), key],
+            "entries are trimmed and empties dropped"
         );
+        assert!(
+            split_legacy_master_keys(&Secret::supplied(SourceKind::CliFile, None)).is_empty(),
+            "a configured-but-unread secret yields no entries"
+        );
+        assert!(split_legacy_master_keys(&Secret::<String>::absent()).is_empty());
 
-        // (2) A present CLI/env literal WINS over the file entry, byte-for-byte.
-        let cli_literal = "00".repeat(32);
-        let won = zeroship_core::config::obtain_secret(
-            "MASTER_KEY / --master-key",
-            &cli_literal,
-            file_secrets.master_key.as_deref(),
-            false,
-        );
-        assert_eq!(
-            won, cli_literal,
-            "a present CLI/env value must take precedence over the [secrets] file entry"
-        );
-
-        std::env::remove_var(&key);
+        // Does NOT cover the strength guard that then runs over the entries;
+        // that is asserted by the boot-guard path, not by the splitter.
     }
 }
