@@ -106,7 +106,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       </AsyncSection>
       {state.status !== "error" ? (
         <div className="inline-form">
-          <input placeholder="bug_... this depends on" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
+          <input aria-label="Bug this depends on" placeholder="bug_... this depends on" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
           <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
           </Button>

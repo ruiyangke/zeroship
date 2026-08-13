@@ -206,7 +206,7 @@ function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
               onChange={(e) =>
                 setConditions((cs) => cs.map((c) => (c.id === condition.id ? { ...c, value: e.target.value } : c)))
               }
-              placeholder="value"
+              aria-label="Value" placeholder="value"
             />
           ) : null}
           <Button variant="gray" size="small"

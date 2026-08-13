@@ -100,7 +100,7 @@ export function KeywordsPanel({
       </AsyncSection>
       <div className="inline-form">
         <input
-          placeholder="New keyword name"
+          aria-label="New keyword name" placeholder="New keyword name"
           value={newKeyword}
           onChange={(e) => setNewKeyword(e.target.value)}
         />

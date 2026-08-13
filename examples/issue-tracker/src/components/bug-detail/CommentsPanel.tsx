@@ -61,7 +61,12 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
       </div>
       {editing ? (
         <div className="comment-edit">
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} />
+          <textarea
+            aria-label="Edit comment"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={4}
+          />
           <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
             Save
           </Button>
@@ -101,6 +106,7 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
   return (
     <div className="new-comment">
       <textarea
+        aria-label="Add a comment"
         placeholder="Add a comment..."
         value={body}
         onChange={(e) => setBody(e.target.value)}

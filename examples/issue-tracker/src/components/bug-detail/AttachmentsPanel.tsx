@@ -142,7 +142,7 @@ function UploadForm({ bugId, onUploaded }: { bugId: string; onUploaded: () => vo
 
   return (
     <div className="upload-form">
-      <input ref={fileRef} type="file" disabled={busy} />
+      <input ref={fileRef} type="file" disabled={busy} aria-label="Attachment file" />
       <Input
         aria-label="Attachment description"
         placeholder="Description (optional)"
