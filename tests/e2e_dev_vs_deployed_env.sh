@@ -36,7 +36,7 @@
 #   declared UNSAFE if that read does not find it. Without this guard the whole
 #   harness passes trivially on any machine where the export failed.
 #
-# THE POSITIVE CONTROL, differing in ONE variable. `$ZEROSHIP_CONTROL_KEY` IS legitimately
+# THE POSITIVE CONTROL, differing in ONE variable. `$CONTROL_VAR_KEY` IS legitimately
 #   delivered to the app -- as a control-plane app var on the deployed tier, via
 #   the `ZS_VAR_` prefix on the dev tier -- and MUST be readable in the very same
 #   response that reports the canary absent. It differs from the canary in
@@ -105,7 +105,17 @@ MUTATE="${MUTATE:-none}"
 SECRET_EXPOSED_KEY="ZS_SECRET_EXPOSED"
 SECRET_HIDDEN_KEY="ZS_SECRET_HIDDEN"
 CANARY_KEY="ZS_LEAK_PROBE"
-ZEROSHIP_CONTROL_KEY="ZS_ENV_CONTROL"
+# NOT `ZEROSHIP_CONTROL_KEY`, and the name matters more than it looks. This
+# holds the NAME OF AN APP VAR; it is not a platform setting. It was called
+# `CONTROL_KEY` until 05989cf5d renamed every `CONTROL_KEY` in tests/ to the
+# canonical platform spelling, which made this harness-local variable collide
+# with the shared secret `tests/lib/runtime_secrets.sh` generates. The exporter
+# then replaced "ZS_ENV_CONTROL" with 64 hex characters, `POST /vars` answered
+# 400 to a key of that shape, and the harness's POSITIVE CONTROL was gone: the
+# four "canary absent" verdicts below became unfalsifiable and the run went
+# 35/5 against its floor of 40. A rename that is right for a platform name can
+# be wrong for a shell variable that merely shares its spelling.
+CONTROL_VAR_KEY="ZS_ENV_CONTROL"
 FIXTURE_MARKER="ZSENVP-3c9d-fixture"
 
 # Fresh per run. A canary whose value is fixed could be satisfied by a stale
@@ -150,18 +160,18 @@ zs_check_binary_freshness "$ROOT" "$BIN" \
 echo "=== environment surface: dev vs deployed (env-probe) ==="
 echo "  mutation: $MUTATE"
 echo "  canary:   $CANARY_KEY=$CANARY_VAL   (NEVER deployed as an app var)"
-echo "  control:  $ZEROSHIP_CONTROL_KEY=$CONTROL_VAL (deployed as an app var / ZS_VAR_ on dev)"
+echo "  control:  $CONTROL_VAR_KEY=$CONTROL_VAL (deployed as an app var / ZS_VAR_ on dev)"
 
 # --- 0b. the canary must not already be in this shell -----------------------
 # If a previous run (or the operator) left $CANARY_KEY exported with a DIFFERENT
-# value, the fresh value below still wins, but a pre-existing $ZEROSHIP_CONTROL_KEY could
+# value, the fresh value below still wins, but a pre-existing $CONTROL_VAR_KEY could
 # reach the runtime through a path this harness does not control and make the
 # positive control pass for the wrong reason. Refuse rather than report on it.
-if [ -n "${!ZEROSHIP_CONTROL_KEY:-}" ]; then
-  fail "$ZEROSHIP_CONTROL_KEY is already set in this shell ('${!ZEROSHIP_CONTROL_KEY}') -- it would reach the runtime through an uncontrolled path; unset it and re-run"
+if [ -n "${!CONTROL_VAR_KEY:-}" ]; then
+  fail "$CONTROL_VAR_KEY is already set in this shell ('${!CONTROL_VAR_KEY}') -- it would reach the runtime through an uncontrolled path; unset it and re-run"
   exit 2
 fi
-pass "$ZEROSHIP_CONTROL_KEY unset in the harness environment (the positive control can only come from the platform)"
+pass "$CONTROL_VAR_KEY unset in the harness environment (the positive control can only come from the platform)"
 
 # ---------------------------------------------------------------------------
 # The probe. ONE function, both sides. `$1` is the base URL, `$2` the raw file.
@@ -197,7 +207,7 @@ WORK="$WORK_EARLY"   # stack_up replaces this; the build needs a scratch dir now
 
 # The names in this script MUST equal the ones the fixture reads, or every
 # assertion keyed on them is vacuously green.
-for pair in "CANARY_KEY:$CANARY_KEY" "ZEROSHIP_CONTROL_KEY:$ZEROSHIP_CONTROL_KEY" "FIXTURE_MARKER:$FIXTURE_MARKER"; do
+for pair in "CANARY_KEY:$CANARY_KEY" "CONTROL_VAR_KEY:$CONTROL_VAR_KEY" "FIXTURE_MARKER:$FIXTURE_MARKER"; do
   name="${pair%%:*}"; val="${pair#*:}"
   grep -qF "\"$val\"" "$APP/src/index.ts" \
     && pass "$name '$val' matches examples/env-probe/src/index.ts" \
@@ -221,7 +231,7 @@ for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 (
-  cd "$APP" && env "$CANARY_KEY=$CANARY_VAL" "ZS_VAR_$ZEROSHIP_CONTROL_KEY=$CONTROL_VAL" \
+  cd "$APP" && env "$CANARY_KEY=$CANARY_VAL" "ZS_VAR_$CONTROL_VAR_KEY=$CONTROL_VAL" \
     ./node_modules/.bin/vite --port "$VITE_PORT" --strictPort > "$WORK/dev.log" 2>&1
 ) & PIDS+=($!)
 # Readiness: a deadline plus a log-derived diagnosis, not a fixed 25 x 2s count
@@ -321,9 +331,9 @@ APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 # The POSITIVE CONTROL: a legitimately-deployed app var.
 vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
-  -d "{\"key\":\"$ZEROSHIP_CONTROL_KEY\",\"value\":\"$CONTROL_VAL\"}")"
-[ "$vc" = "204" ] && pass "deployed app var $ZEROSHIP_CONTROL_KEY (HTTP $vc)" \
-  || { fail "could not set app var $ZEROSHIP_CONTROL_KEY (HTTP $vc) -- the positive control is unavailable"; }
+  -d "{\"key\":\"$CONTROL_VAR_KEY\",\"value\":\"$CONTROL_VAL\"}")"
+[ "$vc" = "204" ] && pass "deployed app var $CONTROL_VAR_KEY (HTTP $vc)" \
+  || { fail "could not set app var $CONTROL_VAR_KEY (HTTP $vc) -- the positive control is unavailable"; }
 
 # THE OPT-IN SECRET LAYER: two secrets, one opted into the expose list and one
 # not. Setting a secret is not the same as exposing it.
@@ -413,9 +423,9 @@ fi
 for s in appEnv processEnv processEnvIndirect globalEnv; do
   got="$(jread "$WORK/deployed.json" "r.$s.control")"
   if [ "$got" = "$CONTROL_VAL" ]; then
-    pass "POSITIVE CONTROL: deployed $s.$ZEROSHIP_CONTROL_KEY == '$CONTROL_VAL' (a legitimately-deployed var IS visible here)"
+    pass "POSITIVE CONTROL: deployed $s.$CONTROL_VAR_KEY == '$CONTROL_VAL' (a legitimately-deployed var IS visible here)"
   else
-    fail "POSITIVE CONTROL: deployed $s.$ZEROSHIP_CONTROL_KEY was '$got', expected '$CONTROL_VAL' -- 'canary absent' on this surface is NOT a safety result; it is indistinguishable from a probe that cannot read the surface at all"
+    fail "POSITIVE CONTROL: deployed $s.$CONTROL_VAR_KEY was '$got', expected '$CONTROL_VAL' -- 'canary absent' on this surface is NOT a safety result; it is indistinguishable from a probe that cannot read the surface at all"
     CONTROLS_OK=0
   fi
 done
@@ -626,9 +636,9 @@ console.log(JSON.stringify(r,null,1).split("\n").map(l=>"  "+l).join("\n"));
 #
 # CROSS-CHECKED against a second, independent instrument: CALL SITES in the
 # source, with every loop multiplied out.
-#    1  ZEROSHIP_CONTROL_KEY unset in this shell
+#    1  CONTROL_VAR_KEY unset in this shell
 #    1  built app.zship
-#    3  the `for pair in CANARY_KEY ZEROSHIP_CONTROL_KEY FIXTURE_MARKER` fixture-agreement loop
+#    3  the `for pair in CANARY_KEY CONTROL_VAR_KEY FIXTURE_MARKER` fixture-agreement loop
 #    1  envp.report is anon in the manifest
 #    1  dev app reachable
 #    1  dev tier IS the CLI serve vector
