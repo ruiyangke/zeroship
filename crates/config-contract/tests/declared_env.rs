@@ -124,3 +124,76 @@ fn a_declared_read_reports_absence_rather_than_a_value() {
     );
     assert_eq!(absent, None);
 }
+
+/// The `platform` class is a debt ledger, and this is what stops it growing.
+///
+/// `EnvClass::Platform` documents itself as a transitional class whose members
+/// still owe a generated `#[zeroship_config]` declaration. A promise like that
+/// in a doc comment is the kind of claim that reads as protection and is not:
+/// nothing stopped the next conversion from reaching for it. So the count is
+/// pinned. Raising the ceiling is a deliberate edit with a diff someone reviews.
+///
+/// It is a SOURCE census, not a linked one: `DECLARED_ENV_READS` only contains
+/// what this test binary links, which would silently exclude most of the tree.
+///
+/// Does not cover: whether a `platform` entry is CORRECTLY classified. A name
+/// that should have been `dev` sits inside the ceiling as comfortably as one
+/// that could not be anything else.
+#[test]
+fn the_platform_class_census_only_shrinks() {
+    use zeroship_config_contract::inventory::collect_tracked_rust_sources;
+    use zeroship_config_contract::raw_env::collect_declared_keys;
+
+    // Measured 2026-08-12, at the end of Step 4: 14 distinct names across 18
+    // sites. Distinct NAMES, not sites, because the debt is one missing
+    // declaration per identity however many places read it. Lower it as Step 3
+    // and Step 6 give these settings real declarations; never raise it without
+    // saying in the commit why a generated declaration was not possible.
+    //
+    // KNOWN BLIND SPOT, stated rather than papered over:
+    // `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` is a fifteenth platform-class name.
+    // It is declared inside the body of `resolve_s3_runtime!` in
+    // `crates/core/src/config/declared.rs`, and a `macro_rules!` body is tokens
+    // rather than expressions, so this source census cannot see it. It is
+    // counted here in prose and not in the number.
+    const CEILING: usize = 14;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root");
+    let sources = collect_tracked_rust_sources(root).expect("tracked Rust sources");
+    assert!(
+        sources.len() > 500,
+        "only {} tracked files; the enumeration is broken and a low count would \
+         prove nothing",
+        sources.len()
+    );
+
+    let keys = collect_declared_keys(&sources).expect("declared key census");
+    assert!(
+        !keys.is_empty(),
+        "no declared keys found at all; the census instrument is broken"
+    );
+
+    let platform = keys
+        .iter()
+        .filter(|key| key.class == "platform")
+        .collect::<Vec<_>>();
+    let names = platform
+        .iter()
+        .map(|key| key.name.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        names.len() <= CEILING,
+        "the platform class has grown to {} distinct names (ceiling {CEILING}) \
+         across {} sites:\n{}",
+        names.len(),
+        platform.len(),
+        platform
+            .iter()
+            .map(|key| format!("  {} ({})", key.name, key.file))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

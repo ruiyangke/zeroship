@@ -305,6 +305,13 @@ macro_rules! read_declared_env_family {
             ::zeroship_core::config::DECLARED_ENV_READS
         )]
         #[linkme(crate = ::zeroship_core::__private::linkme)]
+        // The linked element is a `static` with `#[link_section]`, which the
+        // workspace `unsafe_code = "deny"` rejects. Outside `zeroship-core` the
+        // lint does not reach external-macro output and this is inert; INSIDE
+        // core the macro is local, so without it every core-internal declared
+        // read would need its own function-scoped allow. Scoped to the generated
+        // static, which contains no `unsafe` block to hide.
+        #[allow(unsafe_code)]
         static __ZEROSHIP_DECLARED_ENV_FAMILY_READ: ::zeroship_core::config::DeclaredEnvRead =
             ::zeroship_core::config::DeclaredEnvRead::family(
                 ($family).prefix(),
@@ -516,6 +523,13 @@ macro_rules! read_process_env_snapshot {
             ::zeroship_core::config::DECLARED_ENV_READS
         )]
         #[linkme(crate = ::zeroship_core::__private::linkme)]
+        // The linked element is a `static` with `#[link_section]`, which the
+        // workspace `unsafe_code = "deny"` rejects. Outside `zeroship-core` the
+        // lint does not reach external-macro output and this is inert; INSIDE
+        // core the macro is local, so without it every core-internal declared
+        // read would need its own function-scoped allow. Scoped to the generated
+        // static, which contains no `unsafe` block to hide.
+        #[allow(unsafe_code)]
         static __ZEROSHIP_PROCESS_ENV_SNAPSHOT_READ: ::zeroship_core::config::DeclaredEnvRead =
             ::zeroship_core::config::DeclaredEnvRead::new(
                 ::zeroship_core::config::PROCESS_ENV_SNAPSHOT,
@@ -544,6 +558,13 @@ macro_rules! read_declared_env {
             ::zeroship_core::config::DECLARED_ENV_READS
         )]
         #[linkme(crate = ::zeroship_core::__private::linkme)]
+        // The linked element is a `static` with `#[link_section]`, which the
+        // workspace `unsafe_code = "deny"` rejects. Outside `zeroship-core` the
+        // lint does not reach external-macro output and this is inert; INSIDE
+        // core the macro is local, so without it every core-internal declared
+        // read would need its own function-scoped allow. Scoped to the generated
+        // static, which contains no `unsafe` block to hide.
+        #[allow(unsafe_code)]
         static __ZEROSHIP_DECLARED_ENV_READ: ::zeroship_core::config::DeclaredEnvRead =
             ::zeroship_core::config::DeclaredEnvRead::new(
                 ($key).name(),
@@ -568,6 +589,13 @@ macro_rules! read_declared_env_os {
             ::zeroship_core::config::DECLARED_ENV_READS
         )]
         #[linkme(crate = ::zeroship_core::__private::linkme)]
+        // The linked element is a `static` with `#[link_section]`, which the
+        // workspace `unsafe_code = "deny"` rejects. Outside `zeroship-core` the
+        // lint does not reach external-macro output and this is inert; INSIDE
+        // core the macro is local, so without it every core-internal declared
+        // read would need its own function-scoped allow. Scoped to the generated
+        // static, which contains no `unsafe` block to hide.
+        #[allow(unsafe_code)]
         static __ZEROSHIP_DECLARED_ENV_OS_READ: ::zeroship_core::config::DeclaredEnvRead =
             ::zeroship_core::config::DeclaredEnvRead::new(
                 ($key).name(),
