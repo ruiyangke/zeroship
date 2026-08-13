@@ -6577,3 +6577,131 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// A scope reviewed for ONE migration must not authorise a DIFFERENT one.
+//
+// `ApprovalScope::Versions` exists so that approving one reviewed destructive
+// step "can NEVER blanket-authorize an unrelated co-bundled destructive op the
+// operator never saw" - approval.rs says so directly.
+//
+// The existing coverage (`sqlite_rebuild_apply.rs`) shows two things: an EMPTY
+// scope refuses, and a scope containing THIS version allows. Neither is the
+// bypass case. Both are consistent with an implementation that merely checks
+// "is the scope non-empty", which would admit every destructive op the moment
+// the operator approved any single one - exactly the hole the type exists to
+// close.
+//
+// So this supplies a NON-EMPTY scope naming a different, real version and
+// requires the refusal anyway, then admits the right version through the same
+// call to show the refusal was about scope membership rather than about the
+// step being unrunnable.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_scope_naming_another_version_does_not_authorise_this_one() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".scoped_items (id bigint PRIMARY KEY, value text NOT NULL); \
+             INSERT INTO \"{schema}\".scoped_items (id, value) VALUES (1, 'pending'), (2, 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create the scoped target");
+
+    let version = MigrationId::generate();
+    // A real, distinct version: the operator reviewed THIS one, not the step below.
+    let reviewed_elsewhere = MigrationId::generate();
+    let checksum = step_checksum("scoped backfill");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "scoped_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+            name: "scoped_items_id_immutable".into(),
+        },
+        cursor_contract: None,
+        batch_size: 2,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        filter: None,
+        name: "scoped backfill".into(),
+    };
+
+    let values = || async {
+        let rows = session
+            .query(
+                &format!(
+                    "SELECT value FROM \"{}\".scoped_items ORDER BY id",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("read values");
+        rows.iter()
+            .map(|row| row.try_get::<_, String>("value").expect("value"))
+            .collect::<Vec<_>>()
+    };
+
+    // A non-empty scope, naming a real version that is not this step's.
+    let mut elsewhere = std::collections::BTreeSet::new();
+    elsewhere.insert(reviewed_elsewhere.as_str().to_string());
+    let refused = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::Versions(elsewhere),
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("approval reviewed for another version must not authorise this step");
+    let message = refused.to_string();
+    assert!(
+        message.contains(version.as_str()),
+        "the refusal must name the version that was not in scope, got: {message}"
+    );
+    assert_eq!(
+        values().await,
+        vec!["pending".to_string(), "pending".to_string()],
+        "a refused step must not have touched a row"
+    );
+
+    // The same call, with THIS version admitted, applies - so the refusal above
+    // was about scope membership and not about the step being unrunnable.
+    let mut admitted = std::collections::BTreeSet::new();
+    admitted.insert(version.as_str().to_string());
+    backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::Versions(admitted),
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("the in-scope step applies");
+    assert_eq!(
+        values().await,
+        vec!["done".to_string(), "done".to_string()],
+        "the admitted step must actually run"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
