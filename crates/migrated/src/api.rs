@@ -43,11 +43,37 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/v1/apps/{app_id}/migrations/rollback").route(web::post().to(stub_phase2)),
     )
-    .service(web::resource("/health").route(web::get().to(health)));
+    .service(web::resource("/healthz").route(web::get().to(healthz)))
+    .service(web::resource("/readyz").route(web::get().to(readyz)));
 }
 
-pub async fn health() -> web::HttpResponse {
+/// Liveness. Constant 200 by design: it must not touch Postgres, or a database
+/// blip would get this container killed on top of the outage.
+pub async fn healthz() -> web::HttpResponse {
     web::HttpResponse::Ok().json(&json!({"ok": true}))
+}
+
+/// Readiness. Every endpoint this service exposes reads or writes Postgres, so
+/// an unreachable database means it cannot serve. The probe is bounded,
+/// cached and single-flighted; the body carries no DSN and no driver text.
+pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpResponse {
+    let ready = state
+        .readiness
+        .ready(|| async {
+            match state.policy_store.probe().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(error = %error, "migrated readiness: postgres unreachable");
+                    false
+                }
+            }
+        })
+        .await;
+    if ready {
+        web::HttpResponse::Ok().json(&json!({"ready": true}))
+    } else {
+        web::HttpResponse::ServiceUnavailable().json(&json!({"ready": false}))
+    }
 }
 
 pub async fn apply(
