@@ -745,3 +745,72 @@ test("PostgreSQL: an applied prior moves the refusal from the database into the 
     await client.end().catch(() => {});
   }
 });
+
+/** The dialect split for the GUARDED drop of a never-created view, which is the pair
+ *  `docs/writing-migrations.md` gets to state and therefore the pair that must be
+ *  measured rather than reasoned about.
+ *
+ *  The MySQL half is above: with a prior applied, the fold refuses. This is the other
+ *  half, and it lands the opposite way — PostgreSQL ACCEPTS the same authored migration
+ *  in the same shape. Without it, MySQL's refusal reads as "the fold refuses absent
+ *  views", a dialect-independent claim that is false.
+ *
+ *  The asymmetry is not the fold disagreeing with itself. `render/fold.rs` is guard-blind
+ *  for every drop by design ("an existence_guard governs only apply-time presence"), so
+ *  the fold would refuse on both. PostgreSQL never reaches it: its executor resolves the
+ *  guard against the live catalog under lock and the op is gone before projection. MySQL
+ *  probes nothing, so the op survives into the fold and dies there — which is also why
+ *  the native `DROP VIEW IF EXISTS` the docs credit MySQL with is unreachable for an
+ *  absent view.
+ *
+ *  Both arms drop a view NO migration in the history ever created, so a pass cannot come
+ *  from the snapshot resolving a known view without consulting the guard. */
+test("PostgreSQL: an ifExists drop of a view that never existed is absorbed, unlike MySQL", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG absent-view guard arm skipped");
+    return;
+  }
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+
+  const schema = uniqueNamespace("viewdropabsent_pg");
+  const meta = `${schema}_migrations`;
+  const driver: DriverConfig = { kind: "postgres", url: PG_URL };
+
+  try {
+    await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
+    // The prior is what builds the projection at all; without it this arm would be
+    // measuring the empty-history path, which succeeds on every dialect and would make
+    // the comparison against MySQL meaningless.
+    const priors = createTableOnly();
+    await applyOne(priors, schema, driver, []);
+
+    const outcome = await applyOne(dropTheViewIfExists(), schema, driver, [priors]).then(
+      () => "ran",
+      (error: unknown) => String((error as Error)?.message ?? error),
+    );
+    assert.equal(
+      outcome,
+      "ran",
+      "PostgreSQL resolves the guard against the catalog before projection, so an absent " +
+        "view is a satisfied no-op rather than the fold error MySQL raises",
+    );
+
+    // And nothing was created to make it true.
+    const { rows } = await client.query(
+      `SELECT table_name FROM information_schema.views
+        WHERE table_schema = $1 AND table_name = $2`,
+      [schema, VIEW],
+    );
+    assert.equal(rows.length, 0, "the absorbed drop must not have created the view");
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS ${pgIdent(schema)} CASCADE;
+         DROP SCHEMA IF EXISTS ${pgIdent(meta)} CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+  }
+});
