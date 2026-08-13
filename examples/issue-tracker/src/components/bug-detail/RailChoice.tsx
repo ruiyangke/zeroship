@@ -1,8 +1,10 @@
-import { useState, type ReactNode } from "react";
-import { Button, Select } from "@zeroship/ui";
+import type { ReactNode } from "react";
+import { Select } from "@zeroship/ui";
+
+import { RailProperty } from "./RailProperty";
 
 /**
- * A rail property you read, and edit only when you mean to.
+ * A rail property whose value comes from a fixed list.
  *
  * The rail used to render a bordered Select per property, so a column whose
  * job is to state facts about the bug was a column of form controls -- four
@@ -14,6 +16,9 @@ import { Button, Select } from "@zeroship/ui";
  * NOT done by restyling the design system's select chrome away. A control
  * that looks like text but eats clicks is worse than an honest box; the fix
  * is to not render a control until one is wanted.
+ *
+ * The read-mode shell lives in RailProperty, shared with the assignee row,
+ * which needs a people search rather than a list.
  */
 export function RailChoice({
   label,
@@ -32,57 +37,28 @@ export function RailChoice({
   disabled?: boolean;
   onChange: (next: string) => void | Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
-
-  if (!editing) {
-    return (
-      <div className="rail-choice">
-        <span className="field-label">{label}</span>
-        <span className="rail-choice-value">{display}</span>
-        <Button
-          variant="plain"
-          size="small"
-          disabled={disabled}
-          // Named per property: a rail of bare "Edit" buttons tells a screen
-          // reader nothing about which one it has landed on.
-          aria-label={`Edit ${label}`}
-          onClick={() => setEditing(true)}
-        >
-          Edit
-        </Button>
-      </div>
-    );
-  }
-
   return (
-    <div className="rail-choice is-editing">
-      <span className="field-label">{label}</span>
-      <Select
-        value={value}
-        aria-label={label}
-        disabled={disabled}
-        onValueChange={async (next) => {
-          if (next != null && next !== value) await onChange(next);
-          setEditing(false);
-        }}
-        renderValue={(current) =>
-          options.find((option) => option.value === current)?.label ?? String(current ?? "")
-        }
-      >
-        {options.map((option) => (
-          <Select.Item key={option.value} value={option.value}>
-            {option.label}
-          </Select.Item>
-        ))}
-      </Select>
-      <Button
-        variant="plain"
-        size="small"
-        aria-label={`Cancel editing ${label}`}
-        onClick={() => setEditing(false)}
-      >
-        Cancel
-      </Button>
-    </div>
+    <RailProperty label={label} display={display} disabled={disabled}>
+      {(done) => (
+        <Select
+          value={value}
+          aria-label={label}
+          disabled={disabled}
+          onValueChange={async (next) => {
+            if (next != null && next !== value) await onChange(next);
+            done();
+          }}
+          renderValue={(current) =>
+            options.find((option) => option.value === current)?.label ?? String(current ?? "")
+          }
+        >
+          {options.map((option) => (
+            <Select.Item key={option.value} value={option.value}>
+              {option.label}
+            </Select.Item>
+          ))}
+        </Select>
+      )}
+    </RailProperty>
   );
 }

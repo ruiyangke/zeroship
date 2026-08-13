@@ -390,7 +390,11 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* ── user picker ─────────────────────────────────────────────────────── */
 .user-picker { margin-top: 0.4rem; }
+/* The field must be allowed to shrink. A flex item defaults to min-width:auto,
+   so the input held its intrinsic size and pushed the Find button off the page
+   the first time the picker was put somewhere narrow (the bug rail). */
 .user-picker-row { display: flex; gap: 0.4rem; }
+.user-picker-row > :first-child { flex: 1 1 auto; min-inline-size: 0; }
 .user-picker-results { list-style: none; margin: 0.3rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; }
 
 /* ── new bug ─────────────────────────────────────────────────────────── */
@@ -1188,3 +1192,9 @@ fieldset.bug-detail-extras { display: grid; }
    button beside it. */
 .fields-panel .field-block-head.is-action { display: block; min-block-size: 0; }
 .fields-panel .field-block-head.is-action > button { opacity: 1; }
+
+/* An editor that needs the whole rail: the label sits above it rather than
+   beside it, because a people search plus its button will not fit in a
+   column sized for "major". */
+.rail-choice.is-editing.is-wide { grid-template-columns: minmax(0, 1fr); }
+.rail-choice.is-editing.is-wide > button { grid-column: 1; }

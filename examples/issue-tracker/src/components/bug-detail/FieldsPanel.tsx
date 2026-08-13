@@ -5,6 +5,7 @@ import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } fr
 
 import { PriorityBadge, SeverityBadge } from "../Badges";
 import { RailChoice } from "./RailChoice";
+import { RailProperty } from "./RailProperty";
 import { errorMessage, toPromise } from "../rpc";
 import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -73,15 +74,16 @@ function AssigneeControl({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [picking, setPicking] = useState(false);
 
-  const assign = async (assigneeId: string) => {
+  const assign = async (assigneeId: string, done: () => void) => {
     setBusy(true);
     setError(null);
     try {
       onUpdated(await reassignBug({ id: bug.id, assigneeId }));
-      setPicking(false);
+      done();
     } catch (err) {
+      // Deliberately stays open on failure: closing would discard the choice
+      // and leave the old name showing, which reads as a refusal nobody made.
       setError(errorMessage(err));
     } finally {
       setBusy(false);
@@ -89,17 +91,17 @@ function AssigneeControl({
   };
 
   return (
-    <div className="field-block">
-      <div className="field-block-head">
-        <span className="field-label">Assignee</span>
-        <span>{personName(bug.assigneeId, people, "unassigned")}</span>
-        <Button variant="gray" size="small" disabled={busy} onClick={() => setPicking((v) => !v)}>
-          Change
-        </Button>
-      </div>
-      {picking ? <UserPicker onPick={(user) => void assign(user.id)} /> : null}
+    <>
+      <RailProperty
+        label="Assignee"
+        display={personName(bug.assigneeId, people, "unassigned")}
+        disabled={busy}
+        wide
+      >
+        {(done) => <UserPicker onPick={(user) => void assign(user.id, done)} />}
+      </RailProperty>
       {error ? <p className="field-error">{error}</p> : null}
-    </div>
+    </>
   );
 }
 

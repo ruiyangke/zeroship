@@ -77,3 +77,67 @@ test("a rail property reads as a value and edits in place", async ({ page, baseU
   const stored = await rpc("bugs.get", { id: bug.id });
   expect(stored.bug.severity, "the change reached the server").toBe("critical");
 });
+
+/**
+ * The editor has to fit the rail it opens in.
+ *
+ * Assignee edits with a people search rather than a list, and a search field
+ * plus its button does not fit beside a label in a column sized for the word
+ * "major". Dropped in unchanged, the input kept its intrinsic width -- a flex
+ * item will not shrink below its content unless told to -- and pushed the
+ * Find button off the right edge of the page.
+ *
+ * Checked at desktop width on purpose. The phone-width spec cannot see this:
+ * the rail is full width there, so the row that overflows at 1440 has room.
+ */
+test("the assignee editor stays inside the rail", async ({ page, baseURL }) => {
+  await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
+
+  const rpc = async (proc: string, json: unknown) => {
+    const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} should succeed`).toBe(200);
+    return (await res.json()).json;
+  };
+
+  const product = await rpc("products.create", {
+    name: `Fit ${RUN}`,
+    key: productKey("FIT"),
+    description: "fit",
+  });
+  const component = await rpc("components.create", {
+    productId: product.id,
+    name: "Core",
+    description: "core",
+  });
+  const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
+  const bug = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary: `Assignee editor fits ${RUN}`,
+    description: "seed",
+  });
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`/#/bugs/${bug.id}`);
+
+  await page.getByRole("button", { name: "Edit Assignee", exact: true }).click();
+
+  const rail = page.locator(".bug-detail-side");
+  const row = page.locator(".rail-choice.is-editing .user-picker-row");
+  await expect(row, "the picker opened").toBeVisible();
+
+  // Measure the BUTTON, not the row that holds it. The row is a grid item
+  // sized to its column, so it reports itself inside the rail while its
+  // contents spill out of it -- an earlier version of this check asserted on
+  // the row and passed happily against the broken layout.
+  const find = row.getByRole("button", { name: "Find" });
+  const railBox = await rail.boundingBox();
+  const findBox = await find.boundingBox();
+  expect(railBox, "the rail is laid out").toBeTruthy();
+  expect(findBox, "the button is laid out").toBeTruthy();
+  expect(
+    Math.round(findBox!.x + findBox!.width),
+    "the picker ends inside the rail rather than running off the page",
+  ).toBeLessThanOrEqual(Math.round(railBox!.x + railBox!.width));
+});

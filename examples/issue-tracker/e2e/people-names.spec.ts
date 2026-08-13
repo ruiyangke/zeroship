@@ -70,7 +70,7 @@ test("the bug page names people rather than printing their ids", async ({
     .locator("div", { has: page.getByText("Reporter", { exact: true }) })
     .last();
   await expect(reporter, "the reporter is a person").toContainText(name);
-  const assignee = page.locator(".field-block", { hasText: "Assignee" }).first();
+  const assignee = page.locator(".rail-choice", { hasText: "Assignee" }).first();
   await expect(assignee, "the assignee is a person").toContainText(name);
 
   const authors = page.locator(".comment-author");
