@@ -8,15 +8,23 @@
 #
 # All keys are optional. Absent keys use the binary's compiled default.
 # Scalar key precedence: CLI flag > env > this file > default.
-# Secret VALUES never go in this file. The [secrets] section below holds only
-# REFERENCES (urn:/arn:) that point at where each secret actually lives; a
-# plaintext literal there is rejected at startup.
+# Secret values may be literals in an UNTRACKED overlay, but never in THIS file:
+# it is tracked, and a plaintext secret in a tracked file is unrecoverable once
+# committed. See the secrets note below the operational tables.
 
 # Public-edge topology for browser-visible URLs and same-origin checks. These
 # are ordinary operational settings, not security-check switches. Exact
 # origins only: no wildcards, paths, queries, fragments, credentials, or null.
 # origin_scheme = "https"
 # trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
+
+# Platform-global secrets, at the ROOT because several binaries read the one
+# value: control_key (control, gateway, worker, migrated, auth), worker_key
+# (control, gateway, worker), pairwise_salt (control, gateway). Root keys must
+# precede the first table header, or TOML puts them inside it.
+control_key = "urn:zeroship:file:/etc/zeroship/secrets/control_key"
+worker_key = "urn:zeroship:file:/etc/zeroship/secrets/worker_key"
+pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 
 [auth]
 # Supply the native OP public origin to auth through ZEROSHIP_AUTH_PUBLIC_URL and the
@@ -67,57 +75,58 @@ log_filter = "info,zeroship_=debug"
 # Precedence: CLI flag > env > this file > default.
 log_format = "json"
 
-[secrets]
-# Secret-reference overlay. PORTABILITY NOTE: this file holds REFERENCES only,
-# NEVER literal secret values. Every key below is an optional pointer to where
-# the real secret lives (env var, file path, Vault, AWS Secrets Manager). A
-# plaintext literal here is rejected at startup - the config file must never
-# carry a secret. That keeps the file safe to commit per-environment alongside
-# the rest of deploy/ops/.
+# ---------------------------------------------------------------------------
+# Secrets
 #
-# Precedence for every secret: CLI flag > env var > this file > compiled default.
-# References here are RESOLVED AT BOOT (the env var is read, the file is opened,
-# the backend is fetched). Under `--check-config` only the reference FORMAT is
-# validated - nothing is read or fetched - so a dry run never needs the secret
-# backends to be reachable.
+# There is no [secrets] table. A secret sits WITH its siblings, so LOCATION
+# ENCODES SHARING: a key at the root is one every consumer shares, a key under
+# [control] is control's alone. The flat table destroyed that distinction, which
+# is how one control_key ended up a literal in four services and a ${VAR}
+# indirection in the fifth with nothing marking the difference.
 #
-# Reference forms (a value NOT starting with urn:/arn: is treated as a literal
-# and rejected):
-#   urn:zeroship:env:<VARNAME>     read the named environment variable
-#   urn:zeroship:file:/abs/path    read the file contents (trailing \n trimmed)
-#   urn:zeroship:vault:<namespace> HashiCorp Vault (resolution not yet implemented)
-#   urn:zeroship:awssm:<namespace> AWS Secrets Manager, short form (not yet implemented)
-#   arn:aws:secretsmanager:<...>   AWS Secrets Manager, full ARN (not yet implemented)
+# A value is EITHER the secret itself OR urn:zeroship:file:/abs/path. That is
+# the whole set. The env-to-env form (urn:zeroship:env:<VAR>) is gone - a config
+# file naming an environment variable so a deployment can set it under a third
+# name IS the alias hop - and so are the Vault and AWS Secrets Manager forms,
+# which parsed but always failed at boot with BackendUnavailable. A syntax the
+# runtime always refuses is not a deployment source.
 #
-# Every key is OPTIONAL; omit a key to fall back to CLI/env/default. The
-# examples below show each reference form - pick whichever backend an
-# environment uses.
+# A LITERAL IS PERMITTED HERE, and that is deliberate: the overlay may itself BE
+# a mounted Kubernetes Secret, in which case the values never enter git and are
+# RBAC-controlled. Permitting a literal by environment and forbidding one by
+# mounted file had no principled basis. What is forbidden is a plaintext secret
+# in a TRACKED file - THIS file is tracked, so keep references here and put
+# literals only in an untracked overlay.
+#
+# Precedence for every secret: the generated --<name>-file path flag, then the
+# canonical ZEROSHIP_* environment name, then this file. Under --check-config
+# nothing is opened and no reference is followed: the run establishes which
+# source supplies each secret, validates its source policy and format, and
+# reports presence only.
+#
+# Convention, not mechanism: keep secret entries last within each table.
 
-# Bundle/master encryption key.
-master_key = "urn:zeroship:env:MASTER_KEY"
-# Control-plane shared secret.
-control_key = "urn:zeroship:env:CONTROL_KEY"
-# Worker shared secret.
-worker_key = "urn:zeroship:env:WORKER_KEY"
-# Stash signing key.
+[control]
+# Control's own secrets, under control's table. Each of these is read by
+# exactly one binary, which is what the scope segment records.
+database_url = "urn:zeroship:file:/etc/zeroship/secrets/control_database_url"
+master_key = "urn:zeroship:file:/etc/zeroship/secrets/master_key"
+legacy_master_keys = "urn:zeroship:file:/etc/zeroship/secrets/legacy_master_keys"
+stripe_webhook_secret = "urn:zeroship:file:/etc/zeroship/secrets/stripe_webhook_secret"
+stripe_secret_key = "urn:zeroship:file:/etc/zeroship/secrets/stripe_secret_key"
+smtp_password = "urn:zeroship:file:/etc/zeroship/secrets/control_smtp_password"
+resend_api_key = "urn:zeroship:file:/etc/zeroship/secrets/control_resend_api_key"
+
+[gateway]
+database_url = "urn:zeroship:file:/etc/zeroship/secrets/gateway_database_url"
 stash_signing_key = "urn:zeroship:file:/etc/zeroship/secrets/stash_signing_key"
-# Gateway OIDC relying-party client secret.
-gateway_oidc_secret = "urn:zeroship:file:/etc/zeroship/secrets/gateway_oidc_secret"
-# Stripe webhook signing secret.
-stripe_webhook_secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:zeroship/stripe_webhook-AbCdEf"
-# Primary database URL.
-database_url = "urn:zeroship:env:DATABASE_URL"
-# Auth database URL.
-auth_db_url = "urn:zeroship:env:AUTH_DB_URL"
-# Legacy master keys (comma-separated, for key rotation).
-legacy_master_keys = "urn:zeroship:env:LEGACY_MASTER_KEYS"
-# Google OAuth client secret.
-google_client_secret = "urn:zeroship:vault:secret/data/zeroship/google#client_secret"
-# GitHub OAuth client secret.
-github_client_secret = "urn:zeroship:vault:secret/data/zeroship/github#client_secret"
-# SMTP password.
-smtp_password = "urn:zeroship:file:/etc/zeroship/secrets/smtp_password"
-# Resend API key.
-resend_api_key = "urn:zeroship:awssm:zeroship/resend_api_key"
-# Postmark inbound webhook basic-auth password.
-postmark_webhook_password = "urn:zeroship:env:POSTMARK_WEBHOOK_PASSWORD"
+broker_secret = "urn:zeroship:file:/etc/zeroship/secrets/broker_secret"
+
+[worker]
+database_url = "urn:zeroship:file:/etc/zeroship/secrets/worker_database_url"
+kv_url = "urn:zeroship:file:/etc/zeroship/secrets/kv_url"
+
+[migrated]
+database_url = "urn:zeroship:file:/etc/zeroship/secrets/migrated_database_url"
+provision_database_url = "urn:zeroship:file:/etc/zeroship/secrets/provision_database_url"
+policy_seal_key = "urn:zeroship:file:/etc/zeroship/secrets/policy_seal_key"

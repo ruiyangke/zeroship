@@ -31,25 +31,37 @@ authoritative per-declaration set.
 
 There are **two naming families** and they are not interchangeable.
 
-The service binaries take secrets as **CLI flags with a bare env fallback**:
-`--db` / `DATABASE_URL`, `--control-key` / `CONTROL_KEY`, `--master-key` /
-`MASTER_KEY`, `--worker-key` / `WORKER_KEY`.
+**SECRETS are no longer in the bare family either.** A secret is generated from
+the same one canonical identity as everything else, so its environment name is
+`ZEROSHIP_<CANONICAL>` and its overlay path is the canonical name itself. What
+is different about a secret is its FLAG: it gets exactly one, a
+`--<name>-file PATH`, and never a value flag, so secret material cannot reach a
+process argument list.
 
-The compose stack does not set those. It sets `ZEROSHIP_`-prefixed names, and
-`deploy/ops/zeroship.toml` maps one onto the other through its `[secrets]`
-block:
-
-```toml
-control_key  = "urn:zeroship:env:ZEROSHIP_CONTROL_KEY"
-master_key   = "urn:zeroship:env:ZEROSHIP_MASTER_KEY"
-worker_key   = "urn:zeroship:env:ZEROSHIP_WORKER_KEY"
+```
+control_key        ZEROSHIP_CONTROL_KEY               --control-key-file
+control.master_key ZEROSHIP_CONTROL_MASTER_KEY        --master-key-file
+gateway.database_url ZEROSHIP_GATEWAY_DATABASE_URL    --database-url-file
 ```
 
-So `ZEROSHIP_CONTROL_KEY` is not read by any Rust `env::var` call. It is read by
-the config overlay, which supplies the value the `--control-key` flag would
-otherwise carry. Setting `CONTROL_KEY` directly also works; setting **both** to
-different values resolves by the documented precedence (CLI flag > `[secrets]`
-file reference > default), which is a good way to confuse yourself.
+The alias hop is gone with it. `deploy/ops/zeroship.toml` used to carry a
+`[secrets]` block whose every entry was a `urn:zeroship:env:<VAR>` reference -
+a config file naming an environment variable so that a compose service could
+set the value under a third name. That whole table is deleted, and so is the
+env-to-env reference scheme that expressed it. A secret in the overlay now sits
+at its canonical path beside its operational siblings, so LOCATION ENCODES
+SHARING: a key at the root is one several binaries read, a key under `[control]`
+is control's alone.
+
+An overlay value is EITHER the secret itself OR `urn:zeroship:file:/abs/path`.
+There is no third form: the Vault and AWS Secrets Manager spellings parsed but
+always failed at boot, so they were syntax for a source that did not exist, and
+they are deleted too. A literal is permitted, because the overlay may itself be
+a mounted Kubernetes Secret - but never in a TRACKED file.
+
+Under `--check-config` nothing is opened and no reference is followed. The run
+establishes which source supplies each secret, validates that source's policy
+and format, and reports presence only.
 
 The overlay is auto-discovered at `/etc/zeroship/zeroship.toml`, or pointed at
 with `ZEROSHIP_CONFIG`.
@@ -360,14 +372,6 @@ CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 Found while compiling this list. Recorded rather than fixed, because each is a
 separate change.
 
-**`deploy/ops/zeroship.example.toml` references an env name nothing reads.**
-Line 116 declares
-`postmark_webhook_password = "urn:zeroship:env:POSTMARK_WEBHOOK_PASSWORD"`, but
-the only consumer is `crates/auth/src/config.rs`, which declares
-`AUTH_POSTMARK_WEBHOOK_PASSWORD`. Setting the documented name has no effect. The
-live `deploy/ops/zeroship.toml` does not carry the reference, so only the
-example misleads.
-
 **`SANDBOX_URL` points at a service this repo does not build.** Compose sets
 `http://sandbox:9091` on control; the sandbox backend was extracted to the
 standalone `zeroship-sandbox` project. The port also happens to be `migrated`'s,
@@ -394,8 +398,10 @@ grep -rEo 'process\.env\.[A-Z][A-Z_0-9]*' sdks/ examples/ \
 # The compose knobs an operator can set
 grep -ohE '\$\{[A-Z_0-9]+(:-[^}]*)?\}' deploy/compose/docker-compose.yml | sort -u
 
-# The config-overlay indirection
-grep -rhoE 'urn:zeroship:env:[A-Z_0-9]+' deploy/ops/*.toml | sort -u
+# The overlay's secret file references. There is no env-to-env indirection to
+# enumerate any more: the scheme that expressed it is deleted, so a hit here is
+# a stale file rather than a name to document.
+grep -rhoE 'urn:zeroship:file:[^"]+' deploy/ops/*.toml | sort -u
 ```
 
 Run these under `bash`, not `zsh`: zsh does not word-split unquoted variables,

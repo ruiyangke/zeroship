@@ -688,6 +688,57 @@ log_format = "json"
         );
     }
 
+    // The SHIPPED EXAMPLE, which had no parse test at all and was therefore free
+    // to drift. It carried Vault and AWS Secrets Manager references that always
+    // failed at boot, and env-to-env references for the alias hop, so the file an
+    // operator copies documented three sources that do not exist. Every value in
+    // it is now a file reference, and every key is a leaf the schema knows -
+    // which only a load can establish, because `deny_unknown_fields` is where a
+    // stale key surfaces.
+    #[test]
+    fn the_shipped_example_overlay_parses_and_places_secrets_at_canonical_paths() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/ops/zeroship.example.toml");
+
+        let config = FileConfig::load(Some(&path)).expect("load zeroship.example.toml");
+
+        // A platform-global secret sits at the ROOT, not inside the first table
+        // that happens to precede it. TOML scoping makes that a real hazard: a
+        // root key written after a table header silently joins that table.
+        assert!(config.control_key.is_some(), "control_key must be a root key");
+        assert!(config.worker_key.is_some());
+        assert!(config.pairwise_salt.is_some());
+        // A per-binary secret sits in that binary's table.
+        assert!(config.control.master_key.is_some());
+        assert!(config.gateway.stash_signing_key.is_some());
+        assert!(config.migrated.policy_seal_key.is_some());
+
+        // Every reference in the tracked example must be a FILE reference: the
+        // schemes this step deleted are the ones an operator would otherwise
+        // copy, and a literal in a tracked file is the thing 4.7 forbids.
+        // VALUE lines only. The prose above the tables names the deleted schemes
+        // on purpose, to say they are deleted; a scan that could not tell a
+        // comment from a value would forbid explaining the change.
+        let raw = std::fs::read_to_string(&path).expect("read example");
+        for line in raw
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter(|line| line.contains("urn:") || line.contains("arn:"))
+        {
+            assert!(
+                !line.contains("urn:zeroship:env:")
+                    && !line.contains("urn:zeroship:vault:")
+                    && !line.contains("urn:zeroship:awssm:")
+                    && !line.contains("arn:aws:secretsmanager:"),
+                "the example still shows a deleted reference scheme: {line}"
+            );
+        }
+
+        // Does NOT cover deploy/compose/docker-compose.yml, which still carries
+        // comments describing the deleted [secrets] table. Rewriting deployment
+        // inputs is Step 6 of the proposal and is sequenced separately.
+    }
+
     #[test]
     fn load_auth_only_defaults_observability() {
         let file = TempFile::write(

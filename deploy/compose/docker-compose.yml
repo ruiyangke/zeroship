@@ -242,8 +242,11 @@ services:
       retries: 5
       start_period: 30s
     environment:
-      # Role-specific DSN + shared secrets, resolved from deploy/ops/zeroship.toml's
-      # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
+      # STALE as of the secret conversion. The [secrets] table and its
+      # env-to-env references are deleted; each binary now declares its own
+      # canonical ZEROSHIP_* secret name. The assignments below still use the
+      # pre-conversion spellings - rewriting deployment inputs is Step 6 of
+      # docs/proposals/2026-08-11-config-name-alignment.md.
       ZEROSHIP_DATABASE_URL: ${CONTROL_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
       # Public-edge topology, independent of the origin's plain HTTP transport
       # and of the service's security posture.
@@ -443,8 +446,8 @@ services:
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     environment:
-      # Role-specific DSN + shared secrets, resolved from deploy/ops/zeroship.toml's
-      # [secrets] `urn:zeroship:env:<VAR>` references. The gateway's least-priv
+      # STALE as of the secret conversion; see the control service above. The
+      # gateway's least-priv
       # DSN; --control-key/--worker-key flow through the file, not literal flags.
       # `--worker-key` MUST match the worker's WORKER_KEY.
       ZEROSHIP_DATABASE_URL: ${GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
@@ -545,7 +548,7 @@ services:
       retries: 5
       start_period: 40s
     environment:
-      # Resolved from deploy/ops/zeroship.toml [secrets] `urn:zeroship:env:<VAR>` refs.
+      # STALE as of the secret conversion; see the control service above.
       # Worker DSN = privileged provisioning superuser (see NOTE above); distinct
       # from control/gateway roles under the same shared `database_url` reference.
       ZEROSHIP_DATABASE_URL: ${WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
@@ -666,15 +669,15 @@ services:
       retries: 5
       start_period: 30s
     environment:
-      # auth's least-priv DSN, resolved from deploy/ops/zeroship.toml's
-      # [secrets].auth_db_url = "urn:zeroship:env:AUTH_DB_URL" reference (auth's
+      # STALE as of the secret conversion; see the control service above. Auth's
+      # least-priv DSN is now ZEROSHIP_AUTH_DATABASE_URL (auth's
       # flag is --db-url, a separate slot from the control/gateway/worker --db).
       AUTH_DB_URL: ${AUTH_DB_URL:-postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship}
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
       ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
       # auth loads the SAME ../ops/zeroship.toml overlay as control and gateway,
-      # and that overlay declares control_key = urn:zeroship:env:ZEROSHIP_CONTROL_KEY.
+      # and every consumer of the shared control_key declares ZEROSHIP_CONTROL_KEY.
       # Every binary reading the overlay must therefore supply the var; auth set only
       # AUTH_DB_URL + ZEROSHIP_AUTH_PUBLIC_URL and crash-looped on the unresolved reference.
       # Auth uses this ONLY to gate control -> auth internal OP mint calls.
