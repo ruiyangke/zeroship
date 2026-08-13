@@ -909,6 +909,12 @@ port = 9091
 
 [workflow_scheduler]
 tick_secs = 1
+
+[auth]
+addr = "0.0.0.0:9092"
+provider = "native"
+smtp_port = 587
+relay_smtp_tls = "starttls"
 "#,
         );
         let config = FileConfig::load(Some(&file.path)).expect("canonical overlay parses");
@@ -917,6 +923,9 @@ tick_secs = 1
         assert_eq!(config.worker.threads, Some(4));
         assert_eq!(config.migrated.port, Some(9091));
         assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
+        assert_eq!(config.auth.addr.as_deref(), Some("0.0.0.0:9092"));
+        assert_eq!(config.auth.provider.as_deref(), Some("native"));
+        assert_eq!(config.auth.smtp_port, Some(587));
         assert_eq!(config.trust_proxy, Some(true));
 
         // The one-variable control: the SAME file with one key misspelled must
@@ -939,5 +948,28 @@ tick_secs = 1
         let err = FileConfig::load(Some(&control.path))
             .expect_err("a bootstrap control has no overlay tier");
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // Split out from the case above because it asserts a REJECTION per key and a
+    // loop of `expect_err` reads badly inline.
+    #[test]
+    fn an_auth_control_key_has_no_overlay_tier_and_is_refused_in_the_auth_table() {
+        for key in ["config", "no_config", "check_config", "check_config_format"] {
+            let file = TempFile::write(
+                &format!("auth-control-{key}"),
+                &format!("[auth]\n{key} = \"x\"\n"),
+            );
+            let err = FileConfig::load(Some(&file.path))
+                .err()
+                .unwrap_or_else(|| panic!("[auth].{key} must be rejected"));
+            assert!(matches!(err, ConfigError::Parse { .. }), "{key}: {err}");
+        }
+
+        // The one-variable control: an ordinary operational key in the SAME
+        // table parses. Without it, the loop above would also pass on an
+        // `[auth]` section that rejected every key it was given.
+        let ok = TempFile::write("auth-control-accepts", "[auth]\naddr = \"0.0.0.0:9092\"\n");
+        let config = FileConfig::load(Some(&ok.path)).expect("an operational auth key parses");
+        assert_eq!(config.auth.addr.as_deref(), Some("0.0.0.0:9092"));
     }
 }
