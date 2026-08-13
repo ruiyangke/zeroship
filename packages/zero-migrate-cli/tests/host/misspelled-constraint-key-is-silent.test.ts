@@ -225,3 +225,109 @@ test("a misspelled foreign-key option applies clean and lands no constraint", as
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// The same silence, on the option where it costs the most.
+//
+// An existence guard is what makes a migration RE-RUNNABLE. Misspell it and the
+// recorder drops it exactly as it drops a misspelled constraint - except the
+// consequence lands on the re-run the guard was added to survive:
+//
+//   ifNotExists  exit 0   the guard is honoured, the existing table is left alone
+//   ifNotExist   exit 1   relation "alpha" already exists
+//
+// One character. No authoring-time complaint from the runtime, and the failure
+// arrives against a database that already has the object.
+//
+// The recorder stores this as `existenceGuard: "ifNotExists"`, not as a boolean
+// field named after the option - worth knowing, because a test that asserts on
+// `op.ifNotExists` reads `undefined` for BOTH spellings and proves nothing. That
+// mistake was made while writing this.
+//
+// Silently dropped in the same way, measured at the recorder: `primaryKey` ->
+// `primarykey`, `index().add({ unique })` -> `uniqe`, `column().add({ ifNotExists })`,
+// and `table().rename({ ifExists })`. So this is a property of the DSL surface,
+// not of one call.
+//
+// Same inverted-style contract as the test above: it pins CURRENT behaviour and
+// fails when the runtime starts rejecting unknown keys.
+test("a misspelled existence guard applies unguarded and fails on an existing object", async (ctx) => {
+  const client = await connectLivePg(ctx);
+  if (!client) return;
+
+  const results: Record<string, { code: number | null; err: string }> = {};
+  for (const spelling of ["ifNotExists", "ifNotExist"]) {
+    const schema = uniqueNamespace(`guard_${spelling.toLowerCase()}`);
+    const meta = `${schema}_migrations`;
+    const work = mkdtempSync(join(HERE, "guard-"));
+    mkdirSync(join(work, "migrations"));
+    writeFileSync(
+      join(work, "policy.toml"),
+      `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = [${JSON.stringify(schema)}] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = [${JSON.stringify(schema)}] }
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`,
+    );
+    writeFileSync(join(work, "registry.json"), JSON.stringify({ alpha: OWNER_APP }));
+    writeFileSync(
+      join(work, "migrations", "20260101000000_guarded.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "guarded_create";
+export default {
+  up() {
+    table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"], ${spelling}: true });
+  },
+};
+`,
+    );
+    try {
+      await client.query(`CREATE SCHEMA "${schema}"`);
+      // The object already exists - the situation an existence guard is for.
+      await client.query(`CREATE TABLE "${schema}".alpha (id int primary key)`);
+      results[spelling] = await apply(work, schema);
+    } finally {
+      await client
+        .query(
+          `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+           DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
+        )
+        .catch(() => {});
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+  await client.end().catch(() => {});
+
+  // The control: correctly spelled, the guard works and the deploy is re-runnable.
+  assert.equal(
+    results.ifNotExists.code,
+    0,
+    `the correct spelling must honour the guard; ${results.ifNotExists.err}`,
+  );
+
+  // The defect: one character off, and the guard is silently not there.
+  assert.equal(
+    results.ifNotExist.code,
+    1,
+    `the misspelled guard currently applies UNGUARDED and fails; if it now ` +
+      `refuses the unknown key at authoring time, that is the intended fix - ` +
+      `invert this test. ${results.ifNotExist.err}`,
+  );
+  assert.match(
+    results.ifNotExist.err,
+    /already exists/i,
+    `it must fail on the pre-existing object, which is what proves the guard was ` +
+      `dropped rather than some unrelated error: ${results.ifNotExist.err}`,
+  );
+});
