@@ -6705,3 +6705,141 @@ async fn a_scope_naming_another_version_does_not_authorise_this_one() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// Editing an ALREADY-APPLIED migration aborts the next deploy before it runs.
+///
+/// `executor.rs` calls the tamper gate "the SHARED comparison": one
+/// `check_checksum_drift` implementation, "two callers: the report and the
+/// abort-on-drift gate cannot diverge". Every existing test measures the REPORT
+/// caller — `sqlite_drift.rs` and `check_checksum_drift`'s own PostgreSQL test
+/// both call the function directly and read its findings. The other caller, the
+/// one that turns a finding into a refusal, was never driven.
+///
+/// Those are not the same claim. A read-only report can be perfectly correct
+/// while `apply` never consults it, consults it and continues, or consults it
+/// only after the batch has run — and the operationally meaningful behaviour is
+/// entirely the second caller's: an operator edits an applied migration file and
+/// then deploys a NEW one, and the engine must refuse the whole batch.
+///
+/// The refusal is asserted on the DATABASE, not only on the reply. The new
+/// migration's table must not exist afterwards: a gate that reported drift after
+/// executing the pending work would return exactly the same error and would have
+/// protected nothing.
+///
+/// The honest batch then applies through the same call. Without that control the
+/// refusal is equally consistent with a batch that could never have run.
+#[compio::test]
+async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let v1 = MigrationId::generate();
+    let settled = mig(
+        v1.clone(),
+        "create_accounts",
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&settled),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the first migration applies");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "accounts").await,
+        "the settled migration really ran"
+    );
+
+    // The edit. Same version and name, a different body — what an operator
+    // produces by "just fixing" a migration that already shipped. The checksum is
+    // recomputed honestly over the new body, because the file on disk is the only
+    // thing the engine reads.
+    let edited = mig(
+        v1.clone(),
+        "create_accounts",
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY, note text)",
+            cfg.project_schema
+        ),
+    );
+    assert_ne!(
+        settled.checksum.as_str(),
+        edited.checksum.as_str(),
+        "the edit must move the checksum or this test measures nothing"
+    );
+
+    // The new deploy the operator is actually trying to ship.
+    let v2 = MigrationId::generate();
+    let next = mig(
+        v2.clone(),
+        "create_ledger",
+        &format!(
+            "CREATE TABLE \"{}\".ledger (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+
+    let err = apply(
+        &session,
+        &cfg,
+        &[edited.clone(), next.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect_err("an edited applied migration must abort the batch");
+    match err {
+        ApplyError::ChecksumDrift {
+            version,
+            recorded,
+            expected,
+        } => {
+            assert_eq!(version, v1.as_str(), "the refusal must name the edited one");
+            assert_eq!(recorded, settled.checksum.as_str());
+            assert_eq!(expected, edited.checksum.as_str());
+        }
+        other => panic!("expected ChecksumDrift, got {other:?}"),
+    }
+
+    // What the gate is FOR. The pending migration must not have run.
+    assert!(
+        !table_exists(&session, &cfg.project_schema, "ledger").await,
+        "the batch must be refused BEFORE the pending migration executes"
+    );
+    // And the tampered version must not have been re-journalled.
+    let journal = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
+    assert_eq!(
+        journal.iter().filter(|e| e.version == v1.as_str()).count(),
+        1,
+        "the refusal must not append a second entry for the edited version"
+    );
+
+    // The control: restoring the file lets the very same deploy through.
+    apply(
+        &session,
+        &cfg,
+        &[settled.clone(), next.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the honest batch applies");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "ledger").await,
+        "the refusal above was about the edit, not about an unrunnable batch"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
