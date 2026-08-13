@@ -954,15 +954,32 @@ relay_smtp_tls = "starttls"
     // loop of `expect_err` reads badly inline.
     #[test]
     fn an_auth_control_key_has_no_overlay_tier_and_is_refused_in_the_auth_table() {
-        for key in ["config", "no_config", "check_config", "check_config_format"] {
+        // Each value here is the NATURAL type for that control, so a section
+        // that actually declared the field would PARSE and this would go red.
+        // A deliberately ill-typed value would be rejected either way, which
+        // proves nothing - and did not: an earlier draft wrote `= "x"` for all
+        // four, and adding `pub check_config: Option<bool>` to the section left
+        // the test green.
+        for (key, value) in [
+            ("config", "\"/etc/zeroship/zeroship.toml\""),
+            ("no_config", "true"),
+            ("check_config", "true"),
+            ("check_config_format", "\"json\""),
+        ] {
             let file = TempFile::write(
                 &format!("auth-control-{key}"),
-                &format!("[auth]\n{key} = \"x\"\n"),
+                &format!("[auth]\n{key} = {value}\n"),
             );
             let err = FileConfig::load(Some(&file.path))
                 .err()
                 .unwrap_or_else(|| panic!("[auth].{key} must be rejected"));
-            assert!(matches!(err, ConfigError::Parse { .. }), "{key}: {err}");
+            let ConfigError::Parse { source, .. } = &err else {
+                panic!("{key}: expected a parse error, got {err}");
+            };
+            assert!(
+                source.to_string().contains("unknown field"),
+                "{key} must be rejected AS AN UNKNOWN FIELD, not for its type: {source}"
+            );
         }
 
         // The one-variable control: an ordinary operational key in the SAME
