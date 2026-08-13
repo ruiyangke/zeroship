@@ -110,7 +110,7 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
 
   // The bug is findable from the list by its summary.
   await page.goto("/#/bugs");
-  await page.getByPlaceholder("Search summary, whiteboard, URL...").fill(RUN);
+  await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.keyboard.press("Enter");
   await expect(page.getByText(summary)).toBeVisible();
 });

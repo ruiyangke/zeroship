@@ -61,7 +61,7 @@ test("headers sort the server query, and only where the server can", async ({
   }
 
   await page.goto("/#/bugs");
-  await page.getByPlaceholder("Search summary").fill(RUN);
+  await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
 
   const priorities = async () =>

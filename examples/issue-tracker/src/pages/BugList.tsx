@@ -11,7 +11,21 @@ import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
 import type { Bug } from "../components/types";
 import { BUG_STATUSES, type BugStatus } from "../lib/workflow";
-import { BUG_PRIORITIES, BUG_SEVERITIES } from "../lib/quicksearch";
+import { BUG_PRIORITIES, BUG_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
+
+/**
+ * The parser throws on malformed input ("@" with no handle). A half-typed
+ * query is the normal state of a search box, so a throw there would blank the
+ * list mid-keystroke; an unparseable string is simply treated as text.
+ */
+function parseQuickSearchSafely(input: string) {
+  if (!input.trim()) return [];
+  try {
+    return parseQuickSearch(input);
+  } catch {
+    return [{ field: "text" as const, value: input }];
+  }
+}
 
 const DEFAULT_COLUMNS: BugColumnKey[] = [
   "id",
@@ -83,13 +97,40 @@ export function BugListPage() {
 
   const productsQ = useAsync(() => listProducts({}), []);
 
+  /**
+   * The search box speaks Bugzilla QuickSearch.
+   *
+   * "P1 @alice comp:parser" used to need its own box on its own page. That
+   * page is gone, and rather than bury the shorthand in the modal it is
+   * parsed HERE: recognised tokens become the same filters the dropdowns set,
+   * so they show up as removable chips and the query stays one call to
+   * bugs.search -- which is anonymous, where search.quick is not.
+   *
+   * Only the tokens that map to a filter this page already has. An assignee,
+   * product or component token names something by handle or name and would
+   * need resolving to an id first, so those stay as free text rather than
+   * being silently dropped.
+   */
+  const parsed = parseQuickSearchSafely(text);
+  const tokenStatus = parsed.find((c) => c.field === "status")?.value as BugStatus | undefined;
+  const tokenSeverity = parsed.find((c) => c.field === "severity")?.value as
+    | (typeof BUG_SEVERITIES)[number]
+    | undefined;
+  const tokenPriority = parsed.find((c) => c.field === "priority")?.value as
+    | (typeof BUG_PRIORITIES)[number]
+    | undefined;
+  const freeText = parsed
+    .filter((c) => c.field === "text")
+    .map((c) => c.value)
+    .join(" ");
+
   const { state, reload } = useAsync(
     () =>
       searchBugs({
-        text: text.trim() || undefined,
-        status: status || undefined,
-        severity: severity || undefined,
-        priority: priority || undefined,
+        text: freeText.trim() || undefined,
+        status: status || tokenStatus || undefined,
+        severity: severity || tokenSeverity || undefined,
+        priority: priority || tokenPriority || undefined,
         productId: productId || undefined,
         sortBy,
         sortDirection,
@@ -135,6 +176,26 @@ export function BugListPage() {
    * chip appears when a filter is applied and removing it clears that one.
    */
   const activeFilters = [
+    // Tokens typed into the box are shown as chips too, marked so it is clear
+    // they came from the query rather than a dropdown, and removed by editing
+    // the text since that is where they live.
+    tokenStatus && !status
+      ? { id: "t-status", label: `Status: ${tokenStatus} (typed)`, onRemove: () => setText(freeText) }
+      : null,
+    tokenSeverity && !severity
+      ? {
+          id: "t-severity",
+          label: `Severity: ${tokenSeverity} (typed)`,
+          onRemove: () => setText(freeText),
+        }
+      : null,
+    tokenPriority && !priority
+      ? {
+          id: "t-priority",
+          label: `Priority: ${tokenPriority} (typed)`,
+          onRemove: () => setText(freeText),
+        }
+      : null,
     status ? { id: "status", label: `Status: ${status}`, onRemove: () => setStatus("") } : null,
     severity
       ? { id: "severity", label: `Severity: ${severity}`, onRemove: () => setSeverity("") }
@@ -175,7 +236,7 @@ export function BugListPage() {
       <FilterBar
         search={text}
         onSearchChange={setText}
-        searchPlaceholder="Search summary, whiteboard, URL..."
+        searchPlaceholder="Search, or type P1 CONFIRMED major..."
         activeFilters={activeFilters}
         onClearFilters={activeFilters.length > 0 ? resetFilters : undefined}
         actions={

@@ -59,7 +59,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
 
   // The bug list, filtered to this run so the assertion is about this row.
   await page.goto("/#/bugs");
-  await page.getByPlaceholder("Search summary").fill(RUN);
+  await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(tableOf(page)).toContainText(productName);
   expect(

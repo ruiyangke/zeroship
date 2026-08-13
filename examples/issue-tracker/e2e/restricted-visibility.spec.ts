@@ -81,7 +81,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   const search = async () => {
     await bob.goto("/#/bugs");
     await bob.reload();
-    await bob.getByPlaceholder("Search summary").fill(RUN);
+    await bob.getByPlaceholder("Search, or type").fill(RUN);
     await bob.getByRole("button", { name: "Apply" }).click();
   };
 
