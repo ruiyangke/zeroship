@@ -47,9 +47,10 @@ The secret directory contains exactly seven files:
 
 The env overlay contains eight generated scalar values:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
-`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
-`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
+`ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
+`ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
 The command is idempotent: it validates and retains existing material, creates
 only missing entries, and refuses invalid or conflicting values instead of
@@ -57,11 +58,11 @@ rotating them. On Unix it applies 0700 to the secret directory and 0600 to the
 secret files and `.env`.
 
 Two shared-value rules are load-bearing. Gateway and auth read the same physical
-`broker-secret` file. The raw bytes of `pairwise-salt` equal `PAIRWISE_SALT` in
-`.env` with no trailing line ending; auth, control, and gateway must derive the
+`broker-secret` file. The raw bytes of `pairwise-salt` equal `ZEROSHIP_PAIRWISE_SALT`
+in `.env` with no trailing line ending; auth, control, and gateway must derive the
 same per-app `pws_`. The generator enforces both shapes. Do not export a
-different `PAIRWISE_SALT` in the shell that launches Compose; shell values take
-precedence over `.env` interpolation.
+different `ZEROSHIP_PAIRWISE_SALT` in the shell that launches Compose; shell
+values take precedence over `.env` interpolation.
 
 ### Dev domain (via Caddy)
 
@@ -171,8 +172,8 @@ docker compose -f deploy/compose/docker-compose.yml up --build
 All four web binaries default to a **loopback** bind for safety, so each compose
 command explicitly opts into a non-loopback address to be reachable across the
 container network: `control` and `gateway` pass `--bind 0.0.0.0`, `zeroship-worker`
-passes `--bind 0.0.0.0` (paired with `--worker-key`), and `zeroship-auth` passes
-`--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
+passes `--bind 0.0.0.0` (paired with `ZEROSHIP_WORKER_KEY`), and `zeroship-auth`
+passes `--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
 need no override. Authentication and secret checks remain active on those
 non-loopback container binds.
 
