@@ -227,7 +227,15 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
 
   await page.reload();
   await expect(votes.getByText(/not enabled/i)).toHaveCount(0);
-  await votes.getByLabel("My votes").fill("2");
+  // Typed, not filled. NumberField is a FORMATTED text input (Base UI parses
+  // input events and re-renders from its own state), so Playwright .fill(),
+  // which assigns .value directly, leaves the component out of sync -- "2"
+  // landed as "12". A user selects and types, so the spec does that.
+  const voteCount = votes.getByLabel("My votes");
+  await voteCount.click();
+  await voteCount.press("ControlOrMeta+A");
+  await voteCount.pressSequentially("2");
+  await voteCount.blur();
   await votes.getByRole("button", { name: "Vote" }).click();
 
   // voteCount is the SUM of quantities, so two votes read as 2, not 1.

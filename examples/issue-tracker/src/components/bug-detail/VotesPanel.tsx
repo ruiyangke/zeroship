@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Field } from "@zeroship/ui";
+import { Button, Field, NumberField } from "@zeroship/ui";
 
 import { castVote } from "../../api";
 import { errorMessage } from "../rpc";
@@ -58,20 +58,22 @@ export function VotesPanel({
       ) : (
         <>
           <Field>
-            {/* A plain native number input, not the design system's
-                NumberField: NumberField's controlled text input does not
-                replace-on-fill the way a native <input type="number"> does
-                (Playwright's .fill("2") landed as "12", appended rather
-                than replacing "1"), which this panel's own regression spec
-                exercises directly. */}
-            <Field.Label htmlFor="votes-count">My votes</Field.Label>
-            <input
-              id="votes-count"
-              type="number"
+                        {/* The design system's NumberField, deliberately.
+                This was briefly swapped for a native <input type="number">
+                because the voting spec's `.fill("2")` produced "12" -- but
+                the component is fine and the harness was the problem.
+                NumberField wraps Base UI's formatted text input, which parses
+                `input` events and re-renders from its own state, so assigning
+                `.value` directly leaves the two out of sync. Typing works,
+                which is what a user does and what the spec now does.
+                Swapping the component would have let a test-runner quirk
+                decide what the app is built from. */}
+            <Field.Label>My votes</Field.Label>
+            <NumberField
               min={0}
               max={maxVotesPerBug > 0 ? maxVotesPerBug : undefined}
               value={count}
-              onChange={(e) => setCount(Math.max(0, Number(e.target.value) || 0))}
+              onValueChange={(next) => setCount(Math.max(0, next ?? 0))}
             />
           </Field>
           <Button variant="gray" size="small" disabled={busy} onClick={() => void submit()}>
