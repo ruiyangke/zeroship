@@ -46,6 +46,10 @@ export default defineConfig({
   //
   // Raising this needs per-worker database isolation, not a green run.
   workers: 1,
+  // Sweeps the fixture groups the access-control specs leave in the dev
+  // database. See e2e/global-teardown.ts -- it deletes through the same
+  // guarded procedure a person would, so an in-use group is refused.
+  globalTeardown: "./e2e/global-teardown.ts",
   reporter: process.env.CI ? "line" : [["list"], ["html", { open: "never" }]],
   timeout: 60_000,
   expect: { timeout: 10_000 },

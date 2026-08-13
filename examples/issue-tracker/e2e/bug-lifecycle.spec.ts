@@ -346,6 +346,14 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   // The confirmation must state the consequence, not just "done" -- restricting
   // a bug changes who can see it and that is the point of the action.
   await expect(security.getByText(/only members of that group/i)).toBeVisible();
+
+  // Lift it again. The global teardown sweeps fixture groups through the
+  // guarded delete, which refuses while a restriction is attached -- so a spec
+  // that restricts and walks away leaves a group nothing can ever clean up.
+  const created = ((await rpc("groups.list", {})) as Array<{ id: string; name: string }>).find(
+    (g) => g.name === `sec-${RUN}`,
+  );
+  if (created) await rpc("bugs.unrestrict", { bugId: bug.id, groupId: created.id });
 });
 
 test("see also links are added, listed and removed from the bug page", async ({ page, baseURL }) => {

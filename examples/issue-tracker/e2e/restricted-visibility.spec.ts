@@ -147,5 +147,14 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
     summary,
   );
 
+  // Lift the restriction so the group stops being load-bearing. The global
+  // teardown deletes fixture groups through the guarded procedure, which
+  // rightly refuses while a restriction is still attached -- so a spec that
+  // restricts and walks away leaves a group nothing can ever clean up.
+  const created = ((await rpc("groups.list", {})) as Array<{ id: string; name: string }>).find(
+    (g) => g.name === `vis-${RUN}`,
+  );
+  if (created) await rpc("bugs.unrestrict", { bugId: bug.id, groupId: created.id });
+
   await bobContext.close();
 });
