@@ -3,8 +3,8 @@
 //! Split into focused submodules:
 //! - [`file`] — the TOML schema (`FileConfig`, sections, `ConfigError`).
 //! - [`source`] — overlay discovery (`ConfigSource`, `LoadedOverlay`, resolve/load).
-//! - [`env`] — the sole raw process-environment boundary, plus pure truthiness.
-//! - [`declared`] — typed keys for reads the config contract does not generate.
+//! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
+//! - [`declared`] - typed keys for reads the config contract does not generate.
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
 //!
