@@ -152,8 +152,10 @@ pub(crate) async fn run_sqlite_via_engine(
     let guard_cfg = GuardConfig::confined_with_effective(app_id, effective.clone())
         .for_dialect(SqlDialect::Sqlite);
     let author = DeclarativeAuthor::new_for_dialect(app_id, app_id, SqlDialect::Sqlite);
+    // Class `creator`: identifies the deployed app, not the platform process.
     let deploy_id =
-        std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
+        zeroship_core::declared_env!(creator, "ZEROSHIP_DEPLOY_ID", crate::PluginDbConsumer)
+            .unwrap_or_else(|| "cold_start".to_string());
 
     // -- Step 1: open B (hardened migration actor) on the app file. -----------
     // B is the creator-of-record for a FRESH file and the opener-of-existing for

@@ -139,7 +139,9 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 fn common(resource: &str, args: &[String]) -> (String, String, String) {
     let app = flag_str(args, "--app=").expect("--app=<uuid> is required");
     let control_url = flag_str(args, "--control=")
-        .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
+        .or_else(|| {
+            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
+        })
         .unwrap_or_else(|| "http://localhost:9090".into());
     let token = resolve_bearer_token(args).unwrap_or_else(|e| {
         eprintln!(

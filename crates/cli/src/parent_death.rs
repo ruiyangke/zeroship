@@ -67,6 +67,12 @@
 /// step 7d of `tests/golden_path.sh` kills a REAL vite dev server and requires
 /// the runtime it spawned to be gone. A rename on either side alone leaves the
 /// variable unset on the child and turns that step red.
+///
+/// This constant is the spelling the diagnostics interpolate. The READ below
+/// inlines the literal instead of using it, because the source gate lifts key
+/// literals out of the syntax tree and cannot see a name behind a `&str`
+/// constant. The two must not drift; a rename here without a rename there
+/// leaves the guard reading a name nothing sets.
 pub const ENV_DIE_WITH_PARENT: &str = "ZEROSHIP_DIE_WITH_PARENT";
 
 /// Arm the guard from the environment. No-op when the variable is unset.
@@ -74,7 +80,9 @@ pub const ENV_DIE_WITH_PARENT: &str = "ZEROSHIP_DIE_WITH_PARENT";
 /// Call FIRST in `main`, before any port bind or state-dir open: everything
 /// this process might hold is held from that point on.
 pub fn arm_from_env() {
-    let Ok(raw) = std::env::var(ENV_DIE_WITH_PARENT) else {
+    let Some(raw) =
+        zeroship_core::declared_env!(cli, "ZEROSHIP_DIE_WITH_PARENT", crate::ZeroshipCliConsumer)
+    else {
         return;
     };
     let raw = raw.trim();

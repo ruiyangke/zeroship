@@ -602,7 +602,12 @@ async fn open_backfill_audit_row(
     classification: Classification,
     change_class: ChangeClass,
 ) -> Option<i64> {
-    let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
+    // Class `creator`: this identifies the DEPLOYED APP, not the platform
+    // process, and the worker injects it per app rather than an operator
+    // setting it for the host.
+    let deploy_id =
+        zeroship_core::declared_env!(creator, "ZEROSHIP_DEPLOY_ID", crate::PluginDbConsumer)
+            .unwrap_or_else(|| "cold_start".to_string());
     let schema_version = crate::audit::next_schema_version(pool, app_id).await.unwrap_or(1);
 
     if let Ok(Some(existing)) =

@@ -22,7 +22,13 @@ pub const MAX_OBJECT_BYTES_ENV: &str = "ZEROSHIP_STORAGE_MAX_OBJECT_BYTES";
 /// env var if set to a valid positive integer, else [`DEFAULT_MAX_OBJECT_BYTES`].
 #[must_use]
 pub fn max_object_bytes() -> u64 {
-    env_u64(MAX_OBJECT_BYTES_ENV).unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
+    // Class `platform`, like the other three knobs in this file.
+    positive_u64(zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_STORAGE_MAX_OBJECT_BYTES",
+        crate::PluginStorageConsumer
+    ))
+    .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +54,13 @@ pub const MAX_STREAM_OBJECT_BYTES_ENV: &str = "ZEROSHIP_STORAGE_MAX_STREAM_BYTES
 /// else [`DEFAULT_MAX_STREAM_OBJECT_BYTES`].
 #[must_use]
 pub fn max_stream_object_bytes() -> u64 {
-    env_u64(MAX_STREAM_OBJECT_BYTES_ENV).unwrap_or(DEFAULT_MAX_STREAM_OBJECT_BYTES)
+    // Class `platform`, like the other three knobs in this file.
+    positive_u64(zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_STORAGE_MAX_STREAM_BYTES",
+        crate::PluginStorageConsumer
+    ))
+    .unwrap_or(DEFAULT_MAX_STREAM_OBJECT_BYTES)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +90,15 @@ pub const UPLOAD_CONCURRENCY_ENV: &str = "ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY";
 /// valid positive integer, else [`DEFAULT_UPLOAD_CONCURRENCY`].
 #[must_use]
 pub fn upload_concurrency() -> usize {
-    env_u64(UPLOAD_CONCURRENCY_ENV)
+    // Class `platform`: zeroship-owned and read on the SERVER path (the worker
+    // links this crate), so it is neither `cli` nor `dev` nor `test`. It is a
+    // conversion candidate - it deserves a generated declaration with a flag,
+    // a TOML path and a `--check-config` row, and has none yet.
+    positive_u64(zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY",
+        crate::PluginStorageConsumer
+    ))
         .map(|n| n.clamp(1, 64) as usize)
         .unwrap_or(DEFAULT_UPLOAD_CONCURRENCY)
 }
@@ -154,16 +174,25 @@ const MAX_LIVE_GET_STREAMS_CEILING: usize = (u32::MAX - 1) as usize;
 /// [`DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP`].
 #[must_use]
 pub fn max_live_get_streams_per_app() -> usize {
-    env_u64(MAX_LIVE_GET_STREAMS_PER_APP_ENV)
+    // Class `platform`, for the same reason as `upload_concurrency` above.
+    positive_u64(zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_STORAGE_MAX_LIVE_GET_STREAMS",
+        crate::PluginStorageConsumer
+    ))
         .and_then(|n| usize::try_from(n).ok())
         .map(|n| n.min(MAX_LIVE_GET_STREAMS_CEILING))
         .unwrap_or(DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP)
 }
 
-fn env_u64(name: &str) -> Option<u64> {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
+/// Parse an already-read value as a positive `u64`.
+///
+/// This takes the VALUE, not the name. As `env_u64(name: &str)` it performed
+/// the read itself, so the two names this file governs were invisible to any
+/// scan of it: the literals sat at the call sites and the read sat here. The
+/// read now lives next to its literal in each resolver.
+fn positive_u64(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
 }
 
@@ -195,7 +224,7 @@ mod tests {
     #[test]
     fn upload_concurrency_default_is_4() {
         // No env override in this test process → default.
-        assert!(std::env::var(UPLOAD_CONCURRENCY_ENV).is_err());
+        assert!(zeroship_core::test_env!("ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY").is_none());
         assert_eq!(upload_concurrency(), DEFAULT_UPLOAD_CONCURRENCY);
         assert_eq!(DEFAULT_UPLOAD_CONCURRENCY, 4);
     }

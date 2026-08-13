@@ -242,7 +242,15 @@ printf '%s\n200\n' '{get_response}'
 
 #[cfg(unix)]
 fn run_secret(path_dir: &Path, request_log: &Path, args: &[&str]) -> Output {
-    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    // Class `external` even though the reader is a test: `PATH` is the OS's
+    // contract, not a zeroship test knob. The consumer marker is what records
+    // that a test read it.
+    let inherited_path = zeroship_core::declared_env_os!(
+        external,
+        "PATH",
+        zeroship_core::config::TestHarness
+    )
+    .unwrap_or_default();
     let mut paths = vec![path_dir.to_path_buf()];
     paths.extend(std::env::split_paths(&inherited_path));
     let path = std::env::join_paths(paths).expect("construct PATH for curl stub");
@@ -258,7 +266,15 @@ fn run_secret(path_dir: &Path, request_log: &Path, args: &[&str]) -> Output {
 
 #[cfg(unix)]
 fn run_secret_rm(path_dir: &Path, request_log: &Path, key: &str) -> Output {
-    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    // Class `external` even though the reader is a test: `PATH` is the OS's
+    // contract, not a zeroship test knob. The consumer marker is what records
+    // that a test read it.
+    let inherited_path = zeroship_core::declared_env_os!(
+        external,
+        "PATH",
+        zeroship_core::config::TestHarness
+    )
+    .unwrap_or_default();
     let mut paths = vec![path_dir.to_path_buf()];
     paths.extend(std::env::split_paths(&inherited_path));
     let path = std::env::join_paths(paths).expect("construct PATH for curl stub");

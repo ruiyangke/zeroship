@@ -14,8 +14,8 @@ const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 mod parity;
 
 fn test_url() -> String {
-    std::env::var("PG_TEST_URL")
-        .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
+    zeroship_core::test_env!("PG_TEST_URL")
+        .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 
 async fn require_pg() -> String {
@@ -4841,8 +4841,10 @@ struct WithEnv {
 }
 #[allow(unsafe_code)]
 impl WithEnv {
-    fn set(name: &'static str, value: &str) -> Self {
-        let prev = std::env::var(name).ok();
+    /// `prev` is supplied by the CALLER, already read through a declared key.
+    /// Reading it here from `name: &str` made this an unattributable read: the
+    /// literal lived at the call site and the read lived here.
+    fn set(name: &'static str, value: &str, prev: Option<String>) -> Self {
         // SAFETY: each test that touches the env var serialises via
         // --test-threads=1 (per `required-features`). The
         // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned; no
@@ -4875,7 +4877,11 @@ async fn encrypted_column_round_trip_randomised() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Synthetic 32-byte root key.
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"a".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"a".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -4953,7 +4959,11 @@ async fn encrypted_column_round_trip_randomised() {
 async fn encrypted_randomised_row_swap_rejected() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"b".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"b".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -5056,7 +5066,11 @@ async fn encrypted_randomised_row_swap_rejected() {
 async fn encrypted_deterministic_equality_lookup() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"c".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"c".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -5149,7 +5163,11 @@ async fn encrypted_deterministic_equality_lookup() {
 async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"d".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"d".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     let app = "p4_round_trip";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -5421,7 +5439,11 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
 async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"e".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"e".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     let app = "p5_engine_created";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -5630,7 +5652,11 @@ async fn pg_admin_table_key_source_reads_bytea_directly() {
     let env_name = "ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST";
     let admin_root_hex = "11".repeat(32);
     let env_root_hex = "22".repeat(32);
-    let _env = WithEnv::set(env_name, &env_root_hex);
+    let _env = WithEnv::set(
+        env_name,
+        &env_root_hex,
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST"),
+    );
 
     pool.execute(
         r#"DELETE FROM "__zeroship_admin"."column_keys" WHERE key_id = $1"#,
@@ -7502,7 +7528,11 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
 async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"t".repeat(64));
+    let _env = WithEnv::set(
+        "ZEROSHIP_COLUMN_KEY_DEFAULT",
+        &"t".repeat(64),
+        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
+    );
 
     let app = "t6_deploy_cache";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])

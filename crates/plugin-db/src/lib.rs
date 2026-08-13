@@ -50,6 +50,16 @@ use crate::error::DbError;
 // switches its visibility on `test-helpers` so the integration suite
 // can probe the auth surface.
 
+zeroship_core::declare_env_consumer!(
+    /// The database plugin's own environment reads.
+    ///
+    /// A LIBRARY consumer, so `target` is the cargo package: this crate is
+    /// linked into `zeroship-worker` AND into the CLI's `zeroship serve`
+    /// vector, and naming one binary would be a claim the other falsifies.
+    pub PluginDbConsumer,
+    target = "zeroship-plugin-db",
+    scope = "plugin_db");
+
 // Always pub:
 pub mod broker;
 pub mod error;

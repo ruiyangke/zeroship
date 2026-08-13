@@ -29,6 +29,17 @@ use std::sync::Arc;
 pub mod meter;
 pub mod outbox;
 
+zeroship_core::declare_env_consumer!(
+    /// The metering crate's own environment reads.
+    ///
+    /// A LIBRARY consumer, so `target` is the cargo package rather than a
+    /// binary: `UsageStreamSettings::from_env` is called by both
+    /// `zeroship-worker` and `zeroship-gate`, and naming either one would put
+    /// a fiction in the record.
+    pub MeteringConsumer,
+    target = "zeroship-metering",
+    scope = "metering");
+
 pub use meter::Meter;
 pub use outbox::{
     build_usage_outbox, spawn_disabled_drain_task, spawn_outbox_task, wal_identity, OutboxConfig,

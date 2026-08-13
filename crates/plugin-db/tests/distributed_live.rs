@@ -39,7 +39,7 @@ use zeroship_runtime::{
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
 fn pg_url() -> String {
-    std::env::var("LIVE_DB_TEST_URL").unwrap_or_else(|_| {
+    zeroship_core::test_env!("LIVE_DB_TEST_URL").unwrap_or_else(|| {
         "postgres://postgres:zeroship@127.0.0.1:5440/zeroship".to_string()
     })
 }
