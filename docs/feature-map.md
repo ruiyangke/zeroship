@@ -577,7 +577,7 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Audit retention sweep (cron) | 🟢 | internal | `crates/control/src/cron/audit_retention.rs` | — | `crates/control/tests/audit_retention_test.rs` | GUC flag cleared on exit. |
 | Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/control/src/rate_limit.rs`, `http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node. |
 | Metering aggregation / period snapshots | 🟢 | internal | `crates/control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
-| Control health check | 🟢 | GET /internal/health | `crates/control/src/internal.rs` | — | — | Liveness only. |
+| Control health + readiness | 🟢 | GET /healthz, GET /readyz | `crates/control/src/internal.rs` | — | `crates/control/tests/health_endpoints_test.rs` | /healthz is a constant 200 (liveness); /readyz probes the shared Postgres client, cached 2s. |
 | TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | — | Auth namespace removed (R5); missing admin/PAT wrappers. |
 | Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
 
@@ -880,7 +880,7 @@ snapshots are shared across threads via a process-wide RwLock.
 | In-flight request abort on LRU eviction | 🟢 | internal | `crates/worker/src/cache.rs` | — | — | Synchronous abort before drop. |
 | App console log capture + /logs endpoint | 🟢 | GET /logs/{app_id} | `crates/worker/src/logs.rs` | — | `crates/worker/src/handler.rs` | Ring buffer 1000 lines; no persistence. |
 | Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/worker/src/metrics.rs` | — | — | 13 counters; no auth. |
-| Health check endpoint | 🟢 | GET /health | `crates/worker/src/main.rs` | — | `tests/e2e_platform.sh` | Liveness only. |
+| Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
 | Config validation dry-run | 🟢 | --check-config [--format] | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
 | Secret reference resolution | 🟢 | CONTROL_KEY / WORKER_KEY / ... | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | urn:zeroship:env/file; [secrets] overlay. |
 | Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/worker/src/main.rs` | — | — | Stale socket removed at startup. |
@@ -1256,7 +1256,7 @@ schema, the Nomad `ch` driver TaskConfig + VM layout, agent body caps, the mint 
 the `detach_isolated` pattern.
 
 **Worker:** streaming forwarding, gateway auth + ZeroShip-User HMAC, the env snapshot cache, abort
-on eviction, the `/logs` and `/metrics` and `/health` endpoints, `--check-config`, the
+on eviction, the `/logs` and `/metrics` and `/healthz`/`/readyz` endpoints, `--check-config`, the
 `urn:zeroship:` secret URN scheme, the Unix socket, shutdown drain, `needs_reload()`/`LoadedMeta`,
 the SEC-7 env rotation, the per-thread cyper client, and SSG-only handling.
 

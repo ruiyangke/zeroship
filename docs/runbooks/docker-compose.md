@@ -370,6 +370,35 @@ OpenMeter stack running between iterations. See
 divergences from the mock") for what this e2e catches that the in-test mock cannot
 (eventual-consistency lag + the query-window/`time` interaction).
 
+## Service health
+
+Every platform service (`control`, `gateway`, `worker`, `migrated`, `auth`)
+exposes the SAME pair, and compose gives each one a `healthcheck` pointed at
+`/readyz`:
+
+| Endpoint | Meaning | Checks |
+| --- | --- | --- |
+| `GET /healthz` | Liveness. Constant 200. | Nothing. It must never fail because a dependency did, or an outage in Postgres would get every container killed on top of it. |
+| `GET /readyz` | Readiness. 200 or 503. | control / migrated / auth: Postgres. worker: control poll current AND blob store reachable. gateway: control route pull current. |
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml ps   # STATUS shows (healthy)
+curl -sf http://127.0.0.1:9090/readyz    # control, 200 = can serve
+curl -sf http://127.0.0.1:8000/readyz    # gateway, 503 until the first route pull
+```
+
+Both are unauthenticated, so `/readyz` is built not to be a lever: each
+dependency probe has a short explicit timeout, the outcome is cached for a
+couple of seconds and concurrent probes collapse into one, and the response
+body is `{"ready":true|false}` with no DSN, host, driver text or version in
+it. The gateway and worker read a stamp written by the background poll they
+already run, so their probes issue no upstream request at all.
+
+There is no `/health`. It was deleted rather than aliased.
+
+`tests/health_endpoints.sh` walks the whole contract against the real
+binaries, including the arms where a dependency is taken away.
+
 ## Database migrations
 
 The shared Postgres `zeroship` schema is managed by the platform migration

@@ -186,8 +186,14 @@ metadata, initializes the refresh-token key material, and serves discovery at
 
 ## Healthchecks
 
-- `GET /healthz` checks process liveness.
-- `GET /readyz` checks service readiness.
+- `GET /healthz` checks process liveness: a constant 200 that touches no
+  dependency, so a Postgres blip does not get the container restarted.
+- `GET /readyz` checks readiness: 200 only when Postgres answers (no login,
+  token or consent route works without it), 503 otherwise. The probe is
+  bounded and its result cached for ~2s, so probe traffic cannot become
+  database traffic; the body is `{"ready":true|false}` and never names the
+  DSN or the driver error. Point your orchestrator's readiness gate here and
+  its liveness gate at `/healthz`.
 - `GET /oauth2/.well-known/openid-configuration` should return the issuer.
 - `GET /oauth2/.well-known/jwks.json` should return at least one key.
 
