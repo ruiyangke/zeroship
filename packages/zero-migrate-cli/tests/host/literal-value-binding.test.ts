@@ -218,26 +218,26 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
   }
 });
 
-// IF THIS TEST FAILS WITH `+ 'before'  - 'before\x00after'`, IT IS NOT FLAKY AND
-// IT IS NOT THIS FILE. Check `node --version` first.
+// THE READER USED TO BE THE BUG HERE, NOT THE ENGINE. Worth knowing before
+// changing the assertion back.
 //
-//   Node v22.23.1   node:sqlite stores "before\0after" as "before"   TRUNCATED
-//   Node v24.18.1   stores it exactly                                 EXACT
+// This test read `SELECT body` and compared the JS string. On Node 22 - which
+// `flake.nix` pins as `pkgs.nodejs_22` and CONTRIBUTING documents - `node:sqlite`
+// stops converting a TEXT value at the first NUL, so `before\0after` came back as
+// `before` and the test failed. On Node 24 it came back whole and the test passed.
 //
-// Reproduced with raw `node:sqlite` DatabaseSync on an in-memory database - no
-// engine, no addon, no driver - so it is a Node behaviour difference, not a
-// zero-migrate defect. The assertion below is correct and is catching real data
-// truncation on the platform `flake.nix` pins (`pkgs.nodejs_22`) and
-// CONTRIBUTING documents.
+// The stored data was correct the whole time. Writing through the engine (bundled
+// rusqlite) on Node 22 and then reading the same file with both versions:
 //
-// Consequence: run this suite OUTSIDE the devShell on a newer Node and it passes,
-// which is how it stayed hidden. A green host suite says nothing about NUL-byte
-// handling unless you know which Node produced it.
+//   hex(body)  6265666F7265006166746572   identical on Node 22 and Node 24
+//   SELECT body -> "before"       (Node 22, truncated by the reader)
+//   SELECT body -> "before\0after" (Node 24)
 //
-// Do not weaken this assertion to make the suite green. Silencing it converts a
-// loud correct signal into the silent truncation it exists to detect. The open
-// decision - raise the Node pin, bind NUL-bearing strings as BLOB, refuse them
-// fail-closed, or document the limitation - is in `docs/review-log` F558.
+// So the assertion was measuring `node:sqlite`'s decoding rather than what the
+// engine wrote, and it failed on the supported Node while the bytes on disk were
+// byte-perfect. It now compares `hex()`, which SQLite computes over the stored
+// blob and which is therefore version-independent - and is what "byte for byte"
+// in this test's name was always supposed to mean.
 test("SQLite binds literal values and stores a NUL byte exactly", async () => {
   for (const [label, value] of [...PORTABLE, ["NUL byte", NUL_VALUE] as const]) {
     const work = mkdtempSync(join(HERE, "lit-sq-"));
@@ -261,10 +261,23 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
 
       const db = new DatabaseSync(dbPath);
       try {
-        const row = db.prepare("SELECT body FROM items WHERE id = 1").get() as
+        // Compare the STORED BYTES via `hex()`, not the JS string `node:sqlite`
+        // hands back. The engine writes through bundled rusqlite and stores the
+        // NUL correctly; it is the reader that varies - Node 22's `node:sqlite`
+        // stops converting a TEXT value at the first NUL and returns "before",
+        // while Node 24 returns the whole thing. Asserting on the string measured
+        // the reader's decoding, not what the engine wrote, so this test failed on
+        // the Node the project pins while the data on disk was byte-perfect.
+        //
+        // `hex()` is computed by SQLite over the stored blob, so it is identical
+        // on both versions and is what "byte for byte" in this test's name
+        // actually means. (`length()` is NOT usable here: SQLite's `length()` on
+        // TEXT also stops at the first NUL, reporting 6 for these 12 bytes.)
+        const row = db.prepare("SELECT hex(body) AS hex FROM items WHERE id = 1").get() as
           | Record<string, unknown>
           | undefined;
-        assert.equal(row?.body, value, `${label}: the value must round-trip byte for byte`);
+        const expected = Buffer.from(value, "utf8").toString("hex").toUpperCase();
+        assert.equal(row?.hex, expected, `${label}: the value must round-trip byte for byte`);
 
         const tables = db
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
