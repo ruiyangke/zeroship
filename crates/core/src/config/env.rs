@@ -1,8 +1,21 @@
-//! Environment-variable and CLI boolean truthiness helpers.
+//! The one module in the workspace that touches the process environment.
+//!
+//! Everything above it presents a typed key and a consumer token; the three
+//! functions here are the only place a `&str` name reaches `std::env`. That is
+//! what makes the claim "every first-party environment read is enumerable" a
+//! structural property rather than a convention: the source gate in
+//! `crates/core/tests/config_env_access_gate.rs` exempts this file BY PATH and
+//! nothing else, so a read anywhere else fails the build.
+//!
+//! The truthiness helpers that used to live here took a `&str` name and read
+//! the environment themselves, which made them a second, unattributable read
+//! surface of exactly the kind Section 4.5 of
+//! `docs/proposals/2026-08-11-config-name-alignment.md` names. They are now
+//! PURE: they classify a value somebody else already read through a typed key.
 
-/// The sole raw environment read used by the inert typed naming layer.
-///
-/// This remains crate-private: callers must present an `EnvKey<T, Consumer>`.
+use std::ffi::OsString;
+
+/// The sole raw string read. Callers must present a typed key.
 pub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {
     match std::env::var(key) {
         Ok(value) => Ok(Some(value)),
@@ -11,22 +24,37 @@ pub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {
     }
 }
 
-/// Return true when environment variable `key` is exactly `expected`.
-///
-/// Some bootstrap flags preserve exact `"1"` environment truthiness, while
-/// others intentionally use [`env_is_truthy`] to also accept `"true"`.
-#[must_use]
-pub fn env_is_exact(key: &str, expected: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == expected)
+/// The sole raw `OsString` read. Callers must present a typed key.
+pub(crate) fn raw_var_os(key: &str) -> Option<OsString> {
+    std::env::var_os(key)
 }
 
-/// Return true when environment variable `key` is `"1"` or case-insensitive `"true"`.
+/// The sole whole-environment snapshot.
+///
+/// Non-Unicode entries are dropped rather than lossily converted: the one
+/// caller forwards this to creator app code as a `HashMap<String, String>`,
+/// and inventing a replacement character for a name or value it will later use
+/// as a lookup key would be worse than omitting it.
+pub(crate) fn raw_vars() -> Vec<(String, String)> {
+    std::env::vars().collect()
+}
+
+/// Return true when an already-read value is exactly `expected`.
+///
+/// Some bootstrap flags preserve exact `"1"` truthiness, while others
+/// intentionally use [`env_is_truthy`] to also accept `"true"`.
+#[must_use]
+pub fn env_is_exact(value: Option<&str>, expected: &str) -> bool {
+    value == Some(expected)
+}
+
+/// Return true when an already-read value is `"1"` or case-insensitive `"true"`.
 ///
 /// This intentionally differs from [`env_is_exact`] for bootstrap-style flags
 /// that accept both common truthy spellings.
 #[must_use]
-pub fn env_is_truthy(key: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+pub fn env_is_truthy(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 /// Parse a boolean flag value accepting `1/0/true/false/yes/no` case-insensitively.
@@ -55,40 +83,20 @@ mod tests {
 
     #[test]
     fn env_is_exact_matches_only_expected_value() {
-        let key = format!("ZEROSHIP_TEST_ENV_EXACT_{}", std::process::id());
-
-        std::env::remove_var(&key);
-        assert!(!env_is_exact(&key, "1"));
-
-        std::env::set_var(&key, "true");
-        assert!(!env_is_exact(&key, "1"));
-
-        std::env::set_var(&key, "1");
-        assert!(env_is_exact(&key, "1"));
-
-        std::env::remove_var(&key);
+        assert!(!env_is_exact(None, "1"));
+        assert!(!env_is_exact(Some("true"), "1"));
+        assert!(!env_is_exact(Some(""), "1"));
+        assert!(env_is_exact(Some("1"), "1"));
     }
 
     #[test]
     fn env_is_truthy_accepts_one_and_true() {
-        let key = format!("ZEROSHIP_TEST_ENV_TRUTHY_{}", std::process::id());
-
-        std::env::remove_var(&key);
-        assert!(!env_is_truthy(&key));
-
-        std::env::set_var(&key, "1");
-        assert!(env_is_truthy(&key));
-
-        std::env::set_var(&key, "true");
-        assert!(env_is_truthy(&key));
-
-        std::env::set_var(&key, "TRUE");
-        assert!(env_is_truthy(&key));
-
-        std::env::set_var(&key, "yes");
-        assert!(!env_is_truthy(&key));
-
-        std::env::remove_var(&key);
+        assert!(!env_is_truthy(None));
+        assert!(env_is_truthy(Some("1")));
+        assert!(env_is_truthy(Some("true")));
+        assert!(env_is_truthy(Some("TRUE")));
+        assert!(!env_is_truthy(Some("yes")));
+        assert!(!env_is_truthy(Some("")));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! Split into focused submodules:
 //! - [`file`] — the TOML schema (`FileConfig`, sections, `ConfigError`).
 //! - [`source`] — overlay discovery (`ConfigSource`, `LoadedOverlay`, resolve/load).
-//! - [`env`] — environment/CLI boolean truthiness helpers.
+//! - [`env`] — the sole raw process-environment boundary, plus pure truthiness.
+//! - [`declared`] — typed keys for reads the config contract does not generate.
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
 //!
@@ -16,12 +17,19 @@
 //! `observability.*` declarations owned by each binary's config module.
 
 pub mod bootstrap;
+pub mod declared;
 pub mod env;
 pub mod file;
 pub mod names;
 pub mod secrets;
 pub mod source;
 pub mod topology;
+
+pub use declared::{
+    consumer_of, is_valid_env_name, read_declared_env_os_value, read_declared_env_value,
+    read_process_env_snapshot_value, DeclaredEnvKey, DeclaredEnvRead, EnvClass,
+    DECLARED_ENV_READS, PROCESS_ENV_SNAPSHOT,
+};
 
 pub use bootstrap::{
     bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,
