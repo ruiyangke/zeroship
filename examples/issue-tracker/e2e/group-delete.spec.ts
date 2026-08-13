@@ -96,4 +96,12 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
   const recreated = await rpc("groups.create", { name: unusedName, description: "again" });
   expect(recreated.id, "the deleted group's name can be used again").toBeTruthy();
   await rpc("groups.delete", { id: recreated.id });
+
+  // Clean up the in-use group too, now that there is a way to. Specs creating
+  // groups and never removing them is how the dev database reached 95 of them
+  // on a page about products -- and this spec, of all of them, has no excuse.
+  // Unrestrict first: the server refuses while the group is load-bearing,
+  // which is the whole point of it.
+  await rpc("bugs.unrestrict", { bugId: bug.id, groupId: inUse.id });
+  await rpc("groups.delete", { id: inUse.id });
 });

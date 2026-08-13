@@ -66,7 +66,14 @@ export function KeywordsPanel({
             above "No keywords defined yet." they read as one statement
             contradicting itself. Both now name their own subject. */}
         {[...attached].length === 0 ? (
-          <span className="dim">No keywords on this bug.</span>
+          // ...but only while there is a vocabulary to have chosen from. When
+          // the tracker defines no keywords at all, "No keywords on this bug"
+          // states a consequence of the message directly below it, and the
+          // panel says nothing twice. The distinction is real; showing both at
+          // once is what was redundant.
+          state.status === "ready" && state.data.length === 0 ? null : (
+            <span className="dim">No keywords on this bug.</span>
+          )
         ) : (
           [...attached].map((name) => (
             <Tag key={name} size="sm">
