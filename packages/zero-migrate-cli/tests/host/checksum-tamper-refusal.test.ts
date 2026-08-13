@@ -73,12 +73,12 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-function body(extraColumn: string): string {
+function body(extraColumn: string, tableName = "things"): string {
   return `import { table, t } from "zero-migrate";
 export const name = "create_things";
 export default {
   up() {
-    table("things").create({
+    table("${tableName}").create({
       columns: { id: t.int().notNull()${extraColumn} },
       primaryKey: ["id"],
     });
@@ -103,9 +103,14 @@ scope = { include = [${JSON.stringify(schema)}] }
 key = "schema.create_table"
 value = true
 scope = { include = [${JSON.stringify(schema)}] }
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
 `,
   );
-  writeFileSync(join(work, "registry.json"), JSON.stringify({ things: OWNER_APP }));
+  writeFileSync(join(work, "registry.json"), JSON.stringify({ things: OWNER_APP, victim: OWNER_APP }));
   writeFileSync(join(work, "migrations", MIGRATION_FILE), body(""));
   return work;
 }
@@ -155,6 +160,9 @@ interface Dialect {
   setUp(namespace: string): Promise<void>;
   databaseUrl(namespace: string): string;
   columns(namespace: string): Promise<string[]>;
+  tables(namespace: string): Promise<string[]>;
+  /** A bystander table the tampered `up` renames the rollback's target onto. */
+  createBystander(namespace: string): Promise<void>;
   tearDown(namespace: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -177,6 +185,17 @@ async function postgres(): Promise<Dialect> {
         [namespace],
       );
       return rows.map((row) => row.column_name as string);
+    },
+    async tables(namespace) {
+      const { rows } = await client.query(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = $1 ORDER BY table_name`,
+        [namespace],
+      );
+      return rows.map((row) => row.table_name as string);
+    },
+    async createBystander(namespace) {
+      await client.query(`CREATE TABLE "${namespace}".victim (id int PRIMARY KEY)`);
     },
     async tearDown(namespace) {
       await client
@@ -210,6 +229,17 @@ async function mysql(): Promise<Dialect> {
         [namespace],
       );
       return (rows as Array<{ n: string }>).map((row) => row.n);
+    },
+    async tables(namespace) {
+      const [rows] = await connection.query(
+        `SELECT TABLE_NAME AS n FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = ? ORDER BY 1`,
+        [namespace],
+      );
+      return (rows as Array<{ n: string }>).map((row) => row.n);
+    },
+    async createBystander(namespace) {
+      await connection.query(`CREATE TABLE \`${namespace}\`.victim (id int PRIMARY KEY)`);
     },
     async tearDown(namespace) {
       await connection.query(`DROP DATABASE IF EXISTS \`${namespace}\``).catch(() => {});
@@ -353,5 +383,108 @@ test("the recorded checksum is the same on both servers", async (ctx) => {
   } finally {
     await pg.close();
     await my.close();
+  }
+});
+
+/** The same tamper, aimed at ROLLBACK instead of apply.
+ *
+ *  Rollback has no authored `down` to tamper with - the engine refuses a migration
+ *  that declares one at all ("the recorder does not capture down(); rollback runs
+ *  the engine's synthesised inverse", pinned in `rollback-atomicity`). That closes
+ *  the obvious attack and moves the question rather than settling it: the inverse
+ *  is synthesised from the migration's ops, so if those are re-read from the
+ *  EDITABLE files, editing `up` redirects whatever the rollback drops.
+ *
+ *  The edit here repoints `up` from the table it created onto a PRE-EXISTING
+ *  bystander. If the synthesis trusted the file, the rollback would drop `victim`
+ *  - a table this migration never created and whose rows no journal entry
+ *  describes. That is strictly worse than the apply case: apply's tamper adds
+ *  something unrecorded, this one DESTROYS something unrelated.
+ *
+ *  The control is the reason the refusal means anything: an UNTAMPERED rollback of
+ *  the same migration must succeed and drop the table it really created. Without
+ *  it, "rollback refused" is equally consistent with rollback being broken. */
+async function rollbackTamperScenario(dialect: Dialect): Promise<void> {
+  const namespace = uniqueNamespace(`${dialect.prefix}_rb`);
+  const work = project(namespace);
+  const url = dialect.databaseUrl(namespace);
+  const rollback = ["rollback", "--steps", "1", "--approve", "--backup-acknowledged"];
+  try {
+    await dialect.setUp(namespace);
+    await dialect.createBystander(namespace);
+
+    const applied = await cli(work, namespace, url, ["apply", "--approve"]);
+    assert.equal(applied.code, 0, `${dialect.name}: the original must apply; ${applied.text}`);
+
+    // TAMPER: same filename, so the same identity; `up` now names the bystander.
+    writeFileSync(join(work, "migrations", MIGRATION_FILE), body("", "victim"));
+    const tampered = await cli(work, namespace, url, rollback);
+
+    assert.equal(
+      tampered.code,
+      1,
+      `${dialect.name}: the rollback of an edited migration must be refused; ${tampered.text}`,
+    );
+    assert.match(
+      tampered.text,
+      /checksum drift/,
+      `${dialect.name}: and it must be the checksum gate that refuses: ${tampered.text}`,
+    );
+
+    // THE ASSERTION THAT MATTERS: nothing was dropped. Not the bystander the edit
+    // aimed at, and not the real table either.
+    const survivors = await dialect.tables(namespace);
+    assert.ok(
+      survivors.includes("victim"),
+      `${dialect.name}: the bystander the edit aimed at must survive; saw ${JSON.stringify(survivors)}`,
+    );
+    assert.ok(
+      survivors.includes("things"),
+      `${dialect.name}: and the refused rollback must not have dropped its own table either; ` +
+        `saw ${JSON.stringify(survivors)}`,
+    );
+
+    // THE CONTROL: restore the real bytes and the same rollback goes through,
+    // dropping the table this migration actually created and nothing else.
+    writeFileSync(join(work, "migrations", MIGRATION_FILE), body(""));
+    const honest = await cli(work, namespace, url, rollback);
+    assert.equal(
+      honest.code,
+      0,
+      `${dialect.name}: the untampered rollback must succeed, or the refusal above ` +
+        `proves only that rollback is broken; ${honest.text}`,
+    );
+    const after = await dialect.tables(namespace);
+    assert.ok(!after.includes("things"), `${dialect.name}: it must drop its own table`);
+    assert.ok(after.includes("victim"), `${dialect.name}: and still leave the bystander alone`);
+  } finally {
+    await dialect.tearDown(namespace);
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+test("PostgreSQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG rollback tamper arm skipped");
+    return;
+  }
+  const dialect = await postgres();
+  try {
+    await rollbackTamperScenario(dialect);
+  } finally {
+    await dialect.close();
+  }
+});
+
+test("MySQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL rollback tamper arm skipped");
+    return;
+  }
+  const dialect = await mysql();
+  try {
+    await rollbackTamperScenario(dialect);
+  } finally {
+    await dialect.close();
   }
 });
