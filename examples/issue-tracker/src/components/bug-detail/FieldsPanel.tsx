@@ -353,7 +353,6 @@ export function FieldsPanel({
   readOnly?: boolean;
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
-  const [editingSummary, setEditingSummary] = useState(false);
   const [showOther, setShowOther] = useState(false);
   // "Unspecified" is the server's default for opSys and platform, so a bug
   // that has never been touched reads as unset rather than as configured.
@@ -366,34 +365,13 @@ export function FieldsPanel({
   return (
     <Card className="fields-panel">
       <fieldset className="rail-fields" disabled={readOnly}>
-      {/* No heading here. The page head already states the summary, and this
-          panel repeated it as an h2 immediately above an input containing the
-          same text -- the same string three times in the top 200 pixels. */}
+      {/* The summary is edited in the PAGE HEAD, where the summary is.
+          It lived here as "Edit summary" floating at the top of the rail, a
+          control several hundred pixels from the words it changes and in a
+          column reserved for metadata. A title is not metadata about itself. */}
       {/* Not a permanent text box. The page heading already states the
           summary in full; a second copy in a 22rem rail truncated it and
           invited edits nobody came to make. Editing is a deliberate act. */}
-      {editingSummary ? (
-        <GeneralField
-          bug={bug}
-          field="summary"
-          label="Summary"
-          value={bug.summary}
-          onUpdated={(next) => {
-            setEditingSummary(false);
-            onUpdated(next);
-          }}
-        />
-      ) : (
-        /* "Summary / Edit" alone at the top of the rail read as a field whose
-           value had gone missing -- a label and a button with nothing between
-           them. It is an action, so it is written as one. */
-        <Cluster gap={2} align="center" justify="end" className="rail-action">
-          <Button variant="gray" size="small" onClick={() => setEditingSummary(true)}>
-            Edit summary
-          </Button>
-        </Cluster>
-      )}
-
       <StatusControl bug={bug} onUpdated={onUpdated} />
       <RailSection title="Classification" />
       <SeverityPriority bug={bug} onUpdated={onUpdated} />

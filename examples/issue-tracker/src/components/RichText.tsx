@@ -250,7 +250,7 @@ export function RichTextEditor({
 }) {
   const [focused, setFocused] = useState(false);
   const editor = useEditor({
-    extensions: EXTENSIONS,
+    extensions: WRITING_EXTENSIONS,
     content: value,
     immediatelyRender: false,
     editorProps: {

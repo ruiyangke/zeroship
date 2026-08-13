@@ -1011,3 +1011,19 @@ fieldset.bug-detail-extras { display: grid; }
   text-align: start;
   max-inline-size: 100%;
 }
+
+/* The composer's action row: options group left, the action anchors right,
+   which is where a form's confirm belongs. "Comment" is the primary act of
+   this page and it was wrapping onto its own line at the far left. */
+.new-comment-row { gap: 0.75rem 1rem; }
+.new-comment-row > *:last-child { margin-inline-start: auto; }
+
+/* The title and its edit affordance. The button stays quiet until the row is
+   hovered or focused, so the heading reads as a heading rather than as a
+   control with a label attached. */
+.bug-title-row .bug-title { margin-block-end: 0; }
+.bug-title-edit { opacity: 0; transition: opacity 0.12s ease; }
+.bug-title-row:hover .bug-title-edit,
+.bug-title-row:focus-within .bug-title-edit { opacity: 1; }
+@media (hover: none) { .bug-title-edit { opacity: 1; } }
+.bug-title-editor { display: flex; flex-direction: column; gap: 0.5rem; max-inline-size: 46ch; margin-block-end: 0.5rem; }

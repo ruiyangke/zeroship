@@ -283,7 +283,7 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
       {/* A Cluster, not a bare flex row. Checkbox renders its own label
           BELOW its box in this row and it landed on top of the next field's
           label -- two labels overlapping reads as a rendering fault. */}
-      <Cluster gap={3} align="center" className="new-comment-row">
+      <Cluster gap={3} align="center" className="new-comment-row" justify="between">
         {/* Checkbox owns its own label, so the wrapping <label> that used to
             associate a bare input is gone rather than nested inside it. */}
         <Checkbox

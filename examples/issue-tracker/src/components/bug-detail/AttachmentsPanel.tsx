@@ -70,7 +70,12 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
         <Button variant="gray" size="small" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
         </Button>
-        <Button variant="gray" size="small" intent="destructive" disabled={busy} onClick={() => void remove()}>
+        {/* Plain, not destructive-red. On a list row this was the most
+            saturated thing in the whole column -- louder than "Comment", the
+            page primary -- for an action on a file somebody attached on
+            purpose. Deleting is available here, it is not the point of the
+            panel. */}
+        <Button variant="plain" size="small" disabled={busy} onClick={() => void remove()}>
           Delete
         </Button>
       </div>

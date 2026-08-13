@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Banner, Button, Card, Cluster, Stack } from "@zeroship/ui";
+import { Banner, Button, Card, Cluster, Input, Stack } from "@zeroship/ui";
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { currentUser, getBug, getProduct, listAttachments, listProducts } from "../api";
+import { currentUser, getBug, getProduct, listAttachments, listProducts, updateBug } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
 import { isUnauthenticated } from "../components/rpc";
 import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
@@ -15,10 +15,72 @@ import { VotesPanel } from "../components/bug-detail/VotesPanel";
 import { HistoryPanel } from "../components/bug-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/bug-detail/RelationsPanel";
 import { KeywordsPanel } from "../components/bug-detail/KeywordsPanel";
-import { toPromise, useAsync } from "../components/rpc";
+import { errorMessage, toPromise, useAsync } from "../components/rpc";
 import type { ProductDetail } from "../components/types";
 
 type Tab = "details" | "history";
+
+/**
+ * Editing the bug's title, where the title is.
+ *
+ * This used to be "Edit summary" at the top of the metadata rail: a control
+ * several hundred pixels from the words it changes, in the column reserved for
+ * facts ABOUT the bug. A title is not metadata about itself, and an action
+ * belongs beside its object.
+ */
+function TitleEditor({
+  bug,
+  onDone,
+}: {
+  bug: { id: string; summary: string };
+  onDone: (changed: boolean) => void;
+}) {
+  const [draft, setDraft] = useState(bug.summary);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    const summary = draft.trim();
+    if (!summary) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await toPromise(updateBug({ id: bug.id, changes: { summary } }));
+      onDone(true);
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="bug-title-editor">
+      <Input
+        aria-label="Summary"
+        value={draft}
+        disabled={busy}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void save();
+          }
+          // Escape abandons, and the draft dies with the component.
+          if (event.key === "Escape") onDone(false);
+        }}
+      />
+      <Cluster gap={2} align="center">
+        <Button variant="filled" size="small" disabled={busy || !draft.trim()} onClick={() => void save()}>
+          Save
+        </Button>
+        <Button variant="plain" size="small" disabled={busy} onClick={() => onDone(false)}>
+          Cancel
+        </Button>
+      </Cluster>
+      {error ? <p className="field-error">{error}</p> : null}
+    </div>
+  );
+}
 
 export function BugDetailPage({ id }: { id: string }) {
   const { state, reload } = useAsync(() => getBug({ id }), [id]);
@@ -30,6 +92,7 @@ export function BugDetailPage({ id }: { id: string }) {
   // real defect and why the specs saw the panel become "not stable, then not
   // visible" while clicking.
   const [moreOpen, setMoreOpen] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
   const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
   const productsQ = useAsync(() => listProducts({}), []);
   // Bugs are public, so unlike the dashboard this page stays READABLE without
@@ -100,7 +163,30 @@ export function BugDetailPage({ id }: { id: string }) {
         <span className="bug-id">
           {detail.product ? `${detail.product.key}-${detail.bug.number}` : detail.bug.id}
         </span>
-        <h1 className="bug-title">{detail.bug.summary}</h1>
+        {editingTitle ? (
+          <TitleEditor
+            bug={detail.bug}
+            onDone={(next) => {
+              setEditingTitle(false);
+              if (next) reload();
+            }}
+          />
+        ) : (
+          <Cluster gap={2} align="center" className="bug-title-row">
+            <h1 className="bug-title">{detail.bug.summary}</h1>
+            {signedOut ? null : (
+              <Button
+                variant="plain"
+                size="small"
+                className="bug-title-edit"
+                aria-label="Edit summary"
+                onClick={() => setEditingTitle(true)}
+              >
+                Edit
+              </Button>
+            )}
+          </Cluster>
+        )}
         <Cluster gap={2} align="center" className="bug-state">
           <StatusBadge status={detail.bug.status} />
           <ResolutionBadge resolution={detail.bug.resolution ?? null} />
