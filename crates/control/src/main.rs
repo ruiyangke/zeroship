@@ -232,6 +232,13 @@ fn build_billing_mailer(
     }
 }
 
+/// How the native-mode boot guard names the platform issuer input.
+///
+/// A `const` rather than a literal at the guard so the diagnostic test below
+/// can read the exact string an operator sees. Every other auth-provider
+/// diagnostic is already reachable through the function that produces it.
+const PLATFORM_ISSUER_INPUT: &str = "--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER";
+
 fn build_control_auth_provider(
     auth_provider: AuthProviderKind,
     supabase: ControlSupabaseAuthConfig,
@@ -637,7 +644,7 @@ fn main() -> std::io::Result<()> {
     if auth_provider_kind == AuthProviderKind::Native {
         let mut missing = Vec::new();
         if auth_platform_issuer.is_empty() {
-            missing.push("--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER");
+            missing.push(PLATFORM_ISSUER_INPUT);
         }
         if !missing.is_empty() {
             tracing::error!(
@@ -1588,6 +1595,127 @@ mod tests {
             provider.issuer(),
             "https://project.supabase.co/auth/v1",
             "dual issuer reports the legacy issuer for Supabase device-flow helpers"
+        );
+    }
+
+    /// Every environment variable name `zeroship-control` actually reads.
+    ///
+    /// DERIVED, never listed. The clap command carries `env = "..."` for the
+    /// binary's own hand-written args AND for every flattened generated
+    /// operational setting; `SPECS` adds the converted secrets, which have no
+    /// clap env tier by construction. A list here would be a third spelling
+    /// that could be edited to agree with a stale diagnostic, which is the
+    /// failure this test exists to catch.
+    fn env_names_control_reads() -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let command = <ControlCli as clap::CommandFactory>::command();
+        for arg in command.get_arguments() {
+            if let Some(env) = arg.get_env() {
+                names.insert(env.to_string_lossy().into_owned());
+            }
+        }
+        for spec in ControlSettings::SPECS {
+            if let Some(env) = spec.env_name() {
+                names.insert(env);
+            }
+        }
+        names
+    }
+
+    /// The substrings of `text` that are shaped like an environment name.
+    ///
+    /// A maximal run of `[A-Z0-9_]` holding at least one underscore. That
+    /// shape admits `SUPABASE_ANON_KEY` and `ZEROSHIP_AUTH_PROVIDER` while
+    /// excluding ordinary prose and bare acronyms such as `URL` or `JWKS`.
+    fn env_like_tokens(text: &str) -> Vec<String> {
+        text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .filter(|token| token.len() >= 4 && token.contains('_'))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Every auth-provider diagnostic, obtained by DRIVING the code that emits
+    /// it rather than by copying its wording.
+    fn auth_provider_diagnostics() -> Vec<String> {
+        let no_supabase = ControlSupabaseAuthConfig {
+            url: "https://project.supabase.co",
+            anon_key: "",
+            service_role_key: "",
+            jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
+            jwks_url: "",
+            jwt_issuer: "https://project.supabase.co/auth/v1",
+        };
+        let no_platform = ControlPlatformAuthConfig {
+            issuer: "",
+            jwks_url: "",
+        };
+        vec![
+            build_control_auth_provider(AuthProviderKind::Supabase, no_supabase, no_platform)
+                .map(|_| ())
+                .expect_err("supabase without an anon key must fail closed"),
+            build_control_auth_provider(AuthProviderKind::Native, no_supabase, no_platform)
+                .map(|_| ())
+                .expect_err("native without an issuer must fail closed"),
+            platform_config(ControlPlatformAuthConfig {
+                issuer: "",
+                jwks_url: "https://auth.zeroship.test/oauth2/.well-known/jwks.json",
+            })
+            .map(|_| ())
+            .expect_err("a JWKS URL without an issuer must fail closed"),
+            PLATFORM_ISSUER_INPUT.to_owned(),
+        ]
+    }
+
+    #[test]
+    fn every_auth_provider_diagnostic_names_a_variable_control_reads() {
+        // The defect this pins: all three of these diagnostics named
+        // ZEROSHIP_AUTH_PROVIDER while control read
+        // ZEROSHIP_CONTROL_AUTH_PROVIDER, and two named AUTH_PLATFORM_ISSUER
+        // after that variable had gained its ZEROSHIP_ prefix. An operator who
+        // followed the advice edited a variable this binary does not read.
+        //
+        // What this does NOT catch: a diagnostic that names a variable control
+        // really does read but that is the WRONG one for the failure at hand,
+        // and any stale name in a diagnostic outside the set
+        // `auth_provider_diagnostics` can reach.
+        let readable = env_names_control_reads();
+        assert!(
+            readable.contains("ZEROSHIP_AUTH_PROVIDER"),
+            "the derivation itself is broken: control's own selector is absent"
+        );
+
+        for diagnostic in auth_provider_diagnostics() {
+            let tokens = env_like_tokens(&diagnostic);
+            assert!(
+                !tokens.is_empty(),
+                "diagnostic names no variable at all: {diagnostic:?}"
+            );
+            for token in tokens {
+                assert!(
+                    readable.contains(&token),
+                    "diagnostic {diagnostic:?} tells the operator to set {token}, \
+                     which zeroship-control does not read"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_diagnostic_check_rejects_a_variable_control_does_not_read() {
+        // The one-variable control for the test above. Same instrument, same
+        // token shape, one thing changed: a name nothing declares. Without
+        // this, a `readable` set that had silently become everything - or an
+        // `env_like_tokens` that matched nothing - would still print green.
+        let readable = env_names_control_reads();
+        let stale = "ZEROSHIP_CONTROL_AUTH_PROVIDER is required for supabase";
+        assert_eq!(
+            env_like_tokens(stale),
+            vec!["ZEROSHIP_CONTROL_AUTH_PROVIDER".to_owned()],
+            "the token scanner must see the retired name"
+        );
+        assert!(
+            !readable.contains("ZEROSHIP_CONTROL_AUTH_PROVIDER"),
+            "the retired control-scoped name must no longer be read"
         );
     }
 
