@@ -7552,3 +7552,227 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// The squash all-or-none gate, on a live database.
+///
+/// A squash `S` supersedes `[v1..vN]`: applying it means "these are already built,
+/// skip them". Whether that is safe depends entirely on what is already applied,
+/// and `check_squash_all_or_none` decides it before anything runs:
+///
+///   none satisfied      run `S.up` — the fresh-database path
+///   all satisfied       refuse (`SquashAlreadyApplied`) — `ops::squash` records
+///                       the supersession WITHOUT running `up`; running it here
+///                       would re-create what exists
+///   some satisfied      refuse (`SquashPartialOverlap`) — inconsistent
+///
+/// `squash_supersession_pg.rs` covers the `ops::squash` verb. It does not reach
+/// these gates, and none of the three `ApplyError` variants appears anywhere in the
+/// tree outside the executor.
+///
+/// WHAT THE GATE ACTUALLY BUYS, measured rather than assumed. With
+/// `check_squash_all_or_none` disabled, the partial arm does not silently record a
+/// bogus supersession — the squash's `up` runs and PostgreSQL rejects it with
+/// `relation "alpha" already exists`. So the gate is not the only thing standing
+/// between a partial squash and a corrupt journal; it is what turns a mid-batch
+/// failure into a pre-flight refusal, which is exactly what the source claims:
+/// "caught here, before any execution — fail-closed on nonsensical authoring
+/// rather than erroring mid-batch". That difference is worth a gate because the
+/// server's rejection only rescues a TRANSACTIONAL squash; a non-transactional one
+/// has no rollback to fall back on.
+///
+/// The edge count is still asserted, because "refused" must mean nothing was
+/// recorded either: a supersession edge written for a version that never ran would
+/// mark it covered forever, and nothing later reports it missing.
+///
+/// The fresh arm is the control. Without it both refusals hold equally on a build
+/// where a squash never applies at all.
+#[compio::test]
+async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    use zero_migrate::driver::SqlSession;
+
+    /// `v1`/`v2` create one table each; the squash creates BOTH, which is what a
+    /// real squash of the two would do.
+    fn parts(tok: &str, schema: &str) -> (Migration, Migration, Migration) {
+        let v1 = mig(
+            MigrationId::derive("sq_v1", tok.as_bytes()),
+            "create_alpha",
+            &format!("CREATE TABLE \"{schema}\".alpha (id bigint PRIMARY KEY)"),
+        );
+        let v2 = mig(
+            MigrationId::derive("sq_v2", tok.as_bytes()),
+            "create_beta",
+            &format!("CREATE TABLE \"{schema}\".beta (id bigint PRIMARY KEY)"),
+        );
+        let mut squash = mig(
+            MigrationId::derive("sq_s", tok.as_bytes()),
+            "squash_alpha_beta",
+            &format!(
+                "CREATE TABLE \"{schema}\".alpha (id bigint PRIMARY KEY); \
+                 CREATE TABLE \"{schema}\".beta (id bigint PRIMARY KEY)"
+            ),
+        );
+        squash.supersedes = vec![v1.version.clone(), v2.version.clone()];
+        squash.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&squash));
+        (v1, v2, squash)
+    }
+
+    async fn tables(session: &PgDevSession, schema: &str) -> Vec<String> {
+        let rows = session
+            .query(
+                "SELECT table_name FROM information_schema.tables
+                  WHERE table_schema = $1 ORDER BY table_name",
+                &[schema.into()],
+            )
+            .await
+            .expect("list tables");
+        rows.iter()
+            .map(|r| r.try_get::<_, String>("table_name").expect("decode name"))
+            .collect()
+    }
+
+    // ── PARTIAL: v1 applied, v2 not ────────────────────────────────────────────
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _guard = ensure_project_schema(&session, &cfg).await;
+    let (v1, v2, squash) = parts(&tok, &cfg.project_schema);
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&v1),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply the first half of the prefix");
+
+    let err = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&squash),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a squash over a partly-applied prefix must be refused");
+    match &err {
+        ApplyError::SquashPartialOverlap { version, .. } => {
+            assert_eq!(version.as_str(), squash.version.as_str());
+        }
+        other => panic!("expected SquashPartialOverlap, got {other:?}"),
+    }
+    assert_eq!(
+        tables(&session, &cfg.project_schema).await,
+        vec!["alpha".to_string()],
+        "the refused squash must not have run its up"
+    );
+    // The silent half. An edge here would mark `v2` covered forever.
+    let edges: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
+                cfg.pg.meta_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("count supersession edges")
+        .try_get("n")
+        .expect("decode n");
+    assert_eq!(
+        edges, 0,
+        "no supersession edge may be recorded by a refusal"
+    );
+    // And `v2` really is still runnable, which is what the missing edge buys.
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&v2),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("the un-run half must still be applicable after the refusal");
+    assert_eq!(
+        tables(&session, &cfg.project_schema).await,
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+
+    // ── ALL SATISFIED: both applied ────────────────────────────────────────────
+    let full_tok = token();
+    let full_cfg = cfg_for(&full_tok);
+    drop_schemas(&session, &full_cfg).await;
+    let _full_guard = ensure_project_schema(&session, &full_cfg).await;
+    let (fv1, fv2, full_squash) = parts(&full_tok, &full_cfg.project_schema);
+    apply(
+        &session,
+        &full_cfg,
+        &[fv1.clone(), fv2.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply the whole prefix");
+    let err = apply(
+        &session,
+        &full_cfg,
+        std::slice::from_ref(&full_squash),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect_err("a squash over a fully-applied prefix must be refused by apply");
+    assert!(
+        matches!(&err, ApplyError::SquashAlreadyApplied { version, .. }
+            if version.as_str() == full_squash.version.as_str()),
+        "expected SquashAlreadyApplied, got {err:?}"
+    );
+    assert_eq!(
+        tables(&session, &full_cfg.project_schema).await,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the refusal must leave the built schema exactly as it was"
+    );
+
+    // ── THE CONTROL: nothing satisfied, so the squash really runs ──────────────
+    let fresh_tok = token();
+    let fresh_cfg = cfg_for(&fresh_tok);
+    drop_schemas(&session, &fresh_cfg).await;
+    let _fresh_guard = ensure_project_schema(&session, &fresh_cfg).await;
+    let (_, _, fresh_squash) = parts(&fresh_tok, &fresh_cfg.project_schema);
+    apply(
+        &session,
+        &fresh_cfg,
+        std::slice::from_ref(&fresh_squash),
+        Approval::Approved,
+        "app_test",
+    )
+    .await
+    .expect("on a fresh database the squash applies");
+    assert_eq!(
+        tables(&session, &fresh_cfg.project_schema).await,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the fresh path builds the schema the superseded versions would have"
+    );
+    let fresh_edges: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
+                fresh_cfg.pg.meta_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("count fresh edges")
+        .try_get("n")
+        .expect("decode n");
+    assert_eq!(
+        fresh_edges, 2,
+        "and it records an edge for each version it supersedes"
+    );
+
+    drop_schemas(&session, &cfg).await;
+    drop_schemas(&session, &full_cfg).await;
+    drop_schemas(&session, &fresh_cfg).await;
+}
