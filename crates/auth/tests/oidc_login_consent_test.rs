@@ -847,7 +847,7 @@ async fn totp_login_preserves_native_return_to() {
         return;
     };
     let secret = totp::generate_secret();
-    let key = totp::key_from_config(&fx.cfg.secrets.totp_enc_key).expect("totp key");
+    let key = totp::key_from_config(fx.cfg.settings.totp_enc_key.expose_str()).expect("totp key");
     totp_store::enroll(
         &fx.db,
         fx.user_id,

@@ -622,7 +622,7 @@ pub async fn mint_platform_token(
 }
 
 fn authorized(req: &HttpRequest, cfg: &AuthConfig) -> bool {
-    let expected = cfg.secrets.control_key.trim();
+    let expected = cfg.settings.control_key.expose_str().trim();
     if expected.is_empty() {
         return false;
     }

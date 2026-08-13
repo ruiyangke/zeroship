@@ -50,9 +50,10 @@ pub async fn send_email(
     mailer: State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     let Some(secret) = cfg
-        .secrets.gotrue_email_hook_secret
-        .as_deref()
-        .map(str::trim)
+        .settings
+        .gotrue_email_hook_secret
+        .expose_secret()
+        .map(|secret| secret.trim())
         .filter(|s| !s.is_empty())
     else {
         tracing::warn!("gotrue send-email hook hit but AUTH_GOTRUE_EMAIL_HOOK_SECRET is unset");
@@ -565,12 +566,12 @@ mod tests {
 
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use clap::Parser;
     use compio_postgres::{connect, NoTls};
     use ntex::http::header::HeaderValue;
     use ntex::web::{self, test};
     use serde_json::json;
     use uuid::Uuid;
+    use zeroship_core::config::{Secret, SourceKind};
     use zeroship_mailer::{check_suppression, suppressions, MessageId};
 
     use super::*;
@@ -633,12 +634,8 @@ mod tests {
     }
 
     fn cfg() -> AuthConfig {
-        AuthConfig::parse_from([
+        let mut cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--stash-signing-key",
-            "test-stash-key-not-for-prod-32bytes!",
             "--provider",
             "supabase",
             "--supabase-url",
@@ -649,9 +646,12 @@ mod tests {
             "auth@zeroship.test",
             "--mail-from-name",
             "zeroship test",
-            "--gotrue-email-hook-secret",
-            &test_secret(),
-        ])
+        ]);
+        // Secrets have no value flag; supply each in the shape an in-memory
+        // literal resolves to.
+        cfg.settings.gotrue_email_hook_secret =
+            Secret::supplied(SourceKind::Env, Some(test_secret()));
+        cfg
     }
 
     fn payload(action: &str) -> GoTrueSendEmailPayload {
@@ -809,7 +809,8 @@ mod tests {
             .expect("add suppression");
 
         let mut cfg = cfg();
-        cfg.secrets.gotrue_email_hook_secret = Some(test_secret());
+        cfg.settings.gotrue_email_hook_secret =
+            Secret::supplied(SourceKind::Env, Some(test_secret()));
         let cfg = Arc::new(cfg);
         let mailer = Arc::new(SuppressionAwareCountingMailer::default());
         let mailer_state: Arc<dyn Mailer> = mailer.clone();
@@ -843,7 +844,7 @@ mod tests {
         .expect("body");
         let ts = now_unix_secs();
         let sig = sign(
-            cfg.secrets.gotrue_email_hook_secret.as_deref().expect("secret"),
+            cfg.settings.gotrue_email_hook_secret.expose_str(),
             "msg_suppressed",
             ts,
             &body,

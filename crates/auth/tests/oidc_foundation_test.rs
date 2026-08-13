@@ -1,7 +1,6 @@
 //! P1a platform OP token-issuance foundation tests.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use clap::Parser;
 use compio_postgres::{connect, Client, NoTls};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -11,6 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
 use zeroship_auth::oidc::{
@@ -34,17 +34,22 @@ fn scopes() -> Vec<String> {
 }
 
 fn test_config(public_url: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+    // Secrets carry no value flag; supply each in the shape an in-memory
+    // literal resolves to (see crates/auth/tests/common/mod.rs).
+    let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
-        "--db-url",
-        "postgres://unused",
-        "--stash-signing-key",
-        "test-stash-key-not-for-prod-32bytes!",
         "--public-url",
         public_url,
-    ])
+    ]);
+    cfg.settings.database_url =
+        Secret::supplied(SourceKind::Env, Some("postgres://unused".to_owned()));
+    cfg.settings.stash_signing_key = Secret::supplied(
+        SourceKind::Env,
+        Some("test-stash-key-not-for-prod-32bytes!".to_owned()),
+    );
+    cfg
 }
 
 fn access_mint<'a>(user_id: &'a str, scopes: &'a [String]) -> AccessTokenMint<'a> {

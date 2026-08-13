@@ -118,8 +118,10 @@ pub async fn complete_callback(
         .github_client_id()
         .ok_or_else(|| AuthError::Config("github_client_id missing".into()))?;
     let client_secret = cfg
-        .secrets.github_client_secret
-        .as_deref()
+        .settings
+        .github_client_secret
+        .expose_secret()
+        .map(String::as_str)
         .ok_or_else(|| AuthError::Config("github_client_secret missing".into()))?;
 
     let client = cyper::Client::new();
@@ -285,19 +287,18 @@ async fn get_with_token<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use zeroship_core::config::{Secret, SourceKind};
 
     fn cfg_with_github() -> AuthConfig {
         let mut cfg = AuthConfig::parse_from([
             "zeroship-auth",
-            "--db-url",
-            "postgres://x/y",
             "--github-client-id",
             "test-client",
             "--github-redirect-uri",
             "https://auth.zeroship.ai/oauth/github/callback",
         ]);
-        cfg.secrets.github_client_secret = Some("test-secret".into());
+        cfg.settings.github_client_secret =
+            Secret::supplied(SourceKind::Env, Some("test-secret".to_owned()));
         cfg
     }
 
@@ -370,7 +371,7 @@ mod tests {
     #[test]
     fn start_authorize_url_errors_when_client_id_missing() {
         // The compiled default is empty, which IS "no client id".
-        let cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
+        let cfg = AuthConfig::parse_from(["zeroship-auth"]);
         let err = start_authorize_url(&cfg, None).expect_err("must fail without client_id");
         assert!(matches!(err, AuthError::Config(_)), "got: {err:?}");
     }

@@ -22,13 +22,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::http::header::{LOCATION, SET_COOKIE};
 use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::csrf;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::{password, totp};
@@ -105,12 +105,6 @@ impl Fixture {
             "zeroship-auth",
             "--addr",
             "127.0.0.1:0",
-            "--db-url",
-            &db_url,
-            "--stash-signing-key",
-            STASH_KEY,
-            "--totp-enc-key",
-            TOTP_ENC_KEY_HEX,
             "--mail-from-email",
             "test@zeroship.test",
             "--mail-from-name",
@@ -118,6 +112,13 @@ impl Fixture {
             "--public-url",
             "http://auth.test",
         ]);
+        // Secrets carry no value flag; supply each in the shape an in-memory
+        // literal resolves to (see crates/auth/tests/common/mod.rs).
+        cfg.settings.database_url = Secret::supplied(SourceKind::Env, Some(db_url.clone()));
+        cfg.settings.stash_signing_key =
+            Secret::supplied(SourceKind::Env, Some(STASH_KEY.to_owned()));
+        cfg.settings.totp_enc_key =
+            Secret::supplied(SourceKind::Env, Some(TOTP_ENC_KEY_HEX.to_owned()));
         let cfg = Arc::new(cfg);
 
         let mailer = Arc::new(CaptureMailer::default());

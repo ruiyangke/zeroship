@@ -211,10 +211,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
 impl RefreshTokenKeys {
     pub(super) fn from_config(cfg: &AuthConfig) -> Result<Self, OAuthError> {
-        let hash_file = cfg.secrets.refresh_hash_key_file.as_deref().ok_or_else(|| {
+        let hash_file = cfg.refresh_hash_key_file().ok_or_else(|| {
             OAuthError::server_error("refresh hash key is not configured")
         })?;
-        let idem_file = cfg.secrets.refresh_idem_key_file.as_deref().ok_or_else(|| {
+        let idem_file = cfg.refresh_idem_key_file().ok_or_else(|| {
             OAuthError::server_error("refresh idempotency key is not configured")
         })?;
         Self::from_files(hash_file, idem_file).map_err(|err| {

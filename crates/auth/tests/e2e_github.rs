@@ -25,6 +25,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::password;
 use zeroship_auth::server;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::store::users;
 
 mod common;
@@ -108,7 +109,8 @@ impl NativeGithubFixture {
                 &mock.github_emails_url(),
             ],
         );
-        cfg_inner.secrets.github_client_secret = Some("mock-github-secret".into());
+        cfg_inner.settings.github_client_secret =
+            Secret::supplied(SourceKind::Env, Some("mock-github-secret".to_owned()));
         let cfg = Arc::new(cfg_inner);
 
         let cfg_state = cfg.clone();

@@ -2,22 +2,26 @@
 
 use std::sync::Arc;
 
-use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::identity::magic_link;
 
 fn test_cfg(db_url: &str) -> AuthConfig {
-    AuthConfig::parse_from([
-        "zeroship-auth",
-        "--db-url",
-        db_url,
-        "--stash-signing-key",
-        "test-stash-key-not-for-prod-32bytes!",
-    ])
+    // A secret has no value flag - that is the point of the conversion - so the
+    // fixture supplies each one in the shape an in-memory literal resolves to,
+    // which is byte-for-byte what ZEROSHIP_AUTH_<NAME>=<value> produces. The
+    // environment itself is process-global and would race sibling tests.
+    let mut cfg = AuthConfig::parse_from(["zeroship-auth"]);
+    cfg.settings.database_url = Secret::supplied(SourceKind::Env, Some(db_url.to_owned()));
+    cfg.settings.stash_signing_key = Secret::supplied(
+        SourceKind::Env,
+        Some("test-stash-key-not-for-prod-32bytes!".to_owned()),
+    );
+    cfg
 }
 
 #[allow(clippy::future_not_send)]
