@@ -2553,6 +2553,49 @@ mod tuple_tests {
         );
     }
 
+    /// A cursor projection cast to text MUST alias away from the key it orders by.
+    ///
+    /// PostgreSQL names a bare cast expression after its underlying column, and
+    /// `ORDER BY` resolves an OUTPUT-column name in preference to an input one. So
+    /// `SELECT _bf_key_0::text FROM _bf_window ORDER BY _bf_key_0 DESC` sorted by
+    /// TEXT, and each batch checkpointed at the text-maximum of its window. A
+    /// window holding 9 and 10 checkpointed at `'9'`, so the cursor moved
+    /// BACKWARDS and the next batch re-applied row 10 - a silent double
+    /// application of a non-idempotent transform, with the migration reporting
+    /// success and the journal recording a completed backfill.
+    ///
+    /// This asserts the SHAPE, at the layer the defect lived in, so it fails on
+    /// generated SQL without needing a database. The live behavioural proof is
+    /// `backfill-cursor-ordering.test.ts` in the host suite; this is the cheap
+    /// guard that catches the alias being dropped again.
+    ///
+    /// `build_end_cursor_sql` above never had the defect because it already
+    /// aliased its cast, which is what the test above happens to pin.
+    #[test]
+    fn a_text_cast_cursor_projection_never_shadows_the_key_it_orders_by() {
+        let cursor = PgCursor::from_contract(contract()).expect("cursor renders");
+        let sql = build_batch_sql(&spec(), &cursor, true).unwrap();
+
+        for index in 0..cursor.arity() {
+            assert!(
+                !sql.contains(&format!("_bf_key_{index}::text FROM")),
+                "component {index} casts to text with no alias, so its output column \
+                 shadows _bf_key_{index} and ORDER BY sorts by text: {sql}"
+            );
+            assert!(
+                sql.contains(&format!("_bf_key_{index}::text AS _bf_cursor_text_{index}")),
+                "component {index} must alias its text cast away from the key name: {sql}"
+            );
+        }
+
+        // The ordering must still name the KEYS. Ordering by the text alias would
+        // reintroduce the identical defect by a different route.
+        assert!(
+            sql.contains("ORDER BY _bf_key_0 DESC, _bf_key_1 DESC"),
+            "the checkpoint must order by the typed keys: {sql}"
+        );
+    }
+
     #[test]
     fn assignment_to_either_cursor_component_is_rejected_exactly() {
         let cursor = PgCursor::from_contract(contract()).expect("cursor renders");
