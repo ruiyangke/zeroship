@@ -300,7 +300,7 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | `ZEROSHIP_ORIGIN_SCHEME` | control, gateway |
 | `ZEROSHIP_CONFIG`, `ZEROSHIP_NO_CONFIG` | auth, control, gateway, migrated, worker |
 | `ZEROSHIP_TRUST_PROXY` | control, gateway |
-| `ZEROSHIP_AUTH_PROVIDER` | auth, control. `native` or `supabase`, one value for both: auth SERVES the provider and control VERIFIES its tokens. `native` means the platform's own OP is the issuer. Control used to have a separate `ZEROSHIP_CONTROL_AUTH_PROVIDER` spelling that state `platform`, so the pair could be set to disagree; it is gone, as is its `[control] auth_provider` overlay key |
+| `ZEROSHIP_AUTH_PROVIDER` | auth, control. `native` or `supabase`, one value for both: auth SERVES the provider and control VERIFIES its tokens. `native` means the platform's own OP is the issuer. Control used to have a separate `ZEROSHIP_CONTROL_AUTH_PROVIDER` that spelled this state `platform`, so the pair could be set to disagree; it is gone, as is its `[control] auth_provider` overlay key |
 | `ZEROSHIP_AUTH_SUPABASE_URL` | auth, control |
 | `ZEROSHIP_AUTH_SUPABASE_ANON_KEY` | auth. Control reads the same deployment value through its own still-unconverted `SUPABASE_ANON_KEY`; the secret conversion joins them |
 | `HOSTNAME` | control, gateway, worker |
