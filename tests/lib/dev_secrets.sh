@@ -36,8 +36,8 @@ _dev_secrets_complete() {
   # verifies, so `dev init` does not generate one and compose defaults it to
   # empty. Control still refuses every webhook while it is empty.
   for name in \
-    ZEROSHIP_CONTROL_KEY ZEROSHIP_MASTER_KEY ZEROSHIP_WORKER_KEY \
-    GATEWAY_OIDC_SECRET ZEROSHIP_MIGRATED_POLICY_SEAL_KEY ZEROSHIP_GATEWAY_STASH_SIGNING_KEY \
+    ZEROSHIP_CONTROL_KEY ZEROSHIP_CONTROL_MASTER_KEY ZEROSHIP_WORKER_KEY \
+    ZEROSHIP_MIGRATED_POLICY_SEAL_KEY ZEROSHIP_GATEWAY_STASH_SIGNING_KEY \
     ZEROSHIP_PAIRWISE_SALT ZEROSHIP_AUTH_STASH_SIGNING_KEY ZEROSHIP_AUTH_TOTP_ENC_KEY; do
     grep -q "^${name}=" "$env_file" 2>/dev/null || return 1
   done

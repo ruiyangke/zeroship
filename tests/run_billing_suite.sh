@@ -65,7 +65,7 @@
 #   TEST_THREADS (1)          - passed to each binary's `--test-threads`
 #   REDPANDA_BROKERS (unset)  - set to gate the real Kafka-wire stream path
 #
-# The tests never skip for want of a database: CONTROL_TEST_DB / ZEROSHIP_AUTH_DATABASE_URL /
+# The tests never skip for want of a database: CONTROL_TEST_DB / AUTH_DB_URL /
 # MIGRATED_TEST_DB are exported below, and with them unset the targets fall back
 # to the dev DSN and fail loudly if it is unreachable. A missing database can
 # never masquerade as a pass.
@@ -111,10 +111,10 @@ DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
 # Three names for one database. The control suite is not consistent about which
 # it reads - the billing and registry targets take CONTROL_TEST_DB, the
 # auth-adjacent ones (admin / oauth / token / device / bootstrap handlers) take
-# ZEROSHIP_AUTH_DATABASE_URL, and zeroship-migrated takes MIGRATED_TEST_DB. Exporting all three
+# AUTH_DB_URL, and zeroship-migrated takes MIGRATED_TEST_DB. Exporting all three
 # is what lets the single cargo invocation below cover all of them.
 export CONTROL_TEST_DB="$DSN"
-export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
+export AUTH_DB_URL="$DSN"
 export MIGRATED_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }

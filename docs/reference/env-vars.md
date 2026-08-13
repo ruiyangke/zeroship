@@ -114,14 +114,13 @@ than rotating it:
 | Variable | Consumers or purpose |
 | --- | --- |
 | `ZEROSHIP_CONTROL_KEY` | Shared machine-to-machine key for control, gateway, worker, migrated, and auth. |
-| `ZEROSHIP_MASTER_KEY` | Control-plane secret-at-rest key and operator bearer. |
+| `ZEROSHIP_CONTROL_MASTER_KEY` | Control-plane secret-at-rest key and operator bearer. |
 | `ZEROSHIP_WORKER_KEY` | Shared gateway-to-worker dispatch and identity-signing key. |
-| `GATEWAY_OIDC_SECRET` | Legacy Compose slot with no current Rust reader; generated here so no weak literal ships. |
-| `STASH_SIGNING_KEY` | Gateway short-lived stash signing key. |
-| `PAIRWISE_SALT` | Permanent control/gateway pairwise-subject seed; must match the file described below. |
-| `AUTH_STASH_SIGNING_KEY` | Auth-origin stash-cookie signing key. |
-| `AUTH_TOTP_ENC_KEY` | Auth TOTP secret-at-rest key. |
-| `MIGRATED_POLICY_SEAL_KEY` | Migration-service policy seal key. |
+| `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` | Gateway short-lived stash signing key. |
+| `ZEROSHIP_PAIRWISE_SALT` | Permanent control/gateway pairwise-subject seed; must match the file described below. |
+| `ZEROSHIP_AUTH_STASH_SIGNING_KEY` | Auth-origin stash-cookie signing key. |
+| `ZEROSHIP_AUTH_TOTP_ENC_KEY` | Auth TOTP secret-at-rest key. |
+| `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` | Migration-service policy seal key. |
 
 Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
 values rather than built-in weak defaults. One generated value therefore moves

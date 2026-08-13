@@ -63,7 +63,7 @@ expect_status() {
 
 echo "=== must COUNT: real announcements ==="
 expect_count 1 "single announcement" '' \
-  'ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_WORKER_KV_URL unset'
+  'ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_KV_URL unset'
 expect_count 3 "several announcements" '' \
   'ZEROSHIP-TEST-SKIPPED: a
 ZEROSHIP-TEST-SKIPPED: b
@@ -72,7 +72,7 @@ ZEROSHIP-TEST-SKIPPED: c'
 # is. A head/tail-only check would miss this.
 expect_count 1 "buried between passing tests" '' \
   'test alpha ... ok
-ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_WORKER_KV_URL unset
+ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_KV_URL unset
 test beta ... ok
 test result: ok. 2 passed; 0 failed; 0 ignored'
 
@@ -99,7 +99,7 @@ expect_count 0 "allowlisted reason is tolerated" 'GATEWAY_ANCHORS_DB_URL' \
 # reading as a narrow, deliberate exemption.
 expect_count 1 "a sibling skip is still reported" 'GATEWAY_ANCHORS_DB_URL' \
   'ZEROSHIP-TEST-SKIPPED: [anchors] skip auth_token (no GATEWAY_ANCHORS_DB_URL)
-ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_WORKER_KV_URL unset'
+ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_KV_URL unset'
 
 echo
 echo "=== trap 1: an EMPTY allowlist must match NOTHING ==="
@@ -150,7 +150,7 @@ expect_status 0 "clean run returns 0" '' 'test result: ok. 5 passed'
 expect_status 0 "fully allowlisted run returns 0" 'AUTH_TEST_SMTP_SINK' \
   'ZEROSHIP-TEST-SKIPPED: smtp sink absent (AUTH_TEST_SMTP_SINK)'
 expect_status 1 "an unexplained skip returns 1" 'AUTH_TEST_SMTP_SINK' \
-  'ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_WORKER_KV_URL unset'
+  'ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_KV_URL unset'
 # A missing or unreadable log is not a pass in disguise: it reports zero
 # offenders, and the caller's own ran-something / floor check is what catches a
 # run that produced no log at all. Pinned so the behaviour is stated, not
