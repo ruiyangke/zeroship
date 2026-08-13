@@ -388,8 +388,6 @@ export function FieldsPanel({
         </DescriptionList.Item>
       </DescriptionList>
 
-      <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
-
       {productDetail ? (
         <>
           {/* Read-first, like every other property here. These were the last
@@ -432,6 +430,13 @@ export function FieldsPanel({
         <p className="state-hint small">Sign in to change version/milestone.</p>
       )}
       {versionMilestoneError ? <p className="field-error">{versionMilestoneError}</p> : null}
+
+      {/* After the properties, not among them. It sat between "QA contact"
+          and "Version", so a column of "label: value" lines was interrupted
+          by a lone button and the reader lost the rhythm mid-scan. Moving a
+          bug changes product AND component, so it belongs to the whole group
+          rather than to any one line in it. */}
+      <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
 
       {/* Four rows that usually say nothing.
           Whiteboard, OS, platform and URL are unset on most bugs, so the rail
