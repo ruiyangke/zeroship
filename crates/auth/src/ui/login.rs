@@ -67,8 +67,8 @@ async fn get_native(
 
     if let Some(location) = auth_request.as_ref().and_then(|request| {
         request.provider_start_location(
-            cfg.google_client_id.is_some(),
-            cfg.github_client_id.is_some(),
+            cfg.google_client_id().is_some(),
+            cfg.github_client_id().is_some(),
         )
     }) {
         return return_to::see_other(&location)
@@ -256,7 +256,7 @@ async fn post_native(
 /// against the signed copy.
 #[must_use]
 pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpResponse {
-    let cookie = stash.encode(cfg.stash_signing_key.as_bytes());
+    let cookie = stash.encode(cfg.secrets.stash_signing_key.as_bytes());
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
         return_to: &stash.return_to,
@@ -406,7 +406,7 @@ pub async fn post_2fa(
 
     // 2. Decode + verify the factor-1 challenge cookie.
     let Some(stash) = totp_challenge::parse_cookie(cookie_header)
-        .and_then(|raw| TotpChallenge::decode(&raw, cfg.stash_signing_key.as_bytes()))
+        .and_then(|raw| TotpChallenge::decode(&raw, cfg.secrets.stash_signing_key.as_bytes()))
     else {
         return redirect_to_login(&return_to);
     };
@@ -460,7 +460,7 @@ pub async fn post_2fa(
     };
 
     // 5a. Try the TOTP code first.
-    let key = match totp::key_from_config(&cfg.totp_enc_key) {
+    let key = match totp::key_from_config(&cfg.secrets.totp_enc_key) {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "totp enc key misconfigured");
@@ -628,8 +628,8 @@ fn render_login_error(
         csrf: &csrf_token,
         error: Some(err),
         client_name,
-        google_enabled: cfg.google_client_id.is_some(),
-        github_enabled: cfg.github_client_id.is_some(),
+        google_enabled: cfg.google_client_id().is_some(),
+        github_enabled: cfg.github_client_id().is_some(),
         google_start_href: oauth_start_href("/oauth/google/start", return_to),
         github_start_href: oauth_start_href("/oauth/github/start", return_to),
     };
@@ -657,8 +657,8 @@ fn render_login_form_native(
         csrf: &csrf_token,
         error: err,
         client_name,
-        google_enabled: cfg.google_client_id.is_some(),
-        github_enabled: cfg.github_client_id.is_some(),
+        google_enabled: cfg.google_client_id().is_some(),
+        github_enabled: cfg.github_client_id().is_some(),
         google_start_href: oauth_start_href("/oauth/google/start", return_to),
         github_start_href: oauth_start_href("/oauth/github/start", return_to),
     };

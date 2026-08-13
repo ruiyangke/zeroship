@@ -69,8 +69,7 @@ pub fn start_authorize_url(
     upstream_prompt: Option<UpstreamPrompt>,
 ) -> Result<AuthorizeStart> {
     let client_id = cfg
-        .google_client_id
-        .as_deref()
+        .google_client_id()
         .ok_or_else(|| AuthError::Config("google_client_id missing".into()))?;
 
     let verifier = generate_verifier();
@@ -84,7 +83,7 @@ pub fn start_authorize_url(
     query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", &cfg.google_redirect_uri)
+        .append_pair("redirect_uri", &cfg.settings.google_redirect_uri.get())
         .append_pair("scope", "openid email profile")
         .append_pair("access_type", "online")
         .append_pair("include_granted_scopes", "true")
@@ -99,7 +98,7 @@ pub fn start_authorize_url(
         }
     }
     let query = query.finish();
-    let url = format!("{}?{query}", cfg.google_auth_url);
+    let url = format!("{}?{query}", cfg.settings.google_auth_url.get());
 
     Ok(AuthorizeStart {
         url,
@@ -123,11 +122,10 @@ pub async fn complete_callback(
     jwks: &JwksCache,
 ) -> Result<GoogleIdentity> {
     let client_id = cfg
-        .google_client_id
-        .as_deref()
+        .google_client_id()
         .ok_or_else(|| AuthError::Config("google_client_id missing".into()))?;
     let client_secret = cfg
-        .google_client_secret
+        .secrets.google_client_secret
         .as_deref()
         .ok_or_else(|| AuthError::Config("google_client_secret missing".into()))?;
 
@@ -137,13 +135,13 @@ pub async fn complete_callback(
         .append_pair("code", code)
         .append_pair("client_id", client_id)
         .append_pair("client_secret", client_secret)
-        .append_pair("redirect_uri", &cfg.google_redirect_uri)
+        .append_pair("redirect_uri", &cfg.settings.google_redirect_uri.get())
         .append_pair("code_verifier", verifier)
         .finish();
 
     let client = cyper::Client::new();
     let resp = client
-        .request(http::Method::POST, cfg.google_token_url.as_str())
+        .request(http::Method::POST, cfg.settings.google_token_url.get().as_str())
         .map_err(|e| AuthError::Internal(format!("google token build: {e}")))?
         .header("content-type", "application/x-www-form-urlencoded")
         .map_err(|e| AuthError::Internal(format!("google token header: {e}")))?
@@ -180,7 +178,7 @@ pub async fn complete_callback(
     let claims: TokenClaims = verify_id_token(
         jwks,
         &tr.id_token,
-        cfg.google_issuer.as_str(),
+        cfg.settings.google_issuer.get().as_str(),
         client_id,
         Some(expected_nonce),
         tr.access_token.as_deref(),

@@ -72,8 +72,7 @@ pub fn start_authorize_url(
     upstream_prompt: Option<UpstreamPrompt>,
 ) -> Result<AuthorizeStart> {
     let client_id = cfg
-        .github_client_id
-        .as_deref()
+        .github_client_id()
         .ok_or_else(|| AuthError::Config("github_client_id missing".into()))?;
 
     let verifier = generate_verifier();
@@ -84,7 +83,7 @@ pub fn start_authorize_url(
     query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", &cfg.github_redirect_uri)
+        .append_pair("redirect_uri", &cfg.settings.github_redirect_uri.get())
         .append_pair("scope", "read:user user:email")
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
@@ -93,7 +92,7 @@ pub fn start_authorize_url(
         query.append_pair("prompt", prompt.prompt_value());
     }
     let query = query.finish();
-    let url = format!("{}?{query}", cfg.github_authorize_url);
+    let url = format!("{}?{query}", cfg.settings.github_authorize_url.get());
 
     Ok(AuthorizeStart {
         url,
@@ -116,11 +115,10 @@ pub async fn complete_callback(
     verifier: &str,
 ) -> Result<GitHubIdentity> {
     let client_id = cfg
-        .github_client_id
-        .as_deref()
+        .github_client_id()
         .ok_or_else(|| AuthError::Config("github_client_id missing".into()))?;
     let client_secret = cfg
-        .github_client_secret
+        .secrets.github_client_secret
         .as_deref()
         .ok_or_else(|| AuthError::Config("github_client_secret missing".into()))?;
 
@@ -136,12 +134,12 @@ pub async fn complete_callback(
         .append_pair("code", code)
         .append_pair("client_id", client_id)
         .append_pair("client_secret", client_secret)
-        .append_pair("redirect_uri", &cfg.github_redirect_uri)
+        .append_pair("redirect_uri", &cfg.settings.github_redirect_uri.get())
         .append_pair("code_verifier", verifier)
         .finish();
 
     let resp = client
-        .request(http::Method::POST, cfg.github_token_url.as_str())
+        .request(http::Method::POST, cfg.settings.github_token_url.get().as_str())
         .map_err(|e| AuthError::Internal(format!("github token build: {e}")))?
         .header("content-type", "application/x-www-form-urlencoded")
         .map_err(|e| AuthError::Internal(format!("github token header: {e}")))?
@@ -178,7 +176,7 @@ pub async fn complete_callback(
     // 2. GET /user
     let user = get_with_token::<UserResponse>(
         &client,
-        cfg.github_user_url.as_str(),
+        cfg.settings.github_user_url.get().as_str(),
         &tr.access_token,
     )
     .await?;
@@ -186,7 +184,7 @@ pub async fn complete_callback(
     // 3. GET /user/emails
     let emails: Vec<EmailEntry> = get_with_token(
         &client,
-        cfg.github_emails_url.as_str(),
+        cfg.settings.github_emails_url.get().as_str(),
         &tr.access_token,
     )
     .await?;

@@ -92,8 +92,8 @@ pub async fn postmark(
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
-        cfg.postmark_webhook_user.as_deref(),
-        cfg.postmark_webhook_password.as_deref(),
+        cfg.postmark_webhook_user(),
+        cfg.secrets.postmark_webhook_password.as_deref(),
     ) else {
         tracing::warn!("postmark webhook hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();
@@ -423,8 +423,8 @@ pub async fn relay_inbound(
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
-        cfg.relay_inbound_user.as_deref(),
-        cfg.relay_inbound_password.as_deref(),
+        cfg.relay_inbound_user(),
+        cfg.secrets.relay_inbound_password.as_deref(),
     ) else {
         tracing::warn!("relay-inbound hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();
@@ -630,7 +630,7 @@ pub async fn relay_inbound(
         &alias,
         &target.real_inbox,
         RELAY_APP_DISPLAY,
-        &cfg.relay_domain,
+        &cfg.settings.relay_domain.get(),
         msg.next_hop(),
     );
     match relay_mailer.0.send(db.as_ref(), forward).await {
@@ -699,7 +699,7 @@ async fn emit_bounce_then_ok(
     req: &HttpRequest,
 ) -> HttpResponse {
     let original_sender = &inbound.from_full.email;
-    let bounce = build_bounce(original_sender, reason, &cfg.relay_domain);
+    let bounce = build_bounce(original_sender, reason, &cfg.settings.relay_domain.get());
     match relay_mailer.0.send(db, bounce).await {
         Ok(_) => {}
         Err(MailerError::Suppressed(_)) => {

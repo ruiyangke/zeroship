@@ -806,6 +806,58 @@ impl AuthConfig {
         self.settings.control_url.get()
     }
 
+    /// Google OAuth client ID; `None` when unset, which is what keeps the
+    /// `/oauth/google/*` routes unregistered.
+    #[must_use]
+    pub fn google_client_id(&self) -> Option<&str> {
+        non_empty(self.settings.google_client_id.get())
+    }
+
+    /// GitHub OAuth client ID; `None` when unset, which is what keeps the
+    /// `/oauth/github/*` routes unregistered.
+    #[must_use]
+    pub fn github_client_id(&self) -> Option<&str> {
+        non_empty(self.settings.github_client_id.get())
+    }
+
+    /// Transactional SMTP host; `None` when unset.
+    #[must_use]
+    pub fn smtp_host(&self) -> Option<&str> {
+        non_empty(self.settings.smtp_host.get())
+    }
+
+    /// Transactional SMTP username; `None` when the relay needs no auth.
+    #[must_use]
+    pub fn smtp_username(&self) -> Option<&str> {
+        non_empty(self.settings.smtp_username.get())
+    }
+
+    /// Relay-forward SMTP host; `None` when unset.
+    #[must_use]
+    pub fn relay_smtp_host(&self) -> Option<&str> {
+        non_empty(self.settings.relay_smtp_host.get())
+    }
+
+    /// Relay-forward SMTP username; `None` when the sink needs no auth.
+    #[must_use]
+    pub fn relay_smtp_username(&self) -> Option<&str> {
+        non_empty(self.settings.relay_smtp_username.get())
+    }
+
+    /// Relay inbound webhook Basic-auth username; `None` fail-closes the
+    /// handler with 401.
+    #[must_use]
+    pub fn relay_inbound_user(&self) -> Option<&str> {
+        non_empty(self.settings.relay_inbound_user.get())
+    }
+
+    /// Postmark webhook Basic-auth username; `None` fail-closes the handler
+    /// with 401.
+    #[must_use]
+    pub fn postmark_webhook_user(&self) -> Option<&str> {
+        non_empty(self.settings.postmark_webhook_user.get())
+    }
+
     /// Refresh-family pool size, floored at 1: a zero-sized pool would deadlock
     /// every refresh-token transaction rather than merely serialising them.
     #[must_use]
