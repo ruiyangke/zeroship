@@ -121,14 +121,25 @@ export function GroupsAdmin() {
       ) : groups.length === 0 ? (
         <p className="state-hint small">No groups yet.</p>
       ) : (
-        <ul className="group-list">
-          {groups.map((group) => (
-            <li key={group.id}>
-              <strong>{group.name}</strong>
-              {group.description ? <span className="dim"> {group.description}</span> : null}
-            </li>
-          ))}
-        </ul>
+        <>
+          {/* Counted and BOUNDED. This was an unbounded bulleted list, so a
+              tracker with thirty groups pushed products, components, versions
+              and flag types off the bottom of a page called "Products
+              administration" -- the groups section is not even its subject.
+              The count is stated because a scroll container hides how much is
+              in it. */}
+          <p className="state-hint small">
+            {groups.length} {groups.length === 1 ? "group" : "groups"}
+          </p>
+          <ul className="group-list">
+            {groups.map((group) => (
+              <li key={group.id}>
+                <strong>{group.name}</strong>
+                {group.description ? <span className="dim"> {group.description}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
 
       {groups && groups.length > 0 ? (

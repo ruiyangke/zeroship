@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Checkbox, Input } from "@zeroship/ui";
 import { deleteAttachment, getAttachment, listAttachments, setAttachmentObsolete, uploadAttachment } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
@@ -143,15 +143,19 @@ function UploadForm({ bugId, onUploaded }: { bugId: string; onUploaded: () => vo
   return (
     <div className="upload-form">
       <input ref={fileRef} type="file" disabled={busy} />
-      <input
+      <Input
+        aria-label="Attachment description"
         placeholder="Description (optional)"
         value={description}
         onChange={(e) => setDescription(e.target.value)}
       />
-      <label>
-        <input type="checkbox" checked={isPatch} onChange={(e) => setIsPatch(e.target.checked)} />
-        Patch
-      </label>
+      {/* No wrapping <label>: Checkbox renders its own, and nesting one
+          inside another associates the control twice. */}
+      <Checkbox
+        checked={isPatch}
+        onCheckedChange={(next: boolean | "indeterminate") => setIsPatch(next === true)}
+        label="Patch"
+      />
       <Button variant="filled" size="small" disabled={busy} onClick={() => void submit()}>
         Upload
       </Button>

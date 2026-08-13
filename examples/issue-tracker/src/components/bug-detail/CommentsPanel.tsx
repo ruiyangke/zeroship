@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Checkbox, Field, NumberField } from "@zeroship/ui";
 import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
@@ -107,19 +107,21 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
         rows={4}
       />
       <div className="new-comment-row">
-        <label>
-          <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} />
-          Private
-        </label>
-        <label>
-          Work time (min)
-          <input
-            type="number"
+        {/* Checkbox owns its own label, so the wrapping <label> that used to
+            associate a bare input is gone rather than nested inside it. */}
+        <Checkbox
+          checked={isPrivate}
+          onCheckedChange={(next) => setIsPrivate(next === true)}
+          label="Private"
+        />
+        <Field orientation="horizontal">
+          <Field.Label>Work time (min)</Field.Label>
+          <NumberField
             min={0}
             value={workTimeMinutes}
-            onChange={(e) => setWorkTimeMinutes(Number(e.target.value) || 0)}
+            onValueChange={(next) => setWorkTimeMinutes(next ?? 0)}
           />
-        </label>
+        </Field>
         <Button variant="filled" size="small" disabled={busy || !body.trim()} onClick={() => void submit()}>
           Comment
         </Button>

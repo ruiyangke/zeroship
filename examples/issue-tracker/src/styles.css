@@ -427,3 +427,16 @@ tbody tr:hover { background: var(--surface-2); }
   align-items: center;
   gap: 0.5rem;
 }
+
+/* The group list is bounded and scrolls in place. Unbounded, thirty groups
+   pushed every other section of the products admin page below the fold -- and
+   groups are not that page's subject. */
+.group-list {
+  max-block-size: 12rem;
+  overflow-y: auto;
+  margin-block: 0.25rem 0.75rem;
+  padding-inline-start: 1.1rem;
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.08));
+  border-radius: 0.5rem;
+  padding-block: 0.5rem;
+}
