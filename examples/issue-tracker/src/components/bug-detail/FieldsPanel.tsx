@@ -3,6 +3,7 @@ import { Button, Card, Cluster, DescriptionList, Field, Input, Select } from "@z
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
 
+import { PriorityBadge, SeverityBadge } from "../Badges";
 import { errorMessage, toPromise } from "../rpc";
 import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -23,11 +24,18 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
         {/* The badge is gone. It sat directly above a select showing the same
             value, so the page stated severity twice and neither told you which
             one to use. */}
+        {/* The badge, not the bare word. The page head already renders
+            severity and priority as coloured badges while the rail printed the
+            same two values as plain text -- one datum with two appearances a
+            few hundred pixels apart, and the rail's version carrying none of
+            the meaning the colour exists to convey. A P1 blocker looked
+            exactly like a P3 nit. */}
         <Field.Label>Severity</Field.Label>
         <Select
           value={bug.severity}
           disabled={busy !== null}
           aria-label="Severity"
+          renderValue={(value) => <SeverityBadge severity={String(value)} />}
           onValueChange={async (next) => {
             const severity = next as BugSeverity;
             setBusy("severity");
@@ -54,6 +62,7 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
           value={bug.priority}
           disabled={busy !== null}
           aria-label="Priority"
+          renderValue={(value) => <PriorityBadge priority={String(value)} />}
           onValueChange={async (next) => {
             const priority = next as BugPriority;
             setBusy("priority");

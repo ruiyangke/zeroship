@@ -73,7 +73,7 @@ export function ErrorState({
       description={
         authRequired
           ? "This needs a signed-in identity. Sign in through the platform and reload."
-          : `${errorCode(error) ?? "ERROR"} · ${errorMessage(error)}`
+          : `${errorCode(error) ?? "ERROR"}: ${errorMessage(error)}`
       }
     >
       {/* The action is a compound child rather than the ergonomic onRetry
