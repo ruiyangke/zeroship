@@ -53,7 +53,11 @@ export interface ApplyPendingContractDto {
   fromColumn: string
   /** Destination column populated by the online expansion. */
   toColumn: string
-  /** Stable key accepted by `resolvePending` and `resolve-pending`. */
+  /**
+   * Stable key accepted by the `resolvePending()` embedding API. The CLI
+   * discharges the same obligation by authored migration NAME, via
+   * `zero-migrate resolve`.
+   */
   pendingVersion: string
 }
 

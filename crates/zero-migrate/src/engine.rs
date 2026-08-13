@@ -156,7 +156,7 @@ pub enum EngineError {
     /// from a prior deploy. The read-back runs inside the held project lock (so it
     /// is not a TOCTOU); the deploy applies NOTHING. Carries the
     /// structured [`PendingContractRefusal`](crate::plan::pending::PendingContractRefusal)
-    /// whose `apply_action` names the exact `migrate resolve-pending --apply`
+    /// whose `apply_action` names the exact `zero-migrate resolve --commit`
     /// remedy. The human message is the projection of the payload.
     #[error("{0}")]
     PendingContract(crate::plan::pending::PendingContractRefusal),
@@ -2713,7 +2713,7 @@ impl MigrationEngine {
         // `resolved='applied'` row (append-only — the `pending` row is never edited),
         // so a later deploy reads the obligation as discharged and no longer refuses
         // the table. This is the routine deploy-N+1 contract-apply path; the
-        // `resolve-pending --apply` CLI is the operator's manual equivalent.
+        // `zero-migrate resolve --commit` CLI is the operator's manual equivalent.
         if let Some(pending_contracts) = backend.pending_contracts() {
             for pc in &discharging {
                 pending_contracts

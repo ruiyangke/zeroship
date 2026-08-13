@@ -412,7 +412,9 @@ pub struct ApplyPendingContractDto {
     pub from_column: String,
     /// Destination column populated by the online expansion.
     pub to_column: String,
-    /// Stable key accepted by `resolvePending` and `resolve-pending`.
+    /// Stable key accepted by the `resolvePending()` embedding API. The CLI
+    /// discharges the same obligation by authored migration NAME, via
+    /// `zero-migrate resolve`.
     pub pending_version: String,
 }
 

@@ -6,7 +6,7 @@
 //! orchestrator can act on — not only a prose string. The human-readable
 //! message is the **projection** of the structured payload (the `Display` impls
 //! here), and each payload carries enough to EXECUTE the remedy (an
-//! `apply_action` / `abort_action` naming the exact `migrate …` command).
+//! `apply_action` / `abort_action` naming the exact `zero-migrate …` command).
 //!
 //! The three payloads:
 //! - [`PendingContractRefusal`] (`TABLE_HAS_PENDING_CONTRACT`) — a new op touches
@@ -30,13 +30,23 @@ pub const CODE_DEPENDENCY_PENDING_CONTRACT: &str = "DEPENDENCY_PENDING_CONTRACT"
 /// The `code` literal for an [`OrphanedPendingContract`].
 pub const CODE_ORPHANED_PENDING_CONTRACT: &str = "ORPHANED_PENDING_CONTRACT";
 
-/// An executable remediation action — a `migrate …` command + the version it
-/// targets — so an automated orchestrator can self-resolve where policy allows.
+/// A remediation action — the command that discharges the obligation plus the
+/// version it targets — so an automated orchestrator can self-resolve where
+/// policy allows.
+///
+/// The two audiences reach this by different routes, and the fields serve both.
+/// An EMBEDDER calls `resolvePending()` with `version` directly, which is why the
+/// version travels here at all. An OPERATOR runs `command`, which takes the
+/// authored migration NAME rather than a version — `zero-migrate status` maps one
+/// to the other. So `command` and `version` do not concatenate into a shell line,
+/// and the `Display` impls below deliberately do not join them into one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionPayload {
-    /// The `migrate …` command to run (e.g. `migrate resolve-pending --apply`).
+    /// The `zero-migrate …` command that discharges the obligation (e.g.
+    /// `zero-migrate resolve --commit`). Takes a migration name, not `version`.
     pub command: String,
-    /// The version the command targets (the pending/orphan `pending_version`).
+    /// The version the action targets (the pending/orphan `pending_version`).
+    /// Directly accepted by the `resolvePending()` embedding API.
     pub version: String,
 }
 
@@ -71,7 +81,7 @@ impl PendingContractRefusal {
             pending_version: pending_version.clone(),
             remediation: "apply_pending".to_string(),
             apply_action: ActionPayload {
-                command: "migrate resolve-pending --apply".to_string(),
+                command: "zero-migrate resolve --commit".to_string(),
                 version: pending_version,
             },
         }
@@ -84,7 +94,8 @@ impl std::fmt::Display for PendingContractRefusal {
             f,
             "table `{}` has an in-flight online rename (contract pending from a prior \
              deploy, version `{}`); apply that contract before authoring further changes \
-             to `{}` — run `{} {}`",
+             to `{}` — run `{} <migration> --approve`, where `<migration>` is the \
+             authored name `zero-migrate status` lists for contract `{}`",
             self.table,
             self.pending_version,
             self.table,
@@ -180,7 +191,7 @@ impl OrphanedPendingContract {
                 "resolve_pending_abort".to_string(),
             ],
             abort_action: ActionPayload {
-                command: "migrate resolve-pending --abort".to_string(),
+                command: "zero-migrate resolve --rollback".to_string(),
                 version: orphan_version,
             },
         }
@@ -193,7 +204,8 @@ impl std::fmt::Display for OrphanedPendingContract {
             f,
             "table `{}` has an ORPHANED online-rename contract (version `{}`): a later \
              deploy no longer carries the rename. Re-add the rename op, or abort it — run \
-             `{} {}`",
+             `{} <migration> --approve`, where `<migration>` is the authored name \
+             `zero-migrate status` lists for contract `{}`",
             self.table, self.orphan_version, self.abort_action.command, self.abort_action.version
         )
     }
@@ -227,7 +239,7 @@ mod tests {
         assert_eq!(r.table, "users");
         assert_eq!(r.pending_version, "mig_expandV2");
         assert_eq!(r.remediation, "apply_pending");
-        assert_eq!(r.apply_action.command, "migrate resolve-pending --apply");
+        assert_eq!(r.apply_action.command, "zero-migrate resolve --commit");
         assert_eq!(r.apply_action.version, "mig_expandV2");
     }
 
@@ -236,7 +248,7 @@ mod tests {
     fn orphan_carries_abort_action_and_both_remedies() {
         let o = OrphanedPendingContract::new("users", "mig_expandV2");
         assert_eq!(o.code, CODE_ORPHANED_PENDING_CONTRACT);
-        assert_eq!(o.abort_action.command, "migrate resolve-pending --abort");
+        assert_eq!(o.abort_action.command, "zero-migrate resolve --rollback");
         assert_eq!(o.abort_action.version, "mig_expandV2");
         assert_eq!(
             o.remediation,
