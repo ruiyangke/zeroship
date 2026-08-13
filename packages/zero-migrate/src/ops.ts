@@ -3221,11 +3221,59 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 // These build + push the EXACT canonical op object the Rust `Op` enum
 // deserializes. They are internal — only the fluent `table()` handle calls them.
 
+/**
+ * Reject option keys this call does not know.
+ *
+ * The runtime used to accept any extra property and silently drop it, so
+ * `create({ fk: [...] })` recorded no foreign key and `create({ ifNotExist: true })`
+ * recorded no existence guard — both applying clean and leaving the authored
+ * intent simply absent. `tsc` rejects the same source (TS2353), but `apply` loads
+ * migrations through tsx WITHOUT typechecking, so nothing objected at the moment
+ * it mattered.
+ *
+ * Failing closed here matches what this file already does for
+ * `cursorStability` ("accepts exactly mode and name") and what the engine does for
+ * a declared constraint it cannot emit: refuse rather than quietly drop.
+ *
+ * The message lists the accepted keys because the realistic cause is a
+ * near-miss spelling (`fk`, `foriegnKeys`, `uniques` vs `unique`), and the fix is
+ * usually visible the moment the correct name is in front of the author.
+ */
+function rejectUnknownKeys(
+  args: object,
+  accepted: readonly string[],
+  what: string,
+): void {
+  const unknown = Object.keys(args).filter((key) => !accepted.includes(key));
+  if (unknown.length === 0) return;
+  throw structuredError(
+    "OP_INVALID",
+    `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; ` +
+      `accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}`,
+  );
+}
+
+/** Every key `create()` reads. Keep in lock-step with `CreateTableArgs`. */
+const CREATE_TABLE_KEYS = [
+  "columns",
+  "options",
+  "primaryKey",
+  "uniques",
+  "checks",
+  "foreignKeys",
+  "exclusions",
+  "indexes",
+  "partitionBy",
+  "ifNotExists",
+  "schema",
+] as const;
+
 function recordCreateTable(
   name: string,
   args: CreateTableArgs,
   checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
+  rejectUnknownKeys(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`);
   const cols: Node[] = [];
   const constraints: Node[] = [];
   const indexes: Node[] = [];

@@ -1,39 +1,30 @@
-// A misspelled table-level constraint key applies clean, and the constraint is
-// simply absent.
+// A misspelled key in `create()` is refused, by name, before anything runs.
 //
-// `create({ foreignKeys: [...] })` is the real spelling. Write `fk`, or the very
-// plausible transposition `foriegnKeys`, and the recorder accepts the call,
-// records `constraints: null`, and `apply` exits 0 against a real server with the
-// table present and NO foreign key on it. Referential integrity the author asked
-// for is silently not there.
+// It used to be silently dropped. `create({ fk: [...] })` recorded no foreign key
+// and `create({ ifNotExist: true })` recorded no existence guard, and both applied
+// clean - so the authored intent was simply absent, with nothing said. The guard
+// case was the worse half: an existence guard is what makes a migration
+// re-runnable, so dropping it moved the failure onto the exact re-run the guard
+// was added to survive (`relation "alpha" already exists`).
 //
-// THE TYPE LAYER DOES CATCH THIS. `tsc --noEmit` on the same source reports
+// `tsc` rejected the same source all along (TS2353), but `apply` loads migrations
+// through tsx WITHOUT typechecking, so nothing objected at the moment it mattered,
+// and plain-JS authors had no layer that would.
 //
-//   error TS2353: Object literal may only specify known properties,
-//   and 'fk' does not exist in type 'CreateTableArgs'.
+// The runtime now fails closed, which is what the engine already did for a
+// declared constraint it cannot emit (`unsupported-constraints-refuse.test.ts`)
+// and what `ops.ts` already did for `cursorStability` ("accepts exactly mode and
+// name"). This file asserts the refusal names BOTH the key the author wrote and
+// the accepted keys, because the cause is a near-miss spelling and the fix is only
+// obvious once the correct name is in front of them.
 //
-// so this is not a hole in the types. It is that the RUNTIME is more permissive
-// than the types, and `apply` loads migrations through tsx WITHOUT typechecking —
-// so the CLI will execute a migration `tsc` would have rejected. Authors writing
-// plain JS, or keeping migrations outside a typechecked project, have no layer
-// that objects at all.
+// It also asserts that NOTHING was created. A refusal that still left the table
+// behind would be worse than the silent drop it replaced.
 //
-// WHY THIS IS WORTH PINNING RATHER THAN SHRUGGING AT: it contradicts the posture
-// the engine holds everywhere else. `unsupported-constraints-refuse.test.ts`
-// exists precisely because emitting a table WITHOUT a constraint the author
-// declared is unacceptable — SQLite and MySQL refuse a table-level UNIQUE or
-// CHECK rather than quietly dropping it. A constraint the author MISSPELLED is
-// dropped without a word. Same outcome, opposite handling.
-//
-// THIS TEST PINS THE CURRENT BEHAVIOUR, WHICH IS THE BEHAVIOUR I THINK SHOULD
-// CHANGE. It is written the same way as `guard-adoption-blind-spot.test.ts`: if
-// the runtime learns to reject unknown keys, this test FAILS, and the failure is
-// the signal to invert it rather than a regression. Do not "fix" it by loosening
-// the assertion.
-//
-// The decision it is waiting on is a public-API one — whether the DSL should
-// reject unknown `create()` keys at runtime, and whether that breaks callers
-// passing extra properties deliberately — so it is the maintainer's to make.
+// Measured at the recorder, the same drop affected `primaryKey`, `uniques`,
+// `indexes` and the `addColumn`/`renameTable` guards - it was a property of the
+// surface, not one call. `create()` is fixed here; the other entry points still
+// accept unknown keys and are worth the same treatment.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
@@ -152,32 +143,34 @@ test("a misspelled foreign-key option applies clean and lands no constraint", as
 
       assert.equal(
         ran.code,
-        0,
-        `apply currently SUCCEEDS with the misspelled key \`${spelling}\`; ` +
-          `if it now refuses, that is the intended fix - invert this test. ${ran.err}`,
+        1,
+        `apply must REFUSE the misspelled key \`${spelling}\`; ${ran.err}`,
+      );
+      // The refusal has to name the offending key and the accepted ones, because
+      // the cause is a near-miss spelling and the fix is only obvious once the
+      // correct name is in front of the author.
+      assert.match(
+        ran.err,
+        new RegExp(`does not accept "${spelling}"`),
+        `the refusal must name the key the author actually wrote: ${ran.err}`,
+      );
+      assert.match(
+        ran.err,
+        /accepted keys are .*"foreignKeys"/,
+        `the refusal must list the accepted keys, which is what makes it fixable: ${ran.err}`,
       );
 
-      // The table is really there, so this is a silent drop and not a no-op run.
+      // NOTHING may have been created. A refusal that still left `child` behind
+      // would be worse than the silent drop it replaced.
       const { rows: tables } = await client.query(
         `SELECT table_name FROM information_schema.tables
           WHERE table_schema = $1 AND table_name = 'child'`,
         [schema],
       );
-      assert.equal(tables.length, 1, "the child table must actually have been created");
-
-      // And the foreign key the author asked for is not on it.
-      const { rows: fks } = await client.query(
-        `SELECT con.conname
-           FROM pg_constraint con
-           JOIN pg_namespace n ON n.oid = con.connamespace
-          WHERE n.nspname = $1 AND con.contype = 'f'`,
-        [schema],
-      );
       assert.equal(
-        fks.length,
+        tables.length,
         0,
-        `the misspelled \`${spelling}\` currently lands NO foreign key; ` +
-          `if one appeared, the runtime started honouring the key and this test should be inverted`,
+        "the refusal must happen before anything is created, not after",
       );
     } finally {
       await client
@@ -316,18 +309,25 @@ export default {
     `the correct spelling must honour the guard; ${results.ifNotExists.err}`,
   );
 
-  // The defect: one character off, and the guard is silently not there.
+  // One character off is now refused up front, by name.
   assert.equal(
     results.ifNotExist.code,
     1,
-    `the misspelled guard currently applies UNGUARDED and fails; if it now ` +
-      `refuses the unknown key at authoring time, that is the intended fix - ` +
-      `invert this test. ${results.ifNotExist.err}`,
+    `the misspelled guard must be refused; ${results.ifNotExist.err}`,
   );
   assert.match(
     results.ifNotExist.err,
+    /does not accept "ifNotExist"/,
+    `the refusal must name the misspelling: ${results.ifNotExist.err}`,
+  );
+  // The distinction that matters: it must fail because the KEY is unknown, not
+  // because it applied unguarded and then collided. `already exists` here would
+  // mean the guard was still being dropped and the deploy still reached the
+  // server - the exact behaviour this change removed.
+  assert.doesNotMatch(
+    results.ifNotExist.err,
     /already exists/i,
-    `it must fail on the pre-existing object, which is what proves the guard was ` +
-      `dropped rather than some unrelated error: ${results.ifNotExist.err}`,
+    `it must be refused for the unknown key, not fail on the pre-existing ` +
+      `object after applying unguarded: ${results.ifNotExist.err}`,
   );
 });

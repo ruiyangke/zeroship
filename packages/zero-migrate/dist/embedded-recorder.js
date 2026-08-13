@@ -2488,7 +2488,29 @@ function commentTargetToIr(target) {
       throw structuredError("OP_INVALID", `unsupported comment target kind ${target.kind}`);
   }
 }
+function rejectUnknownKeys(args, accepted, what) {
+  const unknown = Object.keys(args).filter((key) => !accepted.includes(key));
+  if (unknown.length === 0) return;
+  throw structuredError(
+    "OP_INVALID",
+    `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}`
+  );
+}
+var CREATE_TABLE_KEYS = [
+  "columns",
+  "options",
+  "primaryKey",
+  "uniques",
+  "checks",
+  "foreignKeys",
+  "exclusions",
+  "indexes",
+  "partitionBy",
+  "ifNotExists",
+  "schema"
+];
 function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr) {
+  rejectUnknownKeys(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`);
   const cols = [];
   const constraints = [];
   const indexes = [];
