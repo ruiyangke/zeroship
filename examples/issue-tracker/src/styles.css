@@ -592,3 +592,25 @@ tbody tr:hover { background: var(--surface-2); }
   margin: 0;
   min-width: 0;
 }
+
+/* A metadata row you are reading rather than editing: label, value, and a
+   quiet way in. The rail's job is to let you take a bug in at a glance, and
+   an open text input says "type here" about a field you are not changing. */
+.field-row-compact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0.45rem 0;
+  font-size: 0.85rem;
+}
+.field-row-compact .field-label { flex: 0 0 auto; }
+.field-row-compact .field-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+/* The Edit affordance stays out of the way until the row is worth acting on. */
+.field-row-compact button { opacity: 0; transition: opacity 0.12s; }
+.field-row-compact:hover button,
+.field-row-compact:focus-within button { opacity: 1; }

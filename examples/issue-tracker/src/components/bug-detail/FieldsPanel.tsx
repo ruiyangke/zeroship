@@ -237,16 +237,17 @@ function GeneralField({
   value: string;
   onUpdated: (b: Bug) => void;
 }) {
+  const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dirty = draft !== value;
 
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
       onUpdated(await updateBug({ id: bug.id, changes: { [field]: draft } }));
+      setEditing(false);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -254,16 +255,53 @@ function GeneralField({
     }
   };
 
+  // Read until asked. Four of these -- whiteboard, OS, platform, URL -- sat
+  // open as text inputs in a 352px rail, so the column that should let you
+  // GLANCE at a bug's metadata was mostly empty edit boxes for fields almost
+  // nobody sets. A value you are not changing is something to read.
+  if (!editing) {
+    return (
+      <div className="field-row-compact">
+        <span className="field-label">{label}</span>
+        <span className="field-value">{value || "--"}</span>
+        <Button
+          variant="plain"
+          size="small"
+          // Named per field: a rail with five bare "Edit" buttons is
+          // ambiguous to a screen reader and to a strict-mode locator.
+          aria-label={`Edit ${label}`}
+          onClick={() => {
+            setDraft(value);
+            setEditing(true);
+          }}
+        >
+          Edit
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <Field className="field-block">
       <Field.Label>{label}</Field.Label>
       <span className="field-block-head">
         <Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
-        {dirty ? (
-          <Button variant="gray" size="small" disabled={busy} onClick={() => void save()}>
-            Save
-          </Button>
-        ) : null}
+        <Button variant="gray" size="small" disabled={busy} onClick={() => void save()}>
+          Save
+        </Button>
+        <Button
+          variant="plain"
+          size="small"
+          disabled={busy}
+          aria-label={`Cancel editing ${label}`}
+          onClick={() => {
+            setDraft(value);
+            setEditing(false);
+            setError(null);
+          }}
+        >
+          Cancel
+        </Button>
       </span>
       {error ? <p className="field-error">{error}</p> : null}
     </Field>
