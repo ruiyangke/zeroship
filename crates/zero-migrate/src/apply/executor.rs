@@ -1894,15 +1894,26 @@ fn check_squash_all_or_none(
 // ===========================================================================
 
 /// How far a rollback should unwind the applied migrations.
+///
+/// Every variant here is resolved in **apply order** — the journal's `event_seq`
+/// — and never by how version strings sort. The distinction is not cosmetic:
+/// [`AppliedEntry::event_seq`](crate::apply::journal::AppliedEntry::event_seq)
+/// records that `MigrationId::derive` stamps the high bits with an `0xFF` marker
+/// and fills the rest from a SHA-256, so derived ids sort in hash order among
+/// themselves and above every generated id. Version order carries no authoring
+/// or apply order at all, and a target resolved against it would name an
+/// arbitrary set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackTarget {
-    /// Roll back every net-applied migration whose version is **strictly after**
-    /// this one — i.e. unwind *down to* (and keeping) this version. The target
-    /// itself is NOT rolled back.
+    /// Roll back every net-applied migration applied **strictly after** this one
+    /// — i.e. unwind *down to* (and keeping) this version. The target itself is
+    /// NOT rolled back. "After" is by apply order; the target's own version
+    /// string may sort above or below the migrations that come back.
     ToVersion(MigrationId),
-    /// Roll back the `n` most-recently-applied migrations (the `n` highest
-    /// net-applied versions). `Steps(0)` is a no-op; `Steps(k)` with `k` ≥ the
-    /// applied count behaves like [`RollbackTarget::All`].
+    /// Roll back the `n` most-recently-applied migrations — most recent by apply
+    /// order, which is not the same as the `n` highest version strings.
+    /// `Steps(0)` is a no-op; `Steps(k)` with `k` ≥ the applied count behaves
+    /// like [`RollbackTarget::All`].
     Steps(usize),
     /// Roll back **all** net-applied migrations.
     All,
@@ -3278,6 +3289,72 @@ mod rollback_selection_tests {
         .expect("plan");
         let got: Vec<&str> = plan.steps.iter().map(|m| m.version.as_str()).collect();
         assert_eq!(got, vec![set[2].version.as_str(), set[1].version.as_str()]);
+    }
+
+    /// `ToVersion` resolves its anchor by APPLY order, never by how version
+    /// strings sort.
+    ///
+    /// `selection_uses_apply_order_not_version_order` already pins this for
+    /// `Steps`, and pins it well. It does not reach `ToVersion`, which is a
+    /// SEPARATE code path: `Steps` takes a prefix of the sorted list, while
+    /// `ToVersion` finds an anchor and filters on `event_seq > anchor.event_seq`.
+    /// Changing only that filter to compare versions leaves the sibling test
+    /// green, so without this the gap is unwatched.
+    ///
+    /// The failure it admits is the quiet kind. Anchoring on the first-applied
+    /// migration when that migration also holds the HIGHEST version means nothing
+    /// sorts after it, so a version-ordered filter selects the empty set and the
+    /// rollback reports success having unwound nothing.
+    ///
+    /// Version order carries no ordering information at all — `AppliedEntry::
+    /// event_seq` documents that `MigrationId::derive` stamps the high bits with
+    /// an `0xFF` marker and fills the rest from a SHA-256, so derived ids sort in
+    /// hash order among themselves and above every generated id. Three migrations
+    /// applied in exactly the reverse of their version order make that concrete.
+    #[test]
+    fn to_version_anchors_by_apply_order_not_version_order() {
+        let mut ids = [
+            MigrationId::derive("rb", b"one"),
+            MigrationId::derive("rb", b"two"),
+            MigrationId::derive("rb", b"three"),
+        ];
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        assert!(
+            ids[0].as_str() < ids[1].as_str() && ids[1].as_str() < ids[2].as_str(),
+            "the ids must be in ascending version order for the reversal below to mean anything"
+        );
+
+        // Applied HIGHEST version first, so the last applied is the lowest version.
+        let set: Vec<Migration> = ids
+            .iter()
+            .rev()
+            .map(|id| mig(id.clone(), Some("DROP TABLE t"), vec![]))
+            .collect();
+        let applied = versions(&set);
+
+        // Anchored on the FIRST applied, which is also the highest version:
+        // everything applied after it must be selected. A version-ordered filter
+        // finds nothing "after" the highest version and unwinds the empty set.
+        let after_first = plan_rollback(
+            &req(RollbackTarget::ToVersion(ids[2].clone())),
+            &set,
+            &applied,
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("plan to version");
+        let mut reached: Vec<&str> = after_first
+            .steps
+            .iter()
+            .map(|m| m.version.as_str())
+            .collect();
+        reached.sort_unstable();
+        let mut expected = vec![ids[0].as_str(), ids[1].as_str()];
+        expected.sort_unstable();
+        assert_eq!(
+            reached, expected,
+            "ToVersion keeps its anchor and unwinds what was applied AFTER it, by apply order"
+        );
     }
 
     #[test]
