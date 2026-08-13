@@ -408,7 +408,7 @@ mod tests {
     // therefore inherits the not-send trait — structural, not a defect.
     #[allow(dead_code, clippy::future_not_send)]
     async fn pg() -> Option<compio_postgres::Client> {
-        let dsn = std::env::var("AUTH_DB_URL").ok()?;
+        let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
         let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
             .await
             .expect("connect");

@@ -75,8 +75,9 @@ impl ConsentTestApp {
         declared: &[AppScope],
     ) -> Self {
         let client_id = client_id.to_owned();
-        let db_url = std::env::var("AUTH_DB_URL")
-            .expect("AUTH_DB_URL is required for consent_ui_test");
+        let db_url =
+            zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+                .expect("AUTH_DB_URL is required for consent_ui_test");
         let (pg_client, pg_connection) =
             compio_postgres::connect(&db_url, compio_postgres::NoTls)
                 .await

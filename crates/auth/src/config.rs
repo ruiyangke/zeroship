@@ -1198,7 +1198,7 @@ supabase_anon_key = "anon-file-key"
     fn dev_insecure_env_is_ignored() {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
+        let old = zeroship_core::test_env_os!("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
 
         let cfg = test_config();

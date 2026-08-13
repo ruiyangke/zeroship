@@ -43,7 +43,7 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -129,9 +129,9 @@ async fn drop_magic_links_insert_delay(client: &Client) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
@@ -293,9 +293,9 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
@@ -402,9 +402,9 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }
@@ -619,9 +619,9 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
             return;
         }

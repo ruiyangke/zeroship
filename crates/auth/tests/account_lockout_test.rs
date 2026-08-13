@@ -41,7 +41,7 @@ const BAD_PW: &str = "definitely the wrong password here";
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consecutive_failures_lock_account_then_success_resets() {
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skipping account_lockout_test (no AUTH_DB_URL)");
         return;
     };
@@ -162,7 +162,7 @@ async fn consecutive_failures_lock_account_then_success_resets() {
 /// Connect + spawn the PG driver, returning a shared client. Returns `None`
 /// (and prints a skip note) when `AUTH_DB_URL` is unset.
 async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>> {
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip(&format!("skipping {label} (no AUTH_DB_URL)"));
         return None;
     };

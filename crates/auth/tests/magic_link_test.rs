@@ -17,7 +17,7 @@ use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     Some(pg_connect(&dsn).await)
 }
 
@@ -129,9 +129,9 @@ fn sha256(s: &str) -> [u8; 32] {
 
 #[compio::test]
 async fn wrong_code_does_not_mutate_reserved_completion() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
             return;
         }
@@ -225,9 +225,9 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_token() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
             return;
         }
@@ -844,7 +844,8 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
         zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
         return;
     };
-    let dsn = std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL present after pg");
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .expect("AUTH_DB_URL present after pg");
 
     let csrf_nonce = format!("completion-race-{}", Uuid::new_v4().simple());
     let email = format!("magic-race-{}@example.test", Uuid::new_v4().simple());

@@ -80,6 +80,39 @@ fn a_read_site_carries_its_class_and_its_consumer() {
 }
 
 #[test]
+fn every_linked_declared_read_has_a_usable_environment_name() {
+    // The SOURCE gate checks key literals, which is the complete population
+    // today because `declared_env!` accepts a literal only. This checks the
+    // LINKED population instead, so a key built some other way - a `const fn`
+    // that assembles a name, a future constructor - still cannot register a
+    // name no shell can set.
+    // Does not cover: names in code this binary does not link, and the reserved
+    // snapshot marker, which is deliberately not a variable name.
+    assert!(
+        !DECLARED_ENV_READS.is_empty(),
+        "no declared reads linked; this test would pass vacuously"
+    );
+    for read in DECLARED_ENV_READS {
+        if read.name() == zeroship_core::config::PROCESS_ENV_SNAPSHOT {
+            continue;
+        }
+        assert!(
+            zeroship_core::config::is_valid_env_name(read.name()),
+            "{:?} at {:?} is not a usable environment name",
+            read.name(),
+            read.location()
+        );
+        assert!(
+            read.class() != EnvClass::External || !read.name().starts_with("ZEROSHIP_"),
+            "{:?} at {:?} claims to be somebody else's contract but carries our \
+             prefix",
+            read.name(),
+            read.location()
+        );
+    }
+}
+
+#[test]
 fn a_declared_read_reports_absence_rather_than_a_value() {
     // Does not cover: the value of a variable that IS set. This asserts the
     // absent arm, which is the only one a test can assert without arranging

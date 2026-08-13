@@ -59,9 +59,10 @@ struct MagicFixture {
 impl MagicFixture {
     #[allow(clippy::future_not_send)]
     async fn boot() -> Option<Self> {
-        let db_url = match std::env::var("AUTH_DB_URL") {
-            Ok(db_url) => db_url,
-            Err(_) => return None,
+        let Some(db_url) =
+            zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        else {
+            return None;
         };
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");

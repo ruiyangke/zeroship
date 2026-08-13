@@ -22,9 +22,9 @@
 
 use std::collections::BTreeSet;
 
-use syn::visit::{self, Visit};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, ExprCall, ExprPath, ItemUse, Lit, Macro, Meta, Token, UseTree};
 use thiserror::Error;
 
@@ -424,7 +424,7 @@ fn declared_key_class(segments: &[String]) -> Option<String> {
     }
     matches!(
         method.as_str(),
-        "external" | "test" | "dev" | "cli" | "build" | "creator"
+        "external" | "test" | "dev" | "cli" | "build" | "creator" | "platform"
     )
     .then(|| method.clone())
 }

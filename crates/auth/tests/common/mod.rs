@@ -270,7 +270,9 @@ impl Fixture {
     // are intentionally `!Send`. Test helper futures here inherit that.
     #[allow(clippy::future_not_send)]
     pub async fn boot(client_id_prefix: &str) -> Option<Self> {
-        let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+        let Some(db_url) =
+            zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        else {
             return None;
         };
 

@@ -47,8 +47,8 @@ struct EnrollFixture {
 impl EnrollFixture {
     #[allow(clippy::future_not_send)]
     async fn boot(label: &str) -> Self {
-        let db_url = std::env::var("AUTH_DB_URL")
-            .or_else(|_| std::env::var("PG_TEST_URL"))
+        let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
             .expect("AUTH_DB_URL is required for totp_enroll_reauth_test");
         let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
