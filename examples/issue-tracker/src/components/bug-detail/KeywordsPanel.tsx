@@ -5,6 +5,7 @@ import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
 import type { Activity } from "../types";
+import { RailDisclosure } from "./RailDisclosure";
 
 export function KeywordsPanel({
   bugId,
@@ -57,9 +58,23 @@ export function KeywordsPanel({
     }
   };
 
+  const names = [...attached];
+  const summary =
+    names.length === 0 ? (
+      <span className="dim">none</span>
+    ) : (
+      <span className="rail-tags">
+        {names.map((name) => (
+          <Tag key={name} size="sm">
+            {name}
+          </Tag>
+        ))}
+      </span>
+    );
+
   return (
+    <RailDisclosure label="Labels" summary={summary}>
     <section className="keywords-panel">
-      <h3>Keywords</h3>
       <div className="keyword-tags">
         {/* These two empty states say DIFFERENT things -- none attached to
             this bug, versus none defined anywhere -- and stacked as "none"
@@ -118,5 +133,6 @@ export function KeywordsPanel({
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </section>
+    </RailDisclosure>
   );
 }

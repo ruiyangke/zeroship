@@ -51,8 +51,15 @@ export function personLabel(actorId: string, people: PeopleMap): string {
  * Only a LEADING typed id followed by a colon is stripped, so a value that
  * merely contains a colon -- a URL, a whiteboard note -- survives intact.
  */
-export function displayValue(value: string | null | undefined): string {
+export function displayValue(
+  value: string | null | undefined,
+  labels: Record<string, string> = {},
+): string {
   if (!value) return "";
+  // A resolved name wins over any string surgery: `dependsOn` stores a bare
+  // bug id with no readable half to salvage, so stripping cannot help and
+  // only a lookup can.
+  if (labels[value]) return labels[value];
   const match = /^[a-z]{3,6}_[0-9A-Za-z]{16,}:(.+)$/.exec(value);
   return match ? match[1] : value;
 }

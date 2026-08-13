@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button, Field, Input } from "@zeroship/ui";
 
 import { addSeeAlso, listSeeAlso, removeSeeAlso } from "../../api";
+import { RailDisclosure } from "./RailDisclosure";
 import { errorMessage } from "../rpc";
 
 /**
@@ -62,9 +63,16 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
     }
   };
 
+  const summary =
+    links.length === 0 ? (
+      <span className="dim">none</span>
+    ) : (
+      <>{links.length} linked</>
+    );
+
   return (
+    <RailDisclosure label="See also" summary={summary} action="Add">
     <section className="see-also-panel">
-      <h3>See also</h3>
       {links.length === 0 ? (
         <p className="state-hint small">No linked reports.</p>
       ) : (
@@ -99,5 +107,6 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </section>
+    </RailDisclosure>
   );
 }

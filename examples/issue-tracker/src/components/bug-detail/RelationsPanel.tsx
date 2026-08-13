@@ -4,6 +4,7 @@ import { addDependency, dependencyGraph, listDuplicates, removeDependency } from
 import { StatusBadge } from "../Badges";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
+import { RailDisclosure } from "./RailDisclosure";
 
 function BugLink({ id, summary, status }: { id: string; summary: string; status: string }) {
   return (
@@ -48,9 +49,26 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
     }
   };
 
+  const counts =
+    state.status === "ready"
+      ? {
+          dependsOn: state.data.edges.filter((e) => e.bugId === bugId).length,
+          blocks: state.data.edges.filter((e) => e.dependsOnId === bugId).length,
+        }
+      : null;
+  const summary = !counts ? (
+    <span className="dim">--</span>
+  ) : counts.dependsOn === 0 && counts.blocks === 0 ? (
+    <span className="dim">none</span>
+  ) : (
+    <>
+      {counts.dependsOn} depends on, {counts.blocks} blocks
+    </>
+  );
+
   return (
+    <RailDisclosure label="Dependencies" summary={summary}>
     <section className="relations-panel">
-      <h3>Dependencies</h3>
       <AsyncSection
         state={state}
         onRetry={reload}
@@ -115,6 +133,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       ) : null}
       {error ? <p className="field-error">{error}</p> : null}
     </section>
+    </RailDisclosure>
   );
 }
 
@@ -126,9 +145,17 @@ export function DuplicatesPanel({ bugId, duplicateOfId }: { bugId: string; dupli
     return state.data.filter((b) => b.id !== bugId);
   }, [state, bugId]);
 
+  const summary = duplicateOfId ? (
+    <>duplicate of another bug</>
+  ) : cluster && cluster.length > 0 ? (
+    <>{cluster.length} marked duplicate</>
+  ) : (
+    <span className="dim">none</span>
+  );
+
   return (
+    <RailDisclosure label="Duplicates" summary={summary}>
     <section className="relations-panel">
-      <h3>Duplicates</h3>
       {duplicateOfId ? (
         <p className="state-hint small">
           This bug is marked as a duplicate of{" "}
@@ -155,5 +182,6 @@ export function DuplicatesPanel({ bugId, duplicateOfId }: { bugId: string; dupli
         )}
       </AsyncSection>
     </section>
+    </RailDisclosure>
   );
 }

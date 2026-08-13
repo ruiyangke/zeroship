@@ -4,6 +4,7 @@ import { addCc, listCc, removeCc } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
 import { UserPicker } from "../UserPicker";
+import { RailDisclosure } from "./RailDisclosure";
 
 export function CcPanel({ bugId }: { bugId: string }) {
   const { state, reload } = useAsync(() => listCc({ bugId }), [bugId]);
@@ -38,9 +39,22 @@ export function CcPanel({ bugId }: { bugId: string }) {
     }
   };
 
+  // The resting line. Names while there are few, a count once the list is
+  // longer than the rail is wide -- three names is already 30 characters.
+  const summary =
+    state.status !== "ready" ? (
+      <span className="dim">--</span>
+    ) : state.data.length === 0 ? (
+      <span className="dim">nobody</span>
+    ) : state.data.length <= 2 ? (
+      <>{state.data.map((row) => row.user?.name ?? row.userId).join(", ")}</>
+    ) : (
+      <>{state.data.length} people</>
+    );
+
   return (
+    <RailDisclosure label="CC" summary={summary} action="Add">
     <section className="cc-panel">
-      <h3>CC</h3>
       <AsyncSection
         state={state}
         onRetry={reload}
@@ -72,5 +86,6 @@ export function CcPanel({ bugId }: { bugId: string }) {
       ) : null}
       {error ? <p className="field-error">{error}</p> : null}
     </section>
+    </RailDisclosure>
   );
 }

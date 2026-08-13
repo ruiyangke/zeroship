@@ -148,6 +148,12 @@ export function BugDetailPage({ id }: { id: string }) {
     ...Object.fromEntries((productDetail?.versions ?? []).map((v) => [v.id, v.name])),
     ...Object.fromEntries((productDetail?.milestones ?? []).map((m) => [m.id, m.name])),
     ...Object.fromEntries((productDetail?.components ?? []).map((c) => [c.id, c.name])),
+    // Bugs named by the log: dependsOn / blocks / duplicateOfId store another
+    // bug's typed id as the value, so without these the history reads "set
+    // Depends On to bug_0346W0Ole6amXDN9RKvzW6".
+    ...Object.fromEntries(
+      Object.entries(detail.bugRefs ?? {}).map(([id, ref]) => [id, ref.label]),
+    ),
   };
 
   return (
@@ -243,6 +249,7 @@ export function BugDetailPage({ id }: { id: string }) {
               readOnly={signedOut}
               activities={detail.activities}
               people={detail.people}
+              labels={historyLabels}
               attachments={attachmentsQ.state}
               onAttachmentsChanged={attachmentsQ.reload}
             />
@@ -261,8 +268,6 @@ export function BugDetailPage({ id }: { id: string }) {
                 linked bugs are readable facts about a public bug. */}
             <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
               <AttachmentsPanel state={attachmentsQ.state} reload={attachmentsQ.reload} />
-              <CcPanel bugId={id} />
-              <DependenciesPanel bugId={id} />
             </fieldset>
 
             {/* The long tail, folded.
@@ -287,13 +292,10 @@ export function BugDetailPage({ id }: { id: string }) {
                 aria-expanded={moreOpen}
                 onClick={() => setMoreOpen((open) => !open)}
               >
-                {moreOpen ? "Hide" : "Show"} keywords, flags, votes, duplicates, links and security
+                {moreOpen ? "Hide" : "Show"} flags, votes and security
               </Button>
               {moreOpen ? (
               <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
-              <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
-              <SeeAlsoPanel bugId={id} />
-              <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
               {/* No `activities` prop: the panel reads real flags from
                   flags.list instead of replaying the bug's history. */}
               <FlagsPanel bugId={id} flagTypes={productDetail?.flagTypes ?? null} onChanged={reload} />
@@ -325,6 +327,28 @@ export function BugDetailPage({ id }: { id: string }) {
               onUpdated={() => reload()}
               readOnly={signedOut}
             />
+            {/* State and relations, not narrative -- so their position must
+                not depend on how long the conversation is. Below the composer
+                they sank further down the page with every reply; a bug with
+                forty comments put "who is CC'd" a thousand pixels from the
+                top. Here they are anchored.
+
+                Each one is a single line until asked to open (RailDisclosure),
+                which is what makes this survivable: the last time these lived
+                in the rail they rendered list AND form at all times and the
+                stack measured 1856px in a 352px column. */}
+            {/* Labelled like every other rail group, so the space above it
+                reads as a heading's space rather than as a gap nobody meant.
+                These four are about OTHER things -- people and bugs -- which
+                is a different kind of fact from severity or component. */}
+            <p className="rail-section">Links</p>
+            <fieldset className="rail-fields rail-groups" disabled={signedOut}>
+              <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
+              <CcPanel bugId={id} />
+              <DependenciesPanel bugId={id} />
+              <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
+              <SeeAlsoPanel bugId={id} />
+            </fieldset>
           </Stack>
         </div>
       )}

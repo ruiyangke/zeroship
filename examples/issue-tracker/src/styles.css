@@ -1198,3 +1198,20 @@ fieldset.bug-detail-extras { display: grid; }
    column sized for "major". */
 .rail-choice.is-editing.is-wide { grid-template-columns: minmax(0, 1fr); }
 .rail-choice.is-editing.is-wide > button { grid-column: 1; }
+
+/* Rail groups: a line each, until opened.
+   The panels inside were built for the main column, so their headings and
+   grid-based inner layouts have to give way in a 324px rail. */
+.rail-groups { display: flex; flex-direction: column; }
+.rail-disclosure + .rail-disclosure { border-block-start: 1px solid var(--line); }
+.rail-disclosure-body { padding-block: 0.2rem 0.6rem; }
+.rail-disclosure-body section { background: none; border: 0; padding: 0; margin: 0; }
+/* One column. relation-columns is a two-across grid that does not fit here. */
+.rail-disclosure-body .relation-columns { display: block; }
+.rail-disclosure-body .inline-form { flex-wrap: wrap; }
+.rail-disclosure-body .inline-form input { inline-size: 100%; }
+/* Chips wrap rather than widening the row past the rail. */
+.rail-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+/* The heading owns the space above the group, so the fieldset does not also
+   contribute the Stack's gap on top of it. */
+.rail-section + .rail-groups { margin-block-start: -0.7rem; }

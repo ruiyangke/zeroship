@@ -349,11 +349,19 @@ export function CommentsPanel({
   onAttachmentsChanged,
   activities = [],
   people = {},
+  labels = {},
 }: {
   bugId: string;
   /** Field changes, shown inline the way GitHub and Linear do. */
   activities?: readonly Activity[];
   people?: PeopleMap;
+  /**
+   * Ids to the names they stand for, shared with the History tab.
+   *
+   * The same map feeds both views on purpose: two resolvers is how one of
+   * them ends up printing a raw id after a field is added to the log.
+   */
+  labels?: Record<string, string>;
   /** No identity: the thread is readable, the controls are not offered. */
   readOnly?: boolean;
   /** Owned by the page, because the files panel lists the same rows. */
@@ -407,7 +415,7 @@ export function CommentsPanel({
                       <span key={i}>
                         {i > 0 ? ", " : ""}
                         set <span className="timeline-field">{fieldLabel(change.fieldName)}</span> to{" "}
-                        <span className="timeline-value">{displayValue(change.newValue) || "nothing"}</span>
+                        <span className="timeline-value">{displayValue(change.newValue, labels) || "nothing"}</span>
                       </span>
                     ))}
                     <span className="timeline-when" title={formatDate(item.at)}>

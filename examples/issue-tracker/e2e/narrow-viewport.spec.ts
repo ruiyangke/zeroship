@@ -8,7 +8,7 @@ import { signIn } from "./session";
  *
  * Every other spec and every screenshot in this suite ran at 1280px or wider,
  * so the phone width was simply never looked at -- and the fold's own label,
- * "Show keywords, flags, votes, duplicates, links and security", ran past the
+ * "Show flags, votes and security", ran past the
  * right edge and was clipped. Buttons do not wrap by default, so the one thing
  * that label exists to tell you was the part cut off.
  *
@@ -70,7 +70,7 @@ test("the bug page fits a phone", async ({ page, baseURL }) => {
 
   // The fold's label is the specific thing that was clipped, so it is named:
   // a generic overflow check would go green if the button were removed.
-  const toggle = page.getByRole("button", { name: /keywords, flags, votes/i });
+  const toggle = page.getByRole("button", { name: /flags, votes and security/i });
   await expect(toggle, "the fold is still offered").toBeVisible();
   const fits = await toggle.evaluate(
     (el) => el.getBoundingClientRect().right <= document.documentElement.clientWidth + 1,

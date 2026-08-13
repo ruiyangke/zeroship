@@ -1239,6 +1239,43 @@ export const getBug = query(
         )
       ).map((user) => [user.id, publicUserView(user)]),
     );
+
+    // Bugs named by the LOG rather than by a column.
+    //
+    // `dependsOn`, `blocks` and `duplicateOfId` store another bug's typed id
+    // as the activity value, and the history rendered it verbatim: "set
+    // Depends On to bug_0346W0Ole6amXDN9RKvzW6". That is the raw-id leak this
+    // app has a whole spec class about, and it survived because the spec's
+    // fixture -- "a bug with everything hung off it" -- had no dependency, so
+    // the row it would have caught was never written.
+    //
+    // Resolved here rather than in the client for the same reason `people` is:
+    // the viewer's access was already decided above, so a reference they may
+    // not see is simply absent from the map.
+    const referencedBugIds = [
+      ...new Set(
+        activityRows
+          .filter((activity) => BUG_REFERENCE_FIELDS.has(activity.fieldName))
+          .flatMap((activity) => [activity.oldValue, activity.newValue])
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0 && !hidden.has(value),
+          ),
+      ),
+    ];
+    const referencedBugs = referencedBugIds.length > 0 ? await readByIds(db.bugs, referencedBugIds) : [];
+    const referencedProducts =
+      referencedBugs.length > 0
+        ? await readByIds(db.products, [...new Set(referencedBugs.map((b) => b.productId))])
+        : [];
+    const referencedKeys = new Map(referencedProducts.map((prod) => [prod.id, prod.key]));
+    const bugRefs = Object.fromEntries(
+      referencedBugs.map((b) => {
+        const key = referencedKeys.get(b.productId);
+        return [b.id, { label: key ? `${key}-${b.number}` : b.id, summary: b.summary }];
+      }),
+    );
+
     return {
       // The same denormalised key searchBugs carries, so a bug from EITHER
       // endpoint can name itself without a second lookup. The dashboard builds
@@ -1252,6 +1289,7 @@ export const getBug = query(
         productKey?: string | null;
       },
       people,
+      bugRefs,
       product: must(product),
       component: must(component),
       // The history is filtered too. Several activity rows carry ANOTHER

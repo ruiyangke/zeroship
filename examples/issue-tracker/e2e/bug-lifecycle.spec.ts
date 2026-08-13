@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
-import { openMorePanels } from "./more";
+import { openMorePanels, openRailGroup } from "./more";
 
 /**
  * The Bugzilla flow a real user walks, driven in a real browser: file a bug
@@ -392,6 +392,7 @@ test("see also links are added, listed and removed from the bug page", async ({ 
 
   await page.goto(`/#/bugs/${bug.id}`);
   await openMorePanels(page);
+  await openRailGroup(page, "See also");
   const panel = page.locator("section.see-also-panel");
   await expect(panel).toBeVisible();
   await expect(panel.getByText("No linked reports.")).toBeVisible();

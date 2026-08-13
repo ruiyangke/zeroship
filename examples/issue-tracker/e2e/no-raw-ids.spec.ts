@@ -72,6 +72,23 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
   await rpc("cc.add", { bugId: bug.id, userId: me.id });
   await rpc("comments.add", { bugId: bug.id, body: "a comment" });
   await rpc("seeAlso.add", { bugId: bug.id, url: "https://example.com/1" });
+  // A DEPENDENCY, which this fixture claimed to have and did not.
+  //
+  // "Everything hung off it" was the stated premise, but nothing here ever
+  // called deps.add, so no dependsOn row was written and the one activity
+  // whose VALUE is another bug's id never rendered. The history duly printed
+  // "set Depends On to bug_0346W0Ole6amXDN9RKvzW6" for months underneath a
+  // green test asserting that could not happen.
+  const blocker = await rpc("bugs.create", {
+    productId: product.id,
+    componentId: component.id,
+    versionId: version.id,
+    summary: `Blocker ${RUN}`,
+    description: "d",
+  });
+  await rpc("deps.add", { bugId: bug.id, dependsOnId: blocker.id });
+  const keyword = await rpc("keywords.create", { name: `kw-${RUN}` });
+  await rpc("keywords.attach", { bugId: bug.id, keywordId: keyword.id });
 
   const offenders: string[] = [];
   const check = async (label: string) => {
