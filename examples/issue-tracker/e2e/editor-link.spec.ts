@@ -50,8 +50,21 @@ test("the link control applies safe URLs and states refusals", async ({ page, ba
   const composer = page.locator(".new-comment");
   await expect(editor).toBeVisible();
 
+  // The composer's toolbar stays out of the way until there is something to
+  // format. Both halves are asserted: absent while blurred and empty, present
+  // once focused. The first alone would pass against a toolbar that never
+  // renders at all.
+  await expect(
+    composer.getByRole("button", { name: "Bold" }),
+    "an untouched composer shows no formatting controls",
+  ).toHaveCount(0);
+
   // Type text and select it -- a link needs something to attach to.
   await editor.click();
+  await expect(
+    composer.getByRole("button", { name: "Bold" }),
+    "focusing the composer brings the toolbar",
+  ).toBeVisible();
   await page.keyboard.type("see the docs");
   await page.keyboard.press("ControlOrMeta+A");
 

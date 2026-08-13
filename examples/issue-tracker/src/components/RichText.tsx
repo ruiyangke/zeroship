@@ -211,12 +211,24 @@ export function RichTextEditor({
   onChange,
   placeholder,
   ariaLabel,
+  collapsible = false,
 }: {
   value: string;
   onChange: (html: string) => void;
   placeholder?: string;
   ariaLabel: string;
+  /**
+   * Keep the toolbar out of the way until there is something to format.
+   *
+   * The comment composer sits at the foot of every bug page, so twelve
+   * formatting buttons were permanently on screen under the thread -- more
+   * chrome than the empty box they belonged to, and all of it addressing a
+   * task nobody had started. Editing an existing comment does NOT set this:
+   * there the toolbar is the point of having opened the editor.
+   */
+  collapsible?: boolean;
 }) {
+  const [focused, setFocused] = useState(false);
   const editor = useEditor({
     extensions: EXTENSIONS,
     content: value,
@@ -229,6 +241,8 @@ export function RichTextEditor({
       },
     },
     onUpdate: ({ editor: next }) => onChange(next.getMarkdown()),
+    onFocus: () => setFocused(true),
+    onBlur: () => setFocused(false),
   });
 
   // Reset when the caller clears the field -- posting a comment empties the
@@ -242,6 +256,9 @@ export function RichTextEditor({
 
   return (
     <div className="rich-text-editor">
+      {/* Shown once the editor has focus or content. A blurred, empty
+          composer needs no formatting controls. */}
+      {!collapsible || focused || hasText(value) ? (
       <Cluster gap={1} className="rich-text-toolbar">
         <ToolbarButton
           editor={editor}
@@ -327,6 +344,7 @@ export function RichTextEditor({
           onClick={() => editor.chain().focus().redo().run()}
         />
       </Cluster>
+      ) : null}
       <EditorContent editor={editor} />
     </div>
   );

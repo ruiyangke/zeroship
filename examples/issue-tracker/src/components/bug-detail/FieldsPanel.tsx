@@ -366,8 +366,8 @@ export function FieldsPanel({
         /* "Summary / Edit" alone at the top of the rail read as a field whose
            value had gone missing -- a label and a button with nothing between
            them. It is an action, so it is written as one. */
-        <Cluster gap={2} align="center" className="rail-action">
-          <Button variant="plain" size="small" onClick={() => setEditingSummary(true)}>
+        <Cluster gap={2} align="center" justify="end" className="rail-action">
+          <Button variant="gray" size="small" onClick={() => setEditingSummary(true)}>
             Edit summary
           </Button>
         </Cluster>

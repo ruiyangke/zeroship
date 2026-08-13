@@ -200,6 +200,7 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
         onChange={setBody}
         placeholder="Add a comment..."
         ariaLabel="Add a comment"
+        collapsible
       />
       {/* A Cluster, not a bare flex row. Checkbox renders its own label
           BELOW its box in this row and it landed on top of the next field's
