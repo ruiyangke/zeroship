@@ -714,9 +714,14 @@ fi
 # 13-15 extended coverage to worker and migrated on the same day. Cases 16-17
 # (the shared auth-provider variable) took a measured run to 63.
 #
+# Cases 16-17 (the shared auth-provider variable) took a measured run to 63, and
+# the secret conversion took it to 76: cases 8-12 became the absent-file pair,
+# the deleted-source set, the canonical-path overlay tiers, the inverted literal
+# rule and the presence-only sentinel.
+#
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-63}"
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-76}"
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2

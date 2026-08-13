@@ -231,10 +231,12 @@ rollout + graceful shutdown on all services.
 ### ISS-39 · No production secrets backend
 **Status:** open · **Effort:** M · **Tier:** T2
 
-The `SecretRef` Vault / AWS-SM backends are stubs (`BackendUnavailable`); prod secrets can only
-come from env/files, with no rotation runbook for the core keys (MASTER/WORKER/CONTROL/Stripe/
-OAuth/signing). **Fix:** implement one dynamic backend (compio HTTP — no tokio AWS/Vault SDK) +
-a rotation procedure. (CONTROL_KEY also lacks a strength floor — see the security remediation plan.)
+The Vault and AWS-SM `SecretRef` variants are DELETED, not stubbed: they parsed and then always
+failed at boot, so the syntax advertised a source that did not exist. A secret is now a literal or
+a `urn:zeroship:file:<path>` reference, supplied by a canonical `ZEROSHIP_*` name, a generated
+`--<name>-file` path flag, or a canonical overlay path. There is still no DYNAMIC backend and no
+rotation runbook for the core keys (master/worker/control/Stripe/OAuth/signing). **Fix:** implement
+one dynamic backend (compio HTTP, no tokio AWS/Vault SDK) plus a rotation procedure.
 
 ### ISS-40 · Static worker fleet — no health ejection / autoscaling
 **Status:** open · **Effort:** M · **Tier:** T2
