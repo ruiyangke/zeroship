@@ -15,7 +15,7 @@ delivery is self-driven.
 
 ```
 stripe listen --print-secret              → capture the STABLE whsec_…
-  ─► boot zeroship-control with STRIPE_WEBHOOK_SECRET = that secret
+  ─► boot zeroship-control with ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET = that secret
   ─► stripe listen --forward-to $CONTROL/internal/webhooks/stripe   (bg forwarder)
       (Stripe streams every test-mode event to control, REAL-signed)
   ─► create real objects (customer + invoice + pay) → Stripe DELIVERS
@@ -56,10 +56,10 @@ key. Self-managed up/down: tears down `stripe listen` + control on exit.
 ## Secrets handling
 
 - Reads `STRIPE_TEST_SECRET_KEY` (`sk_test_…`) from the **environment only**;
-  never prints/writes/commits it; passes it to control via the `STRIPE_SECRET_KEY`
+  never prints/writes/commits it; passes it to control via the `ZEROSHIP_CONTROL_STRIPE_SECRET_KEY`
   env var (not argv, so it never lands in `/proc/<pid>/cmdline`).
 - The webhook signing secret is the **stable** value from
-  `stripe listen --print-secret` (so control's `STRIPE_WEBHOOK_SECRET` matches the
+  `stripe listen --print-secret` (so control's `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` matches the
   secret Stripe signs its deliveries with — the real verify path). It is captured
   into a shell var, redacted in all log echoes, and never persisted.
 

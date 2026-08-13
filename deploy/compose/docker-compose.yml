@@ -495,7 +495,7 @@ services:
     # so we explicitly opt in to 0.0.0.0 AND set a worker key - without
     # the key the worker refuses to bind a non-loopback address (to
     # avoid exposing unauthenticated code execution). The key must match
-    # the gateway's `--worker-key`.
+    # the gateway's ZEROSHIP_WORKER_KEY.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
     # gateway's. NOTE on the worker's DSN: ZEROSHIP_WORKER_DATABASE_URL is
