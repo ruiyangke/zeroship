@@ -45,7 +45,6 @@ fn test_config(public_url: &str) -> AuthConfig {
         "--public-url",
         public_url,
     ]);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }
 

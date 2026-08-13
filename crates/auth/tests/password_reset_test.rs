@@ -24,7 +24,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }
 

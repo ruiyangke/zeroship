@@ -633,13 +633,13 @@ mod tests {
     }
 
     fn cfg() -> AuthConfig {
-        let mut cfg = AuthConfig::parse_from([
+        AuthConfig::parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
             "--stash-signing-key",
             "test-stash-key-not-for-prod-32bytes!",
-            "--auth-provider",
+            "--provider",
             "supabase",
             "--supabase-url",
             "http://localhost:54321",
@@ -651,9 +651,7 @@ mod tests {
             "zeroship test",
             "--gotrue-email-hook-secret",
             &test_secret(),
-        ]);
-        cfg.resolve(zeroship_core::config::AuthSection::default());
-        cfg
+        ])
     }
 
     fn payload(action: &str) -> GoTrueSendEmailPayload {
@@ -811,7 +809,7 @@ mod tests {
             .expect("add suppression");
 
         let mut cfg = cfg();
-        cfg.gotrue_email_hook_secret = Some(test_secret());
+        cfg.secrets.gotrue_email_hook_secret = Some(test_secret());
         let cfg = Arc::new(cfg);
         let mailer = Arc::new(SuppressionAwareCountingMailer::default());
         let mailer_state: Arc<dyn Mailer> = mailer.clone();
@@ -845,7 +843,7 @@ mod tests {
         .expect("body");
         let ts = now_unix_secs();
         let sig = sign(
-            cfg.gotrue_email_hook_secret.as_deref().expect("secret"),
+            cfg.secrets.gotrue_email_hook_secret.as_deref().expect("secret"),
             "msg_suppressed",
             ts,
             &body,

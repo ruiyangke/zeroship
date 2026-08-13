@@ -527,6 +527,10 @@ pub struct AuthSecretSources {
 }
 
 /// zeroship-auth command line.
+///
+/// No `Debug`: [`AuthSecretSources`] carries raw credential material, and a
+/// derived `Debug` here would print it. The resolved [`AuthConfig`] has a
+/// hand-written redacting impl instead.
 #[derive(Clone, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthCli {
@@ -942,35 +946,14 @@ impl std::fmt::Debug for AuthConfig {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use clap::CommandFactory;
 
     use super::*;
-    use zeroship_core::config::FileConfig;
 
-    struct TempFile {
-        path: PathBuf,
-    }
-
-    impl TempFile {
-        fn write(name: &str, contents: &str) -> Self {
-            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-            let path = std::env::temp_dir().join(format!(
-                "zeroship-auth-config-{name}-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::write(path.as_path(), contents).expect("write temp config");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(self.path.as_path());
-        }
+    fn overlay(toml_text: &str) -> toml::Value {
+        toml::from_str(toml_text).expect("fixture overlay")
     }
 
     fn restore_env(key: &str, value: Option<OsString>) {
@@ -981,54 +964,134 @@ mod tests {
         }
     }
 
-    fn resolve_from_file(mut cfg: AuthConfig) -> AuthConfig {
-        let file =
-            FileConfig::load(cfg.controls.config.as_deref()).expect("load config file");
-        cfg.resolve(file.auth);
-        cfg
-    }
-
     fn test_config() -> AuthConfig {
         AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
     }
 
+    /// Resolve a command line against a `[auth]` overlay fragment.
+    fn resolve_with(args: &[&str], toml_text: &str) -> AuthConfig {
+        let mut argv = Vec::from(["zeroship-auth", "--db-url", "postgres://test"]);
+        argv.extend_from_slice(args);
+        AuthConfig::try_parse_and_resolve(argv, Some(&overlay(toml_text)))
+            .expect("resolve auth config")
+    }
+
+    // ---- the canonical projection -------------------------------------
+
+    #[test]
+    fn every_auth_environment_name_is_a_canonical_projection() {
+        // The failure this guards: the conversion renames the FLAG and leaves
+        // the old `AUTH_*` variable working, so a deployment that still exports
+        // AUTH_PUBLIC_URL keeps booting and nobody learns the name changed.
+        let envs = AuthSettingsSources::command()
+            .get_arguments()
+            .filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>();
+        assert!(!envs.is_empty(), "the settings must carry environment names");
+        for env in &envs {
+            assert!(
+                env.starts_with("ZEROSHIP_"),
+                "{env} is not a canonical projection"
+            );
+        }
+        assert!(envs.contains(&"ZEROSHIP_AUTH_PUBLIC_URL".to_owned()));
+        assert!(envs.contains(&"ZEROSHIP_AUTH_FRAME_ANCESTOR_ORIGINS".to_owned()));
+        // `auth.provider`, not `auth.auth_provider`: the stutter would have
+        // produced ZEROSHIP_AUTH_AUTH_PROVIDER.
+        assert!(envs.contains(&"ZEROSHIP_AUTH_PROVIDER".to_owned()));
+        // Shared identities keep their unprefixed canonical names, so auth,
+        // gateway and worker read ONE variable for the control-plane URL.
+        assert!(envs.contains(&"ZEROSHIP_CONTROL_URL".to_owned()));
+
+        // The one-variable control: the secrets are deliberately NOT converted,
+        // and their old names are expected to still be there. Without this the
+        // assertion above would also pass on a build where the settings carrier
+        // had no environment names at all.
+        let secret_envs = AuthCli::command()
+            .get_arguments()
+            .filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>();
+        assert!(secret_envs.contains(&"AUTH_DB_URL".to_owned()));
+        assert!(secret_envs.contains(&"AUTH_STASH_SIGNING_KEY".to_owned()));
+    }
+
+    #[test]
+    fn check_config_is_a_flag_with_no_environment_source() {
+        // A stray environment variable must not be able to turn a running auth
+        // server into a config dump that exits before serving.
+        let command = AuthSettingsSources::command();
+        for id in ["check_config", "check_config_format"] {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .unwrap_or_else(|| panic!("no argument {id}"));
+            assert_eq!(arg.get_env(), None, "{id} must not read the environment");
+        }
+    }
+
+    #[test]
+    fn discovery_is_on_unless_no_config_is_passed() {
+        let plain =
+            AuthSettingsSources::try_parse_from(["zeroship-auth"]).expect("bare parse");
+        assert!(plain.allow_discovery());
+        assert_eq!(plain.overlay_path(), None);
+
+        let suppressed =
+            AuthSettingsSources::try_parse_from(["zeroship-auth", "--no-config"])
+                .expect("no-config parse");
+        assert!(!suppressed.allow_discovery());
+
+        let explicit = AuthSettingsSources::try_parse_from([
+            "zeroship-auth",
+            "--config",
+            "/etc/zeroship/zeroship.toml",
+        ])
+        .expect("config parse");
+        assert_eq!(
+            explicit.overlay_path(),
+            Some(std::path::Path::new("/etc/zeroship/zeroship.toml"))
+        );
+
+        // Does not cover the environment tier; clap merges it into the same
+        // carriers and a process-wide env mutation would race sibling tests.
+    }
+
+    // ---- provider selection -------------------------------------------
+
     #[test]
     fn auth_provider_defaults_to_native() {
-        let mut cfg = test_config();
-        cfg.try_resolve(AuthSection::default())
-            .expect("resolve default auth config");
-
+        let cfg = test_config();
         assert_eq!(cfg.auth_provider(), AuthProviderKind::Native);
         assert!(cfg.supabase_url().is_none());
         assert!(cfg.supabase_anon_key().is_none());
-        assert_eq!(cfg.control_url(), DEFAULT_CONTROL_URL);
+        assert_eq!(cfg.control_url(), "http://localhost:9090");
     }
 
     #[test]
     fn supabase_provider_requires_url_and_anon_key() {
-        let mut cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--auth-provider",
-            "supabase",
-        ]);
+        let err = AuthConfig::try_parse_and_resolve(
+            [
+                "zeroship-auth",
+                "--db-url",
+                "postgres://test",
+                "--provider",
+                "supabase",
+            ],
+            None,
+        )
+        .expect_err("supabase provider must fail closed without GoTrue config");
 
-        let err = cfg
-            .try_resolve(AuthSection::default())
-            .expect_err("supabase provider must fail closed without GoTrue config");
-
-        assert!(err.contains("SUPABASE_URL"), "{err}");
-        assert!(err.contains("SUPABASE_ANON_KEY"), "{err}");
+        assert!(err.contains("ZEROSHIP_AUTH_SUPABASE_URL"), "{err}");
+        assert!(err.contains("ZEROSHIP_AUTH_SUPABASE_ANON_KEY"), "{err}");
     }
 
     #[test]
     fn supabase_provider_resolves_with_required_fields() {
-        let mut cfg = AuthConfig::parse_from([
+        let cfg = AuthConfig::parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
-            "--auth-provider",
+            "--provider",
             "supabase",
             "--supabase-url",
             "https://project.supabase.test",
@@ -1038,9 +1101,6 @@ mod tests {
             "https://control.zeroship.test",
         ]);
 
-        cfg.try_resolve(AuthSection::default())
-            .expect("supabase provider resolves with GoTrue config");
-
         assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
         assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
         assert_eq!(cfg.supabase_anon_key(), Some("anon-test-key"));
@@ -1048,25 +1108,22 @@ mod tests {
     }
 
     #[test]
-    fn auth_file_overlay_supplies_supabase_device_config_when_unset() {
-        let file = TempFile::write(
-            "auth-supabase-overlay.toml",
+    fn the_overlay_supplies_supabase_config_at_the_canonical_paths() {
+        // The generated resolver walks the canonical dotted path itself, so the
+        // overlay keys ARE `auth.provider` / `auth.supabase_url` and the
+        // control-plane URL is the SHARED root-level `control_url`, not a second
+        // `[auth]` copy of it.
+        let cfg = resolve_with(
+            &[],
             r#"
+control_url = "https://control-file.zeroship.test"
+
 [auth]
-auth_provider = "supabase"
+provider = "supabase"
 supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-file-key"
-control_url = "https://control-file.zeroship.test"
 "#,
         );
-
-        let cfg = resolve_from_file(AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--config",
-            file.path.to_str().expect("utf-8 temp path"),
-        ]));
 
         assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
         assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
@@ -1074,30 +1131,45 @@ control_url = "https://control-file.zeroship.test"
         assert_eq!(cfg.control_url(), "https://control-file.zeroship.test");
     }
 
-    // The stash validator lives in `zeroship_core::config`; auth uses the same
-    // unconditional policy as every other binary.
+    #[test]
+    fn the_flag_wins_over_the_overlay_and_untouched_overlay_values_survive() {
+        let cfg = resolve_with(
+            &["--mailer", "resend"],
+            "[auth]\nmailer = \"smtp\"\nsmtp_port = 2525\n",
+        );
+        assert_eq!(cfg.settings.mailer.get(), "resend", "the flag must win");
+        assert_eq!(
+            *cfg.settings.smtp_port.get(),
+            2525,
+            "the untouched overlay value must survive"
+        );
+
+        // Does not cover the environment tier: clap merges it into the same
+        // carrier, and a process-wide env mutation would race sibling tests.
+    }
+
+    // ---- secret strength guards (unchanged policy) ---------------------
+
     use zeroship_core::config::validate_stash_key;
 
     #[test]
     fn stash_key_empty_default_is_rejected() {
         let cfg = test_config();
-        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
+        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
     }
 
     #[test]
     fn stash_key_short_is_rejected() {
         let mut cfg = test_config();
-        cfg.stash_signing_key = "a".repeat(20);
-
-        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
+        cfg.secrets.stash_signing_key = "a".repeat(20);
+        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
     }
 
     #[test]
     fn stash_key_strong_is_accepted() {
         let mut cfg = test_config();
-        cfg.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
-
-        assert!(validate_stash_key(&cfg.stash_signing_key).is_ok());
+        cfg.secrets.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
+        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_ok());
     }
 
     // The key has no clap `default_value`, so no shared sentinel can leak in
@@ -1105,18 +1177,19 @@ control_url = "https://control-file.zeroship.test"
     #[test]
     fn stash_key_default_is_empty() {
         let cfg = test_config();
-        assert_eq!(cfg.stash_signing_key, "");
-        assert!(validate_stash_key(&cfg.stash_signing_key).is_err());
+        assert_eq!(cfg.secrets.stash_signing_key, "");
+        assert!(validate_stash_key(&cfg.secrets.stash_signing_key).is_err());
     }
 
     #[test]
     fn dev_insecure_flag_is_rejected() {
-        let err = AuthConfig::try_parse_from([
+        let err = AuthCli::try_parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
             "--dev-insecure",
         ])
+        .map(|_| ())
         .expect_err("--dev-insecure must not be accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
@@ -1128,44 +1201,37 @@ control_url = "https://control-file.zeroship.test"
         let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
 
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
-        cfg.resolve(AuthSection::default());
-        assert_eq!(cfg.stash_signing_key, "");
-        assert_eq!(cfg.totp_enc_key, "");
+        let cfg = test_config();
+        assert_eq!(cfg.secrets.stash_signing_key, "");
+        assert_eq!(cfg.secrets.totp_enc_key, "");
 
         restore_env("ZEROSHIP_DEV_INSECURE", old);
     }
 
     #[test]
     fn old_insecure_dev_flag_is_rejected() {
-        let err = AuthConfig::try_parse_from([
+        let err = AuthCli::try_parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
             "--insecure-dev",
         ])
+        .map(|_| ())
         .expect_err("--insecure-dev no longer accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // ─── SMTP TLS mode (Bug 2 regression) ────────────────────────────────
-    // The old `--smtp-starttls`/`--relay-smtp-starttls` were bare `bool` flags
-    // with `default_value = "true"`: passing a value (`=false`) errored and the
-    // bare flag could only ever set `true`, so there was NO way to disable TLS
-    // on the command line (only via env). These value-enum flags fix that AND
-    // add the previously-missing `plaintext` arm for dev/test sinks.
+    // ---- SMTP transport mode -------------------------------------------
 
     #[test]
     fn smtp_tls_defaults_to_starttls() {
         let cfg = test_config();
-        assert_eq!(cfg.smtp_tls, SmtpTls::Starttls);
-        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+        assert_eq!(*cfg.settings.smtp_tls.get(), SmtpTls::Starttls);
+        assert_eq!(*cfg.settings.relay_smtp_tls.get(), SmtpTls::Starttls);
     }
 
     #[test]
     fn smtp_tls_accepts_plaintext_value_on_cli() {
-        // Pre-fix `--smtp-starttls=false` errored ("unexpected value"); the
-        // valued enum parses an explicit mode, including the new plaintext arm.
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
             "--db-url",
@@ -1175,8 +1241,8 @@ control_url = "https://control-file.zeroship.test"
             "--relay-smtp-tls",
             "plaintext",
         ]);
-        assert_eq!(cfg.smtp_tls, SmtpTls::Plaintext);
-        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Plaintext);
+        assert_eq!(*cfg.settings.smtp_tls.get(), SmtpTls::Plaintext);
+        assert_eq!(*cfg.settings.relay_smtp_tls.get(), SmtpTls::Plaintext);
     }
 
     #[test]
@@ -1188,54 +1254,64 @@ control_url = "https://control-file.zeroship.test"
             "--smtp-tls=implicit",
             "--relay-smtp-tls=starttls",
         ]);
-        assert_eq!(cfg.smtp_tls, SmtpTls::Implicit);
-        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+        assert_eq!(*cfg.settings.smtp_tls.get(), SmtpTls::Implicit);
+        assert_eq!(*cfg.settings.relay_smtp_tls.get(), SmtpTls::Starttls);
     }
 
     #[test]
     fn smtp_tls_rejects_unknown_mode() {
-        let err = AuthConfig::try_parse_from([
+        let err = AuthCli::try_parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
             "--smtp-tls",
-            "nope",
+            "sslv3",
         ])
-        .expect_err("unknown smtp-tls mode must be rejected");
+        .map(|_| ())
+        .expect_err("unknown TLS mode must be rejected");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
+    fn smtp_tls_overlay_spelling_matches_the_flag_spelling() {
+        // The `Deserialize` impl and `ValueEnum` must accept the SAME token, or
+        // an operator moving a value from the flag into the overlay gets a
+        // startup error for a value the CLI took happily.
+        let cfg = resolve_with(&[], "[auth]\nsmtp_tls = \"plaintext\"\n");
+        assert_eq!(*cfg.settings.smtp_tls.get(), SmtpTls::Plaintext);
+    }
+
+    #[test]
     fn old_smtp_starttls_flag_is_rejected() {
-        // No back-compat: the bare bool flag is gone, replaced by `--smtp-tls`.
-        let err = AuthConfig::try_parse_from([
+        let err = AuthCli::try_parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
             "--smtp-starttls",
         ])
+        .map(|_| ())
         .expect_err("--smtp-starttls no longer accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // Immersive iframe login (design §4.3/§10.1): the `--frame-ancestor-origin`
-    // CLI flag is comma-splittable and repeatable, and a non-empty CLI value
-    // WINS over the `[auth].frame_ancestor_origins` overlay; an empty CLI falls
-    // back to the overlay; empty entries (a stray trailing comma) are dropped.
+    // ---- the frame-ancestor allowlist ----------------------------------
+
     #[test]
     fn frame_ancestor_origins_cli_comma_split_and_repeatable() {
         let cfg = AuthConfig::parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
-            "--frame-ancestor-origin",
+            "--public-url",
+            "https://auth.zeroship.ai",
+            "--frame-ancestor-origins",
             "https://console.zeroship.ai,https://staging.zeroship.ai",
-            "--frame-ancestor-origin",
+            "--frame-ancestor-origins",
             "https://preview.zeroship.ai",
         ]);
         assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec![
+            cfg.frame_ancestor_origins(),
+            [
                 "https://console.zeroship.ai".to_string(),
                 "https://staging.zeroship.ai".to_string(),
                 "https://preview.zeroship.ai".to_string(),
@@ -1245,41 +1321,49 @@ control_url = "https://control-file.zeroship.test"
 
     #[test]
     fn frame_ancestor_origins_default_empty() {
-        let cfg = test_config();
-        assert!(cfg.frame_ancestor_origins.is_empty());
+        assert!(test_config().frame_ancestor_origins().is_empty());
     }
 
     #[test]
     fn frame_ancestor_origins_cli_wins_over_overlay() {
-        let mut cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            // Issuer same-site with the test origins so the I7 guard is a no-op
-            // here; this test isolates CLI-vs-overlay precedence.
-            "--public-url",
-            "https://auth.zeroship.ai",
-            "--frame-ancestor-origin",
-            "https://console.zeroship.ai",
-        ]);
-        cfg.resolve(AuthSection {
-            frame_ancestor_origins: Some(vec!["https://overlay.zeroship.ai".to_string()]),
-            ..AuthSection::default()
-        });
+        let cfg = resolve_with(
+            &[
+                // Issuer same-site with the test origins so the I7 guard is a
+                // no-op here; this test isolates CLI-vs-overlay precedence.
+                "--public-url",
+                "https://auth.zeroship.ai",
+                "--frame-ancestor-origins",
+                "https://console.zeroship.ai",
+            ],
+            "[auth]\nframe_ancestor_origins = [\"https://overlay.zeroship.ai\"]\n",
+        );
         assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://console.zeroship.ai".to_string()],
-            "a non-empty CLI/env value must win over the [auth] overlay"
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
+            "a CLI/env value must win over the [auth] overlay"
         );
     }
 
-    // §6.2 "no wildcards": a misconfigured `*` / `https://*.zeroship.ai` (or any
-    // non-concrete origin) must be REJECTED at config-resolve, so it can never
-    // reach the `frame-ancestors` builder and re-admit every creator app, and so
-    // `static_insert` can never hit its un-serializable fallback (§4.3).
+    #[test]
+    fn frame_ancestor_origins_overlay_used_when_no_flag_is_given() {
+        let cfg = resolve_with(
+            &["--public-url", "https://auth.zeroship.ai"],
+            "[auth]\nframe_ancestor_origins = [\"https://overlay.zeroship.ai\", \"\"]\n",
+        );
+        assert_eq!(
+            cfg.frame_ancestor_origins(),
+            ["https://overlay.zeroship.ai".to_string()],
+            "with no flag the overlay supplies the list (empties dropped)"
+        );
+    }
+
+    // Section 6.2 "no wildcards": a misconfigured `*` / `https://*.zeroship.ai`
+    // (or any non-concrete origin) must be REJECTED at config-resolve, so it can
+    // never reach the `frame-ancestors` builder and re-admit every creator app,
+    // and so `static_insert` can never hit its un-serializable fallback (4.3).
     #[test]
     fn frame_ancestor_origins_rejects_wildcards_and_non_concrete() {
-        let mut cfg = AuthConfig::parse_from([
+        let cfg = AuthConfig::parse_from([
             "zeroship-auth",
             "--db-url",
             "postgres://test",
@@ -1287,15 +1371,14 @@ control_url = "https://control-file.zeroship.test"
             // rejection (not the I7 same-site drop).
             "--public-url",
             "https://auth.zeroship.ai",
-            "--frame-ancestor-origin",
+            "--frame-ancestor-origins",
             // Mixed: one valid origin + several poison entries.
             "https://console.zeroship.ai,https://*.zeroship.ai,*,'self',data:,\
              ftp://console.zeroship.ai,https://a b.zeroship.ai,console.zeroship.ai",
         ]);
-        cfg.resolve(AuthSection::default());
         assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://console.zeroship.ai".to_string()],
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
             "only the concrete http(s) origin survives; wildcards / keywords / \
              bad schemes / space-bearing tokens are dropped"
         );
@@ -1303,21 +1386,124 @@ control_url = "https://control-file.zeroship.test"
 
     #[test]
     fn frame_ancestor_origins_rejects_wildcards_from_overlay_too() {
-        let mut cfg = test_config(); // no CLI value → overlay path
-        // Same-site issuer so this test isolates wildcard/keyword rejection.
-        cfg.public_url = "https://auth.zeroship.ai".to_string();
-        cfg.resolve(AuthSection {
-            frame_ancestor_origins: Some(vec![
-                "https://*.zeroship.ai".to_string(), // wildcard — dropped
-                "https://console.zeroship.ai".to_string(), // kept
-                "'none'".to_string(),                // CSP keyword — dropped
-            ]),
-            ..AuthSection::default()
-        });
+        let cfg = resolve_with(
+            // Same-site issuer so this test isolates wildcard/keyword rejection.
+            &["--public-url", "https://auth.zeroship.ai"],
+            r#"
+[auth]
+frame_ancestor_origins = [
+  "https://*.zeroship.ai",
+  "https://console.zeroship.ai",
+  "'none'",
+]
+"#,
+        );
         assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://console.zeroship.ai".to_string()],
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
             "the overlay path applies the same wildcard/keyword rejection"
+        );
+    }
+
+    // I7 (latent guard): the SameSite=Strict `__Host-zsidp_csrf` cookie reaches
+    // the in-frame POST only when the framing (console) origin is SAME-SITE
+    // (same registrable domain / eTLD+1) with the auth issuer host. A
+    // cross-registrable-domain console silently breaks framed login (cookie
+    // withheld) and tempts a `Strict->None` downgrade that re-opens cross-site
+    // CSRF. The resolve guard MUST drop any frame-ancestor origin that is not
+    // same-site with `public_url`'s host, so the relaxed `frame-ancestors` never
+    // admits a non-same-site embedder (it falls back to popup / strict default).
+    #[test]
+    fn frame_ancestor_origins_drops_non_same_site_with_issuer() {
+        let cfg = resolve_with(
+            // Concrete prod issuer host: registrable domain `zeroship.ai`.
+            &["--public-url", "https://auth.zeroship.ai"],
+            r#"
+[auth]
+frame_ancestor_origins = [
+  # Same-site with the issuer (same registrable domain) - KEPT.
+  "https://console.zeroship.ai",
+  # Concrete + wildcard-free, but a DIFFERENT registrable domain - NOT
+  # same-site, so the Strict CSRF cookie would be withheld in the frame.
+  "https://console.zeroship-eu.com",
+  # A look-alike suffix that merely CONTAINS the issuer domain as a
+  # substring but is a different registrable domain - dropped.
+  "https://console.zeroship.ai.evil.com",
+]
+"#,
+        );
+        assert_eq!(
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
+            "only the origin same-site (eTLD+1) with the auth issuer survives; \
+             cross-registrable-domain consoles are dropped (relax -> popup)"
+        );
+    }
+
+    // The same-site guard also applies on the CLI path (a CLI value wins over
+    // the overlay but is still subject to the same-site drop).
+    #[test]
+    fn frame_ancestor_origins_cli_drops_non_same_site() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--public-url",
+            "https://auth.zeroship.ai",
+            "--frame-ancestor-origins",
+            "https://console.zeroship.ai,https://attacker.example.com",
+        ]);
+        assert_eq!(
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
+            "a non-same-site CLI origin is dropped by the issuer-same-site guard"
+        );
+    }
+
+    // Dev loopback: issuer host `localhost`; a `localhost` console (any port) is
+    // same-site, but a real registrable-domain console is not.
+    #[test]
+    fn frame_ancestor_origins_loopback_issuer_keeps_localhost_only() {
+        // public_url defaults to http://localhost:9092.
+        let cfg = resolve_with(
+            &[],
+            r#"
+[auth]
+frame_ancestor_origins = ["http://localhost:5173", "https://console.zeroship.ai"]
+"#,
+        );
+        assert_eq!(
+            cfg.frame_ancestor_origins(),
+            ["http://localhost:5173".to_string()],
+            "with a loopback issuer only localhost consoles are same-site"
+        );
+    }
+
+    // The filter is the point of `AuthConfig` existing. This pins that the
+    // accessor every consumer reads is the FILTERED list while the generated
+    // declaration still carries the raw one, so a future refactor that wires a
+    // consumer straight to `settings.frame_ancestor_origins` shows up here as a
+    // visible difference rather than as a silently widened CSP header.
+    #[test]
+    fn frame_ancestor_origins_are_filtered_before_any_consumer_sees_them() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--public-url",
+            "https://auth.zeroship.ai",
+            "--frame-ancestor-origins",
+            "https://console.zeroship.ai,https://*.zeroship.ai,https://attacker.example.com",
+        ]);
+        assert_eq!(
+            cfg.settings.frame_ancestor_origins.get().len(),
+            3,
+            "the declaration keeps the raw operator input"
+        );
+        assert_eq!(
+            cfg.frame_ancestor_origins(),
+            ["https://console.zeroship.ai".to_string()],
+            "the accessor is fail-closed filtered"
         );
     }
 
@@ -1351,99 +1537,6 @@ control_url = "https://control-file.zeroship.test"
         }
     }
 
-    #[test]
-    fn frame_ancestor_origins_overlay_used_when_cli_empty() {
-        let mut cfg = test_config(); // no --frame-ancestor-origin
-        // Same-site issuer so this test isolates the empty-CLI→overlay fallback.
-        cfg.public_url = "https://auth.zeroship.ai".to_string();
-        cfg.resolve(AuthSection {
-            frame_ancestor_origins: Some(vec![
-                "https://overlay.zeroship.ai".to_string(),
-                String::new(), // dropped
-            ]),
-            ..AuthSection::default()
-        });
-        assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://overlay.zeroship.ai".to_string()],
-            "an empty CLI value must fall back to the [auth] overlay (empties dropped)"
-        );
-    }
-
-    // I7 (latent guard): the SameSite=Strict `__Host-zsidp_csrf` cookie reaches
-    // the in-frame POST only when the framing (console) origin is SAME-SITE
-    // (same registrable domain / eTLD+1) with the auth issuer host. A
-    // cross-registrable-domain console silently breaks framed login (cookie
-    // withheld) and tempts a `Strict→None` downgrade that re-opens cross-site
-    // CSRF. The resolve guard MUST drop any frame-ancestor origin that is not
-    // same-site with `public_url`'s host, so the relaxed `frame-ancestors` never
-    // admits a non-same-site embedder (it falls back to popup / strict default).
-    #[test]
-    fn frame_ancestor_origins_drops_non_same_site_with_issuer() {
-        let mut cfg = test_config();
-        // Concrete prod issuer host: registrable domain `zeroship.ai`.
-        cfg.public_url = "https://auth.zeroship.ai".to_string();
-        cfg.resolve(AuthSection {
-            frame_ancestor_origins: Some(vec![
-                // Same-site with the issuer (same registrable domain) — KEPT.
-                "https://console.zeroship.ai".to_string(),
-                // Concrete + wildcard-free, but a DIFFERENT registrable domain —
-                // NOT same-site, so the Strict CSRF cookie would be withheld in
-                // the frame. MUST be dropped.
-                "https://console.zeroship-eu.com".to_string(),
-                // A look-alike suffix that merely *contains* the issuer domain as
-                // a substring but is a different registrable domain — dropped.
-                "https://console.zeroship.ai.evil.com".to_string(),
-            ]),
-            ..AuthSection::default()
-        });
-        assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://console.zeroship.ai".to_string()],
-            "only the origin same-site (eTLD+1) with the auth issuer survives; \
-             cross-registrable-domain consoles are dropped (relax → popup)"
-        );
-    }
-
-    // The same-site guard also applies on the CLI path (CLI value wins over the
-    // overlay but is still subject to the same-site drop).
-    #[test]
-    fn frame_ancestor_origins_cli_drops_non_same_site() {
-        let mut cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--public-url",
-            "https://auth.zeroship.ai",
-            "--frame-ancestor-origin",
-            "https://console.zeroship.ai,https://attacker.example.com",
-        ]);
-        cfg.resolve(AuthSection::default());
-        assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["https://console.zeroship.ai".to_string()],
-            "a non-same-site CLI origin is dropped by the issuer-same-site guard"
-        );
-    }
-
-    // Dev loopback: issuer host `localhost`; a `localhost` console (any port) is
-    // same-site, but a real registrable-domain console is not.
-    #[test]
-    fn frame_ancestor_origins_loopback_issuer_keeps_localhost_only() {
-        let mut cfg = test_config(); // public_url defaults to http://localhost:9092
-        cfg.resolve(AuthSection {
-            frame_ancestor_origins: Some(vec![
-                "http://localhost:5173".to_string(),         // same-site (localhost)
-                "https://console.zeroship.ai".to_string(),   // not same-site
-            ]),
-            ..AuthSection::default()
-        });
-        assert_eq!(
-            cfg.frame_ancestor_origins,
-            vec!["http://localhost:5173".to_string()],
-            "with a loopback issuer only localhost consoles are same-site"
-        );
-    }
 
     #[test]
     fn same_site_predicate_matches_real_topologies() {

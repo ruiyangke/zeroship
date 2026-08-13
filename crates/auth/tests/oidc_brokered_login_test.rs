@@ -131,8 +131,8 @@ impl Fixture {
             b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         );
         write_owner_only(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-        cfg.refresh_hash_key_file = Some(hash_key_file);
-        cfg.refresh_idem_key_file = Some(idem_key_file);
+        cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
+        cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
         let cfg = Arc::new(cfg);
         let cfg_state = cfg.clone();
         let db_state = db.clone();

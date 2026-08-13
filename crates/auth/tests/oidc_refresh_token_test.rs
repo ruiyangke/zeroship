@@ -111,8 +111,8 @@ impl Fixture {
         write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
 
         let mut cfg = test_auth_config(&db_url);
-        cfg.refresh_hash_key_file = Some(hash_key_file);
-        cfg.refresh_idem_key_file = Some(idem_key_file);
+        cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
+        cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
         let cfg = Arc::new(cfg);
         let cfg_state = cfg.clone();
         let db_state = db.clone();

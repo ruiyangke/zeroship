@@ -32,7 +32,10 @@ use zeroship_core::oidc_verify::JwksCache;
 
 mod common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
-use common::{location, native_authorize_return_to, read_set_cookie, test_auth_config, CookieJar};
+use common::{
+    location, native_authorize_return_to, read_set_cookie, test_auth_config,
+    test_auth_config_with, CookieJar,
+};
 
 #[ntex::test]
 async fn google_federation_creates_new_user() {
@@ -84,20 +87,30 @@ async fn google_federation_creates_new_user() {
     //    callback we drive. Since we DON'T follow the redirect to a
     //    real browser, we don't need that URL to actually resolve.
     //    We use the auth_base URL after-the-fact.
-    let mut cfg_inner = test_auth_config(&db_url);
-    cfg_inner.google_client_id = Some("mock-google-client".into());
-    cfg_inner.google_client_secret = Some("mock-google-secret".into());
-    // Placeholder redirect — the actual value only matters for the
+        // Placeholder redirect — the actual value only matters for the
     // upstream `/authorize` redirect step, which we DON'T follow to a
     // real Google. The mock will dutifully echo whatever we sent in
     // the `redirect_uri` query param.
-    cfg_inner.google_redirect_uri = "http://placeholder/oauth/google/callback".to_string();
-    cfg_inner.google_auth_url = mock.google_auth_url();
-    cfg_inner.google_token_url = mock.google_token_url();
-    cfg_inner.google_jwks_url = mock.google_jwks_url();
-    cfg_inner.google_issuer = mock.google_issuer();
+    let mut cfg_inner = test_auth_config_with(
+        &db_url,
+        &[
+            "--google-client-id",
+            "mock-google-client",
+            "--google-redirect-uri",
+            "http://placeholder/oauth/google/callback",
+            "--google-auth-url",
+            &mock.google_auth_url(),
+            "--google-token-url",
+            &mock.google_token_url(),
+            "--google-jwks-url",
+            &mock.google_jwks_url(),
+            "--google-issuer",
+            &mock.google_issuer(),
+        ],
+    );
+    cfg_inner.secrets.google_client_secret = Some("mock-google-secret".into());
     let cfg = Arc::new(cfg_inner);
-    let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
+    let google_jwks = Arc::new(JwksCache::new(cfg.settings.google_jwks_url.get()));
 
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
@@ -313,16 +326,26 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
     .detach();
     let pg = Arc::new(pg_client);
 
-    let mut cfg_inner = test_auth_config(&db_url);
-    cfg_inner.google_client_id = Some("mock-google-client".into());
-    cfg_inner.google_client_secret = Some("mock-google-secret".into());
-    cfg_inner.google_redirect_uri = "http://placeholder/oauth/google/callback".to_string();
-    cfg_inner.google_auth_url = mock.google_auth_url();
-    cfg_inner.google_token_url = mock.google_token_url();
-    cfg_inner.google_jwks_url = mock.google_jwks_url();
-    cfg_inner.google_issuer = mock.google_issuer();
+        let mut cfg_inner = test_auth_config_with(
+        &db_url,
+        &[
+            "--google-client-id",
+            "mock-google-client",
+            "--google-redirect-uri",
+            "http://placeholder/oauth/google/callback",
+            "--google-auth-url",
+            &mock.google_auth_url(),
+            "--google-token-url",
+            &mock.google_token_url(),
+            "--google-jwks-url",
+            &mock.google_jwks_url(),
+            "--google-issuer",
+            &mock.google_issuer(),
+        ],
+    );
+    cfg_inner.secrets.google_client_secret = Some("mock-google-secret".into());
     let cfg = Arc::new(cfg_inner);
-    let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
+    let google_jwks = Arc::new(JwksCache::new(cfg.settings.google_jwks_url.get()));
 
     let cfg_state = cfg.clone();
     let db_state = pg.clone();

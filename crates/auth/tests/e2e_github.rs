@@ -29,7 +29,7 @@ use zeroship_auth::store::users;
 
 mod common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
-use common::{location, read_set_cookie, test_auth_config, CookieJar};
+use common::{location, read_set_cookie, test_auth_config_with, CookieJar};
 
 const TEST_STASH_KEY: &[u8] = b"test-stash-key-not-for-prod-32bytes!";
 
@@ -91,14 +91,24 @@ impl NativeGithubFixture {
         .detach();
         let pg = Arc::new(pg_client);
 
-        let mut cfg_inner = test_auth_config(&db_url);
-        cfg_inner.github_client_id = Some("mock-github-client".into());
-        cfg_inner.github_client_secret = Some("mock-github-secret".into());
-        cfg_inner.github_redirect_uri = "http://placeholder/oauth/github/callback".to_string();
-        cfg_inner.github_authorize_url = mock.github_authorize_url();
-        cfg_inner.github_token_url = mock.github_token_url();
-        cfg_inner.github_user_url = mock.github_user_url();
-        cfg_inner.github_emails_url = mock.github_emails_url();
+        let mut cfg_inner = test_auth_config_with(
+            &db_url,
+            &[
+                "--github-client-id",
+                "mock-github-client",
+                "--github-redirect-uri",
+                "http://placeholder/oauth/github/callback",
+                "--github-authorize-url",
+                &mock.github_authorize_url(),
+                "--github-token-url",
+                &mock.github_token_url(),
+                "--github-user-url",
+                &mock.github_user_url(),
+                "--github-emails-url",
+                &mock.github_emails_url(),
+            ],
+        );
+        cfg_inner.secrets.github_client_secret = Some("mock-github-secret".into());
         let cfg = Arc::new(cfg_inner);
 
         let cfg_state = cfg.clone();

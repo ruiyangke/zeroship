@@ -218,10 +218,16 @@ mod tests {
     /// optional field — so this test breaks loudly if a new required arg
     /// gets added without env defaults.
     fn cfg_with_google() -> AuthConfig {
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
-        cfg.google_client_id = Some("test-client".into());
-        cfg.google_client_secret = Some("test-secret".into());
-        cfg.google_redirect_uri = "https://auth.zeroship.ai/oauth/google/callback".into();
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://x/y",
+            "--google-client-id",
+            "test-client",
+            "--google-redirect-uri",
+            "https://auth.zeroship.ai/oauth/google/callback",
+        ]);
+        cfg.secrets.google_client_secret = Some("test-secret".into());
         cfg
     }
 
@@ -230,7 +236,7 @@ mod tests {
         let cfg = cfg_with_google();
         let start = start_authorize_url(&cfg, None).expect("start");
         assert!(
-            start.url.starts_with(cfg.google_auth_url.as_str()),
+            start.url.starts_with(cfg.settings.google_auth_url.get().as_str()),
             "url base: {}",
             start.url
         );
@@ -288,8 +294,8 @@ mod tests {
 
     #[test]
     fn start_authorize_url_errors_when_client_id_missing() {
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
-        cfg.google_client_id = None;
+        // The compiled default is empty, which IS "no client id".
+        let cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
         let err = start_authorize_url(&cfg, None).expect_err("must fail without client_id");
         assert!(matches!(err, AuthError::Config(_)), "got: {err:?}");
     }

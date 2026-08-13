@@ -454,7 +454,6 @@ fn test_auth_config(db_url: &str) -> AuthConfig {
         "--public-url",
         "http://localhost:0",
     ]);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }
 

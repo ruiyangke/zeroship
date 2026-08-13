@@ -28,7 +28,6 @@ fn test_config() -> Arc<AuthConfig> {
         "--public-url",
         "http://auth.test",
     ]);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     Arc::new(cfg)
 }
 

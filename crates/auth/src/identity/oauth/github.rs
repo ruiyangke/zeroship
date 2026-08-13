@@ -288,10 +288,16 @@ mod tests {
     use clap::Parser;
 
     fn cfg_with_github() -> AuthConfig {
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
-        cfg.github_client_id = Some("test-client".into());
-        cfg.github_client_secret = Some("test-secret".into());
-        cfg.github_redirect_uri = "https://auth.zeroship.ai/oauth/github/callback".into();
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://x/y",
+            "--github-client-id",
+            "test-client",
+            "--github-redirect-uri",
+            "https://auth.zeroship.ai/oauth/github/callback",
+        ]);
+        cfg.secrets.github_client_secret = Some("test-secret".into());
         cfg
     }
 
@@ -308,7 +314,7 @@ mod tests {
         let cfg = cfg_with_github();
         let start = start_authorize_url(&cfg, None).expect("start");
         assert!(
-            start.url.starts_with(cfg.github_authorize_url.as_str()),
+            start.url.starts_with(cfg.settings.github_authorize_url.get().as_str()),
             "url base: {}",
             start.url
         );
@@ -363,8 +369,8 @@ mod tests {
 
     #[test]
     fn start_authorize_url_errors_when_client_id_missing() {
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
-        cfg.github_client_id = None;
+        // The compiled default is empty, which IS "no client id".
+        let cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
         let err = start_authorize_url(&cfg, None).expect_err("must fail without client_id");
         assert!(matches!(err, AuthError::Config(_)), "got: {err:?}");
     }

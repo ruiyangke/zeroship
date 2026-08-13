@@ -98,7 +98,7 @@ impl EnrollFixture {
     /// The at-rest key the handler itself derives, so a secret this test seeds
     /// decrypts under the same key the route uses.
     fn key(&self) -> [u8; 32] {
-        totp::key_from_config(&self.cfg.totp_enc_key).expect("totp enc key")
+        totp::key_from_config(&self.cfg.secrets.totp_enc_key).expect("totp enc key")
     }
 
     /// Seed a PENDING credential and hand back its raw secret.
