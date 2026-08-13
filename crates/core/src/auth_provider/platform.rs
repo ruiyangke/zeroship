@@ -61,10 +61,10 @@ impl PlatformConfig {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PlatformConfigError {
-    #[error("AUTH_PLATFORM_ISSUER is required")]
+    #[error("ZEROSHIP_AUTH_PLATFORM_ISSUER is required")]
     EmptyIssuer,
 
-    #[error("AUTH_PLATFORM_JWKS_URL is required when set")]
+    #[error("ZEROSHIP_AUTH_PLATFORM_JWKS_URL is required when set")]
     EmptyJwksUrl,
 }
 

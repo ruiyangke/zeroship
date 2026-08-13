@@ -210,7 +210,8 @@ fn build_auth_provider(
 ) -> Result<AuthProvider, String> {
     if platform_issuer.trim().is_empty() {
         return Err(
-            "--auth-platform-issuer / AUTH_PLATFORM_ISSUER is required for OAuth bearer verification."
+            "--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER is required for OAuth \
+             bearer verification."
                 .to_string(),
         );
     }
@@ -244,6 +245,8 @@ fn build_pat_issuer(signing_key_file: &str) -> Result<zeroship_authn::PatIssuer,
 mod tests {
     use super::*;
 
+    use zeroship_core::config::GeneratedConfig;
+
     #[test]
     fn pat_signing_key_refuses_missing() {
         let err = build_pat_issuer("").expect_err("missing signing key must fail closed");
@@ -272,6 +275,86 @@ mod tests {
     #[test]
     fn empty_platform_issuer_is_rejected() {
         let error = build_auth_provider("", "").expect_err("missing issuer must fail closed");
-        assert!(error.contains("AUTH_PLATFORM_ISSUER"));
+        assert!(error.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"));
+    }
+
+    /// Every environment variable name `zeroship-migrated` actually reads.
+    ///
+    /// DERIVED, never listed - see the twin of this helper in
+    /// `crates/control/src/main.rs` for why a list would defeat the point.
+    fn env_names_migrated_reads() -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let command = <MigratedCli as clap::CommandFactory>::command();
+        for arg in command.get_arguments() {
+            if let Some(env) = arg.get_env() {
+                names.insert(env.to_string_lossy().into_owned());
+            }
+        }
+        for spec in MigratedSettings::SPECS {
+            if let Some(env) = spec.env_name() {
+                names.insert(env);
+            }
+        }
+        names
+    }
+
+    /// Maximal runs of `[A-Z0-9_]` holding at least one underscore.
+    fn env_like_tokens(text: &str) -> Vec<String> {
+        text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .filter(|token| token.len() >= 4 && token.contains('_'))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn every_startup_diagnostic_names_a_variable_migrated_reads() {
+        // Same defect as control's: the issuer variable gained a ZEROSHIP_
+        // prefix and this diagnostic kept the old spelling, so an operator who
+        // followed it set a variable migrated does not read.
+        //
+        // What this does NOT catch: a diagnostic naming a variable migrated
+        // does read but which is the wrong one for the failure, and any
+        // diagnostic outside the three driven below.
+        let readable = env_names_migrated_reads();
+        assert!(
+            readable.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"),
+            "the derivation itself is broken: the issuer setting is absent"
+        );
+
+        let diagnostics = [
+            build_auth_provider("", "").expect_err("missing issuer must fail closed"),
+            build_pat_issuer("").expect_err("missing signing key must fail closed"),
+            build_policy_config("", 1).map(|_| ()).expect_err("missing seal key must fail closed"),
+        ];
+        for diagnostic in diagnostics {
+            let tokens = env_like_tokens(&diagnostic);
+            assert!(
+                !tokens.is_empty(),
+                "diagnostic names no variable at all: {diagnostic:?}"
+            );
+            for token in tokens {
+                assert!(
+                    readable.contains(&token),
+                    "diagnostic {diagnostic:?} tells the operator to set {token}, \
+                     which zeroship-migrated does not read"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_diagnostic_check_rejects_a_variable_migrated_does_not_read() {
+        // One-variable control for the test above: same scanner, same readable
+        // set, one thing changed - a name nothing declares.
+        let readable = env_names_migrated_reads();
+        assert_eq!(
+            env_like_tokens("set AUTH_PLATFORM_ISSUER first"),
+            vec!["AUTH_PLATFORM_ISSUER".to_owned()],
+            "the token scanner must see the unprefixed name"
+        );
+        assert!(
+            !readable.contains("AUTH_PLATFORM_ISSUER"),
+            "the unprefixed spelling must not be a name migrated reads"
+        );
     }
 }
