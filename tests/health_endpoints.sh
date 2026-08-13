@@ -50,7 +50,7 @@
 # Usage:
 #   ./tests/health_endpoints.sh
 #
-# Requires: docker, openssl, curl; a release build of zeroship-control,
+# Requires: docker, openssl, curl, lsof; a release build of zeroship-control,
 #   zeroship-gate, zeroship-worker, zeroship-auth, zeroship-migrated and
 #   zeroship-platform-migrate.
 # ============================================================================
@@ -95,15 +95,27 @@ trap cleanup EXIT
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null; }
 
 # The whole contract for one service, in its healthy state.
+#
+# The third arm does NOT assert a literal 404. Four of the five services answer
+# an unrouted path with 404, but the gateway hands anything it does not
+# recognise to its subdomain catch-all, which answers 400 for a bare
+# `localhost` Host. Hardcoding 404 measured that quirk rather than the deletion
+# and failed on the gateway alone. Comparing `/health` against a path that was
+# NEVER registered asserts the thing that actually matters - `/health` is no
+# longer special-cased - and says it identically for all five.
 assert_healthy_pair() {
-  local name="$1" base="$2" c
+  local name="$1" base="$2" c gone unknown
   c="$(code "$base/healthz")"
   [ "$c" = "200" ] && pass "$name /healthz 200" || fail "$name /healthz expected 200, got $c"
   c="$(code "$base/readyz")"
   [ "$c" = "200" ] && pass "$name /readyz 200" || fail "$name /readyz expected 200, got $c"
-  c="$(code "$base/health")"
-  [ "$c" = "404" ] && pass "$name /health is gone (404)" \
-    || fail "$name /health should have been deleted, got $c"
+  gone="$(code "$base/health")"
+  unknown="$(code "$base/zz-never-a-route")"
+  if [ "$gone" != "200" ] && [ "$gone" = "$unknown" ]; then
+    pass "$name /health is gone (answers $gone, same as an unregistered path)"
+  else
+    fail "$name /health should answer like an unregistered path; got $gone vs $unknown"
+  fi
 }
 
 echo "=== Build check ==="
@@ -115,7 +127,45 @@ pass "all five service binaries present"
 
 echo ""
 echo "=== Stack: control + worker + gateway ==="
-stack_up || { fail "stack_up failed"; exit 1; }
+# stack_workspace + stack_pg_up rather than stack_up: stack_up's preflight
+# requires node and the workspace `jose` because it can mint PATs, and nothing
+# in this harness authenticates anything. Booting the three binaries here keeps
+# the health contract testable on a checkout that has never run `pnpm install`.
+stack_workspace || { fail "stack_workspace failed"; exit 1; }
+stack_pg_up || { fail "stack_pg_up failed"; exit 1; }
+
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
+         $MIGRATED_PORT $AUTH_PORT $GATEWAY_DOWN_PORT; do
+  lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+done
+
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  > "$WORK/control.log" 2>&1 &
+EXTRA_PIDS+=($!)
+for _ in $(seq 1 30); do
+  [ "$(code "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz")" = "200" ] && break; sleep 1
+done
+
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+EXTRA_PIDS+=($!)
+for _ in $(seq 1 30); do
+  [ "$(code "http://localhost:$ZEROSHIP_WORKER_PORT/readyz")" = "200" ] && break; sleep 1
+done
+
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
+  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --signing-key-file "$WORK/signing-key.pem" \
+  --gateway-broker-secret-file "$WORK/gate-secret" \
+  > "$WORK/gate.log" 2>&1 &
+EXTRA_PIDS+=($!)
+for _ in $(seq 1 30); do
+  [ "$(code "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz")" = "200" ] && break; sleep 1
+done
 
 echo ""
 echo "=== Stack: migrated + auth ==="
