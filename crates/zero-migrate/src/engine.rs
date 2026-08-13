@@ -436,17 +436,31 @@ impl MigrationEngine {
         approval: Approval,
         exec_cfg: &ExecutorConfig,
     ) -> Result<AggregateOutcome, EngineError> {
-        backend
-            .ensure_journal(exec_cfg)
-            .await
-            .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+        // Lock BEFORE bootstrapping, so the project lock serializes the journal
+        // bootstrap as well. Bootstrapping first leaves the one window nothing
+        // serializes: on a first deploy the journal objects do not exist yet, so two
+        // callers both find them absent and both try to create them.
+        //
+        // The same ordering on the addon's deploy verbs raced a real PostgreSQL
+        // server three times out of three, surfacing raw catalog errors that read
+        // like corruption. This entry point is not reachable from the CLI on
+        // PostgreSQL - the only napi caller is the SQLite one - so the fix here is
+        // for parity and for Rust callers driving a server backend directly.
         backend.acquire_project_lock(exec_cfg).await?;
 
-        let result = self
-            .deploy_envelopes_locked(
+        let result = async {
+            // Inside the bracket: the release below must run even when the bootstrap
+            // fails, or a failed bootstrap would leak the lock.
+            backend
+                .ensure_journal(exec_cfg)
+                .await
+                .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+            self.deploy_envelopes_locked(
                 envelopes, backend, policy, dialect, project, app, registry, approval, exec_cfg,
             )
-            .await;
+            .await
+        }
+        .await;
         let release = backend.release_project_lock(exec_cfg).await;
         match (result, release) {
             (Ok(outcome), Ok(())) => Ok(outcome),
