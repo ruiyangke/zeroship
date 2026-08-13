@@ -81,6 +81,7 @@ export function KeywordsPanel({
         loadingLabel="Loading keywords..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="No keywords have been defined for this tracker yet."
+        emptyTone="inline"
       >
         {(keywords) => (
           <div className="keyword-picker">

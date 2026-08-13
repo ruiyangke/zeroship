@@ -47,6 +47,7 @@ export function CcPanel({ bugId }: { bugId: string }) {
         loadingLabel="Loading CC list..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="Nobody is CC'd."
+        emptyTone="inline"
       >
         {(rows) => (
           <ul className="cc-list">

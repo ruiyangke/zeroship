@@ -258,12 +258,27 @@ tbody tr:hover { background: var(--surface-2); }
   align-items: start;
 }
 .bug-detail-main, .bug-detail-side { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
-.fields-panel, .comments-panel, .attachments-panel, .relations-panel, .flags-panel, .keywords-panel, .cc-panel {
+/* Every panel on the bug page gets the same chrome, selected STRUCTURALLY.
+   This was a hand-written list of seven class names, and it had simply
+   grown stale: see-also, votes and security were missing, so those three
+   floated unstyled beside carded neighbours in the same grid row. A list
+   you have to remember to extend is the defect -- the omission is just how
+   it showed up. Adding a panel now inherits the chrome by position. */
+.fields-panel,
+.comments-panel,
+.bug-detail-extras > section {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 1rem;
 }
+
+/* Note on what is deliberately NOT here: a rule shrinking the empty state
+   inside these panels. Reaching into `.zs-empty-state` would restyle the
+   design system from the app again -- the exact thing the label and th rules
+   above were removed for. A panel that wants a quieter empty case asks
+   AsyncSection for one (`tone="inline"`), so the component decides how small
+   is small. */
 
 /* ── comments ────────────────────────────────────────────────────────── */
 .comment-list { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
@@ -560,3 +575,20 @@ tbody tr:hover { background: var(--surface-2); }
   background: transparent;
 }
 .status-control-row { flex-wrap: wrap; gap: 0.5rem; }
+
+/* The bug's related content: files, links, watchers, flags.
+   Two-across inside the main column rather than one stack in the rail.
+   Measured before moving them: these nine panels were 1856px tall inside a
+   352px rail, against 747px of actual conversation -- the metadata column
+   was four times the height of the thing the page is about. */
+.bug-detail-extras {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: start;
+}
+.bug-detail-extras > section {
+  margin: 0;
+  min-width: 0;
+}

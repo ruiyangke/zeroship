@@ -24,10 +24,31 @@ export function Loading({ label = "Loading..." }: { label?: string }) {
 export function EmptyState({
   title,
   hint,
+  tone = "block",
 }: {
   title: string;
   hint?: ReactNode;
+  /**
+   * "block" is the page-level empty state: a centred illustration-scale
+   * heading, right when a whole list has nothing in it.
+   *
+   * "inline" is for a panel. The bug page carries nine small panels side by
+   * side, and most of them are empty on most bugs -- no keywords, no votes,
+   * no dependencies. Rendering "No keywords have been defined for this
+   * tracker yet." as a centred heading inside a 280px card made an ordinary
+   * state look like a failure, nine times over. Here the empty case is an
+   * aside, so it says its piece in one quiet line.
+   */
+  tone?: "block" | "inline";
 }) {
+  if (tone === "inline") {
+    return (
+      <p className="state-hint small">
+        {title}
+        {hint ? <> {hint}</> : null}
+      </p>
+    );
+  }
   // Ergonomic props only. The block composes rather than suppresses, so
   // passing a title prop AND a <Title> child renders two headings.
   return <UiEmptyState title={title} description={hint} />;
@@ -78,6 +99,7 @@ export function AsyncSection<T>({
   isEmpty,
   emptyTitle,
   emptyHint,
+  emptyTone,
   children,
 }: {
   // The shared AsyncState, not a re-spelling of it. This was an inline copy
@@ -89,12 +111,16 @@ export function AsyncSection<T>({
   isEmpty?: (data: T) => boolean;
   emptyTitle?: string;
   emptyHint?: ReactNode;
+  /** Passed through to EmptyState -- "inline" for small side panels. */
+  emptyTone?: "block" | "inline";
   children: (data: T, refreshing: boolean) => ReactNode;
 }) {
   if (state.status === "loading") return <Loading label={loadingLabel} />;
   if (state.status === "error") return <ErrorState error={state.error} onRetry={onRetry} />;
   if (isEmpty?.(state.data)) {
-    return <EmptyState title={emptyTitle ?? "Nothing here yet"} hint={emptyHint} />;
+    return (
+      <EmptyState title={emptyTitle ?? "Nothing here yet"} hint={emptyHint} tone={emptyTone} />
+    );
   }
   // The refreshing flag reaches the child rather than being swallowed here.
   // A section that knows it is reloading can mark itself busy in place; the

@@ -176,6 +176,7 @@ export function AttachmentsPanel({ bugId }: { bugId: string }) {
         loadingLabel="Loading attachments..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="No attachments yet."
+        emptyTone="inline"
       >
         {(attachments) => (
           <ul className="attachment-list">

@@ -57,6 +57,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
         loadingLabel="Loading dependencies..."
         isEmpty={(data) => data.nodes.length <= 1}
         emptyTitle="No dependencies."
+        emptyTone="inline"
         emptyHint="This bug doesn't block, or depend on, any other bug."
       >
         {(graph) => {
@@ -140,6 +141,7 @@ export function DuplicatesPanel({ bugId, duplicateOfId }: { bugId: string; dupli
         loadingLabel="Loading duplicates..."
         isEmpty={() => (cluster?.length ?? 0) === 0}
         emptyTitle="No known duplicates."
+        emptyTone="inline"
       >
         {() => (
           <ul>

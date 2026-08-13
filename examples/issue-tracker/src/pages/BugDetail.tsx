@@ -123,6 +123,32 @@ export function BugDetailPage({ id }: { id: string }) {
               the rail. */}
           <div className="bug-detail-main">
             <CommentsPanel bugId={id} />
+            {/* Everything below is about the bug WITHOUT being metadata about
+                it: files, links to other bugs, who is watching, what is
+                pending review. They lived in the rail, where measurement put
+                them at 1856px stacked inside a 352px column -- a column whose
+                whole job is to stay glanceable. Here they get the main
+                column's width and pair up two-across instead of forming one
+                long ribbon. */}
+            <div className="bug-detail-extras">
+              <AttachmentsPanel bugId={id} />
+              <CcPanel bugId={id} />
+              <DependenciesPanel bugId={id} />
+              <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
+              <SeeAlsoPanel bugId={id} />
+              <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
+              {/* No `activities` prop: the panel reads real flags from
+                  flags.list instead of replaying the bug's history. */}
+              <FlagsPanel bugId={id} flagTypes={productDetail?.flagTypes ?? null} onChanged={reload} />
+              <VotesPanel
+                bugId={id}
+                voteCount={detail.bug.voteCount}
+                maxVotesPerBug={productDetail?.product.maxVotesPerBug ?? 0}
+                votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
+                onChanged={reload}
+              />
+              <SecurityPanel bugId={id} onChanged={reload} />
+            </div>
           </div>
           <Stack className="bug-detail-side" gap={3}>
             <FieldsPanel
@@ -139,27 +165,6 @@ export function BugDetailPage({ id }: { id: string }) {
               fetchProductDetail={(pid) => toPromise(getProduct({ id: pid }))}
               onUpdated={() => reload()}
             />
-            <VotesPanel
-              bugId={id}
-              voteCount={detail.bug.voteCount}
-              maxVotesPerBug={productDetail?.product.maxVotesPerBug ?? 0}
-              votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
-              onChanged={reload}
-            />
-            <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
-            {/* No `activities` prop: the panel reads real flags from
-                flags.list instead of replaying the bug's history. */}
-            <FlagsPanel
-              bugId={id}
-              flagTypes={productDetail?.flagTypes ?? null}
-              onChanged={reload}
-            />
-            <SecurityPanel bugId={id} onChanged={reload} />
-            <SeeAlsoPanel bugId={id} />
-            <DependenciesPanel bugId={id} />
-            <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
-            <CcPanel bugId={id} />
-            <AttachmentsPanel bugId={id} />
           </Stack>
         </div>
       )}
