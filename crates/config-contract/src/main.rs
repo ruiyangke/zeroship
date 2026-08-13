@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use zeroship_config_contract::inventory::{
     collect_rust_sources, collect_tracked_rust_sources, format_tsv, scan_sources, OverlayLeaves,
 };
 use zeroship_config_contract::metadata::check_workspace;
-use zeroship_config_contract::raw_env::{scan_sources_by_role, RawEnvViolation};
+use zeroship_config_contract::raw_env::{collect_declared_keys, scan_sources_by_role, RawEnvViolation};
 
 const USAGE: &str = "usage: zeroship-config-contract \
 [check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR] \
@@ -37,6 +37,33 @@ fn check_metadata(manifest: Option<PathBuf>) {
             }
             std::process::exit(1);
         }
+    }
+}
+
+/// Print every declared key and the per-class totals.
+fn report_declared_keys(sources: &[(String, String)]) {
+    let keys = match collect_declared_keys(sources) {
+        Ok(keys) => keys,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("config raw-env: census: {error}");
+            }
+            return;
+        }
+    };
+    let mut classes: BTreeMap<&str, (usize, BTreeSet<&str>)> = BTreeMap::new();
+    for key in &keys {
+        println!("declared\t{}\t{}\t{}", key.class, key.name, key.file);
+        let entry = classes.entry(key.class.as_str()).or_default();
+        entry.0 += 1;
+        entry.1.insert(key.name.as_str());
+    }
+    eprintln!("config raw-env: {} declared key sites", keys.len());
+    for (class, (sites, names)) in classes {
+        eprintln!(
+            "config raw-env: class {class}: {sites} sites, {} distinct names",
+            names.len()
+        );
     }
 }
 
@@ -77,11 +104,7 @@ fn raw_env(args: &[String]) {
 
     match scan_sources_by_role(&sources) {
         Ok(report) => {
-            let mut classes: BTreeMap<&str, usize> = BTreeMap::new();
-            for key in &report.declared_keys {
-                *classes.entry(key.class.as_str()).or_default() += 1;
-                println!("declared\t{}\t{}\t{}", key.class, key.name, key.file);
-            }
+            report_declared_keys(&sources);
             for permitted in &report.permitted_raw {
                 println!("permitted-raw\t-\t-\t{permitted}");
             }
@@ -92,11 +115,13 @@ fn raw_env(args: &[String]) {
                 report.declared_keys.len(),
                 report.permitted_raw.len()
             );
-            for (class, count) in classes {
-                eprintln!("config raw-env: class {class}: {count}");
-            }
         }
         Err(violations) => {
+            // Print the census ANYWAY. A report that withholds the class counts
+            // whenever anything is still unconverted is useless during the
+            // conversion it exists to measure, which is the only time anyone
+            // runs it.
+            report_declared_keys(&sources);
             let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
             for violation in &violations {
                 let kind = match violation {
