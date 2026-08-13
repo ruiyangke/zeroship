@@ -42,6 +42,7 @@ import { connectLivePg, pgUrl } from "./live-db.js";
 import "./addon.js";
 
 const OWNER_APP = "app_backfill_selective";
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
 /** Twenty rows, alternating groups, so the cohort straddles every batch. */
 const ROWS = Array.from({ length: 20 }, (_, index) => ({
@@ -282,5 +283,113 @@ test("a backfill whose predicate matches nothing completes and records nothing",
       )
       .catch(() => {});
     await client.end().catch(() => {});
+  }
+});
+
+test("MySQL: the same selective backfill reaches the same rows", async (ctx) => {
+  // MySQL has its own backfill lowering and its own journal SQL, so nothing the
+  // PostgreSQL arms establish carries over. `e2e-dml.test.ts` does exercise a
+  // MySQL backfill end to end, but its cohort is `column("id").gt(0)` - every
+  // row - which is the same non-selective shape this file exists to go past.
+  //
+  // Running the SAME authored migration as the PostgreSQL arm is the point: it
+  // shows the two engines AGREE, rather than each doing something locally
+  // reasonable with the predicate.
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL selective backfill skipped");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const database = uniqueNamespace("bfselmy");
+  const meta = `${database}_migrations`;
+  const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
+
+  const seed = {
+    name: "seed",
+    default: {
+      up() {
+        table("items").create({
+          columns: {
+            id: t.int().notNull(),
+            grp: t.text().notNull(),
+            val: t.int().notNull(),
+          },
+          primaryKey: ["id"],
+        });
+        table("items").insert({ rows: ROWS });
+      },
+    },
+  } as MigrationModule & { name: string };
+
+  const fill = {
+    name: "fill",
+    default: {
+      up() {
+        table("items").backfill({
+          set: { val: (col) => col("val").add(1) },
+          where: (col) => col("grp").eq("touch"),
+          cursorColumns: ["id"],
+          cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
+          batchSize: 3,
+          name: "fill_touch",
+        });
+      },
+    },
+  } as MigrationModule & { name: string };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    for (const [migration, priors] of [
+      [seed, []],
+      [fill, [seed]],
+    ] as Array<[MigrationModule & { name: string }, (MigrationModule & { name: string })[]]>) {
+      await apply({
+        migration,
+        priorMigrations: priors,
+        priorNameFallbacks: priors.map((prior) => prior.name),
+        ownerApp: OWNER_APP,
+        projectSchema: database,
+        driver: { kind: "mysql", url: MYSQL_URL },
+        registry: priors.length ? { items: OWNER_APP } : {},
+        policy: [charter(database)],
+        approved: true,
+        appliedBy: "backfill-selective-cohort",
+        nameFallback: migration.name,
+      });
+    }
+
+    const [rows] = await admin.query(
+      `SELECT id, grp, val FROM \`${database}\`.items ORDER BY id`,
+    );
+    const observed = rows as Array<{ id: number; grp: string; val: number }>;
+    assert.equal(observed.length, ROWS.length, "no row may be added or lost");
+
+    const missed = observed
+      .filter((row) => row.grp === "touch" && Number(row.val) !== 1)
+      .map((row) => Number(row.id));
+    assert.deepEqual(missed, [], "every selected row must be transformed exactly once");
+
+    const collateral = observed
+      .filter((row) => row.grp === "keep" && Number(row.val) !== 0)
+      .map((row) => Number(row.id));
+    assert.deepEqual(collateral, [], "a row outside the cohort must not be touched");
+
+    const [progress] = await admin.query(
+      `SELECT rows_done FROM \`${meta}\`.schema_backfills`,
+    );
+    const recorded = progress as Array<{ rows_done: number | string }>;
+    assert.equal(recorded.length, 1, "exactly one backfill was recorded");
+    assert.equal(
+      Number(recorded[0].rows_done),
+      SELECTED.length,
+      "the recorded progress must be the size of the cohort, not of the table",
+    );
+  } finally {
+    await admin
+      .query(
+        `DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``,
+      )
+      .catch(() => {});
+    await admin.end().catch(() => {});
   }
 });
