@@ -137,7 +137,11 @@ export function BugResultsTable({
     product: {
       key: "product",
       header: "Product",
-      cell: (bug) => productsById[bug.productId] ?? bug.productId,
+      // A dash, not the id, while the lookup is in flight. The map arrives on
+      // a second request, so falling back to the raw value meant every row
+      // flashed prod_0346En6o4bMYRunhVm0mmX before the names landed -- brief
+      // when idle, long enough to read on a loaded machine.
+      cell: (bug) => productsById[bug.productId] ?? "--",
     },
     summary: {
       key: "summary",
@@ -151,12 +155,12 @@ export function BugResultsTable({
     assignee: {
       key: "assignee",
       header: "Assignee",
-      cell: (bug) => (bug.assigneeId ? usersById[bug.assigneeId] ?? bug.assigneeId : "--"),
+      cell: (bug) => (bug.assigneeId ? usersById[bug.assigneeId] ?? "--" : "--"),
     },
     reporter: {
       key: "reporter",
       header: "Reporter",
-      cell: (bug) => usersById[bug.reporterId] ?? bug.reporterId,
+      cell: (bug) => usersById[bug.reporterId] ?? "--",
     },
     updated: { key: "updated", header: "Updated", cell: (bug) => formatDate(bug.updated_at) },
   };

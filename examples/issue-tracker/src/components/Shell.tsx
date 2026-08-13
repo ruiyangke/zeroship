@@ -21,7 +21,6 @@ import type { CurrentUser } from "./types";
 
 const LINKS: { route: RouteName; label: string; href: string }[] = [
   { route: "bugs", label: "Bugs", href: "#/bugs" },
-  { route: "search", label: "Search", href: "#/search" },
   { route: "dashboard", label: "My dashboard", href: "#/dashboard" },
   { route: "products", label: "Products", href: "#/products" },
   { route: "reports", label: "Reports", href: "#/reports" },

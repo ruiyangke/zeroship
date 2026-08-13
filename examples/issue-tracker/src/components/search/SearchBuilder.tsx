@@ -7,11 +7,11 @@ import {
   quickSearch,
   saveSavedSearch,
   structuredSearch,
-} from "../api";
-import { ALL_BUG_COLUMNS, BugResultsTable, type BugColumnKey } from "../components/BugResultsTable";
-import { AsyncSection, ErrorState, Loading } from "../components/StateViews";
-import { errorMessage, isUnauthenticated, toPromise, useAsync } from "../components/rpc";
-import type { Bug } from "../components/types";
+} from "../../api";
+import { ALL_BUG_COLUMNS, BugResultsTable, type BugColumnKey } from "../BugResultsTable";
+import { AsyncSection, ErrorState, Loading } from "../StateViews";
+import { errorMessage, isUnauthenticated, toPromise, useAsync } from "../rpc";
+import type { Bug } from "../types";
 
 const RESULT_COLUMNS: BugColumnKey[] = ["id", "status", "resolution", "severity", "priority", "summary", "updated"];
 
@@ -61,7 +61,7 @@ function newCondition(): Condition {
   return { id: ++conditionSeq, field: "summary", operator: "contains", value: "" };
 }
 
-function QuickSearchBox() {
+export function QuickSearchBox() {
   const [text, setText] = useState("");
   const [result, setResult] = useState<
     | { status: "idle" }
@@ -140,7 +140,7 @@ function conditionsToWhere(conditions: Condition[]): WhereNode {
   return { op: "and", clauses };
 }
 
-function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
+export function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
   const [conditions, setConditions] = useState<Condition[]>([newCondition()]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -231,7 +231,7 @@ function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
   );
 }
 
-function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }) {
+export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }) {
   const { state, reload } = useAsync(() => listSavedSearches({}), []);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -306,38 +306,3 @@ function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }
   );
 }
 
-export function AdvancedSearchPage() {
-  const [results, setResults] = useState<Bug[] | null>(null);
-  const usersQ = useAsync(() => toPromise(listUsers({ limit: 1 })).catch(() => []), []);
-
-  const authGate = usersQ.state.status === "error" && isUnauthenticated(usersQ.state.error);
-
-  return (
-    <div className="page advanced-search-page">
-      <PageHeader>
-        <PageHeader.Title>Advanced search</PageHeader.Title>
-      </PageHeader>
-      <QuickSearchBox />
-      {authGate ? (
-        <p className="state-hint">Sign in to use the structured field builder and saved searches.</p>
-      ) : (
-        <>
-          <FieldBuilder onResults={setResults} />
-          {results ? (
-            <section>
-              <h2>Results ({results.length})</h2>
-              {results.length === 0 ? (
-                <p className="state-hint small">No bugs match this search.</p>
-              ) : (
-                <BugResultsTable
-                  bugs={results}
-                  columns={ALL_BUG_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter")}
-                />
-              )}
-            </section>
-          ) : null}
-        </>
-      )}
-    </div>
-  );
-}

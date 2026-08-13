@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
 import { useAsync } from "./components/rpc";
-import { AdvancedSearchPage } from "./pages/AdvancedSearch";
 import { BugDetailPage } from "./pages/BugDetail";
 import { BugListPage } from "./pages/BugList";
 import { DashboardPage } from "./pages/Dashboard";
@@ -17,7 +16,6 @@ export type Route =
   | { name: "bugs" }
   | { name: "bug"; id: string }
   | { name: "new-bug" }
-  | { name: "search" }
   | { name: "dashboard" }
   | { name: "products" }
   | { name: "reports" };
@@ -34,8 +32,6 @@ function parseHash(hash: string): Route {
       if (rest[0] === "new") return { name: "new-bug" };
       if (rest[0]) return { name: "bug", id: rest[0] };
       return { name: "bugs" };
-    case "search":
-      return { name: "search" };
     case "dashboard":
       return { name: "dashboard" };
     case "products":
@@ -65,8 +61,6 @@ function renderRoute(route: Route): ReactNode {
       return <BugDetailPage id={route.id} />;
     case "new-bug":
       return <NewBugPage />;
-    case "search":
-      return <AdvancedSearchPage />;
     case "dashboard":
       return <DashboardPage />;
     case "products":

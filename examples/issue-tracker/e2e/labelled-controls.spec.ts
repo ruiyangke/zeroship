@@ -38,7 +38,6 @@ test("no reachable control is missing an accessible name", async ({ page, baseUR
   const pages: [string, string][] = [
     ["bug list", "/#/bugs"],
     ["new bug", "/#/bugs/new"],
-    ["advanced search", "/#/search"],
     ["dashboard", "/#/dashboard"],
     ["products admin", "/#/products"],
     ["reports", "/#/reports"],

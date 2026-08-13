@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Button, Card, Checkbox, Cluster, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import { listProducts, searchBugs } from "../api";
 import {
   ALL_BUG_COLUMNS,
   BugResultsTable,
   type BugColumnKey,
 } from "../components/BugResultsTable";
+import { FieldBuilder } from "../components/search/SearchBuilder";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
 import type { Bug } from "../components/types";
@@ -73,6 +74,12 @@ export function BugListPage() {
   const [offset, setOffset] = useState(0);
   const [columns, setColumns] = useState<BugColumnKey[]>(loadColumns);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Results from the advanced builder REPLACE the filtered list while they
+  // are set. There is no second results page any more: the builder is a modal
+  // over this one, and a search that lands somewhere else is a search whose
+  // result you then have to go and find.
+  const [advanced, setAdvanced] = useState<Bug[] | null>(null);
+  const [builderOpen, setBuilderOpen] = useState(false);
 
   const productsQ = useAsync(() => listProducts({}), []);
 
@@ -176,6 +183,9 @@ export function BugListPage() {
             <Button variant="gray" size="small" onClick={applyFilters}>
               Apply
             </Button>
+            <Button variant="gray" size="small" onClick={() => setBuilderOpen(true)}>
+              Advanced...
+            </Button>
             <Button
               variant="plain"
               size="small"
@@ -255,6 +265,53 @@ export function BugListPage() {
           column you then have to find is an extra hop and can drift out of
           step with which columns are even visible. */}
 
+      {/* The builder, as a modal over this page. */}
+      <Dialog open={builderOpen} onOpenChange={setBuilderOpen}>
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup className="search-builder-popup">
+            <Dialog.Header>
+              <Dialog.Title>Advanced search</Dialog.Title>
+              <Dialog.Description>
+                Build a structured query, or reuse one you saved.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Body>
+              <FieldBuilder
+                onResults={(rows) => {
+                  setAdvanced(rows);
+                  setBuilderOpen(false);
+                }}
+              />
+              {/* No second SavedSearchesPanel here: FieldBuilder renders one
+                  itself, with the CURRENT query bound to it, so adding
+                  another showed the section twice and the lower copy could
+                  only ever save an empty search. */}
+            </Dialog.Body>
+            <Dialog.Footer>
+              <Dialog.Close>Close</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+
+      {advanced ? (
+        <>
+          {/* Says what you are looking at and how to leave it. A results set
+              that silently replaced the list would be indistinguishable from
+              a filter that happened to match those rows. */}
+          <Cluster gap={2} align="center">
+            <span className="state-hint small">
+              Showing {advanced.length} result{advanced.length === 1 ? "" : "s"} from advanced
+              search
+            </span>
+            <Button variant="plain" size="small" onClick={() => setAdvanced(null)}>
+              Back to filters
+            </Button>
+          </Cluster>
+          <BugResultsTable bugs={advanced} columns={columns} caption="Advanced search results" />
+        </>
+      ) : (
       <AsyncSection
         state={state}
         onRetry={reload}
@@ -304,6 +361,7 @@ export function BugListPage() {
           </>
         )}
       </AsyncSection>
+      )}
     </div>
   );
 }

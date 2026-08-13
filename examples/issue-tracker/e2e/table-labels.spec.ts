@@ -82,25 +82,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
     "the dashboard should not print raw ids in any of its three tables",
   ).toBeNull();
 
-  // Advanced search: the quick-search box, which is the second table that was
-  // missing its maps.
-  await page.goto("/#/search");
-  // The quick-search box is identified by its example-syntax placeholder,
-  // read off the page rather than guessed: /quick search/i matched nothing
-  // and the spec died on a fill timeout with no bearing on the assertion.
-  // Scoped to section.quicksearch. The page carries a second "Search" button
-  // for the field builder, so an unscoped role lookup is a strict-mode
-  // violation -- and it fires on the page being RIGHT, not wrong.
-  const quick = page.locator("section.quicksearch");
-  await quick.getByPlaceholder("P1 @alice comp:parser").fill(RUN);
-  await quick.getByRole("button", { name: "Search" }).click();
-  // Waits on the row, not on the product name. This table renders ID / Status
-  // / Resolution / Severity / Priority / Summary / Updated -- it has no
-  // product or assignee column, so the lookups cannot show up in it and
-  // asserting on the product name here fails against a correct page.
-  await expect(quick.locator("tbody tr")).not.toHaveCount(0);
-  expect(
-    ((await quick.textContent()) ?? "").match(RAW_ID)?.[0] ?? null,
-    "advanced search should not print raw ids",
-  ).toBeNull();
+  // The advanced-search page is gone: the builder is a modal over the bug
+  // list now, so there is no second results table to check. The dashboard
+  // assertion above already covers a table that had the same defect.
 });

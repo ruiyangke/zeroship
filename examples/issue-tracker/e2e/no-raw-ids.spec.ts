@@ -31,7 +31,6 @@ const RAW_ID = /\b(prod|comp|vers|mile|user|pws|grp|bug|kw|flag|att|cmt|note)_[A
 const PAGES: [string, string][] = [
   ["bug list", "/#/bugs"],
   ["new bug", "/#/bugs/new"],
-  ["advanced search", "/#/search"],
   ["dashboard", "/#/dashboard"],
   ["products admin", "/#/products"],
   ["reports", "/#/reports"],
