@@ -15,10 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, ValueEnum};
+use clap::{Args, Parser};
 use zeroship_core::config::{
-    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ConfigResolveError,
-    GeneratedConfig, ObservabilityControls, Operational, OverlaySelector,
+    zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
+    ConfigResolveError, GeneratedConfig, ObservabilityControls, Operational, OverlaySelector,
 };
 use zeroship_core::observability::LogFormat;
 use zeroship_mailer::SmtpTls;
@@ -64,12 +64,14 @@ pub struct AuthSettings {
     ///
     /// The canonical name is `auth.provider`, NOT `auth.auth_provider`: the
     /// scope already says `auth`, and the stuttering form would project to
-    /// `ZEROSHIP_AUTH_AUTH_PROVIDER`. Control has its own
-    /// `control.auth_provider` with a DIFFERENT value vocabulary
-    /// (`platform|supabase` there, `native|supabase` here), so the two are
-    /// deliberately separate identities rather than one name meaning two things.
+    /// `ZEROSHIP_AUTH_AUTH_PROVIDER`.
+    ///
+    /// SHARED with control, which verifies the tokens this service's choice
+    /// causes to be issued. It reads the same `ZEROSHIP_AUTH_PROVIDER` and the
+    /// same `AuthProviderKind`; auth serves the provider, control trusts its
+    /// issuer, and neither restates the vocabulary.
     #[arg(value_enum)]
-    #[config(name = "auth.provider", default = AuthProviderKind::Native)]
+    #[config(shared = AUTH_PROVIDER, default = AuthProviderKind::Native)]
     pub provider: Operational<AuthProviderKind>,
 
     /// Supabase Auth / GoTrue base URL used when `--provider=supabase`.
@@ -335,26 +337,6 @@ impl ObservabilityControls for AuthSettings {
 
     fn log_format(&self) -> LogFormat {
         *self.log_format.get()
-    }
-}
-
-/// `Deserialize` is present so the overlay accepts the same spellings the flag
-/// does; `rename_all` makes those spellings `native` and `supabase`, which is
-/// exactly what `clap::ValueEnum` derives from the variant names.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthProviderKind {
-    Native,
-    Supabase,
-}
-
-impl AuthProviderKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Supabase => "supabase",
-        }
     }
 }
 

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::{self, AuditEvent};
-use crate::config::{AuthConfig, AuthProviderKind};
+use crate::config::AuthConfig;
 use crate::csrf;
 use crate::headers;
 use crate::identity::eligibility;
@@ -21,6 +21,7 @@ use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{DevicePage, DeviceScopeView, SupabaseDevicePage};
 use zeroship_authz::Scope;
+use zeroship_core::config::AuthProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {

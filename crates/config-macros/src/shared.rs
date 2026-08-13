@@ -134,6 +134,20 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     // Auth-domain identities. These sit under `auth.` because they configure
     // the auth domain rather than any one binary, and the overlay already
     // carries that table.
+    //
+    // The provider selector is ONE deployment decision seen from two vantage
+    // points: auth SERVES the provider, control VERIFIES its tokens. It used to
+    // be two identities with two value sets (`native|supabase` against
+    // `platform|supabase`) and no mechanism keeping them coherent, so an
+    // operator could set them to disagree and find out at request time. The
+    // typed inner enum is what makes the disagreement unrepresentable; the
+    // shared name is what makes it one operator-visible setting.
+    SharedIdentity {
+        symbol: "AUTH_PROVIDER",
+        canonical: "auth.provider",
+        wrapper: "Operational",
+        inner: "AuthProviderKind",
+    },
     SharedIdentity {
         symbol: "AUTH_PLATFORM_ISSUER",
         canonical: "auth.platform_issuer",

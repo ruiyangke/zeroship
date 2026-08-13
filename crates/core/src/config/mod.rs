@@ -1,6 +1,7 @@
 //! Shared optional file-overlay configuration.
 //!
 //! Split into focused submodules:
+//! - [`auth_kind`] - the one auth-provider vocabulary (`AuthProviderKind`).
 //! - [`file`] — the TOML schema (`FileConfig`, sections, `ConfigError`).
 //! - [`source`] — overlay discovery (`ConfigSource`, `LoadedOverlay`, resolve/load).
 //! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
@@ -16,6 +17,7 @@
 //! [`crate::observability`]; the observability SETTINGS are ordinary generated
 //! `observability.*` declarations owned by each binary's config module.
 
+pub mod auth_kind;
 pub mod bootstrap;
 pub mod declared;
 pub mod env;
@@ -30,6 +32,8 @@ pub use declared::{
     read_declared_env_value, read_process_env_snapshot_value, DeclaredEnvFamily, DeclaredEnvKey,
     DeclaredEnvRead, EnvClass, TestHarness, DECLARED_ENV_READS, PROCESS_ENV_SNAPSHOT,
 };
+
+pub use auth_kind::AuthProviderKind;
 
 pub use bootstrap::{
     bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,
