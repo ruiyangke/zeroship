@@ -435,17 +435,19 @@ fn the_resolved_struct_redacts_its_secret_without_a_hand_written_debug() {
     // struct uses a DERIVED Debug, and the wrapper supplies the redaction.
     // Does not cover: an explicit `expose_secret()` that the caller then prints;
     // the wrapper removes accidental formatting, not deliberate disclosure.
+    const SENTINEL: &str = "postgres://u:supersecretpw@db/zeroship";
+    let overlay = toml::from_str::<toml::Value>(&format!(
+        "[control]\ndatabase_url = {SENTINEL:?}\n"
+    ))
+    .expect("fixture overlay");
+
     let resolved = FixtureControlConfig::resolve_config(
         FixtureControlConfigSources {
             port: Some(8443),
             database_url: None,
+            check_config: false,
         },
-        Some(
-            &toml::from_str::<toml::Value>(
-                "[control]\ndatabase_url = \"postgres://u:supersecretpw@db/zeroship\"\n",
-            )
-            .expect("fixture overlay"),
-        ),
+        Some(&overlay),
     )
     .expect("fixture resolves");
 
@@ -455,5 +457,126 @@ fn the_resolved_struct_redacts_its_secret_without_a_hand_written_debug() {
         !rendered.contains("supersecretpw"),
         "derived Debug leaked secret material: {rendered}"
     );
-    assert!(rendered.contains("<redacted>"));
+    // Not just the whole value: a prefix, and the LENGTH, are leaks too. The
+    // wrapper prints the supplying TIER and nothing measured from the material.
+    for length in 8..=SENTINEL.len() {
+        assert!(
+            !rendered.contains(&SENTINEL[..length]),
+            "derived Debug leaked a {length}-char prefix: {rendered}"
+        );
+    }
+    assert!(!rendered.contains(&SENTINEL.len().to_string()));
+    assert!(rendered.contains("Secret(configured from Toml)"));
+
+    // The one-variable partner: the SAME declaration resolved by a dry run
+    // establishes the same source and holds no material at all. Without this,
+    // "the secret is redacted" would also be true of a resolver that silently
+    // failed to read anything.
+    let checked = FixtureControlConfig::resolve_config(
+        FixtureControlConfigSources {
+            port: Some(8443),
+            database_url: None,
+            check_config: true,
+        },
+        Some(&overlay),
+    )
+    .expect("fixture resolves under a dry run");
+    assert!(checked.database_url.is_configured());
+    assert_eq!(
+        checked.database_url.expose_secret().map(String::as_str),
+        Some(SENTINEL),
+        "an in-memory literal keeps its material so strength guards still run"
+    );
+}
+
+#[test]
+fn a_dry_run_resolves_a_secret_file_reference_without_opening_it() {
+    // The property `--check-config` owes: SOURCE POLICY and FORMAT, no I/O. The
+    // referenced path deliberately does not exist, so a resolver that opened it
+    // could not return Ok - and the boot-mode partner below proves the path is
+    // genuinely unreadable rather than the reference being ignored.
+    // Does not cover: a real binary routing --check-config to this mode. That is
+    // the macro's wiring, asserted end to end by tests/config_check_e2e.sh.
+    let overlay = toml::from_str::<toml::Value>(
+        "[control]\ndatabase_url = \"urn:zeroship:file:/no/such/zeroship/contract/dsn\"\n",
+    )
+    .expect("fixture overlay");
+
+    let checked = FixtureControlConfig::resolve_config(
+        FixtureControlConfigSources {
+            port: Some(8443),
+            database_url: None,
+            check_config: true,
+        },
+        Some(&overlay),
+    )
+    .expect("a dry run must not open the file");
+    assert!(checked.database_url.is_configured());
+    assert_eq!(checked.database_url.expose_secret(), None);
+
+    assert!(
+        FixtureControlConfig::resolve_config(
+            FixtureControlConfigSources {
+                port: Some(8443),
+                database_url: None,
+                check_config: false,
+            },
+            Some(&overlay),
+        )
+        .is_err(),
+        "the same reference on the boot path must fail to read"
+    );
+}
+
+#[test]
+fn a_secret_source_outside_the_supply_set_is_refused_in_both_modes() {
+    // The deleted schemes, through the GENERATED resolver rather than through
+    // the parser directly: an env-to-env alias, a Vault URN and an AWS ARN are
+    // no longer expressible, so they fail source policy in a dry run instead of
+    // passing it and failing at boot.
+    // Does not cover: the same values appearing in a deployment file nothing
+    // reads. That is a tracked-tree search, and Step 6 owns it.
+    for deleted in [
+        "urn:zeroship:env:SOME_OTHER_VAR",
+        "urn:zeroship:vault:secret/data/app",
+        "arn:aws:secretsmanager:us-east-1:123:secret:x",
+    ] {
+        let overlay = toml::from_str::<toml::Value>(&format!(
+            "[control]\ndatabase_url = {deleted:?}\n"
+        ))
+        .expect("fixture overlay");
+        for check_config in [true, false] {
+            let error = FixtureControlConfig::resolve_config(
+                FixtureControlConfigSources {
+                    port: Some(8443),
+                    database_url: None,
+                    check_config,
+                },
+                Some(&overlay),
+            )
+            .expect_err("a deleted scheme must be refused");
+            let message = error.to_string();
+            assert!(message.contains("control.database_url"));
+            assert!(
+                !message.contains(deleted),
+                "the diagnostic echoed the rejected input: {message}"
+            );
+        }
+    }
+
+    // The one-variable partner: the same field, the same table, the one scheme
+    // that survives - and it resolves.
+    let overlay = toml::from_str::<toml::Value>(
+        "[control]\ndatabase_url = \"urn:zeroship:file:/no/such/path\"\n",
+    )
+    .expect("fixture overlay");
+    assert!(FixtureControlConfig::resolve_config(
+        FixtureControlConfigSources {
+            port: Some(8443),
+            database_url: None,
+            check_config: true,
+        },
+        Some(&overlay),
+    )
+    .is_ok());
 }

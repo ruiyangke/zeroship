@@ -1236,7 +1236,9 @@ pub struct ControlSection {
             ["control.database_url", "control.port", "control_key", "origin_scheme"]
         );
         assert_eq!(leaves.join_by_field("database_url"), Some("control.database_url"));
-        assert_eq!(leaves.join_by_field("port"), None);
+        // A field with no leaf joins to nothing, which is what keeps the join a
+        // reported heuristic rather than a guess.
+        assert_eq!(leaves.join_by_field("bind"), None);
     }
 
     #[test]
