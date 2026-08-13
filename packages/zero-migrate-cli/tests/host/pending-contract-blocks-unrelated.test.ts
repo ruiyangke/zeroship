@@ -40,6 +40,15 @@
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only.
 
+// INTERACTS WITH AN ORPHANED CONTRACT, and the pair is worse than either alone.
+// `orphaned-contract-diagnosis.test.ts` pins that a contract whose creator file
+// was deleted can be DIAGNOSED but not discharged from the CLI — `resolve` looks
+// identifiers up in the supplied directory, and the file is gone. Combine the two:
+// such a contract cannot be cleared, and while it stands this refusal blocks every
+// deploy in the directory, not just the renamed table. Whichever is addressed
+// first, the other's severity changes, and neither test can see that from where it
+// sits.
+
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

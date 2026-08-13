@@ -21,6 +21,16 @@
 // it resolves identifiers against the SUPPLIED DIRECTORY, and the file is gone.
 //
 // So an operator handed `{"orphaned":true,"pendingVersion":"mig_…"}` has no CLI
+// route from that diagnosis to a fix — and see the interaction below before judging
+// how urgent that is.
+//
+// HOW BAD THIS IS DEPENDS ON ANOTHER OPEN BEHAVIOUR, so the two should be weighed
+// together rather than separately. `pending-contract-blocks-unrelated.test.ts`
+// pins that an outstanding contract blocks deploys touching UNRELATED tables. Put
+// them side by side: an orphaned contract cannot be discharged from the CLI, and
+// while it stands it blocks everything, not just the renamed table. Either fix
+// alone reduces the damage — narrow the block, or give `resolve` a route to an
+// orphaned version — and neither test can see the other.
 // route from that diagnosis to a fix. The remedies are to restore the deleted file,
 // or to call the embedding API, whose `ActionPayload` doc says the version is
 // "directly accepted by the `resolvePending()` embedding API" — documented, and NOT
