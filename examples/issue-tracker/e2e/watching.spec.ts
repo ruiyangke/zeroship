@@ -48,8 +48,14 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   const bobContext = await browser.newContext();
   await signIn(bobContext, { runtimePort: RUNTIME_PORT, baseURL: baseURL!, user: otherUser });
   const bob = await bobContext.newPage();
+  // Guarded like the other helper. Unchecked, a non-200 came back as
+  // `undefined` and surfaced later as a TypeError on `.id`, or -- worse --
+  // as the notification assertion failing for a reason that had nothing to do
+  // with watching. A helper that swallows the status turns "the procedure is
+  // gone" into "the feature is broken", which is a long way to walk back.
   const bobRpc = async (proc: string, json: unknown) => {
     const res = await bob.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
+    expect(res.status(), `${proc} (as Bob) should succeed`).toBe(200);
     return (await res.json()).json;
   };
   // Bob has to exist as an app user before he can be watched, and only a
