@@ -6,6 +6,7 @@ import {
   listGroupMembers,
   removeGroupMember,
   createGroup,
+  deleteGroup,
   listGroups,
   listProducts,
   listUsers,
@@ -50,6 +51,27 @@ export function GroupsAdmin() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Refusal is an ANSWER here, not a failure: the server declines while the
+  // group still restricts bugs or products and says how many, because
+  // deleting it then would quietly widen who can read them. So the message
+  // is surfaced rather than swallowed.
+  const remove = async (groupId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteGroup({ id: groupId });
+      if (memberGroup === groupId) {
+        setMemberGroup("");
+        setMembers([]);
+      }
+      await load();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const create = async () => {
     if (!name.trim()) return;
@@ -165,6 +187,19 @@ export function GroupsAdmin() {
               <li key={group.id}>
                 <strong>{group.name}</strong>
                 {group.description ? <span className="dim"> {group.description}</span> : null}
+                {/* Named per group. A list of identical "Delete" buttons is
+                    ambiguous to a screen reader, and this one destroys an
+                    access-control object. */}
+                <Button
+                  variant="gray"
+                  size="small"
+                  intent="destructive"
+                  disabled={busy}
+                  aria-label={`Delete group ${group.name}`}
+                  onClick={() => void remove(group.id)}
+                >
+                  Delete
+                </Button>
               </li>
             ))}
           </ul>

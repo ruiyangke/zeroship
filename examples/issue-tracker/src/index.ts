@@ -4071,6 +4071,61 @@ export const createGroup = mutation(
 );
 
 /**
+ * Delete a group, but only while it is not load-bearing.
+ *
+ * Groups could be created and never removed, so a tracker accumulated them
+ * permanently -- this app's own dev database reached 95, every one of them a
+ * leftover fixture, on a page whose subject is products. Bugzilla lets an
+ * administrator delete a group; this did not, which made the create button a
+ * one-way door.
+ *
+ * It REFUSES while the group still restricts something, and says what. The
+ * tempting alternative -- delete the group and let its `bugGroups` and
+ * `productGroups` rows dangle -- silently widens who can read those bugs, and
+ * does it at the moment an admin is tidying up and least expects a visibility
+ * change. Memberships are different: a membership grants nothing once the
+ * group restricts nothing, so those are purged with the group rather than
+ * standing in its way.
+ *
+ * Purge, not delete: `groups.create` rejects a duplicate name, and a
+ * soft-deleted tombstone keeps the unique index occupied, so the name of a
+ * deleted group could never be reused.
+ */
+export const deleteGroup = mutation(
+  async ({ id }: { id: string }) => {
+    await requireAdmin();
+    const groupId = requireId(id, "id");
+    const group = must(await db.groups.get(groupId));
+    if (!group) notFound("group not found");
+
+    const [bugRestrictions, productRestrictions] = await Promise.all([
+      readAll(db.bugGroups, { groupId }),
+      readAll(db.productGroups, { groupId }),
+    ]);
+    if (bugRestrictions.length > 0 || productRestrictions.length > 0) {
+      const parts: string[] = [];
+      if (bugRestrictions.length > 0) {
+        parts.push(`${bugRestrictions.length} bug${bugRestrictions.length === 1 ? "" : "s"}`);
+      }
+      if (productRestrictions.length > 0) {
+        parts.push(
+          `${productRestrictions.length} product${productRestrictions.length === 1 ? "" : "s"}`,
+        );
+      }
+      conflict(
+        `This group still restricts ${parts.join(" and ")}. Remove those restrictions first, ` +
+          `or deleting it would make them readable to everyone.`,
+      );
+    }
+
+    await db.groupMembers.purgeMany({ groupId });
+    await db.groups.purge(groupId);
+    return { id: groupId, deleted: true };
+  },
+  { id: "groups.delete" },
+);
+
+/**
  * Flag types, without which the whole flag feature is unreachable.
  *
  * `flags.set`, `flags.clear`, `flags.list` and `flags.listRequests` all take or

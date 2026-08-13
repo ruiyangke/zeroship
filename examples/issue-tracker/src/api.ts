@@ -82,6 +82,7 @@ export {
   // Access control -- groups, and product- and bug-level restriction
   createFlagType,
   createGroup,
+  deleteGroup,
   listFlagTypes,
   resolveProducts,
   resolveUsers,
