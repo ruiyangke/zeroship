@@ -68,6 +68,15 @@ BENCH_SECURITY_DIR="/tmp/zeroship-bench-security-$$"
 ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$BENCH_SECURITY_DIR"
+# THE DSN, WHICH WENT MISSING. 05989cf5d removed
+# `--db postgres://postgres:test@localhost:5434/postgres` from control's launch
+# line below and put nothing in its place, so control started with no database
+# at all. Its output goes to /dev/null, so the only symptom was `POST /api/apps`
+# returning an empty body twenty lines later and `set -e` ending the run under a
+# banner and no error. Restored under the canonical names, through the same
+# helper every other harness uses.
+BENCH_DSN="${BENCH_DSN:-postgres://postgres:test@localhost:5434/postgres}"
+e2e_export_database_urls "$BENCH_DSN"
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start platform
