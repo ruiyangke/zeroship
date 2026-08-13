@@ -361,16 +361,26 @@ pub use apply::role::{migrator_role_name, RoleError};
 /// green.
 ///
 /// COVERAGE IS PARTIAL, and worth knowing before trusting a green run: the guide
-/// has seven Rust fences and **two** of them are compiled. The other five are
-/// ```` ```rust,ignore ```` because they are FRAGMENTS — they use bindings such as
-/// `session` that the surrounding prose introduces rather than the snippet — and an
-/// ignored fence is neither compiled nor run. So a rename can still rot those five
-/// and leave CI green, which is the exact failure this item was added to prevent,
-/// just narrowed rather than eliminated.
+/// has seven Rust fences and **three** of them are compiled. The rest are
+/// ```` ```rust,ignore ```` and are neither compiled nor run, so a rename can still
+/// rot them while CI stays green — the exact failure this item was added to
+/// prevent, narrowed rather than eliminated.
 ///
-/// Closing it does not need the fragments rewritten into programs: rustdoc hides
-/// lines prefixed with `# `, so the missing setup can be supplied invisibly and the
-/// rendered guide stays as short as it is now.
+/// The remaining four are not one job. Three need a live backend, an engine and a
+/// config to exist before they say anything (`recover_inflight_ddl`,
+/// `resolve_pending_contract`, the `PostgresBackend`/`MysqlBackend` pair), so
+/// compiling them means standing up fake infrastructure whose drift would then need
+/// its own guard. The fourth is a `trait SqlSession` DEFINITION quoted for shape:
+/// compiling it would declare a SECOND trait that can silently diverge from the
+/// real one while still passing, which is worse than leaving it ignored.
+///
+/// Where a fragment only lacks a binding, rustdoc's `# ` prefix hides the setup and
+/// the fence becomes real coverage — that is how the policy example was closed.
+/// Note the cost, since `embedding.md` is also read as plain Markdown in the repo:
+/// hidden lines are invisible in rustdoc but VISIBLE there, so each one is
+/// boilerplate a human reader pays for. Prefer making genuinely informative setup
+/// visible (the policy example shows its charter string) and hiding only `fn main`
+/// scaffolding.
 ///
 /// The TypeScript docs are gated the same way from the other side, by the
 /// `doc-examples` tests in both JS packages.

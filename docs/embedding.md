@@ -245,7 +245,9 @@ Unsupported capabilities return an error; they are not silently approximated.
 
 Policies are authored as root charter TOML and loaded explicitly:
 
-```rust,ignore
+```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let policy_toml = "policy_version = 1\n";
 let policy =
     zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
 let guard = zero_migrate::GuardConfig::from_policy(
@@ -257,6 +259,9 @@ let executor = zero_migrate::ExecutorConfig::new(
     "app_demo",
     policy,
 );
+# let _ = (guard, executor);
+# Ok(())
+# }
 ```
 
 Use the same `EffectivePolicy` for table-shape resolution, planning, and host
