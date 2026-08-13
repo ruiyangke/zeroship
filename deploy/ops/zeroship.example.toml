@@ -48,7 +48,7 @@ trusted_oauth_clients = []
 # may frame /login - every other surface (creator apps, external sites) is
 # blocked by the browser and falls back to the popup. EXACT origins only - NO
 # wildcards (a `https://*.zeroship.ai` would re-admit every creator app and
-# defeat the property). Also settable via `--frame-ancestor-origin` /
+# defeat the property). Also settable via `--frame-ancestor-origins` /
 # `ZEROSHIP_AUTH_FRAME_ANCESTOR_ORIGINS` (comma-separated); a non-empty CLI/env wins, else this
 # overlay applies, else empty (the relax is a no-op -> strict frame-ancestors
 # 'none'). Empty/omitted => single-origin / dev (no immersive iframe).
