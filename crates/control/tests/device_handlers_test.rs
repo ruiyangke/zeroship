@@ -1249,10 +1249,14 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
 /// front of the handler to reject it first.
 #[compio::test]
 async fn device_auth_is_rate_limited() {
-    // DualIssuer, not Platform: under the Platform-only provider `device_auth`
-    // is disabled and answers 400 before it can mint anything, so the test
-    // would only prove the limiter beats a dead endpoint. Here the accepted
-    // calls really do insert grant rows, which is the thing being bounded.
+    // Either provider would do now: `device_auth` mints grant rows under both,
+    // so the accepted calls really do insert the thing being bounded. DualIssuer
+    // is kept because it is the wider configuration. (This comment used to say
+    // Platform was unusable here - "under the Platform-only provider
+    // `device_auth` is disabled and answers 400 before it can mint anything".
+    // That was true, and was the bug `ensure_platform_device_provider` carried;
+    // it read as a design note rather than a defect, which is part of why it
+    // survived.)
     let fx = Fixture::new_probing_the_admin_limiter(
         FixtureProvider::DualIssuer,
         Quota::per_minute(5, 60),
@@ -1296,6 +1300,174 @@ async fn device_auth_is_rate_limited() {
         "the limiter must bound grant creation without disabling it; {minted} of {} calls minted",
         statuses.len(),
     );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The control-side device flow must work on the SHIPPED DEFAULT provider.
+///
+/// `ZEROSHIP_AUTH_PROVIDER` unset or `platform` maps to `AuthProvider::Platform`
+/// (`control_auth_provider_kind`, crates/control/src/main.rs), and
+/// `AuthProvider::Platform::supabase_url()` returns `None` by construction.
+/// While `ensure_platform_device_provider` also demanded a Supabase URL,
+/// `/api/device/auth` answered 400 `unsupported_provider` on every default
+/// deployment, so `zeroship login` could not even start.
+///
+/// This walks the whole CONTROL side under the platform-only provider: start
+/// -> approve with a platform OAuth bearer -> redeem the one-time token.
+///
+/// What it does NOT cover: the browser leg. Nothing the auth service renders
+/// under `AuthProviderKind::Native` posts to `/api/device/approve` - its
+/// `/device` page drives the native OP grant, which reads
+/// `zeroship.device_grants` rows with `provider = 'op'`, not the
+/// `provider = 'platform'` rows control writes here. A human still cannot
+/// approve this grant from the returned `verification_uri`.
+#[compio::test]
+async fn platform_only_provider_completes_the_control_device_flow() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "openid offline_access apps:deploy apps:read apps:write"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(
+        auth_resp.status(),
+        StatusCode::OK,
+        "the shipped default provider must be able to start a device flow"
+    );
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    let device_code = auth_body["device_code"].as_str().expect("device_code");
+    let user_code = auth_body["user_code"].as_str().expect("user_code");
+    let device_code_hash = fx.track_hash(device_code);
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    let approval_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let approve_status = test::call_service(&app, approve_req).await.status();
+    assert_eq!(approve_status, StatusCode::NO_CONTENT);
+
+    let token_req = test::TestRequest::post()
+        .uri("/api/device/token")
+        .set_json(&json!({
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .to_request();
+    let token_resp = test::call_service(&app, token_req).await;
+    assert_eq!(token_resp.status(), StatusCode::OK);
+    let token_body: Value =
+        serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
+    assert_eq!(token_body["provider"], "platform");
+    assert_eq!(token_body["principal_id"], principal_id.to_string());
+    assert_eq!(token_body["scope"], "apps:deploy apps:read apps:write");
+    let access_token = token_body["access_token"].as_str().expect("access_token");
+    let verified = fx
+        .state
+        .auth_provider
+        .verify_token(access_token)
+        .await
+        .expect("minted platform token verifies");
+    assert_eq!(
+        verified.provider_authz,
+        ProviderAuthz::OAuthScope("apps:deploy apps:read apps:write".to_string())
+    );
+
+    fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A GoTrue bearer must still be refused when the provider has no Supabase.
+///
+/// One-variable partner of the test above: same platform-only provider, same
+/// pending `provider = 'platform'` grant, only the bearer's provenance
+/// differs. Dropping the Supabase clause from `ensure_platform_device_provider`
+/// must not widen who may approve a grant, and this assertion holds on BOTH
+/// sides of that change - which is what makes the pair discriminating rather
+/// than two tests that move together.
+///
+/// The grant row is inserted directly rather than through `/api/device/auth`
+/// on purpose: this test has to be runnable, and green, on the code where
+/// `/api/device/auth` still answers 400 under a platform-only provider.
+/// `platform_token_approves_device_grant_under_platform_provider` asserts the
+/// same refusal in passing; this one exists standalone so the control can be
+/// run, and seen to pass, on its own.
+///
+/// What it does NOT cover: the `supabase_url().is_none()` arm inside
+/// `device_approval_principal`. That arm is unreachable through `AuthProvider`
+/// - the only `ProviderAuthz::GoTrueRole` producer is `SupabaseProvider`, the
+/// only `LegacyAuthProvider` variant is `Supabase`, and `SupabaseProvider::url`
+/// returns `&str` rather than `Option`, so `GoTrueRole` and
+/// `supabase_url() == None` cannot co-occur. Here the GoTrue bearer never
+/// verifies at all, so approval fails one step earlier, in
+/// `verified_device_approval_bearer`.
+#[compio::test]
+async fn platform_only_provider_refuses_a_gotrue_bearer() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let device_code = format!("platform-gotrue-{}", Uuid::new_v4().simple());
+    let device_code_hash = fx.track_hash(&device_code);
+    let user_code_suffix = Uuid::new_v4().simple().to_string();
+    let user_code = format!("GOTR-{}", &user_code_suffix[..4]).to_ascii_uppercase();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.device_grants \
+                (device_code_hash, user_code, provider, scope, expires_at) \
+             VALUES ($1, $2, 'platform', 'apps:deploy apps:read apps:write', \
+                     NOW() + INTERVAL '10 minutes')",
+            &[&device_code_hash, &user_code],
+        )
+        .await
+        .expect("insert pending platform device grant");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let gotrue_bearer = gotrue_token(
+        &fx._mock_supabase.issuer(),
+        &Uuid::new_v4().to_string(),
+        "gotrue-under-platform@zeroship.test",
+        "authenticated",
+    );
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&gotrue_bearer))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let approve_status = test::call_service(&app, approve_req).await.status();
+    assert_eq!(
+        approve_status,
+        StatusCode::UNAUTHORIZED,
+        "a GoTrue bearer must not approve a grant on a provider with no Supabase"
+    );
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    fx.cleanup().await;
 
     drop(app);
     drop(fx);

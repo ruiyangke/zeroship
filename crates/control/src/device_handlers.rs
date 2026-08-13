@@ -472,11 +472,28 @@ pub fn device_access_token_aad(device_code_hash: &str) -> Vec<u8> {
     aad
 }
 
+/// This flow needs the PLATFORM OP, and nothing else.
+///
+/// Everything downstream is platform-shaped: the grant row is written with
+/// `provider = 'platform'`, `mint_platform_deploy_token` posts to the OP's
+/// `/internal/platform-token` under `control_key`, and the minted token is
+/// verified back through `platform_issuer`. Those two values are the whole
+/// precondition.
+///
+/// The one Supabase-shaped arm downstream is the `GoTrueRole` branch of
+/// `device_approval_principal`, and it is not reachable from here: it needs a
+/// bearer GoTrue itself signed, which cannot verify unless a Supabase provider
+/// is configured, and it carries its own `supabase_url` guard regardless.
+///
+/// So requiring a Supabase URL here protected nothing and blocked the shipped
+/// default. `ZEROSHIP_AUTH_PROVIDER` unset or `platform` builds
+/// `AuthProvider::Platform`, whose `supabase_url()` is `None` by construction,
+/// so `/api/device/auth` answered 400 on every default deployment and
+/// `zeroship login` could not start. The clause is a leftover from
+/// `ensure_supabase_provider`, which this function replaced when the flow
+/// stopped being GoTrue-bound.
 fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResponse> {
-    if state.auth_provider.supabase_url().is_some()
-        && state.auth_provider.platform_issuer().is_some()
-        && !state.control_key.is_empty()
-    {
+    if state.auth_provider.platform_issuer().is_some() && !state.control_key.is_empty() {
         Ok(())
     } else {
         Err(unsupported_provider())
