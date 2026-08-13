@@ -177,8 +177,11 @@ through `std::env`.
 ### auth (`crates/auth`)
 
 Listen and identity: `ZEROSHIP_AUTH_ADDR` `ZEROSHIP_AUTH_PUBLIC_URL` `AUTH_DB_URL`
-`FRAME_ANCESTOR_ORIGINS` `ZEROSHIP_AUTH_RELAY_DOMAIN` `ZEROSHIP_AUTH_REFRESH_POOL_SIZE`
+`ZEROSHIP_AUTH_FRAME_ANCESTOR_ORIGINS` `ZEROSHIP_AUTH_RELAY_DOMAIN` `ZEROSHIP_AUTH_REFRESH_POOL_SIZE`
 `ZEROSHIP_AUTH_CRON_TICK_SECS` `ZEROSHIP_AUTH_AUDIT_RETENTION_CHECK_SECS`
+
+Provider selection: `ZEROSHIP_AUTH_PROVIDER` (`native` or `supabase`)
+`ZEROSHIP_AUTH_SUPABASE_URL` `ZEROSHIP_AUTH_SUPABASE_ANON_KEY` `ZEROSHIP_CONTROL_URL`
 
 File-backed key material: `AUTH_SIGNING_KEY_FILE` `AUTH_PAIRWISE_SALT_FILE`
 `AUTH_BROKER_SECRET_FILE` `AUTH_BROKER_SECRET_PREVIOUS_FILE`
@@ -283,8 +286,7 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | --- | --- |
 | `DATABASE_URL` | control, gateway, worker, migrated, cli, migrate-adapter |
 | `CONTROL_KEY` | auth, control, gateway, migrated, worker |
-| `ZEROSHIP_CONTROL_URL` | gateway, worker |
-| `CONTROL_URL` | auth only (not yet converted) |
+| `ZEROSHIP_CONTROL_URL` | auth, gateway, worker |
 | `WORKER_KEY` | control, gateway, worker |
 | `ZEROSHIP_WORKER_URLS` | control, gateway |
 | `ZEROSHIP_BLOB_STORE` | control, gateway, worker |
@@ -295,9 +297,9 @@ plugin-storage) `REDPANDA_BROKERS` (control, stream, worker)
 | `ZEROSHIP_ORIGIN_SCHEME` | control, gateway |
 | `ZEROSHIP_CONFIG`, `ZEROSHIP_NO_CONFIG` | auth, control, gateway, migrated, worker |
 | `ZEROSHIP_TRUST_PROXY` | control, gateway |
-| `ZEROSHIP_CONTROL_AUTH_PROVIDER` | control only; auth still reads `ZEROSHIP_AUTH_PROVIDER`, and the two accept DIFFERENT value sets (`platform|supabase` against `native|supabase`) |
-| `ZEROSHIP_AUTH_SUPABASE_URL` | control; auth still reads `SUPABASE_URL` |
-| `SUPABASE_ANON_KEY` | auth, control |
+| `ZEROSHIP_CONTROL_AUTH_PROVIDER` | control only. Auth has a SEPARATE identity, `ZEROSHIP_AUTH_PROVIDER` (`auth.provider`), because the two accept DIFFERENT value sets (`platform|supabase` against `native|supabase`); one name meaning two things is the drift this alignment removes rather than formalises |
+| `ZEROSHIP_AUTH_SUPABASE_URL` | auth, control |
+| `ZEROSHIP_AUTH_SUPABASE_ANON_KEY` | auth. Control reads the same deployment value through its own still-unconverted `SUPABASE_ANON_KEY`; the secret conversion joins them |
 | `HOSTNAME` | control, gateway, worker |
 | `ZEROSHIP_OBSERVABILITY_LOG_FILTER`, `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | auth, control, gateway, migrated, worker |
 | `RUST_LOG`, `ZEROSHIP_LOG_FORMAT` | the creator CLI and the single-tenant runtime only; the five server binaries no longer read either |
