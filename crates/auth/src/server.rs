@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use ntex::web;
 use zeroship_core::oidc_verify::JwksCache;
+use zeroship_core::readiness::ReadinessGate;
 
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
@@ -271,15 +272,40 @@ pub fn configure(
     }
 }
 
+/// Liveness. Constant 200 by design: it must not touch Postgres, or a database
+/// blip would get this container killed on top of the outage.
 #[web::get("/healthz")]
 async fn healthz() -> web::HttpResponse {
     web::HttpResponse::Ok().json(&serde_json::json!({ "ok": true }))
 }
 
+/// Readiness. There is no login, token, or consent route that does not read
+/// Postgres, so an unreachable database means this OP cannot serve.
+///
+/// Probes the SHARED long-lived client with a protocol-level sync - no new
+/// connection, no query. Bounded, cached and single-flighted by
+/// `ReadinessGate`; the body carries no DSN and no driver error text.
 #[web::get("/readyz")]
-async fn readyz() -> web::HttpResponse {
-    // Phase 1 readiness is process-up. A later probe can include PG reachability.
-    web::HttpResponse::Ok().json(&serde_json::json!({ "ready": true }))
+async fn readyz(
+    db: web::types::State<Arc<compio_postgres::Client>>,
+    gate: web::types::State<Arc<ReadinessGate>>,
+) -> web::HttpResponse {
+    let ready = gate
+        .ready(|| async {
+            match db.check_connection().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(error = %error, "auth readiness: postgres unreachable");
+                    false
+                }
+            }
+        })
+        .await;
+    if ready {
+        web::HttpResponse::Ok().json(&serde_json::json!({ "ready": true }))
+    } else {
+        web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({ "ready": false }))
+    }
 }
 
 #[web::get("/static/style.css")]
@@ -337,11 +363,15 @@ pub async fn run(
     // (immersive iframe login, §4.3). Cloned out of the config so the
     // route-aware `SecurityHeaders` middleware can be rebuilt per worker thread.
     let frame_ancestor_origins = cfg.frame_ancestor_origins().to_vec();
+    // ONE gate for the whole process, shared across ntex worker threads, so
+    // the TTL bounds probe-driven Postgres traffic per PROCESS not per thread.
+    let readiness = Arc::new(ReadinessGate::with_defaults());
 
     web::server(async move || {
         let mut app = web::App::new()
             .state(cfg.clone())
             .state(db.clone())
+            .state(readiness.clone())
             .state(mailer.clone())
             .state(op_issuer.clone())
             .state(refresh_pool.clone())
