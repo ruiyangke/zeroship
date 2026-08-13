@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Button, Select } from "@zeroship/ui";
+import { Button, Field, Select } from "@zeroship/ui";
 
 import { listGroups, restrictBug, unrestrictBug } from "../../api";
 import { errorMessage } from "../rpc";
@@ -85,8 +85,8 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
         </p>
       ) : (
         <>
-          <label>
-            Group
+          <Field>
+            <Field.Label>Group</Field.Label>
             {/* The design system Select. The native one rendered its options
                 with the surrounding JSX whitespace, so selecting by label
                 matched nothing and silently left the control unset -- a spec
@@ -96,6 +96,7 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
               value={selected}
               onValueChange={(next) => setSelected(next ?? "")}
               placeholder="Select a group"
+              aria-label="Group"
               renderValue={(id) => groups.find((g) => g.id === id)?.name ?? id}
             >
               {groups.map((group) => (
@@ -104,7 +105,7 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
                 </Select.Item>
               ))}
             </Select>
-          </label>
+          </Field>
           <Button variant="gray" size="small"
             disabled={busy || !selected}
             onClick={() => void apply("restrict")}

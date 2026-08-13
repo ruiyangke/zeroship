@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, DescriptionList, Select } from "@zeroship/ui";
+import { Button, Card, Cluster, DescriptionList, Field, Input, Select } from "@zeroship/ui";
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
 
@@ -19,11 +19,11 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
 
   return (
     <div className="field-row">
-      <label>
+      <Field>
         {/* The badge is gone. It sat directly above a select showing the same
             value, so the page stated severity twice and neither told you which
             one to use. */}
-        Severity
+        <Field.Label>Severity</Field.Label>
         <Select
           value={bug.severity}
           disabled={busy !== null}
@@ -47,9 +47,9 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
             </Select.Item>
           ))}
         </Select>
-      </label>
-      <label>
-        Priority
+      </Field>
+      <Field>
+        <Field.Label>Priority</Field.Label>
         <Select
           value={bug.priority}
           disabled={busy !== null}
@@ -73,7 +73,7 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
             </Select.Item>
           ))}
         </Select>
-      </label>
+      </Field>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
   );
@@ -174,8 +174,8 @@ function MoveControl({
       </div>
       {open ? (
         <div className="inline-form">
-          <label>
-            Target product
+          <Field>
+            <Field.Label>Target product</Field.Label>
             <Select
               value={targetProductId}
               onValueChange={(next) => void pickProduct(next ?? "")}
@@ -189,9 +189,9 @@ function MoveControl({
                 </Select.Item>
               ))}
             </Select>
-          </label>
-          <label>
-            Target component
+          </Field>
+          <Field>
+            <Field.Label>Target component</Field.Label>
             <Select
               value={targetComponentId}
               disabled={!components}
@@ -206,7 +206,7 @@ function MoveControl({
                 </Select.Item>
               ))}
             </Select>
-          </label>
+          </Field>
           <Button variant="filled" size="small"
             disabled={busy || !targetProductId || !targetComponentId}
             onClick={() => void move()}
@@ -255,10 +255,10 @@ function GeneralField({
   };
 
   return (
-    <label className="field-block">
-      <span className="field-label">{label}</span>
+    <Field className="field-block">
+      <Field.Label>{label}</Field.Label>
       <span className="field-block-head">
-        <input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
+        <Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
         {dirty ? (
           <Button variant="gray" size="small" disabled={busy} onClick={() => void save()}>
             Save
@@ -266,7 +266,7 @@ function GeneralField({
         ) : null}
       </span>
       {error ? <p className="field-error">{error}</p> : null}
-    </label>
+    </Field>
   );
 }
 
@@ -290,12 +290,34 @@ export function FieldsPanel({
   onUpdated: (b: Bug) => void;
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
+  const [editingSummary, setEditingSummary] = useState(false);
   return (
     <Card className="fields-panel">
       {/* No heading here. The page head already states the summary, and this
           panel repeated it as an h2 immediately above an input containing the
           same text -- the same string three times in the top 200 pixels. */}
-      <GeneralField bug={bug} field="summary" label="Summary" value={bug.summary} onUpdated={onUpdated} />
+      {/* Not a permanent text box. The page heading already states the
+          summary in full; a second copy in a 22rem rail truncated it and
+          invited edits nobody came to make. Editing is a deliberate act. */}
+      {editingSummary ? (
+        <GeneralField
+          bug={bug}
+          field="summary"
+          label="Summary"
+          value={bug.summary}
+          onUpdated={(next) => {
+            setEditingSummary(false);
+            onUpdated(next);
+          }}
+        />
+      ) : (
+        <Cluster gap={2} align="center">
+          <span className="field-label">Summary</span>
+          <Button variant="plain" size="small" onClick={() => setEditingSummary(true)}>
+            Edit
+          </Button>
+        </Cluster>
+      )}
 
       <StatusControl bug={bug} onUpdated={onUpdated} />
       <SeverityPriority bug={bug} onUpdated={onUpdated} />
@@ -327,8 +349,8 @@ export function FieldsPanel({
 
       {productDetail ? (
         <div className="field-row">
-          <label>
-            Version
+          <Field>
+            <Field.Label>Version</Field.Label>
             {/* The design system Select, so the detail page stops mixing two
                 kinds of dropdown with the filter bar. */}
             <Select
@@ -341,6 +363,7 @@ export function FieldsPanel({
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
               placeholder="unspecified"
+              aria-label="Version"
               renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
             >
               {productDetail.versions.map((v) => (
@@ -349,9 +372,9 @@ export function FieldsPanel({
                 </Select.Item>
               ))}
             </Select>
-          </label>
-          <label>
-            Milestone
+          </Field>
+          <Field>
+            <Field.Label>Milestone</Field.Label>
             <Select
               value={bug.milestoneId ?? ""}
               onValueChange={(next) => {
@@ -362,6 +385,7 @@ export function FieldsPanel({
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
               placeholder="unspecified"
+              aria-label="Milestone"
               renderValue={(id) => productDetail.milestones.find((m) => m.id === id)?.name ?? id}
             >
               {productDetail.milestones.map((m) => (
@@ -370,7 +394,7 @@ export function FieldsPanel({
                 </Select.Item>
               ))}
             </Select>
-          </label>
+          </Field>
         </div>
       ) : (
         <p className="state-hint small">Sign in to change version/milestone.</p>

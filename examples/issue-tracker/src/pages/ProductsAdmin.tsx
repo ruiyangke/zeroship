@@ -61,10 +61,11 @@ function NewProductForm({ onCreated }: { onCreated: () => void }) {
         value={classification}
         onChange={(e) => setClassification(e.target.value)}
       />
-      <label>
-        <input type="checkbox" checked={allowsUnconfirmed} onChange={(e) => setAllowsUnconfirmed(e.target.checked)} />
-        Allows UNCONFIRMED
-      </label>
+      <Checkbox
+        checked={allowsUnconfirmed}
+        onCheckedChange={(next) => setAllowsUnconfirmed(next === true)}
+        label="Allows UNCONFIRMED"
+      />
       <Button type="submit" variant="filled" size="small" disabled={busy || !name.trim()}>
         Create product
       </Button>
@@ -120,18 +121,12 @@ function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onCha
       <div className="inline-form">
         <Input value={name} onChange={(e) => setName(e.target.value)} />
         <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" />
-        <label>
-          <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
-          Active
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={allowsUnconfirmed}
-            onChange={(e) => setAllowsUnconfirmed(e.target.checked)}
-          />
-          Allows UNCONFIRMED
-        </label>
+        <Checkbox checked={isActive} onCheckedChange={(next) => setIsActive(next === true)} label="Active" />
+        <Checkbox
+          checked={allowsUnconfirmed}
+          onCheckedChange={(next) => setAllowsUnconfirmed(next === true)}
+          label="Allows UNCONFIRMED"
+        />
         <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
           Save product
         </Button>

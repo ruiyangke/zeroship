@@ -173,25 +173,25 @@ export function GroupsAdmin() {
 
       {groups && groups.length > 0 ? (
         <div className="field-row">
-          <label>
-            Add member to
+          <Field>
+            <Field.Label>Add member to</Field.Label>
             <Select
-            value={memberGroup}
-            onValueChange={(next) => {
-              setMemberGroup(next ?? "");
-              void loadMembers(next ?? "");
-            }}
-            placeholder="Select a group"
-            aria-label="Add member to"
-            renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
-          >
-            {(groups ?? []).map((group) => (
-              <Select.Item key={group.id} value={group.id}>
-                {group.name}
-              </Select.Item>
-            ))}
-          </Select>
-          </label>
+              value={memberGroup}
+              onValueChange={(next) => {
+                setMemberGroup(next ?? "");
+                void loadMembers(next ?? "");
+              }}
+              placeholder="Select a group"
+              aria-label="Add member to"
+              renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
+            >
+              {(groups ?? []).map((group) => (
+                <Select.Item key={group.id} value={group.id}>
+                  {group.name}
+                </Select.Item>
+              ))}
+            </Select>
+          </Field>
           <Field>
             <Field.Label>Find user</Field.Label>
             <Input
@@ -311,8 +311,8 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
     <div className="product-restrictions">
       <h3>Product visibility</h3>
       <div className="field-row">
-        <label>
-          Product
+        <Field>
+          <Field.Label>Product</Field.Label>
           <Select
             value={productId}
             onValueChange={(next) => setProductId(next ?? "")}
@@ -326,9 +326,9 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
               </Select.Item>
             ))}
           </Select>
-        </label>
-        <label>
-          Group
+        </Field>
+        <Field>
+          <Field.Label>Group</Field.Label>
           <Select
             value={groupId}
             onValueChange={(next) => setGroupId(next ?? "")}
@@ -342,7 +342,7 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
               </Select.Item>
             ))}
           </Select>
-        </label>
+        </Field>
         <Button variant="gray" size="small"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("restrict")}

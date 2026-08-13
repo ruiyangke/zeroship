@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Field } from "@zeroship/ui";
 
 import { castVote } from "../../api";
 import { errorMessage } from "../rpc";
@@ -57,16 +57,23 @@ export function VotesPanel({
         <p className="state-hint small">Voting is not enabled for this product.</p>
       ) : (
         <>
-          <label>
-            My votes
+          <Field>
+            {/* A plain native number input, not the design system's
+                NumberField: NumberField's controlled text input does not
+                replace-on-fill the way a native <input type="number"> does
+                (Playwright's .fill("2") landed as "12", appended rather
+                than replacing "1"), which this panel's own regression spec
+                exercises directly. */}
+            <Field.Label htmlFor="votes-count">My votes</Field.Label>
             <input
+              id="votes-count"
               type="number"
               min={0}
               max={maxVotesPerBug > 0 ? maxVotesPerBug : undefined}
               value={count}
               onChange={(e) => setCount(Math.max(0, Number(e.target.value) || 0))}
             />
-          </label>
+          </Field>
           <Button variant="gray" size="small" disabled={busy} onClick={() => void submit()}>
             {busy ? "Voting..." : "Vote"}
           </Button>

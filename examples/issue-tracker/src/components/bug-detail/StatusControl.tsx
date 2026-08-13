@@ -4,7 +4,7 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
-import { Button, Select } from "@zeroship/ui";
+import { Button, Field, Input, Select } from "@zeroship/ui";
 import { changeBugStatus, markBugDuplicate, reopenBug, resolveBug } from "../../api";
 import {
   BUG_RESOLUTIONS,
@@ -58,8 +58,8 @@ export function StatusControl({
   return (
     <div className="status-control">
       <div className="status-control-row">
-        <label>
-          Status
+        <Field>
+          <Field.Label>Status</Field.Label>
           <Select
             value={bug.status}
             disabled={busy || targets.length === 0}
@@ -79,7 +79,7 @@ export function StatusControl({
               </Select.Item>
             ))}
           </Select>
-        </label>
+        </Field>
         {/* A VALUE, not a disabled input. Resolution is never typed here --
             it is chosen in the Resolve flow below, which also enforces the
             pairing with status. A greyed-out text box holding "--" says "you
@@ -113,8 +113,8 @@ export function StatusControl({
 
       {showResolve ? (
         <div className="inline-form">
-          <label>
-            Resolution (required to resolve)
+          <Field>
+            <Field.Label>Resolution (required to resolve)</Field.Label>
             <Select
               value={resolution}
               onValueChange={(next) => setResolution(next as NonDuplicateResolution)}
@@ -126,7 +126,7 @@ export function StatusControl({
                 </Select.Item>
               ))}
             </Select>
-          </label>
+          </Field>
           <Button variant="filled" size="small"
             disabled={busy}
             onClick={() => void run(() => resolveBug({ id: bug.id, resolution }))}
@@ -138,14 +138,14 @@ export function StatusControl({
 
       {showDuplicate ? (
         <div className="inline-form">
-          <label>
-            Duplicate of (bug id)
-            <input
+          <Field>
+            <Field.Label>Duplicate of (bug id)</Field.Label>
+            <Input
               value={duplicateOf}
               onChange={(e) => setDuplicateOf(e.target.value)}
               placeholder="bug_..."
             />
-          </label>
+          </Field>
           <Button variant="filled" size="small"
             disabled={busy || !duplicateOf.trim()}
             onClick={() => void run(() => markBugDuplicate({ id: bug.id, duplicateOfId: duplicateOf.trim() }))}

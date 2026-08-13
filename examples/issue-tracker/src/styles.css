@@ -63,9 +63,6 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 fieldset { border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 0.9rem; margin: 0.6rem 0; }
 fieldset[disabled] { opacity: 0.5; }
 legend { padding: 0 0.4rem; color: var(--ink-2); font-weight: 600; font-size: 0.85rem; }
-label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--ink-2); }
-label input, label select, label textarea { color: var(--ink); font-size: 0.9rem; }
-.checkbox-label { flex-direction: row; align-items: center; gap: 0.4rem; }
 .dim { color: var(--ink-faint); }
 .small { font-size: 0.78rem; }
 
@@ -201,7 +198,22 @@ a.btn { text-decoration: none; }
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td[data-col="summary"] { white-space: normal; min-width: 220px; }
-th { color: var(--ink-faint); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; background: var(--surface-2); }
+/* Scoped to the app's OWN tables (History's .table-wrap and the Reports
+   panels' .report-table), not every <th> on the page. As a bare element
+   rule this reached inside @zeroship/ui's DataTable: a sortable column's
+   header text sits inside a <button>, and the browser's UA stylesheet
+   resets text-transform on buttons, so a SORTABLE header (ID, Status,
+   Severity, Priority -- see SERVER_SORTABLE in BugResultsTable.tsx)
+   escaped the uppercase, while a NON-sortable one (Resolution, Product,
+   Summary) kept it. One header row rendered in two casings. */
+.table-wrap th, .report-table th {
+  color: var(--ink-faint);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--surface-2);
+}
 tbody tr:hover { background: var(--surface-2); }
 .bug-link { font-family: var(--mono); font-size: 0.82rem; }
 .bug-summary-link { color: var(--ink); }
@@ -236,7 +248,15 @@ tbody tr:hover { background: var(--surface-2); }
   border-bottom: 2px solid transparent;
 }
 .tabs button.active { color: var(--ink); border-bottom-color: var(--accent); }
-.bug-detail-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 1.5rem; align-items: start; }
+/* Reading column first, metadata rail second. The rail is FIXED rather than
+   fractional: metadata is label-and-value and stops benefiting from width,
+   while the conversation keeps every pixel it is given. */
+.bug-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  gap: 1.5rem;
+  align-items: start;
+}
 .bug-detail-main, .bug-detail-side { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
 .fields-panel, .comments-panel, .attachments-panel, .relations-panel, .flags-panel, .keywords-panel, .cc-panel {
   background: var(--surface);
@@ -417,6 +437,19 @@ tbody tr:hover { background: var(--surface-2); }
   padding: 0.9rem 1rem;
   background: var(--surface, #fff);
 }
+/* The fields panel is a rail card like every other one now, and its rows
+   stack instead of sitting side by side -- a two-column field row inside a
+   22rem rail wrapped into an unreadable zigzag. */
+.bug-detail-side .fields-panel .field-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.bug-detail-side .fields-panel {
+  padding: 0.9rem 1rem;
+}
+.bug-state { margin-block-start: 0.4rem; }
+
 .bug-detail-side > section > h3:first-child {
   margin-block-start: 0;
 }
@@ -505,3 +538,25 @@ tbody tr:hover { background: var(--surface-2); }
   border-inline-start: 3px solid var(--hairline, rgba(0, 0, 0, 0.15));
   color: var(--ink-2, #555);
 }
+
+/* The comment composer row: checkbox, work time and the button on one
+   baseline. Checkbox draws its own label and, left in a bare flex row, that
+   label sat on top of the next field's -- two labels overlapping, which reads
+   as a rendering fault rather than a spacing one. */
+.new-comment-row {
+  margin-block-start: 0.6rem;
+  flex-wrap: wrap;
+}
+.new-comment-row label,
+.new-comment-row .zs-field { margin: 0; }
+
+/* The status block is a rail card like the others. It was a grey rounded
+   panel matching nothing else on the page, which implied a grouping that was
+   never intended. */
+.status-control {
+  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.1));
+  border-radius: 0.6rem;
+  padding: 0.7rem 0.8rem;
+  background: transparent;
+}
+.status-control-row { flex-wrap: wrap; gap: 0.5rem; }

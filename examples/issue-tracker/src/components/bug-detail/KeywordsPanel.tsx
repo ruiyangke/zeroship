@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, Tag } from "@zeroship/ui";
+import { Button, Checkbox, Tag } from "@zeroship/ui";
 import { attachKeyword, createKeyword, detachKeyword, listKeywords } from "../../api";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
@@ -85,15 +85,15 @@ export function KeywordsPanel({
         {(keywords) => (
           <div className="keyword-picker">
             {keywords.map((keyword) => (
-              <label key={keyword.id} className="keyword-option">
-                <input
-                  type="checkbox"
-                  checked={attached.has(keyword.name)}
-                  disabled={busy}
-                  onChange={() => void toggle(keyword.id, keyword.name)}
-                />
-                {keyword.name}
-              </label>
+              <Checkbox
+                key={keyword.id}
+                size="sm"
+                checked={attached.has(keyword.name)}
+                disabled={busy}
+                onCheckedChange={() => void toggle(keyword.id, keyword.name)}
+                label={keyword.name}
+                fieldClassName="keyword-option"
+              />
             ))}
           </div>
         )}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Select } from "@zeroship/ui";
+import { Button, Checkbox, Field, Input, Select } from "@zeroship/ui";
 import { createBug, currentUser, getProduct, listProducts } from "../api";
 import { AsyncSection } from "../components/StateViews";
 import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
@@ -92,14 +92,13 @@ export function NewBugPage() {
               void submit();
             }}
           >
-            <label>
-              1. Product
+            <Field>
+              <Field.Label>1. Product</Field.Label>
               <Select
                 value={productId}
                 onValueChange={(next) => void pickProduct(next ?? "")}
                 placeholder="Select a product"
                 aria-label="1. Product"
-              
                 renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
               >
                 {products.map((p) => (
@@ -108,68 +107,67 @@ export function NewBugPage() {
                   </Select.Item>
                 ))}
               </Select>
-            </label>
+            </Field>
             {productDetailError ? <p className="field-error">{productDetailError}</p> : null}
 
             {productDetail ? (
               <>
-                <label>
-                  2. Component
+                <Field>
+                  <Field.Label>2. Component</Field.Label>
                   <Select
-                value={componentId}
-                onValueChange={(next) => setComponentId(next ?? "")}
-                placeholder="Select a component"
-                aria-label="2. Component"
-              
-                renderValue={(id) => productDetail.components.find((c) => c.id === id)?.name ?? id}
-              >
-                {productDetail.components.map((c) => (
-                  <Select.Item key={c.id} value={c.id}>
-                    {c.name}
-                  </Select.Item>
-                ))}
-              </Select>
-                </label>
+                    value={componentId}
+                    onValueChange={(next) => setComponentId(next ?? "")}
+                    placeholder="Select a component"
+                    aria-label="2. Component"
+                    renderValue={(id) => productDetail.components.find((c) => c.id === id)?.name ?? id}
+                  >
+                    {productDetail.components.map((c) => (
+                      <Select.Item key={c.id} value={c.id}>
+                        {c.name}
+                      </Select.Item>
+                    ))}
+                  </Select>
+                </Field>
 
                 <fieldset disabled={!componentId}>
                   <legend>3. Details</legend>
-                  <label>
-                    Summary
-                    <input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={500} required />
-                  </label>
-                  <label>
-                    Description
+                  <Field>
+                    <Field.Label>Summary</Field.Label>
+                    <Input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={500} required />
+                  </Field>
+                  <Field>
+                    <Field.Label htmlFor="new-bug-description">Description</Field.Label>
                     <textarea
+                      id="new-bug-description"
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       rows={6}
                       required
                     />
-                  </label>
+                  </Field>
                   <div className="field-row">
-                    <label>
-                      Version
+                    <Field>
+                      <Field.Label>Version</Field.Label>
                       {/* Required, not optional: bugs.versionId is NOT NULL,
                           so an "unspecified" choice here composed a bug that
                           could not be stored and failed at submit. Milestone
                           below is genuinely nullable and keeps its blank. */}
                       <Select
-                value={versionId}
-                onValueChange={(next) => setVersionId(next ?? "")}
-                placeholder="Select a version"
-                aria-label="Version"
-              
-                renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
-              >
+                        value={versionId}
+                        onValueChange={(next) => setVersionId(next ?? "")}
+                        placeholder="Select a version"
+                        aria-label="Version"
+                        renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
+                      >
                         {productDetail.versions.map((v) => (
                           <Select.Item key={v.id} value={v.id}>
                             {v.name}
                           </Select.Item>
                         ))}
                       </Select>
-                    </label>
-                    <label>
-                      Milestone
+                    </Field>
+                    <Field>
+                      <Field.Label>Milestone</Field.Label>
                       <Select
                         value={milestoneId}
                         onValueChange={(next) => setMilestoneId(next ?? "")}
@@ -185,11 +183,11 @@ export function NewBugPage() {
                           </Select.Item>
                         ))}
                       </Select>
-                    </label>
+                    </Field>
                   </div>
                   <div className="field-row">
-                    <label>
-                      Severity
+                    <Field>
+                      <Field.Label>Severity</Field.Label>
                       <Select
                         value={severity}
                         onValueChange={(next) => setSeverity(next as BugSeverity)}
@@ -201,9 +199,9 @@ export function NewBugPage() {
                           </Select.Item>
                         ))}
                       </Select>
-                    </label>
-                    <label>
-                      Priority
+                    </Field>
+                    <Field>
+                      <Field.Label>Priority</Field.Label>
                       <Select
                         value={priority}
                         onValueChange={(next) => setPriority(next as BugPriority)}
@@ -215,31 +213,32 @@ export function NewBugPage() {
                           </Select.Item>
                         ))}
                       </Select>
-                    </label>
+                    </Field>
                   </div>
                   <div className="field-row">
-                    <label>
-                      OS
-                      <input value={opSys} onChange={(e) => setOpSys(e.target.value)} />
-                    </label>
-                    <label>
-                      Platform
-                      <input value={platform} onChange={(e) => setPlatform(e.target.value)} />
-                    </label>
+                    <Field>
+                      <Field.Label>OS</Field.Label>
+                      <Input value={opSys} onChange={(e) => setOpSys(e.target.value)} />
+                    </Field>
+                    <Field>
+                      <Field.Label>Platform</Field.Label>
+                      <Input value={platform} onChange={(e) => setPlatform(e.target.value)} />
+                    </Field>
                   </div>
-                  <label>
-                    Whiteboard
-                    <input value={whiteboard} onChange={(e) => setWhiteboard(e.target.value)} />
-                  </label>
-                  <label>
-                    URL
-                    <input value={url} onChange={(e) => setUrl(e.target.value)} />
-                  </label>
+                  <Field>
+                    <Field.Label>Whiteboard</Field.Label>
+                    <Input value={whiteboard} onChange={(e) => setWhiteboard(e.target.value)} />
+                  </Field>
+                  <Field>
+                    <Field.Label>URL</Field.Label>
+                    <Input value={url} onChange={(e) => setUrl(e.target.value)} />
+                  </Field>
                   {productDetail.product.allowsUnconfirmed ? (
-                    <label className="checkbox-label">
-                      <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-                      File as CONFIRMED (skip UNCONFIRMED)
-                    </label>
+                    <Checkbox
+                      checked={confirmed}
+                      onCheckedChange={(next) => setConfirmed(next === true)}
+                      label="File as CONFIRMED (skip UNCONFIRMED)"
+                    />
                   ) : (
                     <p className="state-hint small">
                       This product does not allow UNCONFIRMED bugs; this will be filed as CONFIRMED.

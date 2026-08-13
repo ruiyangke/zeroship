@@ -7,7 +7,7 @@ import {
   reportTimeToResolve,
   reportTrend,
 } from "../api";
-import { Cluster, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { Cluster, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
 
@@ -301,16 +301,15 @@ export function ReportsPage() {
               </Select.Item>
             ))}
         </Select>
-        <label>
-          Window (days)
-          <input
-            type="number"
+        <Field>
+          <Field.Label>Window (days)</Field.Label>
+          <NumberField
             min={1}
             max={365}
             value={days}
-            onChange={(e) => setDays(Math.min(365, Math.max(1, Number(e.target.value) || 30)))}
+            onValueChange={(next) => setDays(Math.min(365, Math.max(1, next ?? 30)))}
           />
-        </label>
+        </Field>
       </div>
       <SummarySection productId={productId} />
       <ByComponentSection productId={productId} productNames={productNames} />

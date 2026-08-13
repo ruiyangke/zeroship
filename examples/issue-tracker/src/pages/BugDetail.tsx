@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, Stack } from "@zeroship/ui";
+import { Card, Cluster, Stack } from "@zeroship/ui";
+import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { getBug, getProduct, listProducts } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
 import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
@@ -82,6 +83,15 @@ export function BugDetailPage({ id }: { id: string }) {
           </span>{" "}
           {detail.bug.summary}
         </h1>
+        {/* State belongs beside the title, not eleven fields down. Someone
+            opening a bug asks "what is this and where is it up to" before
+            anything else. */}
+        <Cluster gap={2} align="center" className="bug-state">
+          <StatusBadge status={detail.bug.status} />
+          <ResolutionBadge resolution={detail.bug.resolution ?? null} />
+          <SeverityBadge severity={detail.bug.severity} />
+          <PriorityBadge priority={detail.bug.priority} />
+        </Cluster>
       </div>
 
       <div className="tabs">
@@ -105,7 +115,16 @@ export function BugDetailPage({ id }: { id: string }) {
         <HistoryPanel activities={detail.activities} labels={historyLabels} />
       ) : (
         <div className="bug-detail-grid">
+          {/* The conversation IS the bug. It used to sit under a screen of
+              editable fields -- summary, status, severity, priority,
+              assignee, product, component, version, whiteboard, OS, platform,
+              URL -- so the description, which is what the bug actually says,
+              started below the fold. Fields are metadata and metadata goes in
+              the rail. */}
           <div className="bug-detail-main">
+            <CommentsPanel bugId={id} />
+          </div>
+          <Stack className="bug-detail-side" gap={3}>
             <FieldsPanel
               bug={detail.bug}
               people={detail.people}
@@ -120,13 +139,6 @@ export function BugDetailPage({ id }: { id: string }) {
               fetchProductDetail={(pid) => toPromise(getProduct({ id: pid }))}
               onUpdated={() => reload()}
             />
-            <CommentsPanel bugId={id} />
-          </div>
-          {/* One place decides panel chrome. These were eight components each
-              styled by whatever class name happened to match, so Keywords and
-              Flags rendered inside a bordered box and Votes, Security and See
-              also did not -- grouping that looked deliberate and was not. */}
-          <Stack className="bug-detail-side" gap={3}>
             <VotesPanel
               bugId={id}
               voteCount={detail.bug.voteCount}

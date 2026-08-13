@@ -78,8 +78,8 @@ export function FlagTypesAdmin() {
           <Field.Label>New flag type</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="review" />
         </Field>
-        <label>
-          Product
+        <Field>
+          <Field.Label>Product</Field.Label>
           <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="All products" aria-label="Product" renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}>
             {/* A type with no product applies to EVERY product, which is
                 Bugzilla behaviour and worth choosing rather than defaulting
@@ -92,9 +92,9 @@ export function FlagTypesAdmin() {
               </Select.Item>
             ))}
           </Select>
-        </label>
-        <label>
-          Applies to
+        </Field>
+        <Field>
+          <Field.Label>Applies to</Field.Label>
           <Select
             value={targetType}
             onValueChange={(next) => setTargetType((next as "bug" | "attachment") ?? "bug")}
@@ -103,7 +103,7 @@ export function FlagTypesAdmin() {
             <Select.Item value="bug">bug</Select.Item>
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
-        </label>
+        </Field>
         <Button variant="filled" size="small"
           disabled={busy || !name.trim()}
           onClick={() => void create()}

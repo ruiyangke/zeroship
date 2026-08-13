@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Field, Input } from "@zeroship/ui";
 
 import { addSeeAlso, listSeeAlso, removeSeeAlso } from "../../api";
 import { errorMessage } from "../rpc";
@@ -85,14 +85,14 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
         </ul>
       )}
       <div className="field-row">
-        <label>
-          Link
-          <input
+        <Field>
+          <Field.Label>Link</Field.Label>
+          <Input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://bugzilla.example.org/show_bug.cgi?id=1"
           />
-        </label>
+        </Field>
         <Button variant="gray" size="small" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
         </Button>
