@@ -20,6 +20,7 @@ use auth::Authenticator;
 use migration_store::MigrationStore;
 use policy::ManagedPolicyConfig;
 use policy_store::AppPolicyStore;
+use zeroship_core::readiness::ReadinessGate;
 
 #[allow(missing_debug_implementations)]
 pub struct MigrationServiceState {
@@ -29,6 +30,11 @@ pub struct MigrationServiceState {
     pub policy_config: ManagedPolicyConfig,
     pub policy_store: AppPolicyStore,
     pub migration_store: MigrationStore,
+    /// Bounds `/readyz`. The probe opens a connection (this service has no
+    /// shared client to reuse - see `AppPolicyStore::connect`), so the gate's
+    /// TTL is what keeps an unauthenticated probe flood from becoming a
+    /// connection flood.
+    pub readiness: ReadinessGate,
 }
 
 impl MigrationServiceState {
@@ -49,6 +55,7 @@ impl MigrationServiceState {
             policy_config,
             policy_store,
             migration_store,
+            readiness: ReadinessGate::with_defaults(),
         }
     }
 }

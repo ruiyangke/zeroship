@@ -28,6 +28,21 @@ impl AppPolicyStore {
         Self { dsn: dsn.into() }
     }
 
+    /// Open one connection and confirm the server answers. Backs
+    /// `/readyz`: every API call this service serves opens a connection on
+    /// this DSN, so a DSN it cannot connect on means it cannot serve.
+    ///
+    /// Deliberately no query - a connect plus a protocol-level sync proves
+    /// reachability, credentials and an accepting server without depending on
+    /// any table existing.
+    pub async fn probe(&self) -> Result<(), AppPolicyStoreError> {
+        let client = self.connect().await?;
+        client
+            .check_connection()
+            .await
+            .map_err(AppPolicyStoreError::Query)
+    }
+
     pub async fn insert_version(
         &self,
         app_id: Uuid,
