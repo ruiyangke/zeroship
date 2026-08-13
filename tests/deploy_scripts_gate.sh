@@ -204,9 +204,9 @@ fi
 
 # Shared token, but the token is in the stoplist. Two variables of the same
 # service are not a rename of each other.
-SUS="$(rename_suspects "GATEWAY_OIDC_SECRET" "GATEWAY_DATABASE_URL")"
+SUS="$(rename_suspects "ZEROSHIP_GATEWAY_BROKER_SECRET_FILE" "ZEROSHIP_GATEWAY_DATABASE_URL")"
 if [ -z "$SUS" ]; then
-  pass "GATEWAY_OIDC_SECRET and GATEWAY_DATABASE_URL do not pair (GATEWAY and SECRET are stoplisted)"
+  pass "the two gateway names do not pair (GATEWAY, SECRET, DATABASE and URL are stoplisted)"
 else
   fail "a stoplisted token paired two unrelated variables:$SUS"
 fi

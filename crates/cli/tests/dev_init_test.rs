@@ -421,6 +421,49 @@ fn dev_init_never_generates_a_stripe_webhook_secret() {
     );
 }
 
+/// The same defect as the Stripe one above, and the reason it is asserted
+/// separately: `GATEWAY_OIDC_SECRET` was generated into the overlay and read by
+/// NOTHING. The name asserts that the gateway OIDC path is configured, so an
+/// operator auditing .env sees a plausible secret and stops looking, while the
+/// value that actually matters is a FILE PATH under a different name
+/// (`ZEROSHIP_GATEWAY_BROKER_SECRET_FILE`). Without this assertion nothing
+/// stops it being added back, because an unread key breaks no test.
+///
+/// This asserts ABSENCE only. It does not prove the gateway is configured; that
+/// is the compose render assertion plus the gateway boot guard.
+#[test]
+fn dev_init_never_generates_the_unread_gateway_oidc_secret() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+
+    let output = run_dev_init(&secrets_dir, &env_file);
+    assert_success(&output, "zeroship dev init");
+
+    let overlay = parse_generated_env(&env_file);
+    assert!(
+        !overlay.contains_key("GATEWAY_OIDC_SECRET"),
+        "dev init generated a key nothing reads: {:?}",
+        overlay.keys().collect::<Vec<_>>()
+    );
+    let raw = std::fs::read_to_string(&env_file).expect("read generated env file");
+    assert!(
+        !raw.contains("GATEWAY_OIDC_SECRET"),
+        "the generated env file still mentions GATEWAY_OIDC_SECRET"
+    );
+    // The one-variable control: the gateway secret that IS read is a path
+    // setting, so it must NOT appear in the generated scalar overlay either -
+    // and the file it names must exist.
+    assert!(
+        !overlay.contains_key("ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"),
+        "a path setting must not be generated as an overlay scalar"
+    );
+    assert!(
+        secrets_dir.join("broker-secret").exists(),
+        "the broker master secret file the gateway actually reads was not created"
+    );
+}
+
 fn run_dev_init(secrets_dir: &Path, env_file: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .args(["dev", "init", "--secrets-dir"])

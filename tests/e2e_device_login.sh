@@ -60,9 +60,9 @@ GATE_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT"
 # THE POINT OF THE WHOLE HARNESS: nothing Supabase-shaped is configured. If any
 # of these leak in from the caller's environment the run is not testing the
 # shipped default, so drop them rather than silently measuring something else.
-unset ZEROSHIP_AUTH_PROVIDER ZEROSHIP_CONTROL_AUTH_PROVIDER AUTH_PROVIDER
+unset ZEROSHIP_AUTH_PROVIDER
 unset ZEROSHIP_AUTH_SUPABASE_URL ZEROSHIP_AUTH_SUPABASE_ANON_KEY ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY ZEROSHIP_AUTH_SUPABASE_JWT_SECRET
-unset ZEROSHIP_SUPABASE_URL ZEROSHIP_SUPABASE_ANON_KEY
+unset ZEROSHIP_AUTH_SUPABASE_URL ZEROSHIP_AUTH_SUPABASE_ANON_KEY
 
 # shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"

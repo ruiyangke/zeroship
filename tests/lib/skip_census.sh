@@ -5,7 +5,7 @@
 #
 # The failure this exists for: a test gated on a live backend is written as
 #
-#     let Ok(url) = std::env::var("ZEROSHIP_WORKER_KV_URL") else { ...announce...; return; };
+#     let Ok(url) = std::env::var("ZEROSHIP_KV_URL") else { ...announce...; return; };
 #
 # which COMPILES, RUNS, RETURNS EARLY, AND COUNTS AS PASSED. Measured on
 # 2026-08-09, `cargo test -p zeroship-plugin-kv --test e2e_runtime` with the var
