@@ -77,7 +77,13 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionError> {
     let store_url = StoreUrl::parse(&cli.blob_store)
         .map_err(|e| err(format!("invalid --blob-store '{}': {e}", cli.blob_store)))?;
-    let blob_store = build_blob_store(&store_url).map_err(|e| {
+    let s3_runtime = match store_url.is_remote() {
+        true => Some(zeroship_core::resolve_s3_runtime!(DevProvisionConsumer).map_err(|e| {
+            err(format!("failed to resolve S3 credentials for blob store: {e}"))
+        })?),
+        false => None,
+    };
+    let blob_store = build_blob_store(&store_url, s3_runtime.as_ref()).map_err(|e| {
         err(format!(
             "failed to initialize blob store '{}': {e}",
             cli.blob_store

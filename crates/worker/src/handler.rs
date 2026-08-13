@@ -1697,9 +1697,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     fn workflow_test_db_url() -> Option<String> {
-        std::env::var("CONTROL_TEST_DB")
-            .or_else(|_| std::env::var("PG_TEST_URL"))
-            .ok()
+        zeroship_core::test_env!("CONTROL_TEST_DB")
+            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
     }
 
     // (app_id, blob_store, envs, logs, config, blob_root)
@@ -3534,9 +3533,9 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// service.
     #[test]
     fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
-        let Some(kv_url) = std::env::var("REDIS_TEST_URL").ok().filter(|s| !s.is_empty())
+        let Some(kv_url) = zeroship_core::test_env!("REDIS_TEST_URL").filter(|s| !s.is_empty())
         else {
-            if std::env::var("KV_REQUIRE_REDIS").ok().as_deref() == Some("1") {
+            if zeroship_core::test_env!("KV_REQUIRE_REDIS").as_deref() == Some("1") {
                 panic!("KV_REQUIRE_REDIS=1 but REDIS_TEST_URL is unset");
             }
             eprintln!(

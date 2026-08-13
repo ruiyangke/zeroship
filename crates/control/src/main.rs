@@ -814,10 +814,18 @@ fn main() -> std::io::Result<()> {
     // for dev, S3 for production). The legacy per-app `BundleStore`/VFS is
     // gone — app purge now deletes the app's manifest keyspace via
     // `BlobStore::delete_app_manifests`.
-    let blob_store: Arc<dyn BlobStore> =
-        build_blob_store(&store_url).expect("failed to initialise blob store");
-    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
-        .expect("failed to initialise workflow blob store");
+    // The S3 inputs are read HERE, not inside `zeroship-bundle`, so the read is
+    // recorded against this binary. Resolved only for a remote store: on local
+    // disk the credentials are legitimately absent.
+    let s3_runtime = store_url.is_remote().then(|| {
+        zeroship_core::resolve_s3_runtime!(zeroship_control::config::ControlSettingsConsumer)
+            .expect("failed to resolve S3 credentials for the blob store")
+    });
+    let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
+        .expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
+        build_workflow_blob_store(&store_url, s3_runtime.as_ref())
+            .expect("failed to initialise workflow blob store");
 
     if !legacy_keys.is_empty() {
         tracing::info!(

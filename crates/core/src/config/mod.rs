@@ -26,9 +26,9 @@ pub mod source;
 pub mod topology;
 
 pub use declared::{
-    consumer_of, is_valid_env_name, read_declared_env_os_value, read_declared_env_value,
-    read_process_env_snapshot_value, DeclaredEnvKey, DeclaredEnvRead, EnvClass, TestHarness,
-    DECLARED_ENV_READS, PROCESS_ENV_SNAPSHOT,
+    consumer_of, is_valid_env_name, read_declared_env_family_value, read_declared_env_os_value,
+    read_declared_env_value, read_process_env_snapshot_value, DeclaredEnvFamily, DeclaredEnvKey,
+    DeclaredEnvRead, EnvClass, TestHarness, DECLARED_ENV_READS, PROCESS_ENV_SNAPSHOT,
 };
 
 pub use bootstrap::{

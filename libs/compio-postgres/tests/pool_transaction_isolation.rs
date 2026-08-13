@@ -4,8 +4,7 @@
 //! it survives a full revert of the transaction-status feature.
 //!
 //! The tests in `integration.rs` that cover the same fix import
-//! `TransactionStatus` and call `transaction    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())status()`. That is right for
+//! `TransactionStatus` and call `transaction_status()`. That is right for
 //! pinning the new behaviour precisely, but it means a revert of the whole
 //! feature produces a COMPILE ERROR rather than a failing test - and a build
 //! break reads as "the tests are stale", which is the wrong signal to hand

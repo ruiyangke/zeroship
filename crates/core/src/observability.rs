@@ -8,10 +8,18 @@
 //! ONE declaration. `config::bootstrap` resolves them and calls
 //! [`init_tracing_with`].
 //!
-//! [`init_tracing`] is the remaining ungoverned entry point: the creator CLI and
-//! the single-tenant runtime still read `RUST_LOG` / `ZEROSHIP_LOG_FORMAT`
-//! directly through it. Those raw reads are a later step's problem, and no
-//! server binary reaches them.
+//! [`init_tracing`] is the entry point for everything that is NOT a server
+//! binary: the creator CLI (`crates/cli/src/main.rs`) and the two single-tenant
+//! runtime binaries (`crates/runtime/src/core/{server,echo_server}.rs`) are its
+//! only callers, and they read `RUST_LOG` / `ZEROSHIP_LOG_FORMAT` through it.
+//! Those two reads are now DECLARED keys owned by [`TracingInitConsumer`]
+//! rather than raw `std::env::var` calls: `RUST_LOG` is `external` (the
+//! `tracing`/`env_filter` convention, not ours), and `ZEROSHIP_LOG_FORMAT` is
+//! `platform` - a zeroship-owned name whose exit is that these three callers
+//! grow a `#[zeroship_config]` declaration and read the generated
+//! `observability.log_format` like the server binaries already do, at which
+//! point this spelling disappears rather than being reclassified. See
+//! [`TracingInitConsumer`] for why the values are not passed in by the caller.
 //!
 //! Calling either init more than once in a process is a no-op after the first
 //! (the global subscriber is locked in by `tracing_subscriber::registry().init()`).
@@ -109,6 +117,28 @@ pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> St
     }
 }
 
+crate::declare_env_consumer!(
+    /// The consumer that owns [`init_tracing`]'s own two environment reads.
+    ///
+    /// WHY A CONSUMER AND NOT THE CALLER. The obvious shape for Step 4 is to
+    /// delete the reads here and have each caller pass resolved values in -
+    /// that is exactly what [`crate::config::bootstrap`] already does for the
+    /// five server binaries, which resolve the GENERATED
+    /// `observability.log_filter` / `observability.log_format` and call
+    /// [`init_tracing_with`]. It is not available here: `init_tracing`'s only
+    /// callers are `crates/cli/src/main.rs` and
+    /// `crates/runtime/src/core/{server,echo_server}.rs`, none of which has a
+    /// `#[zeroship_config]` declaration to resolve from, and all three sit
+    /// outside this crate. Giving them one is Step 3/Step 6 work, not a rename.
+    ///
+    /// The target is the cargo PACKAGE rather than a binary, per
+    /// [`crate::config::DeclaredEnvRead::consumer`]: a library function reached
+    /// from three different binaries has no single binary to name.
+    pub TracingInitConsumer,
+    target = "zeroship-core",
+    scope = "observability",
+);
+
 /// Initialise the workspace-wide tracing subscriber.
 ///
 /// `default_filter` is the directive applied when `RUST_LOG` is not
@@ -120,10 +150,25 @@ pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> St
 /// `bunyan`. Unknown values fall back to `pretty`. When the env var
 /// is unset, we auto-detect: TTY stderr -> `pretty`, otherwise
 /// `json` (production-friendly).
+// WHY AN `unsafe_code` ALLOW ON A FUNCTION WITH NO `unsafe` IN IT.
+// `declared_env!` links each read site into linkme's `DECLARED_ENV_READS`, and
+// a distributed-slice element is a `static` carrying `#[link_section]`, which
+// rustc's `unsafe_code` lint denies (the workspace sets `unsafe_code = "deny"`).
+// Every other crate in the tree gets this for free, because there the expansion
+// comes from an EXTERNAL macro and the lint does not fire in external macro
+// output; inside `zeroship-core` the macro is local, so the deny reaches it.
+// Measured: without this attribute `cargo check -p zeroship-core --all-targets`
+// fails with two "declaration of a static with `link_section`" errors pointing
+// at the two calls below.
+// The scope is this function, so it cannot silence a real `unsafe` block
+// elsewhere, and there is no `unsafe` block here to silence.
+#[allow(unsafe_code)]
 pub fn init_tracing(default_filter: &str) {
-    let filter = resolve_log_filter(std::env::var("RUST_LOG").ok(), default_filter);
-    let format = std::env::var("ZEROSHIP_LOG_FORMAT")
-        .ok()
+    let filter = resolve_log_filter(
+        crate::declared_env!(external, "RUST_LOG", TracingInitConsumer),
+        default_filter,
+    );
+    let format = crate::declared_env!(platform, "ZEROSHIP_LOG_FORMAT", TracingInitConsumer)
         .and_then(|raw| LogFormat::from_str(&raw).ok())
         .unwrap_or(LogFormat::Auto);
 
