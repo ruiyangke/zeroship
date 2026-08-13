@@ -902,6 +902,69 @@ pub fn collect_rust_sources(root: &Path, subdirs: &[&str]) -> Result<Vec<(String
     }
 }
 
+/// Every TRACKED first-party Rust file, as `(repository-relative path, source)`.
+///
+/// `git ls-files` rather than a directory walk, following the repository's
+/// existing source-gate pattern in `crates/core/tests/source_is_greppable_test.rs`.
+/// The difference matters twice: a build artefact under `target/` is not source
+/// and must not be scanned, and a file someone forgot to `git add` is not yet
+/// part of the repository, so a gate that walked the filesystem would fail on
+/// scratch files while missing nothing real.
+///
+/// `third_party/` is excluded because it is a vendored submodule with its own
+/// workspace and its own rules; it is not ours to rewrite.
+///
+/// # Errors
+///
+/// Returns an error when `git ls-files` cannot run, when it lists nothing, or
+/// when a listed file cannot be read.
+pub fn collect_tracked_rust_sources(root: &Path) -> Result<Vec<(String, String)>, Vec<InventoryError>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "*.rs"])
+        .output()
+        .map_err(|error| {
+            vec![InventoryError::Parse {
+                path: root.display().to_string(),
+                message: format!("git ls-files failed: {error}"),
+            }]
+        })?;
+    if !output.status.success() {
+        return Err(vec![InventoryError::Parse {
+            path: root.display().to_string(),
+            message: format!("git ls-files exited {}", output.status),
+        }]);
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut sources = Vec::new();
+    let mut errors = Vec::new();
+    for relative in listing.split('\0').filter(|entry| !entry.is_empty()) {
+        if relative.starts_with("third_party/") {
+            continue;
+        }
+        match std::fs::read_to_string(root.join(relative)) {
+            Ok(source) => sources.push((relative.to_owned(), source)),
+            Err(error) => errors.push(InventoryError::Parse {
+                path: relative.to_owned(),
+                message: error.to_string(),
+            }),
+        }
+    }
+    if sources.is_empty() {
+        errors.push(InventoryError::Parse {
+            path: root.display().to_string(),
+            message: "git ls-files listed no tracked Rust source".to_owned(),
+        });
+    }
+    if errors.is_empty() {
+        sources.sort();
+        Ok(sources)
+    } else {
+        Err(errors)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

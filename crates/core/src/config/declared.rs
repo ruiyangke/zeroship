@@ -396,6 +396,83 @@ macro_rules! read_declared_env_os {
     }};
 }
 
+/// Read a declared name in one line, naming its class and its consumer.
+///
+/// This is the ordinary spelling. It expands to a `const` key plus
+/// [`crate::read_declared_env`], so the read is registered exactly as the
+/// explicit two-step form is; what it saves is a named constant per site.
+///
+/// The name must be a LITERAL. A `const NAME: &str` would satisfy the compiler
+/// but not the source gate, which lifts key literals out of the syntax tree to
+/// check their spelling and their class - so a name behind a constant would be
+/// declared to the type system and invisible to the audit. A site that needs
+/// one name in several places declares the key itself and uses
+/// [`crate::read_declared_env`].
+///
+/// Returns `Option<String>`, dropping a non-Unicode value exactly as the
+/// `std::env::var(..).ok()` it replaces did. That is deliberate: making the
+/// conversion behaviour-preserving is what lets the gate land without auditing
+/// 274 call sites for a changed failure mode. Use the explicit key form when
+/// the difference between "unset" and "not Unicode" matters.
+#[macro_export]
+macro_rules! declared_env {
+    ($class:ident, $name:literal, $consumer:path $(,)?) => {{
+        const __ZEROSHIP_DECLARED_KEY: $crate::config::DeclaredEnvKey<
+            ::std::string::String,
+            $consumer,
+        > = $crate::config::DeclaredEnvKey::$class($name);
+        $crate::read_declared_env!(__ZEROSHIP_DECLARED_KEY, $consumer).ok().flatten()
+    }};
+}
+
+/// Read a declared name as an `OsString`, naming its class and its consumer.
+#[macro_export]
+macro_rules! declared_env_os {
+    ($class:ident, $name:literal, $consumer:path $(,)?) => {{
+        const __ZEROSHIP_DECLARED_OS_KEY: $crate::config::DeclaredEnvKey<
+            ::std::ffi::OsString,
+            $consumer,
+        > = $crate::config::DeclaredEnvKey::$class($name);
+        $crate::read_declared_env_os!(__ZEROSHIP_DECLARED_OS_KEY, $consumer)
+    }};
+}
+
+/// The consumer marker for first-party test code.
+///
+/// Test binaries have no `#[zeroship_config]` declaration and no shipped
+/// target, so there is nothing for a per-crate marker to name that the read
+/// site's file path does not already say. One shared marker keeps a test read
+/// attributable (class `test`, plus file and line) without inventing a
+/// fictional binary per crate.
+///
+/// WHAT THIS GIVES UP: a test read is not bound to its crate at the TYPE level,
+/// so the compiler will not stop `crates/a`'s test from using a name that
+/// `crates/b` owns. The source gate's class check is what keeps a test-class
+/// name out of production code; this marker only makes the read enumerable.
+#[derive(Clone, Copy, Debug)]
+pub struct TestHarness;
+
+impl ConfigConsumer for TestHarness {
+    const BINARY: &'static str = "<first-party tests>";
+    const SCOPE: &'static str = "test";
+}
+
+/// Read a test-only name. Shorthand for `declared_env!(test, NAME, TestHarness)`.
+#[macro_export]
+macro_rules! test_env {
+    ($name:literal $(,)?) => {
+        $crate::declared_env!(test, $name, $crate::config::TestHarness)
+    };
+}
+
+/// Read a test-only name as an `OsString`.
+#[macro_export]
+macro_rules! test_env_os {
+    ($name:literal $(,)?) => {
+        $crate::declared_env_os!(test, $name, $crate::config::TestHarness)
+    };
+}
+
 /// Declare a consumer marker for a component that is not a generated binary.
 ///
 /// `#[zeroship_config]` generates a `ConfigConsumer` for each server binary. A

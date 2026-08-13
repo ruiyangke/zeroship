@@ -35,7 +35,7 @@ fn env_nonempty(key: &str) -> Option<String> {
 
     assert!(errors.iter().any(|error| matches!(
         error,
-        RawEnvViolation::Read(path) if path == "std::env::var"
+        RawEnvViolation::Read(path) if path.ends_with("std::env::var")
     )));
 }
 
