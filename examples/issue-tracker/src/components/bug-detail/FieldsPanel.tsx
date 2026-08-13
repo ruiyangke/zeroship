@@ -19,7 +19,7 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
 
   return (
     <div className="field-row">
-      <Field>
+      <Field orientation="horizontal">
         {/* The badge is gone. It sat directly above a select showing the same
             value, so the page stated severity twice and neither told you which
             one to use. */}
@@ -48,7 +48,7 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
           ))}
         </Select>
       </Field>
-      <Field>
+      <Field orientation="horizontal">
         <Field.Label>Priority</Field.Label>
         <Select
           value={bug.priority}
@@ -174,7 +174,7 @@ function MoveControl({
       </div>
       {open ? (
         <div className="inline-form">
-          <Field>
+          <Field orientation="horizontal">
             <Field.Label>Target product</Field.Label>
             <Select
               value={targetProductId}
@@ -190,7 +190,7 @@ function MoveControl({
               ))}
             </Select>
           </Field>
-          <Field>
+          <Field orientation="horizontal">
             <Field.Label>Target component</Field.Label>
             <Select
               value={targetComponentId}
@@ -282,7 +282,7 @@ function GeneralField({
   }
 
   return (
-    <Field className="field-block">
+    <Field orientation="horizontal" className="field-block">
       <Field.Label>{label}</Field.Label>
       <span className="field-block-head">
         <Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
@@ -387,7 +387,7 @@ export function FieldsPanel({
 
       {productDetail ? (
         <div className="field-row">
-          <Field>
+          <Field orientation="horizontal">
             <Field.Label>Version</Field.Label>
             {/* The design system Select, so the detail page stops mixing two
                 kinds of dropdown with the filter bar. */}
@@ -400,7 +400,7 @@ export function FieldsPanel({
                   .then(onUpdated)
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
-              placeholder="unspecified"
+              placeholder="None"
               aria-label="Version"
               renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
             >
@@ -411,7 +411,7 @@ export function FieldsPanel({
               ))}
             </Select>
           </Field>
-          <Field>
+          <Field orientation="horizontal">
             <Field.Label>Milestone</Field.Label>
             <Select
               value={bug.milestoneId ?? ""}
@@ -422,7 +422,7 @@ export function FieldsPanel({
                   .then(onUpdated)
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
-              placeholder="unspecified"
+              placeholder="None"
               aria-label="Milestone"
               renderValue={(id) => productDetail.milestones.find((m) => m.id === id)?.name ?? id}
             >

@@ -460,6 +460,14 @@ tbody tr:hover { background: var(--surface-2); }
   align-items: stretch;
   gap: 0.5rem;
 }
+
+/* One alignment for the whole rail: expressed through Field's own
+   orientation prop in FieldsPanel, NOT by styling .zs-field__label from here.
+   The rail had three alignments -- DescriptionList inline, Select rows
+   stacked, compact rows inline -- so reading down the column the eye had to
+   re-find where a label starts three times. Fixing that by reaching into the
+   design system's class names would be the third instance of the mistake the
+   label and th rules were removed for. */
 .bug-detail-side .fields-panel {
   padding: 0.9rem 1rem;
 }
