@@ -3,15 +3,16 @@
 //! In the library rather than `main.rs` so the compiled configuration checker
 //! can link the declaration and invoke clap's `CommandFactory` against it.
 //!
-//! Secret-bearing inputs are deliberately absent: `control_key`, `worker_key`,
-//! `db`, `stash_signing_key`, `pairwise_salt` and the three key-file paths stay
-//! hand-spelled on `GateCli` until the `Secret<T>` conversion.
+//! Every input the gateway takes is declared here, secrets included. A
+//! `Secret<T>` field generates only a `--<name>-file PATH` flag, so no gateway
+//! credential can reach argv; the value tiers are the canonical `ZEROSHIP_*`
+//! environment name and the canonical TOML path.
 
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OriginScheme, OverlaySelector, TrustedOrigin,
+    Operational, OriginScheme, OverlaySelector, Secret, TrustedOrigin,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -39,6 +40,67 @@ pub struct GateSettings {
     /// Output format for `--check-config`.
     #[config(shared = CHECK_CONFIG_FORMAT, default = CheckFormat::Text)]
     pub check_config_format: CommandControl<CheckFormat>,
+
+    /// Admin/control API shared secret.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
+    /// Shared secret for worker admin endpoints.
+    #[config(shared = WORKER_KEY)]
+    pub worker_key: Secret<String>,
+
+    /// `PostgreSQL` DSN for gateway session validation. A DSN grammar admits
+    /// userinfo, so it is secret-classed whether or not a given value carries a
+    /// password.
+    #[config(name = "gateway.database_url")]
+    pub database_url: Secret<String>,
+
+    /// HMAC key for short-lived OIDC stash cookies.
+    #[config(name = "gateway.stash_signing_key")]
+    pub stash_signing_key: Secret<String>,
+
+    /// Dedicated PERMANENT pairwise-salt secret (auth-sdk 6.2). The seed for
+    /// every app's `pws_` per-app identity anchor, independent of the rotatable
+    /// stash key. MUST be identical on gateway + control and MUST NOT be
+    /// rotated without a per-app `pws_` migration.
+    ///
+    /// One field, not two. The pre-conversion declaration had a
+    /// `--pairwise-salt` value flag AND a `--pairwise-salt-file` path flag with
+    /// a hand-written file-wins-over-value dance between them; a secret's
+    /// generated supply set is exactly that precedence with no second field to
+    /// keep in step, and the value flag is gone because a secret must never
+    /// travel through argv.
+    #[config(shared = PAIRWISE_SALT)]
+    pub pairwise_salt: Secret<String>,
+
+    /// Shared platform broker master secret, byte-identical to auth's.
+    ///
+    /// The gateway derives per-app `oac_` client secrets from this material
+    /// when brokering authorization-code, refresh, and revoke requests to the
+    /// platform OP. It is the MATERIAL, not a path: the consumer only reads the
+    /// bytes and validates their strength, so nothing is lost by resolving it
+    /// like any other secret.
+    #[config(name = "gateway.broker_secret")]
+    pub broker_secret: Secret<String>,
+
+    /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
+    ///
+    /// A PATH, deliberately, and NOT a `Secret<String>`. `signing::load_from_path`
+    /// sniffs PEM-versus-DER and calls `reject_insecure_permissions(path)` on the
+    /// file it opened; turning the contents into in-memory secret material would
+    /// drop the permission check and break DER keys, which are not UTF-8. A path
+    /// to a secret is not itself a secret.
+    #[config(name = "gateway.signing_key_file", default = PathBuf::new())]
+    pub signing_key_file: Operational<PathBuf>,
+
+    /// PEM/PKCS#8 PREVIOUS signing key FILE for the session-cookie rotation
+    /// overlap (auth-sdk 8.5). Set ONLY during a key roll: the Verifier then
+    /// accepts session cookies signed by EITHER the current or this previous
+    /// key. The Issuer always signs with the current key only. Empty (the
+    /// default) means a single-key Verifier. A path, for the same reason as
+    /// `signing_key_file`.
+    #[config(name = "gateway.prev_signing_key_file", default = PathBuf::new())]
+    pub prev_signing_key_file: Operational<PathBuf>,
 
     /// `EnvFilter` directive for the tracing subscriber.
     #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]

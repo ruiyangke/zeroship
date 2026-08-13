@@ -10,7 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, require_nonempty, validate_stash_key, CheckConfigReport, CheckValue,
+    bootstrap_or_exit, require_nonempty, validate_pairwise_salt, validate_secret_material,
+    validate_stash_key, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
@@ -22,91 +23,14 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// zeroship gateway startup configuration.
-///
-/// Only the credential-bearing fields remain here; every operational value is
-/// generated in `zeroship_gateway::config`.
-#[derive(Parser)]
-#[command(name = "zeroship-gate")]
-struct GateCli {
-    /// Admin/control API shared secret.
-    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
-    control_key: String,
-
-    /// Shared secret for worker admin endpoints.
-    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
-    worker_key: String,
-
-    /// `PostgreSQL` DSN for gateway session validation.
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
-    db: String,
-
-    /// PEM/PKCS#8 signing key file for the gateway-signed session cookie.
-    #[arg(
-        long = "signing-key-file",
-        env = "GATEWAY_SIGNING_KEY_FILE",
-        default_value = ""
-    )]
-    gateway_signing_key_file: String,
-
-    /// PEM/PKCS#8 PREVIOUS signing key file for the session-cookie rotation
-    /// overlap (auth-sdk 8.5). Set ONLY during a key roll: the Verifier
-    /// then accepts session cookies signed by EITHER the current or this
-    /// previous key. The Issuer always signs with the current key only.
-    /// Empty (default) means a single-key Verifier.
-    #[arg(
-        long = "prev-signing-key-file",
-        env = "GATEWAY_PREV_SIGNING_KEY_FILE",
-        default_value = ""
-    )]
-    gateway_prev_signing_key_file: String,
-
-    /// File containing the shared platform broker master secret.
-    ///
-    /// Must contain the same raw bytes as auth's `AUTH_BROKER_SECRET_FILE`.
-    /// The gateway derives per-app `oac_` client secrets from this material
-    /// when brokering authorization-code, refresh, and revoke requests to the
-    /// platform OP.
-    #[arg(
-        long = "gateway-broker-secret-file",
-        env = "GATEWAY_BROKER_SECRET_FILE",
-        default_value = ""
-    )]
-    gateway_broker_secret_file: String,
-
-    /// HMAC key for short-lived OIDC stash cookies.
-    #[arg(
-        long = "stash-signing-key",
-        env = "STASH_SIGNING_KEY",
-        default_value = "",
-        hide_env_values = true
-    )]
-    stash_signing_key: String,
-
-    /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
-    /// app's `pws_` per-app identity anchor (auth-sdk 6.2) - independent of
-    /// the rotatable stash key. MUST be identical on gateway + control and
-    /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
-    /// `--pairwise-salt-file` in production so the value never appears in a
-    /// process listing.
-    #[arg(
-        long = "pairwise-salt",
-        env = "PAIRWISE_SALT",
-        default_value = "",
-        hide_env_values = true
-    )]
-    pairwise_salt: String,
-
-    /// Path to a file holding the dedicated pairwise-salt secret. Takes
-    /// precedence over `--pairwise-salt` / `PAIRWISE_SALT` when set.
-    #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
-    pairwise_salt_file: String,
-
-    /// Every operational value, generated from one declaration in
-    /// `zeroship_gateway::config`.
-    #[command(flatten)]
-    settings: GateSettingsSources,
-}
+/// Operator-facing spelling of the control key, for a diagnostic that has to
+/// name something the operator can actually set.
+const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+/// Operator-facing spelling of the worker dispatch key.
+const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
+/// Operator-facing spelling of the platform broker master secret. Substituted
+/// into the shared validator's message, which names auth's spelling.
+const BROKER_SECRET_LABEL: &str = "ZEROSHIP_GATEWAY_BROKER_SECRET / --broker-secret-file";
 
 /// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
 /// vector, trimming whitespace and dropping empty entries. Parsed ONCE so
@@ -121,78 +45,72 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Resolve the dedicated pairwise-salt secret. Precedence:
-///   1. `--pairwise-salt-file` / `PAIRWISE_SALT_FILE` (read the file verbatim,
-///      trimming a trailing newline) — keeps the value out of the process table,
-///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ the
-///      config-overlay reference).
+/// Every secret-strength guard the gateway applies, in the order `main` applied
+/// them before the conversion, returning the log context and the validator's own
+/// message rather than exiting - so a test can drive the exact set `main` runs
+/// instead of a re-spelling of it.
 ///
-/// A configured-but-unreadable file is fatal; a misconfigured salt must fail
-/// loudly rather than silently falling through to another input tier.
-fn resolve_pairwise_salt(
-    salt_file: &str,
-    salt_value: &str,
-    file_ref: Option<&str>,
-    check_config: bool,
-) -> String {
-    if !salt_file.is_empty() {
-        return std::fs::read_to_string(salt_file)
-            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, path = %salt_file, "gateway: cannot read --pairwise-salt-file");
-                std::process::exit(1);
-            });
-    }
-    zeroship_core::config::obtain_secret(
-        "PAIRWISE_SALT / --pairwise-salt",
-        salt_value,
-        file_ref,
-        check_config,
-    )
-}
-
-fn load_gateway_broker_secret_file(path: &str) -> oidc_rp::BrokerSecret {
-    if path.is_empty() {
-        tracing::error!(
-            "gateway: refusing to start without GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file"
-        );
-        std::process::exit(1);
-    }
-    let bytes = std::fs::read(path).unwrap_or_else(|e| {
-        tracing::error!(
-            error = %e,
-            path = %path,
-            "gateway: cannot read GATEWAY_BROKER_SECRET_FILE"
-        );
-        std::process::exit(1);
-    });
-    oidc_rp::BrokerSecret::from_bytes(bytes).unwrap_or_else(|message| {
-        let message = message.replace(
-            "AUTH_BROKER_SECRET_FILE",
-            "GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file",
-        );
-        tracing::error!(
-            error = %message,
-            "gateway: refusing to start with unsafe broker master secret"
-        );
-        std::process::exit(1);
+/// Each guard goes through [`validate_secret_material`], the single bridge from
+/// a resolved [`zeroship_core::config::Secret`] to the `&str` validators. That
+/// bridge - not a `check_config` conditional at each site - is what keeps a
+/// `--check-config` run from judging an unread secret while still running every
+/// validator on real material at boot and on an in-memory literal in either mode.
+///
+/// # Errors
+///
+/// Returns `(log context, validator message)` for the first guard that fails.
+fn validate_gateway_secrets(settings: &GateSettings) -> Result<(), (&'static str, String)> {
+    validate_secret_material(&settings.control_key, |value| {
+        require_nonempty(CONTROL_KEY_LABEL, value)
     })
+    .map_err(|message| ("gateway: refusing to start without control key", message))?;
+
+    // The broker master secret. Validated through the same constructor the boot
+    // path builds with, so "it passed the guard" and "it can be constructed"
+    // cannot come apart. The shared validator names auth's spelling of the
+    // setting, which is the wrong half of the pair to hand a gateway operator.
+    validate_secret_material(&settings.broker_secret, |material| {
+        oidc_rp::BrokerSecret::from_bytes(material.as_bytes().to_vec()).map(|_| ())
+    })
+    .map_err(|message| {
+        (
+            "gateway: refusing to start with unsafe broker master secret",
+            message.replace("AUTH_BROKER_SECRET_FILE", BROKER_SECRET_LABEL),
+        )
+    })?;
+
+    validate_secret_material(&settings.stash_signing_key, validate_stash_key).map_err(|message| {
+        (
+            "gateway: refusing to start with unsafe stash signing key",
+            message,
+        )
+    })?;
+
+    // A missing or weak salt aborts boot: the per-app `pws_` anchor must be a
+    // strong, stable, operator-set secret.
+    validate_secret_material(&settings.pairwise_salt, validate_pairwise_salt)
+        .map_err(|message| ("gateway: refusing to start with unsafe pairwise salt", message))?;
+
+    // S3 - symmetric WORKER_KEY enforcement. The worker refuses a non-loopback
+    // bind without a key; the gateway is the caller of those worker admin
+    // endpoints, so it must fail just as hard rather than shipping
+    // `Authorization: Bearer ` (empty) into a cluster that believes dispatch is
+    // authenticated.
+    validate_secret_material(&settings.worker_key, |value| {
+        require_nonempty(WORKER_KEY_LABEL, value)
+    })
+    .map_err(|message| ("gateway: refusing to start without worker key", message))?;
+
+    Ok(())
 }
 
 fn main() -> std::io::Result<()> {
-    let cli = GateCli::parse();
     let (settings, boot) = bootstrap_or_exit::<GateSettings>(
-        cli.settings,
+        GateSettingsSources::parse(),
         zeroship_gateway::config::DEFAULT_LOG_FILTER,
         "gateway",
     );
     let check_config = *settings.check_config.get();
-    let file = &boot.overlay.config;
-    // `[secrets]` file-tier overlay — bound ONCE before any secret resolution.
-    // The gateway never partially moves `boot.overlay.config`, so a reference
-    // is sufficient (no clone needed). Precedence per field: CLI/env > this
-    // reference-only file tier > default, applied by `obtain_secret`.
-    let file_secrets = &file.secrets;
 
     let origin_scheme = *settings.origin_scheme.get();
     let trusted_origins = settings.trusted_origins.get().clone();
@@ -208,29 +126,18 @@ fn main() -> std::io::Result<()> {
         eprintln!("gateway: invalid --control-url: {e}");
         std::process::exit(2);
     }
-    // Secret-bearing inputs are resolved through the secret-reference
-    // resolver: a literal value passes through byte-identically, while a
-    // `urn:zeroship:{env|file|...}:…` / `arn:…` reference is dereferenced
-    // at real boot. During `--check-config` we only validate the reference
-    // FORMAT (no env/file/network reads), keeping the local as the raw ref
-    // string for the (non-secret) report.
-    let control_key = zeroship_core::config::obtain_secret(
-        "CONTROL_KEY / --control-key",
-        &cli.control_key,
-        file_secrets.control_key.as_deref(),
-        check_config,
-    );
+    // Secret material, already resolved by the generated resolver from the
+    // `-file` flag, the canonical environment name, or the canonical TOML path -
+    // in that order. Under `--check-config` a source needing I/O yields no
+    // material at all, and these locals are then empty by construction; the
+    // report below asks `is_configured()` and the boot path is not reached.
+    let control_key = settings.control_key.expose_str().to_owned();
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
     // runtime hash ring, so the two can never disagree.
     let worker_urls = parse_worker_urls(settings.worker_urls.get());
     let poll_interval = *settings.poll_interval.get();
-    let worker_key = zeroship_core::config::obtain_secret(
-        "WORKER_KEY / --worker-key",
-        &cli.worker_key,
-        file_secrets.worker_key.as_deref(),
-        check_config,
-    );
+    let worker_key = settings.worker_key.expose_str().to_owned();
     let blob_store_root = settings.blob_store.get().clone();
     // Classify the `--blob-store` value: `s3://…` → remote S3, bare path →
     // local disk (dev default). An `s3://` URL is validated now so a
@@ -248,98 +155,45 @@ fn main() -> std::io::Result<()> {
     let blob_cache_disk_root = settings.blob_cache_disk_root.get().clone();
     let auth_ui_url = settings.auth_ui_url.get().clone();
     let db_pool_size = (*settings.db_pool_size.get()).max(1);
-    // DSN carries the database password, so it is resolved like any other
-    // secret (literals — including colon-laden DSNs — pass through unchanged).
-    let pg_dsn = zeroship_core::config::obtain_secret(
-        "DATABASE_URL / --db",
-        &cli.db,
-        file_secrets.database_url.as_deref(),
-        check_config,
-    );
-    let stash_signing_key = zeroship_core::config::obtain_secret(
-        "STASH_SIGNING_KEY / --stash-signing-key",
-        &cli.stash_signing_key,
-        file_secrets.stash_signing_key.as_deref(),
-        check_config,
-    );
-    // Dedicated pairwise-salt secret. A `--pairwise-salt-file` path wins over
-    // the inline `--pairwise-salt`/`PAIRWISE_SALT` value (and over the config
-    // overlay reference), so prod can keep the value out of the process table.
-    let pairwise_salt = resolve_pairwise_salt(
-        &cli.pairwise_salt_file,
-        &cli.pairwise_salt,
-        file_secrets.pairwise_salt.as_deref(),
-        check_config,
-    );
-    // File-PATH field (names a file to read), NOT a secret value — left
-    // unresolved; the signing key is loaded from this path below.
-    let signing_key_path = cli.gateway_signing_key_file;
-    let prev_signing_key_path = cli.gateway_prev_signing_key_file;
-    let broker_secret_path = cli.gateway_broker_secret_file;
+    // DSN carries the database password, so it is secret-classed like the keys
+    // (a literal DSN, colons and all, is supplied and consumed unchanged).
+    let pg_dsn = settings.database_url.expose_str().to_owned();
+    let stash_signing_key = settings.stash_signing_key.expose_str().to_owned();
+    let pairwise_salt_secret = settings.pairwise_salt.expose_str().to_owned();
+    let broker_secret_material = settings.broker_secret.expose_str().to_owned();
+    // File-PATH settings (they name a file to read), NOT secret values: the
+    // loader below owns the PEM-versus-DER sniff and the permission check.
+    let signing_key_path = settings.signing_key_file.get().clone();
+    let prev_signing_key_path = settings.prev_signing_key_file.get().clone();
     let public_url = settings.public_url.get().clone();
 
-    if let Err(message) = require_nonempty("CONTROL_KEY / --control-key", &control_key) {
-        tracing::error!(error = %message, "gateway: refusing to start without control key");
+    if let Err((context, message)) = validate_gateway_secrets(&settings) {
+        tracing::error!(error = %message, "{context}");
         std::process::exit(1);
     }
 
-    let broker_secret = load_gateway_broker_secret_file(&broker_secret_path);
-
-    // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
-    // so the length/sentinel checks apply to the real material. During
-    // `--check-config` the local is still the raw reference string (we only
-    // format-validated it above); a reference's text is not the secret, so
-    // running a strength check on it would wrongly fail — skip it then.
-    if !check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
-        if let Err(message) = validate_stash_key(&stash_signing_key) {
-            tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
-            std::process::exit(1);
-        }
-    }
-
-    // STRENGTH guard for the dedicated pairwise-salt secret. Same posture as
-    // the stash key: skip the strength check when `--check-config` still holds a
-    // raw secret reference (its text is not the secret). A missing or weak salt
-    // aborts boot: the per-app `pws_` anchor must be a strong, stable,
-    // operator-set secret.
-    if !check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
-        if let Err(message) = zeroship_core::config::validate_pairwise_salt(&pairwise_salt) {
-            tracing::error!(error = %message, "gateway: refusing to start with unsafe pairwise salt");
-            std::process::exit(1);
-        }
-    }
-    let pairwise_salt_secret = pairwise_salt.clone();
-
-    // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
-    // non-loopback bind without a key; the gateway is the caller of those
-    // worker admin endpoints, so it must fail just as hard rather than
-    // shipping `Authorization: Bearer ` (empty) into a cluster that
-    // believes dispatch is authenticated.
-    if let Err(message) = require_nonempty("WORKER_KEY / --worker-key", &worker_key) {
-        tracing::error!(error = %message, "gateway: refusing to start without worker key");
-        std::process::exit(1);
-    }
-
-    // Load the gateway's session-cookie signing key. The flag is optional:
+    // Load the gateway's session-cookie signing key. The setting is optional:
     // when empty, the boot succeeds but the signed session cookie cannot be
     // issued/verified, so the cookie auth arm fails closed. We log a clear
     // warning so operators don't get a surprise.
-    let signing_key: Option<Arc<ed25519_dalek::SigningKey>> = if signing_key_path.is_empty() {
-        tracing::warn!(
-            "GATEWAY_SIGNING_KEY_FILE not set — signed session cookies disabled (cookie auth fails closed)"
-        );
-        None
-    } else {
-        let key = signing::load_from_path(std::path::Path::new(&signing_key_path))
-            .expect("gateway: load signing key");
-        let kid = signing::jwk_thumbprint(&key);
-        tracing::info!(
-            path = %signing_key_path,
-            kid = %kid,
-            "gateway signing key loaded"
-        );
-        Some(Arc::new(key))
-    };
+    let signing_key: Option<Arc<ed25519_dalek::SigningKey>> =
+        if signing_key_path.as_os_str().is_empty() {
+            tracing::warn!(
+                "ZEROSHIP_GATEWAY_SIGNING_KEY_FILE not set - signed session cookies disabled \
+                 (cookie auth fails closed)"
+            );
+            None
+        } else {
+            let key =
+                signing::load_from_path(&signing_key_path).expect("gateway: load signing key");
+            let kid = signing::jwk_thumbprint(&key);
+            tracing::info!(
+                path = %signing_key_path.display(),
+                kid = %kid,
+                "gateway signing key loaded"
+            );
+            Some(Arc::new(key))
+        };
 
     // Load the PREVIOUS session-cookie signing key for the rotation overlap.
     // Set ONLY during a key roll. When present,
@@ -347,20 +201,20 @@ fn main() -> std::io::Result<()> {
     // session cookies signed by EITHER key). Ignored (with a warning) when no
     // current key is configured, since there is nothing to overlap with.
     let prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>> =
-        if prev_signing_key_path.is_empty() {
+        if prev_signing_key_path.as_os_str().is_empty() {
             None
         } else if signing_key.is_none() {
             tracing::warn!(
-                "GATEWAY_PREV_SIGNING_KEY_FILE set but no current signing key — ignoring \
-                 (a previous key needs a current key to overlap with)"
+                "ZEROSHIP_GATEWAY_PREV_SIGNING_KEY_FILE set but no current signing key - \
+                 ignoring (a previous key needs a current key to overlap with)"
             );
             None
         } else {
-            let key = signing::load_from_path(std::path::Path::new(&prev_signing_key_path))
+            let key = signing::load_from_path(&prev_signing_key_path)
                 .expect("gateway: load previous signing key");
             let kid = signing::jwk_thumbprint(&key);
             tracing::info!(
-                path = %prev_signing_key_path,
+                path = %prev_signing_key_path.display(),
                 kid = %kid,
                 "gateway PREVIOUS signing key loaded (rotation overlap active)"
             );
@@ -431,19 +285,26 @@ fn main() -> std::io::Result<()> {
             CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
         );
         report.field("workers_count", CheckValue::Count(worker_urls.len()));
-        report.field("db_configured", CheckValue::Secret(!pg_dsn.is_empty()));
+        // Every secret is reported by PRESENCE, and presence is all a resolved
+        // `Secret<T>` will answer. `!value.is_empty()` used to stand in for that
+        // and could not: under `--check-config` a file-sourced secret has no
+        // material, so the old test read "unset" for a correctly configured
+        // deployment.
+        report.field(
+            "db_configured",
+            CheckValue::Secret(settings.database_url.is_configured()),
+        );
         report.field(
             "signing_key_configured",
-            CheckValue::Secret(!signing_key_path.is_empty()),
+            CheckValue::Secret(!signing_key_path.as_os_str().is_empty()),
         );
         report.field(
-            "gateway_broker_secret_file_configured",
-            CheckValue::Secret(!broker_secret_path.is_empty()),
+            "gateway_broker_secret_configured",
+            CheckValue::Secret(settings.broker_secret.is_configured()),
         );
-        // Report whether the operator supplied a salt without revealing it.
         report.field(
             "pairwise_salt_configured",
-            CheckValue::Secret(!pairwise_salt.is_empty()),
+            CheckValue::Secret(settings.pairwise_salt.is_configured()),
         );
         report.emit(*settings.check_config_format.get());
         return Ok(());
@@ -549,6 +410,14 @@ fn main() -> std::io::Result<()> {
     // SAME `PAIRWISE_SALT` value must be configured on gateway + control.
     // Domain-separated from `anchor_enc_key` by the helper's distinct prefix.
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
+
+    // Built HERE, not before the `--check-config` return, because a dry run
+    // deliberately leaves a file-sourced secret unread and would have nothing to
+    // construct from. `validate_gateway_secrets` already ran this exact
+    // constructor over the same material, so the only way to reach the panic is
+    // for the two to disagree - which is what naming one authority prevents.
+    let broker_secret = oidc_rp::BrokerSecret::from_bytes(broker_secret_material.into_bytes())
+        .expect("gateway: broker master secret passed its boot guard");
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
@@ -766,7 +635,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::{GeneratedConfig, OriginScheme, TrustedOrigin};
+    use zeroship_core::config::{GeneratedConfig, OriginScheme, SourceKind, TrustedOrigin};
 
     static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -775,6 +644,41 @@ mod tests {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    /// A temp file that removes itself even when an assertion panics.
+    struct SecretFile(PathBuf);
+
+    impl SecretFile {
+        fn new(tag: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "zeroship_gate_secret_{tag}_{}_{:?}.txt",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, contents).expect("write fixture secret");
+            Self(path)
+        }
+
+        fn arg(&self) -> &str {
+            self.0.to_str().expect("utf8 fixture path")
+        }
+    }
+
+    impl Drop for SecretFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn resolve(args: &[&str]) -> GateSettings {
+        let mut argv = vec!["zeroship-gate"];
+        argv.extend_from_slice(args);
+        GateSettings::resolve_config(
+            GateSettingsSources::try_parse_from(argv).expect("gateway sources parse"),
+            None,
+        )
+        .expect("gateway settings resolve")
     }
 
     #[test]
@@ -797,9 +701,10 @@ mod tests {
             "origin_scheme = \"https\"\ntrusted_origins = [\"https://file.example\"]\n",
         )
         .expect("fixture overlay");
-        let env = GateCli::try_parse_from(["zeroship-gate"]).expect("parse env topology");
-        let resolved = GateSettings::resolve_config(env.settings, Some(&overlay))
-            .expect("settings resolve");
+        let env =
+            GateSettingsSources::try_parse_from(["zeroship-gate"]).expect("parse env topology");
+        let resolved =
+            GateSettings::resolve_config(env, Some(&overlay)).expect("settings resolve");
         assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
         assert_eq!(
             resolved
@@ -811,7 +716,7 @@ mod tests {
             vec!["https://env.example", "http://localhost:3000"]
         );
 
-        let cli = GateCli::try_parse_from([
+        let cli = GateSettingsSources::try_parse_from([
             "zeroship-gate",
             "--origin-scheme",
             "https",
@@ -819,8 +724,8 @@ mod tests {
             "https://cli.example",
         ])
         .expect("parse CLI topology");
-        let flagged = GateSettings::resolve_config(cli.settings, Some(&overlay))
-            .expect("settings resolve");
+        let flagged =
+            GateSettings::resolve_config(cli, Some(&overlay)).expect("settings resolve");
         assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
         assert_eq!(
             flagged.trusted_origins.get()[0].as_str(),
@@ -833,7 +738,7 @@ mod tests {
 
     #[test]
     fn deleted_security_relaxation_flag_is_rejected() {
-        let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure"]);
+        let parsed = GateSettingsSources::try_parse_from(["zeroship-gate", "--dev-insecure"]);
         let err = match parsed {
             Ok(_) => panic!("deleted --dev-insecure flag must be rejected"),
             Err(err) => err,
@@ -850,27 +755,28 @@ mod tests {
             zeroship_gateway::config::GateSettingsConsumer
         );
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-        let parsed = GateCli::try_parse_from(["zeroship-gate"]);
+        let parsed = GateSettingsSources::try_parse_from(["zeroship-gate"]);
         restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
-        let Ok(cli) = parsed else {
+        let Ok(sources) = parsed else {
             panic!("an obsolete environment variable must not affect parsing");
         };
-        assert_eq!(cli.settings.origin_scheme, None);
-        assert_eq!(cli.settings.trust_proxy, None);
+        assert_eq!(sources.origin_scheme, None);
+        assert_eq!(sources.trust_proxy, None);
     }
 
     #[test]
     fn gateway_worker_key_is_required() {
-        assert!(require_nonempty("WORKER_KEY / --worker-key", "").is_err());
-        assert!(require_nonempty("WORKER_KEY / --worker-key", "key").is_ok());
+        assert!(require_nonempty(WORKER_KEY_LABEL, "").is_err());
+        assert!(require_nonempty(WORKER_KEY_LABEL, "key").is_ok());
     }
 
     // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
     // as an unknown argument, not silently accept it.
     #[test]
     fn auth_secret_flag_is_rejected() {
-        let parsed = GateCli::try_parse_from(["zeroship-gate", "--auth-secret", "x"]);
+        let parsed =
+            GateSettingsSources::try_parse_from(["zeroship-gate", "--auth-secret", "x"]);
         let err = match parsed {
             Ok(_) => panic!("--auth-secret must be rejected as an unknown argument"),
             Err(e) => e,
@@ -901,13 +807,13 @@ mod tests {
 
     #[test]
     fn gateway_control_key_rejects_missing() {
-        let err = require_nonempty("CONTROL_KEY / --control-key", "").unwrap_err();
+        let err = require_nonempty(CONTROL_KEY_LABEL, "").unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_accepts_nonempty() {
-        assert!(require_nonempty("CONTROL_KEY / --control-key", "secret").is_ok());
+        assert!(require_nonempty(CONTROL_KEY_LABEL, "secret").is_ok());
     }
 
     #[test]
@@ -945,115 +851,213 @@ mod tests {
         assert!(validate_stash_key(key).is_ok());
     }
 
-    // --- secret-reference resolver wiring (server-config) ---
+    // --- Secret<T> conversion: the guards still run on the resolved material ---
 
-    // (a) A literal secret passes through the resolver byte-identically.
-    // This is the guarantee that wiring the resolver does not change
-    // behavior for the existing literal-secret deployments.
+    /// The stash-key strength guard, driven end to end through the REAL
+    /// declaration: a `--stash-signing-key-file` path is resolved by the
+    /// generated resolver and `validate_gateway_secrets` hands the material it
+    /// produced to `validate_stash_key`.
+    ///
+    /// Three cases plus the one-variable partner for each, because "the guard
+    /// rejects everything" and "the guard rejects nothing" both satisfy a single
+    /// case on its own.
     #[test]
-    fn literal_secret_resolves_to_itself() {
-        let literal = "super-secret-control-key-value";
-        assert_eq!(
-            zeroship_core::config::resolve_secret(literal).expect("literal resolves"),
-            literal,
-        );
-        // A colon-laden DSN literal must NOT be mistaken for a reference.
-        let dsn = "postgres://user:pass@host:5432/db";
-        assert_eq!(
-            zeroship_core::config::resolve_secret(dsn).expect("dsn resolves"),
-            dsn,
-        );
+    fn a_weak_or_absent_stash_key_still_fails_the_boot_guard() {
+        let strong = "0123456789abcdef0123456789abcdef";
+        let good = SecretFile::new("stash_ok", strong);
+        let weak = SecretFile::new("stash_weak", "short");
+
+        // Every other required secret supplied, so only the stash key can be
+        // the reason a case fails. `--` values are inline files, never argv.
+        let control = SecretFile::new("control", "control-key-material");
+        let worker = SecretFile::new("worker", strong);
+        let broker = SecretFile::new("broker", "gateway-broker-secret-test-master-32-bytes");
+        let salt = SecretFile::new("salt", strong);
+        let base = |stash: &str| -> Vec<String> {
+            vec![
+                "--control-key-file".to_owned(),
+                control.arg().to_owned(),
+                "--worker-key-file".to_owned(),
+                worker.arg().to_owned(),
+                "--broker-secret-file".to_owned(),
+                broker.arg().to_owned(),
+                "--pairwise-salt-file".to_owned(),
+                salt.arg().to_owned(),
+                "--stash-signing-key-file".to_owned(),
+                stash.to_owned(),
+            ]
+        };
+        fn borrow(args: &[String]) -> Vec<&str> {
+            args.iter().map(String::as_str).collect()
+        }
+
+        // 1. WEAK material, read from the file the flag named: rejected.
+        let args = base(weak.arg());
+        let settings = resolve(&borrow(&args));
+        assert_eq!(settings.stash_signing_key.source(), Some(SourceKind::CliFile));
+        let (context, message) =
+            validate_gateway_secrets(&settings).expect_err("a short stash key must be rejected");
+        assert_eq!(context, "gateway: refusing to start with unsafe stash signing key");
+        assert!(message.contains("too short"), "{message}");
+
+        // 1b. The one-variable partner: same flags, a strong key at the path.
+        let args = base(good.arg());
+        validate_gateway_secrets(&resolve(&borrow(&args)))
+            .expect("a strong stash key passes every guard");
+
+        // 2. ABSENT: nothing supplies the stash key at all. The bridge runs the
+        // validator on "", which is how it produces its own "is required".
+        let mut args = base(good.arg());
+        args.truncate(8);
+        let settings = resolve(&borrow(&args));
+        assert!(!settings.stash_signing_key.is_configured());
+        let (context, message) =
+            validate_gateway_secrets(&settings).expect_err("an unset stash key must be rejected");
+        assert_eq!(context, "gateway: refusing to start with unsafe stash signing key");
+        assert!(message.contains("required"), "{message}");
+
+        // Does NOT cover the environment or TOML tiers of this secret: the env
+        // tier is process-global and would race sibling tests, and the overlay
+        // tier is `resolve_secret_sources`'s, asserted in core. It also does not
+        // prove `main` calls `validate_gateway_secrets` - only that the function
+        // main calls behaves this way.
     }
 
-    // (b) The exact boolean the stash-key strength guard is gated on. In
-    // check-config, a REFERENCE skips the strength guard (the local is the
-    // raw ref string, not the material) while a LITERAL still runs it.
-    // Mirrors `!check_config || !is_secret_ref(&stash_signing_key)`.
+    /// The `--check-config` half: a dry run must not open the file, and an
+    /// unread secret must not be judged. Paired with the boot run over the SAME
+    /// missing path, which does fail - so "no error" above is a property of the
+    /// mode, not of the guard having been removed.
     #[test]
-    fn check_config_ref_skips_strength_guard_literal_still_runs() {
-        let check_config = true;
-        // A short literal in check-config: guard must RUN (and would reject it).
-        let literal = "short";
-        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(literal);
-        assert!(runs_guard, "literal in check-config must run the strength guard");
+    fn a_check_config_run_neither_reads_nor_judges_a_secret_file() {
+        let missing = std::env::temp_dir().join("zeroship_gate_absent_stash_key");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!missing.exists(), "the fixture path must really be absent");
+        let missing = missing.to_str().expect("utf8 path").to_owned();
+
+        let sources = GateSettingsSources::try_parse_from([
+            "zeroship-gate",
+            "--check-config",
+            "--stash-signing-key-file",
+            &missing,
+        ])
+        .expect("gateway sources parse");
+        let settings =
+            GateSettings::resolve_config(sources, None).expect("a dry run opens no secret file");
+        assert!(settings.stash_signing_key.is_configured());
+        assert_eq!(
+            settings.stash_signing_key.expose_secret(),
+            None,
+            "--check-config must not have read the file"
+        );
         assert!(
-            validate_stash_key(literal).is_err(),
-            "the short literal would fail the guard once it runs"
+            validate_secret_material(&settings.stash_signing_key, validate_stash_key).is_ok(),
+            "an unread secret must not be judged"
         );
 
-        // A reference in check-config: guard must be SKIPPED (the raw ref
-        // string `urn:…` is not the secret material and would wrongly fail
-        // the length check).
-        let reference = "urn:zeroship:env:STASH_SIGNING_KEY";
-        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
-        assert!(!runs_guard, "reference in check-config must skip the strength guard");
+        // The one-variable partner: only `--check-config` differs, and the boot
+        // run does try to open the same path.
+        let boot = GateSettingsSources::try_parse_from([
+            "zeroship-gate",
+            "--stash-signing-key-file",
+            &missing,
+        ])
+        .expect("gateway sources parse");
+        assert!(GateSettings::resolve_config(boot, None).is_err());
 
-        // Outside check-config the guard always runs, ref or not.
-        let check_config = false;
-        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
-        assert!(runs_guard, "outside check-config the guard always runs");
+        // Does NOT cover whether `main` routes `--check-config` to the report
+        // rather than to the server; that is `tests/config_check_e2e.sh`.
     }
 
-    // (c) A malformed reference is rejected by the format validator used on
-    // the check-config path (validate_secret_ref_or_exit calls this).
+    /// A secret is reported by PRESENCE. The resolved declaration derives
+    /// `Debug`, so this is the formatter every `{:?}` of the settings reaches -
+    /// including any future tracing call that logs them wholesale.
     #[test]
-    fn malformed_secret_ref_is_rejected() {
-        assert!(
-            zeroship_core::config::validate_secret_ref("urn:zeroship:nope:x").is_err(),
-            "an unrecognized urn: scheme must be rejected"
-        );
-        assert!(
-            zeroship_core::config::validate_secret_ref("urn:zeroship:env:").is_err(),
-            "a recognized scheme with an empty body must be rejected"
-        );
-        // A well-formed reference and a plain literal both pass format check.
-        zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR")
-            .expect("well-formed ref is format-valid");
-        zeroship_core::config::validate_secret_ref("a-plain-literal")
-            .expect("a literal is format-valid");
-    }
+    fn a_resolved_secret_never_formats_its_material_or_its_length() {
+        // Deliberately unlike any other text in the struct, so a prefix match
+        // below can only be the secret leaking and never an unrelated field.
+        const SENTINEL: &str = "j4v9c2t6b8m1q5z7x3n0k4h8r2w6y1p5";
+        let file = SecretFile::new("debug", SENTINEL);
+        let settings = resolve(&["--stash-signing-key-file", file.arg()]);
 
-    // (d) `[secrets]` file tier — the gateway maps control_key/worker_key/
-    // database_url/stash_signing_key through
-    // `obtain_secret`. When the CLI/env value is empty, a `[secrets]` file
-    // reference is used; when both are present, the CLI/env value WINS.
-    // Asserted directly against the public `obtain_secret` (the exact helper
-    // each gateway field now calls) so the precedence contract is pinned
-    // without standing up a full process boot.
-    #[test]
-    fn secrets_file_tier_used_when_cli_empty() {
-        // Empty CLI + a `[secrets]` env-reference => the reference resolves.
-        let var = format!("ZEROSHIP_GW_SECRETS_TIER_{}", std::process::id());
-        std::env::set_var(&var, "resolved-from-secrets-file");
-        let reference = format!("urn:zeroship:env:{var}");
-        let out = zeroship_core::config::obtain_secret(
-            "MASTER_KEY",
-            "",
-            Some(&reference),
-            false,
-        );
-        std::env::remove_var(&var);
+        assert!(settings.stash_signing_key.is_configured());
         assert_eq!(
-            out, "resolved-from-secrets-file",
-            "an empty CLI value must fall through to the [secrets] file reference"
+            settings.stash_signing_key.expose_str(),
+            SENTINEL,
+            "the boot path must still get the real material"
         );
+
+        // The secret's OWN formatter: no value, no prefix of it, no length.
+        let field = format!("{:?}", settings.stash_signing_key);
+        for length in 4..=SENTINEL.len() {
+            assert!(
+                !field.contains(&SENTINEL[..length]),
+                "Debug leaked a {length}-char prefix of the secret: {field}"
+            );
+        }
+        assert!(
+            !field.contains(&SENTINEL.len().to_string()),
+            "Debug leaked the secret's length: {field}"
+        );
+        // The one-variable control: the tier IS published, so this is not
+        // passing because Debug prints nothing at all.
+        assert_eq!(field, "Secret(configured from CliFile)");
+
+        // And the whole resolved declaration, which is what a `{:?}` on the
+        // settings reaches.
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains(SENTINEL), "{rendered}");
+        assert!(rendered.contains("Secret(configured from CliFile)"), "{rendered}");
+
+        // Does NOT cover a caller that calls `expose_str` and prints the result
+        // itself. No type can stop deliberate disclosure; what it removes is the
+        // accidental `{:?}`.
     }
 
+    /// A secret's clap carrier is a PATH flag, and there is no value flag for
+    /// any of them - a secret must never travel through argv, where it is
+    /// visible in `ps` to every user on the host.
     #[test]
-    fn cli_env_secret_beats_secrets_file_entry() {
-        // A non-empty CLI/env value WINS over any `[secrets]` file reference:
-        // the file reference is never even resolved (note the env var below is
-        // intentionally never set — if precedence were wrong, resolving the
-        // ref would fail/exit instead of returning the literal).
-        let out = zeroship_core::config::obtain_secret(
-            "MASTER_KEY",
-            "literal-from-cli",
-            Some("urn:zeroship:env:ZEROSHIP_GW_SECRETS_TIER_NEVER_SET"),
-            false,
-        );
-        assert_eq!(
-            out, "literal-from-cli",
-            "a CLI/env secret must win over the [secrets] file entry"
-        );
+    fn no_gateway_secret_has_a_value_flag() {
+        use clap::CommandFactory;
+
+        let command = GateSettingsSources::command();
+        let longs = command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_owned))
+            .collect::<Vec<_>>();
+        for secret in [
+            "control-key",
+            "worker-key",
+            "database-url",
+            "stash-signing-key",
+            "pairwise-salt",
+            "broker-secret",
+        ] {
+            assert!(
+                longs.iter().any(|long| long == &format!("{secret}-file")),
+                "{secret} must offer a -file path flag: {longs:?}"
+            );
+            assert!(
+                !longs.iter().any(|long| long == secret),
+                "{secret} must NOT offer a value flag: {longs:?}"
+            );
+        }
+        // The deleted pre-conversion spellings, by name: `--db` carried the DSN
+        // in argv, and the broker secret's path flag was `gateway`-prefixed.
+        for deleted in ["db", "gateway-broker-secret-file"] {
+            assert!(
+                !longs.iter().any(|long| long == deleted),
+                "--{deleted} must be gone, not aliased: {longs:?}"
+            );
+        }
+        // The one-variable control: the two key-FILE settings stay operational
+        // path flags, because their loader owns the permission check.
+        assert!(longs.iter().any(|long| long == "signing-key-file"));
+        assert!(longs.iter().any(|long| long == "prev-signing-key-file"));
+
+        // Does NOT cover clap's env bindings; those are asserted for the
+        // operational settings in the worker's config tests and, for secrets,
+        // are absent from the carrier by construction (the macro emits no
+        // `env = ...` for a Secret field).
     }
 }
