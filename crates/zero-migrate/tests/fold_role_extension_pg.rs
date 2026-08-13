@@ -79,6 +79,11 @@ value = true
 scope = "all"
 
 [[grant]]
+key = "access.grant"
+value = true
+scope = "all"
+
+[[grant]]
 key = "code.extension"
 value = [{EXTENSION:?}]
 scope = "all"
@@ -735,4 +740,181 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
         .await
         .expect("drop the test schemas");
     work.expect("drop role against live PostgreSQL");
+}
+
+/// `grant` and `revoke` against a live server, asked of PostgreSQL rather than of
+/// an ACL string.
+///
+/// Third op in the role family whose only coverage was offline — it appears in
+/// the envelope, support-matrix, faithfulness and fail-closed tests and is applied
+/// by none of them. The family shares a cause: roles are CLUSTER-WIDE, which makes
+/// them the awkward thing to exercise in a schema-isolated suite.
+///
+/// THE UNGRANTED PRIVILEGE IS THE ASSERTION. Confirming SELECT arrived would pass
+/// just as well on a renderer that emitted `GRANT ALL`, and that failure is a
+/// privilege escalation rather than a cosmetic slip. So INSERT is required to be
+/// ABSENT at the same moment SELECT is present.
+///
+/// The question is put to `has_table_privilege`, so the answer is PostgreSQL's own
+/// resolution — inherited roles, PUBLIC, defaults and all — rather than this
+/// test's reading of an `aclitem[]`. A test that parsed the ACL would be asserting
+/// its own parser.
+#[compio::test]
+async fn grant_and_revoke_move_exactly_the_named_privilege() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("schema");
+    let grantee = token("grantee").to_lowercase();
+    let policy = charter(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
+    let _guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create the project schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure journal: {error}"))?;
+
+        let project = quote_ident(&cfg.project_schema);
+        session
+            .batch(&format!(
+                "CREATE ROLE {grantee} NOLOGIN; \
+                 CREATE TABLE {project}.ledger (id bigint PRIMARY KEY); \
+                 GRANT USAGE ON SCHEMA {project} TO {grantee}",
+                grantee = quote_ident(&grantee),
+            ))
+            .await
+            .map_err(|error| format!("seed the grantee and table: {error}"))?;
+
+        let apply_ops = |case: &str, ops: serde_json::Value| {
+            let case = case.to_string();
+            let policy = policy.clone();
+            let cfg = cfg.clone();
+            let backend = &backend;
+            async move {
+                let doc = serde_json::json!({
+                    "ir_version": 1,
+                    "name": case,
+                    "owner_app": OWNER,
+                    "ops": ops
+                })
+                .to_string();
+                let author =
+                    IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+                let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
+                    .map_err(|error| format!("fold base: {error}"))?;
+                let live = LiveSchema::from_catalog_snapshot(base, OWNER);
+                let artifact = author
+                    .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
+                    .map_err(|error| format!("lower: {error}"))?;
+                MigrationEngine::new()
+                    .apply_plan(
+                        &artifact.plan.steps,
+                        Approval::Approved,
+                        backend,
+                        &cfg,
+                        OWNER,
+                        LockMode::Acquire,
+                    )
+                    .await
+                    .map_err(|error| format!("{error}"))
+            }
+        };
+
+        // PostgreSQL's own answer, not a parse of `relacl`.
+        let can = |privilege: &str| {
+            let session = &session;
+            let qualified = format!("{}.ledger", cfg.project_schema);
+            let grantee = grantee.clone();
+            let privilege = privilege.to_string();
+            async move {
+                let row = session
+                    .query_one(
+                        "SELECT has_table_privilege($1, $2, $3) AS allowed",
+                        &[
+                            grantee.as_str().into(),
+                            qualified.as_str().into(),
+                            privilege.as_str().into(),
+                        ],
+                    )
+                    .await
+                    .expect("ask has_table_privilege");
+                row.try_get::<_, bool>("allowed").expect("decode allowed")
+            }
+        };
+
+        if can("SELECT").await {
+            return Err("the grantee must start without SELECT".to_string());
+        }
+
+        apply_ops(
+            "grant_select",
+            serde_json::json!([{
+                "op": "grant",
+                "privileges": ["select"],
+                "on": { "kind": "table", "names": ["ledger"], "schema": cfg.project_schema },
+                "to": [grantee]
+            }]),
+        )
+        .await
+        .map_err(|error| format!("granting SELECT must succeed: {error}"))?;
+
+        if !can("SELECT").await {
+            return Err("the granted privilege must have arrived".to_string());
+        }
+        // The control. A renderer that emitted GRANT ALL would satisfy the line
+        // above and fail here, and that mistake is an escalation.
+        if can("INSERT").await {
+            return Err(
+                "only the named privilege may be granted; INSERT arrived uninvited".to_string(),
+            );
+        }
+
+        apply_ops(
+            "revoke_select",
+            serde_json::json!([{
+                "op": "revoke",
+                "privileges": ["select"],
+                "on": { "kind": "table", "names": ["ledger"], "schema": cfg.project_schema },
+                "from": [grantee]
+            }]),
+        )
+        .await
+        .map_err(|error| format!("revoking SELECT must succeed: {error}"))?;
+
+        if can("SELECT").await {
+            return Err("the revoked privilege must be gone".to_string());
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = session
+        .batch(&format!(
+            "DROP OWNED BY {} CASCADE; DROP ROLE IF EXISTS {}",
+            quote_ident(&grantee),
+            quote_ident(&grantee)
+        ))
+        .await;
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("grant and revoke against live PostgreSQL");
 }
