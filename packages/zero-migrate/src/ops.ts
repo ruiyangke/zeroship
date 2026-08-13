@@ -3272,6 +3272,14 @@ const RENAME_TABLE_KEYS = ["to", "ifExists", "schema"] as const;
 const ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"] as const;
 const DROP_COLUMN_KEYS = ["ifExists", "schema"] as const;
 const RENAME_COLUMN_KEYS = ["to", "type", "schema"] as const;
+const SET_TABLE_OPTIONS_KEYS = ["softDelete", "versioning", "strictness"] as const;
+const CREATE_PARTITION_KEYS = ["schema", "ifNotExists"] as const;
+const ATTACH_PARTITION_KEYS = ["schema"] as const;
+const DETACH_PARTITION_KEYS = ["schema", "concurrently"] as const;
+const DROP_PARTITION_KEYS = ["schema", "ifExists", "cascade"] as const;
+const POLICY_CREATE_KEYS = ["for", "to", "using", "withCheck", "schema"] as const;
+const POLICY_DROP_KEYS = ["ifExists", "schema"] as const;
+const TRIGGER_DROP_KEYS = ["ifExists", "schema"] as const;
 const CREATE_ENUM_KEYS = ["values", "schema"] as const;
 const CREATE_DOMAIN_KEYS = ["as", "check", "default", "notNull", "schema"] as const;
 const CREATE_SEQUENCE_KEYS = ["as", "increment", "start", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"] as const;
@@ -4611,6 +4619,7 @@ export function __makeTableHandle(
       return __makeTableHandle(args.to, opts, checkExprResolver);
     },
     setOptions(args) {
+      rejectUnknownKeys(args, SET_TABLE_OPTIONS_KEYS, `table("${name}").setOptions(...)`);
       recordSetTableOptions(name, { ...args, schema: dflt });
       return handle;
     },
@@ -4623,6 +4632,7 @@ export function __makeTableHandle(
       const id = registerSelector("partition", partitionName);
       return {
         create(bound, args = {}) {
+          rejectUnknownKeys(args, CREATE_PARTITION_KEYS, `table("${name}").partition("${partitionName}").create(...)`);
           terminateSelector(id);
           recordCreatePartition(partitionName, name, partitionBoundToIr(bound), {
             ifNotExists: args.ifNotExists,
@@ -4631,6 +4641,7 @@ export function __makeTableHandle(
           return handle;
         },
         attach(bound, args = {}) {
+          rejectUnknownKeys(args, ATTACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").attach(...)`);
           terminateSelector(id);
           recordAttachPartition(name, partitionName, partitionBoundToIr(bound), {
             schema: pickSchema(args, dflt),
@@ -4638,6 +4649,7 @@ export function __makeTableHandle(
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, DROP_PARTITION_KEYS, `table("${name}").partition("${partitionName}").drop(...)`);
           terminateSelector(id);
           recordDropPartition(name, partitionName, {
             ifExists: args.ifExists,
@@ -4647,6 +4659,7 @@ export function __makeTableHandle(
           return handle;
         },
         detach(args = {}) {
+          rejectUnknownKeys(args, DETACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").detach(...)`);
           terminateSelector(id);
           recordDetachPartition(name, partitionName, {
             concurrently: args.concurrently,
@@ -4946,6 +4959,7 @@ export function __makeTableHandle(
       const id = registerSelector("policy", policyName);
       return {
         create(args) {
+          rejectUnknownKeys(args, POLICY_CREATE_KEYS, `table("${name}").policy("${policyName}").create(...)`);
           terminateSelector(id);
           if (Array.isArray(args.to) && args.to.length === 0) {
             throw structuredError("OP_INVALID", ".policy(name).create({ to }): to must be a non-empty role array (omit to for PUBLIC)");
@@ -4965,6 +4979,7 @@ export function __makeTableHandle(
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, POLICY_DROP_KEYS, `table("${name}").policy("${policyName}").drop(...)`);
           terminateSelector(id);
           emitDropPolicy({
             name: policyName,
@@ -4995,6 +5010,7 @@ export function __makeTableHandle(
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, TRIGGER_DROP_KEYS, `table("${name}").trigger("${triggerName}").drop(...)`);
           terminateSelector(id);
           emitDropTrigger({
             name: triggerName,

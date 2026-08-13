@@ -2514,6 +2514,14 @@ var RENAME_TABLE_KEYS = ["to", "ifExists", "schema"];
 var ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"];
 var DROP_COLUMN_KEYS = ["ifExists", "schema"];
 var RENAME_COLUMN_KEYS = ["to", "type", "schema"];
+var SET_TABLE_OPTIONS_KEYS = ["softDelete", "versioning", "strictness"];
+var CREATE_PARTITION_KEYS = ["schema", "ifNotExists"];
+var ATTACH_PARTITION_KEYS = ["schema"];
+var DETACH_PARTITION_KEYS = ["schema", "concurrently"];
+var DROP_PARTITION_KEYS = ["schema", "ifExists", "cascade"];
+var POLICY_CREATE_KEYS = ["for", "to", "using", "withCheck", "schema"];
+var POLICY_DROP_KEYS = ["ifExists", "schema"];
+var TRIGGER_DROP_KEYS = ["ifExists", "schema"];
 var CREATE_ENUM_KEYS = ["values", "schema"];
 var CREATE_DOMAIN_KEYS = ["as", "check", "default", "notNull", "schema"];
 var CREATE_SEQUENCE_KEYS = ["as", "increment", "start", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"];
@@ -3583,6 +3591,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       return __makeTableHandle(args.to, opts, checkExprResolver);
     },
     setOptions(args) {
+      rejectUnknownKeys(args, SET_TABLE_OPTIONS_KEYS, `table("${name}").setOptions(...)`);
       recordSetTableOptions(name, { ...args, schema: dflt });
       return handle;
     },
@@ -3595,6 +3604,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       const id = registerSelector("partition", partitionName);
       return {
         create(bound, args = {}) {
+          rejectUnknownKeys(args, CREATE_PARTITION_KEYS, `table("${name}").partition("${partitionName}").create(...)`);
           terminateSelector(id);
           recordCreatePartition(partitionName, name, partitionBoundToIr(bound), {
             ifNotExists: args.ifNotExists,
@@ -3603,6 +3613,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         attach(bound, args = {}) {
+          rejectUnknownKeys(args, ATTACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").attach(...)`);
           terminateSelector(id);
           recordAttachPartition(name, partitionName, partitionBoundToIr(bound), {
             schema: pickSchema(args, dflt)
@@ -3610,6 +3621,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, DROP_PARTITION_KEYS, `table("${name}").partition("${partitionName}").drop(...)`);
           terminateSelector(id);
           recordDropPartition(name, partitionName, {
             ifExists: args.ifExists,
@@ -3619,6 +3631,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         detach(args = {}) {
+          rejectUnknownKeys(args, DETACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").detach(...)`);
           terminateSelector(id);
           recordDetachPartition(name, partitionName, {
             concurrently: args.concurrently,
@@ -3911,6 +3924,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       const id = registerSelector("policy", policyName);
       return {
         create(args) {
+          rejectUnknownKeys(args, POLICY_CREATE_KEYS, `table("${name}").policy("${policyName}").create(...)`);
           terminateSelector(id);
           if (Array.isArray(args.to) && args.to.length === 0) {
             throw structuredError("OP_INVALID", ".policy(name).create({ to }): to must be a non-empty role array (omit to for PUBLIC)");
@@ -3930,6 +3944,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, POLICY_DROP_KEYS, `table("${name}").policy("${policyName}").drop(...)`);
           terminateSelector(id);
           emitDropPolicy({
             name: policyName,
@@ -3960,6 +3975,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, TRIGGER_DROP_KEYS, `table("${name}").trigger("${triggerName}").drop(...)`);
           terminateSelector(id);
           emitDropTrigger({
             name: triggerName,
