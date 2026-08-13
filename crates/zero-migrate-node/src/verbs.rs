@@ -489,6 +489,29 @@ fn rollback_migration_set(
         // The manifest is the one walker that already enumerates every step
         // variant's journal identity, so the refusal can name the step kind
         // without teaching this module the shape of each variant.
+        //
+        // BEFORE MAKING MULTI-STEP PLANS REVERSIBLE, READ THIS. A second,
+        // unrelated safety property currently rests on this refusal, and removing
+        // it here would break that one silently.
+        //
+        // On MySQL an interrupted unwind leaves a marker in
+        // `schema_migrations_rollback_inflight`, and `apply` deliberately does NOT
+        // consult that marker — it sees the migration still journaled `applied`
+        // and skips it. That is correct ONLY because everything reachable here
+        // lowers to exactly one journaled step, and a single DDL statement either
+        // ran or did not: there is no half-reverted shape for `apply` to mistake
+        // for an intact one.
+        //
+        // Make several steps reversible and that stops holding. An unwind can then
+        // fail after step 1 committed, leaving a half-reverted schema under an
+        // `applied` row, which `apply` will skip. Whoever does that work has to
+        // decide what `apply` does when a rollback marker is present.
+        //
+        // No existing test covers the combination: the interrupted-unwind path is
+        // pinned for the single-step case
+        // (`mysql-interrupted-rollback-recovery.test.ts`) and this refusal is
+        // pinned on its own (`rollback-data-semantics.test.ts`), so both suites stay
+        // green while the property between them disappears.
         let manifest = PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
             .map_err(|error| error.to_string())?;
         for step in &manifest.steps {
