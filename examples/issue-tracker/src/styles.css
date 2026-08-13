@@ -1060,3 +1060,103 @@ fieldset.bug-detail-extras { display: grid; }
 .timeline-actor { color: var(--ink-2); font-weight: 600; }
 .timeline-field { color: var(--ink-2); }
 .timeline-value { color: var(--ink); font-weight: 500; }
+
+/* ═══ bug detail: the redesign ═══════════════════════════════════════════
+   The page was nine bordered cards stacked inside two bordered columns, with
+   a card nested inside the rail card. Every group announced itself with a
+   border, so nothing could be more important than anything else -- the
+   conversation, the file list and an empty votes panel all arrived in
+   identical boxes.
+
+   Linear and GitHub group with SPACE and the occasional hairline. That is
+   what this does: one rule separating the two columns, one hairline between
+   rail groups, and nothing else drawn. What remains bordered is what takes
+   input -- the composer -- because a box is how you say "type here".
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* The two columns: content and rail, divided by a single rule. */
+.bug-detail-grid {
+  gap: 0;
+}
+.bug-detail-main {
+  padding-inline-end: 2.5rem;
+}
+.bug-detail-side {
+  border-inline-start: 1px solid var(--line);
+  padding-inline-start: 1.75rem;
+  padding-block-start: 0.25rem;
+}
+
+/* Nothing in the main column is a card any more. */
+.comments-panel,
+.fields-panel,
+.bug-detail-extras > section {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+/* The extras become one quiet band under the conversation rather than three
+   framed panels: a hairline above them is enough to say "different thing". */
+.bug-detail-extras {
+  border-block-start: 1px solid var(--line);
+  padding-block-start: 1.25rem;
+  margin-block-start: 1.75rem;
+  gap: 1.75rem 2rem;
+}
+.bug-detail-extras > section > h3 {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-block-end: 0.5rem;
+}
+
+/* ── the rail, as property rows ──────────────────────────────────────────
+   Label left, value right, one line each. The selects keep their behaviour
+   and lose their chrome: a bordered box per property turned a column of
+   facts into a column of form controls, which is what made the rail read as
+   heavier than the bug. */
+.fields-panel .zs-field,
+.fields-panel .field-block,
+.fields-panel .field-row-compact {
+  margin-block: 0;
+}
+.fields-panel .field-row {
+  flex-direction: column;
+  gap: 0;
+}
+/* Group joints: a hairline, not a heading on its own line with margin above
+   and below. */
+.rail-section {
+  margin: 1.1rem 0 0.5rem;
+  padding-block-start: 0.9rem;
+}
+
+/* The status block stops being a card inside the rail. */
+.status-control {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-block-end: 0.35rem;
+}
+
+/* A rail property: label, value, and a way in that stays out of the way. */
+.rail-choice {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block: 0.4rem;
+  min-block-size: 1.9rem;
+}
+.rail-choice-value { min-inline-size: 0; }
+.rail-choice > button { opacity: 0; transition: opacity 0.12s ease; justify-self: end; }
+.rail-choice:hover > button,
+.rail-choice:focus-within > button { opacity: 1; }
+@media (hover: none) { .rail-choice > button { opacity: 1; } }
+/* While editing, the control takes the value column and the row gives it room. */
+.rail-choice.is-editing { grid-template-columns: 7.5rem minmax(0, 1fr); row-gap: 0.35rem; }
+.rail-choice.is-editing > button { grid-column: 2; opacity: 1; justify-self: start; }

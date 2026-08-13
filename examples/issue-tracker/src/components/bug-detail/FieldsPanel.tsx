@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Button, Card, Cluster, DescriptionList, Field, Input, Select } from "@zeroship/ui";
+import { Button, Cluster, DescriptionList, Field, Input, Select } from "@zeroship/ui";
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
 
 import { PriorityBadge, SeverityBadge } from "../Badges";
+import { RailChoice } from "./RailChoice";
 import { errorMessage, toPromise } from "../rpc";
 import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -19,72 +20,45 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="field-row">
-      <Field orientation="horizontal">
-        {/* The badge is gone. It sat directly above a select showing the same
-            value, so the page stated severity twice and neither told you which
-            one to use. */}
-        {/* The badge, not the bare word. The page head already renders
-            severity and priority as coloured badges while the rail printed the
-            same two values as plain text -- one datum with two appearances a
-            few hundred pixels apart, and the rail's version carrying none of
-            the meaning the colour exists to convey. A P1 blocker looked
-            exactly like a P3 nit. */}
-        <Field.Label>Severity</Field.Label>
-        <Select
-          value={bug.severity}
-          disabled={busy !== null}
-          aria-label="Severity"
-          renderValue={(value) => <SeverityBadge severity={String(value)} />}
-          onValueChange={async (next) => {
-            const severity = next as BugSeverity;
-            setBusy("severity");
-            setError(null);
-            try {
-              onUpdated(await setBugSeverity({ id: bug.id, severity }));
-            } catch (err) {
-              setError(errorMessage(err));
-            } finally {
-              setBusy(null);
-            }
-          }}
-        >
-          {BUG_SEVERITIES.map((s) => (
-            <Select.Item key={s} value={s}>
-              {s}
-            </Select.Item>
-          ))}
-        </Select>
-      </Field>
-      <Field orientation="horizontal">
-        <Field.Label>Priority</Field.Label>
-        <Select
-          value={bug.priority}
-          disabled={busy !== null}
-          aria-label="Priority"
-          renderValue={(value) => <PriorityBadge priority={String(value)} />}
-          onValueChange={async (next) => {
-            const priority = next as BugPriority;
-            setBusy("priority");
-            setError(null);
-            try {
-              onUpdated(await setBugPriority({ id: bug.id, priority }));
-            } catch (err) {
-              setError(errorMessage(err));
-            } finally {
-              setBusy(null);
-            }
-          }}
-        >
-          {BUG_PRIORITIES.map((p) => (
-            <Select.Item key={p} value={p}>
-              {p}
-            </Select.Item>
-          ))}
-        </Select>
-      </Field>
+    <>
+      <RailChoice
+        label="Severity"
+        value={bug.severity}
+        display={<SeverityBadge severity={bug.severity} />}
+        disabled={busy !== null}
+        options={BUG_SEVERITIES.map((value) => ({ value, label: value }))}
+        onChange={async (next) => {
+          setBusy("severity");
+          setError(null);
+          try {
+            onUpdated(await setBugSeverity({ id: bug.id, severity: next as BugSeverity }));
+          } catch (err) {
+            setError(errorMessage(err));
+          } finally {
+            setBusy(null);
+          }
+        }}
+      />
+      <RailChoice
+        label="Priority"
+        value={bug.priority}
+        display={<PriorityBadge priority={bug.priority} />}
+        disabled={busy !== null}
+        options={BUG_PRIORITIES.map((value) => ({ value, label: value }))}
+        onChange={async (next) => {
+          setBusy("priority");
+          setError(null);
+          try {
+            onUpdated(await setBugPriority({ id: bug.id, priority: next as BugPriority }));
+          } catch (err) {
+            setError(errorMessage(err));
+          } finally {
+            setBusy(null);
+          }
+        }}
+      />
       {error ? <p className="field-error">{error}</p> : null}
-    </div>
+    </>
   );
 }
 
@@ -372,7 +346,7 @@ export function FieldsPanel({
       (bug.platform && bug.platform !== "Unspecified"),
   );
   return (
-    <Card className="fields-panel">
+    <div className="fields-panel">
       <fieldset className="rail-fields" disabled={readOnly}>
       {/* The summary is edited in the PAGE HEAD, where the summary is.
           It lived here as "Edit summary" floating at the top of the rail, a
@@ -412,54 +386,43 @@ export function FieldsPanel({
       <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
 
       {productDetail ? (
-        <div className="field-row">
-          <Field orientation="horizontal">
-            <Field.Label>Version</Field.Label>
-            {/* The design system Select, so the detail page stops mixing two
-                kinds of dropdown with the filter bar. */}
-            <Select
-              value={bug.versionId ?? ""}
-              onValueChange={(next) => {
-                if (!next) return;
-                setVersionMilestoneError(null);
-                toPromise(updateBug({ id: bug.id, changes: { versionId: next } }))
-                  .then(onUpdated)
-                  .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
-              }}
-              placeholder="None"
-              aria-label="Version"
-              renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
-            >
-              {productDetail.versions.map((v) => (
-                <Select.Item key={v.id} value={v.id}>
-                  {v.name}
-                </Select.Item>
-              ))}
-            </Select>
-          </Field>
-          <Field orientation="horizontal">
-            <Field.Label>Milestone</Field.Label>
-            <Select
-              value={bug.milestoneId ?? ""}
-              onValueChange={(next) => {
-                if (!next) return;
-                setVersionMilestoneError(null);
-                toPromise(updateBug({ id: bug.id, changes: { milestoneId: next } }))
-                  .then(onUpdated)
-                  .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
-              }}
-              placeholder="None"
-              aria-label="Milestone"
-              renderValue={(id) => productDetail.milestones.find((m) => m.id === id)?.name ?? id}
-            >
-              {productDetail.milestones.map((m) => (
-                <Select.Item key={m.id} value={m.id}>
-                  {m.name}
-                </Select.Item>
-              ))}
-            </Select>
-          </Field>
-        </div>
+        <>
+          {/* Read-first, like every other property here. These were the last
+              two bordered selects in the rail, so the column still had two
+              rhythms: facts you read, and controls you fill in. */}
+          <RailChoice
+            label="Version"
+            value={bug.versionId ?? ""}
+            display={
+              productDetail.versions.find((v) => v.id === bug.versionId)?.name ?? (
+                <span className="dim">None</span>
+              )
+            }
+            options={productDetail.versions.map((v) => ({ value: v.id, label: v.name }))}
+            onChange={(next) => {
+              setVersionMilestoneError(null);
+              toPromise(updateBug({ id: bug.id, changes: { versionId: next } }))
+                .then(onUpdated)
+                .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
+            }}
+          />
+          <RailChoice
+            label="Milestone"
+            value={bug.milestoneId ?? ""}
+            display={
+              productDetail.milestones.find((m) => m.id === bug.milestoneId)?.name ?? (
+                <span className="dim">None</span>
+              )
+            }
+            options={productDetail.milestones.map((m) => ({ value: m.id, label: m.name }))}
+            onChange={(next) => {
+              setVersionMilestoneError(null);
+              toPromise(updateBug({ id: bug.id, changes: { milestoneId: next } }))
+                .then(onUpdated)
+                .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
+            }}
+          />
+        </>
       ) : (
         <p className="state-hint small">Sign in to change version/milestone.</p>
       )}
@@ -488,6 +451,6 @@ export function FieldsPanel({
         </Button>
       )}
       </fieldset>
-    </Card>
+    </div>
   );
 }

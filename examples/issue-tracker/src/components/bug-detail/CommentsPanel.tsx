@@ -390,7 +390,6 @@ export function CommentsPanel({
 
   return (
     <section className="comments-panel">
-      <h3>Comments</h3>
       <AsyncSection
         state={state}
         onRetry={reload}

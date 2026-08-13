@@ -98,17 +98,22 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
 
   // Severity and priority must both have survived the round trip as the values
   // chosen, and must still be distinct fields.
-  // The SELECT value, not a badge. The panel used to render a severity badge
-  // directly above a select holding the same value; the badge is gone, so
-  // asserting on loose text "major" was asserting on the duplicate.
-  // The combobox reports its selection as TEXT, not a value attribute --
-  // toHaveValue is a native-select assertion and silently has nothing to read
-  // on a combobox.
-  await expect(page.getByRole("combobox", { name: "Severity" })).toHaveText(/major/);
+  // The RAIL ROW, scoped by its label. The rail states properties as values
+  // now and only renders a control while one is being edited, so there is no
+  // combobox to read at rest. Scoped rather than loose, because the page head
+  // shows the same badge -- an unscoped getByText("major") matches both and
+  // proves neither.
+  await expect(
+    page.locator(".rail-choice", { hasText: "Severity" }),
+    "the rail states the severity",
+  ).toContainText("major");
   // Same as severity: the priority badge is gone, and loose text "P1" now
   // matches a hidden <option> inside the select -- "received: hidden" rather
   // than "not found", which is the tell.
-  await expect(page.getByRole("combobox", { name: "Priority" })).toHaveText(/P1/);
+  await expect(
+    page.locator(".rail-choice", { hasText: "Priority" }),
+    "and the priority",
+  ).toContainText("P1");
 
   // The bug is findable from the list by its summary.
   await page.goto("/#/bugs");

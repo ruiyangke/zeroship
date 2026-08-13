@@ -59,8 +59,10 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
   // against a page that never offers one to anybody.
   await page.goto(`/#/bugs/${bug.id}`);
   await expect(page.getByLabel("Add a comment"), "a signed-in user can comment").toBeVisible();
+  // The way in is the per-property Edit affordance; the control itself does
+  // not exist until it is asked for.
   await expect(
-    page.getByRole("combobox", { name: "Severity" }),
+    page.getByRole("button", { name: "Edit Severity" }),
     "and can change fields",
   ).toBeEnabled();
 
@@ -87,7 +89,7 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
     "nor per-comment actions",
   ).toHaveCount(0);
   await expect(
-    visitor.getByRole("combobox", { name: "Severity" }),
+    visitor.getByRole("button", { name: "Edit Severity" }),
     "and the field controls are disabled rather than merely doomed",
   ).toBeDisabled();
 
