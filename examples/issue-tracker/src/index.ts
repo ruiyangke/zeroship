@@ -1244,7 +1244,17 @@ export const getBug = query(
           db.users,
           // assignee and QA contact are both nullable; an unset one must not
           // become a null inside the `$in` list.
-          [bug.assigneeId, bug.reporterId, bug.qaContactId].filter(
+          // Activity actors too. The history log records WHO changed each
+          // field and the tab could not say so: without these ids the panel
+          // either printed a raw `usr_...` or, as it did, left the person out
+          // of the record entirely. A history that cannot name who acted is
+          // the half of an audit trail that does not audit.
+          [
+            bug.assigneeId,
+            bug.reporterId,
+            bug.qaContactId,
+            ...activityRows.map((activity) => activity.actorId),
+          ].filter(
             (value): value is string => typeof value === "string" && value.length > 0,
           ),
         )
@@ -1276,6 +1286,11 @@ export const getBug = query(
         .sort((left, right) => left.created_at - right.created_at)
         .filter((activity) => !hidesRestrictedReference(activity, hidden))
         .map((activity) => ({
+          // WHO, which the log has always recorded and this projection threw
+          // away, so the history tab could not name the person who made a
+          // change. It is the same publicUserView identity the rest of the
+          // payload carries -- no new exposure, just stopping the discard.
+          actorId: activity.actorId,
           fieldName: activity.fieldName,
           oldValue: activity.oldValue ?? null,
           newValue: activity.newValue ?? null,

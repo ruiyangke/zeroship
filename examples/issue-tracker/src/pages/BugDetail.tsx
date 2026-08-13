@@ -116,7 +116,7 @@ export function BugDetailPage({ id }: { id: string }) {
       </div>
 
       {tab === "history" ? (
-        <HistoryPanel activities={detail.activities} labels={historyLabels} />
+        <HistoryPanel activities={detail.activities} labels={historyLabels} people={detail.people} />
       ) : (
         <div className="bug-detail-grid">
           {/* The conversation IS the bug. It used to sit under a screen of
