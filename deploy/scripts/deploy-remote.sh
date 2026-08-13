@@ -91,8 +91,8 @@ compose_vars() {
 # Relatedness = a shared underscore-separated token, minus a stoplist of tokens
 # so common they carry no signal (the product name, service names, and the
 # generic KEY/SECRET/URL suffixes). ZEROSHIP_SCHEME and ZEROSHIP_ORIGIN_SCHEME
-# share SCHEME and pair; GATEWAY_OIDC_SECRET and GATEWAY_DATABASE_URL share
-# only GATEWAY and do not.
+# share SCHEME and pair; ZEROSHIP_GATEWAY_BROKER_SECRET_FILE and
+# ZEROSHIP_GATEWAY_DATABASE_URL share only GATEWAY and do not.
 rename_suspects() {
   local stopwords=" ZEROSHIP AUTH CONTROL GATEWAY WORKER MIGRATED DB DATABASE URL KEY SECRET "
   local o d tok

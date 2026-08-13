@@ -216,9 +216,9 @@ COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/b
 # NOT carry migration documents (crates/bundle/src/manifest.rs - they "are
 # applied through the standalone migration service"), so the deploy SUCCEEDS,
 # the app serves its assets and RPCs, and every env.db call then fails against
-# tables that were never created. Compose even set PROVISION_DATABASE_URL, the
-# superuser DSN this service needs, on the CONTROL service - which has no code
-# that reads it.
+# tables that were never created. Compose even set the provisioning superuser
+# DSN this service needs on the CONTROL service - which has no code that reads
+# one; it is ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL and it belongs here.
 COPY --from=builder /build/target/release/zeroship-migrated /usr/local/bin/
 # The migration SOURCE the one-shot above reads, baked in rather than
 # bind-mounted. The compose `migrate` service used to mount

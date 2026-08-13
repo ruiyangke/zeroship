@@ -22,16 +22,25 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// Stripe-Signature. Generating it produced an inert placeholder that made an
 /// unconfigured deployment look configured. Compose now defaults it to empty
 /// and control fails every webhook closed with 500 while it stays empty.
+/// EVERY name here is the canonical `ZEROSHIP_` projection of a declared
+/// setting, and compose maps each one to itself. The bare middle spellings
+/// this list used to write - the unprefixed master-key, stash and salt names -
+/// are read by nothing since Step 5 of
+/// `docs/proposals/2026-08-11-config-name-alignment.md` deleted them, so
+/// writing one would leave a dev stack that looks initialised and crash-loops.
+///
+/// `GATEWAY_OIDC_SECRET` is gone rather than renamed: it had no Rust reader at
+/// all. Generating a secret nothing consumes is the set-but-unread shape this
+/// migration exists to remove, and it is not made better by a canonical name.
 const ENV_KEYS: &[&str] = &[
     "ZEROSHIP_CONTROL_KEY",
-    "ZEROSHIP_MASTER_KEY",
+    "ZEROSHIP_CONTROL_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
-    "GATEWAY_OIDC_SECRET",
-    "MIGRATED_POLICY_SEAL_KEY",
-    "STASH_SIGNING_KEY",
-    "PAIRWISE_SALT",
-    "AUTH_STASH_SIGNING_KEY",
-    "AUTH_TOTP_ENC_KEY",
+    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
+    "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
+    "ZEROSHIP_PAIRWISE_SALT",
+    "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+    "ZEROSHIP_AUTH_TOTP_ENC_KEY",
 ];
 
 const WEAK_LITERALS: &[&str] = &[
@@ -163,7 +172,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
             pairwise_path.display()
         ));
     }
-    let pairwise = resolve_pairwise(existing_env.get("PAIRWISE_SALT"), &existing_pairwise)?;
+    let pairwise = resolve_pairwise(existing_env.get("ZEROSHIP_PAIRWISE_SALT"), &existing_pairwise)?;
 
     // Validate every existing file before creating anything. A broken partial
     // directory is an operator decision, not permission to add more state
@@ -179,7 +188,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
             desired_env.insert((*name).to_string(), random_hex(32)?);
         }
     }
-    desired_env.insert("PAIRWISE_SALT".to_string(), pairwise.clone());
+    desired_env.insert("ZEROSHIP_PAIRWISE_SALT".to_string(), pairwise.clone());
 
     let mut outcome = InitOutcome::default();
     for (name, generate, validate) in secret_specs {
@@ -368,7 +377,7 @@ fn ensure_pairwise_file(
             .map_err(|error| format!("read existing pairwise-salt {}: {error}", path.display()))?;
         if actual != desired {
             return Err(format!(
-                "existing pairwise-salt {} does not equal PAIRWISE_SALT in the environment overlay; neither value was changed",
+                "existing pairwise-salt {} does not equal ZEROSHIP_PAIRWISE_SALT in the environment overlay; neither value was changed",
                 path.display()
             ));
         }
@@ -392,7 +401,7 @@ fn resolve_pairwise(env_value: Option<&String>, file_bytes: &[u8]) -> Result<Str
     let value = match (env_value, file_value) {
         (Some(env), Some(file)) if env.as_bytes() != file.as_bytes() => {
             return Err(
-                "PAIRWISE_SALT in the environment overlay differs byte-for-byte from pairwise-salt; neither value was changed"
+                "ZEROSHIP_PAIRWISE_SALT in the environment overlay differs byte-for-byte from pairwise-salt; neither value was changed"
                     .to_string(),
             );
         }
@@ -400,9 +409,9 @@ fn resolve_pairwise(env_value: Option<&String>, file_bytes: &[u8]) -> Result<Str
         (None, Some(file)) => file,
         (None, None) => random_hex(32)?,
     };
-    validate_env_value("PAIRWISE_SALT", &value)?;
+    validate_env_value("ZEROSHIP_PAIRWISE_SALT", &value)?;
     if value.contains(['\r', '\n']) {
-        return Err("PAIRWISE_SALT must not contain a line ending".to_string());
+        return Err("ZEROSHIP_PAIRWISE_SALT must not contain a line ending".to_string());
     }
     Ok(value)
 }
@@ -478,15 +487,15 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
         return Err(format!("{name} must not be all zero"));
     }
     match name {
-        "ZEROSHIP_MASTER_KEY" | "AUTH_TOTP_ENC_KEY" => {
+        "ZEROSHIP_CONTROL_MASTER_KEY" | "ZEROSHIP_AUTH_TOTP_ENC_KEY" => {
             zeroship_core::config::validate_master_key_material(name, value)
         }
         "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(value),
-        "STASH_SIGNING_KEY" | "AUTH_STASH_SIGNING_KEY" => {
+        "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY" | "ZEROSHIP_AUTH_STASH_SIGNING_KEY" => {
             zeroship_core::config::validate_stash_key(value)
         }
-        "PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value),
-        "ZEROSHIP_CONTROL_KEY" | "GATEWAY_OIDC_SECRET" | "MIGRATED_POLICY_SEAL_KEY" => Ok(()),
+        "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value),
+        "ZEROSHIP_CONTROL_KEY" | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }
 }
