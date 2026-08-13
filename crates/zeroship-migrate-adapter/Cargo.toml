@@ -50,6 +50,14 @@ zero-migrate-ir = { workspace = true, optional = true }
 # The engine PDP — names the composed `EffectivePolicy` the platform table-shape
 # resolver + `load_and_lower_guarded` thread (Stage 4a platform-migrate only).
 zero-migrate-policy = { workspace = true, optional = true }
+# The declared-environment registry. The `zeroship-platform-migrate` bin reads
+# DATABASE_URL and the PG suites read ZERO_MIGRATE_TEST_PG_URL; both go through
+# `zeroship_core::{declared_env,test_env}` so the reads are enumerable
+# (docs/proposals/2026-08-11-config-name-alignment.md, Step 4). Not optional: a
+# `[dev-dependencies]` entry alone would not cover the bin, and an optional dep
+# gated on `platform-cli` would not cover the two feature-free test targets.
+# zeroship-core does NOT depend on this crate, so this adds no cycle.
+zeroship-core = { workspace = true }
 # The platform's native io_uring Postgres driver — the concrete session this
 # adapter maps onto the neutral seam.
 compio-postgres = { workspace = true }

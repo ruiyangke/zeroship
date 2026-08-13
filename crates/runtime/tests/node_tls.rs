@@ -30,11 +30,23 @@ impl EnvGuard {
     }
 
     fn set_with_native_roots(dev: bool, cert_file: Option<&Path>) -> Self {
-        let keys = ["ZEROSHIP_DEV", "SSL_CERT_FILE", "SSL_CERT_DIR"];
-        let prev = keys
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect::<Vec<_>>();
+        // Each name is read through a literal macro call (the registering
+        // macros require a literal at the call site), in the same order as
+        // `keys`, rather than looping `var_os` over a runtime `&str`.
+        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
+            (
+                "ZEROSHIP_DEV",
+                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
+            ),
+            (
+                "SSL_CERT_FILE",
+                zeroship_core::declared_env_os!(external, "SSL_CERT_FILE", zeroship_runtime::RuntimeConsumer),
+            ),
+            (
+                "SSL_CERT_DIR",
+                zeroship_core::declared_env_os!(external, "SSL_CERT_DIR", zeroship_runtime::RuntimeConsumer),
+            ),
+        ];
         unsafe {
             if dev {
                 std::env::set_var("ZEROSHIP_DEV", "1");

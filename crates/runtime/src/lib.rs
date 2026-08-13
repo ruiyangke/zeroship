@@ -101,6 +101,13 @@ pub mod transport;
 pub mod web;
 pub mod webidl;
 
+zeroship_core::declare_env_consumer!(
+    /// Marker for first-party environment reads performed by the runtime
+    /// crate itself (dev-auth, node net policy, SSRF guard, and similar
+    /// startup-adjacent reads that are not part of a generated server
+    /// `#[zeroship_config]` struct).
+    pub RuntimeConsumer, target = "zeroship-runtime", scope = "runtime");
+
 // Back-compat re-exports for the SSRF helper (was `crate::fetch`) and the
 // kernel HTTP bridge (was `crate::http`). Both moved under `transport/`.
 pub use transport::handler as http;

@@ -17,6 +17,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
+zeroship-core = { workspace = true }
 compio = { workspace = true }
 
 [build-dependencies]

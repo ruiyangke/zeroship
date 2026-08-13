@@ -534,7 +534,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 /// cleared, (d) OP `/revoke` was hit exactly once.
 #[ntex::test]
 async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
-    let Some(dsn) = std::env::var("GATEWAY_ANCHORS_DB_URL").ok() else {
+    let Some(dsn) = zeroship_core::test_env!("GATEWAY_ANCHORS_DB_URL") else {
         zeroship_test_support::skip("skipping (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };

@@ -35,11 +35,23 @@ pub struct EnvGuard {
 
 impl EnvGuard {
     pub fn set_dev() -> Self {
-        let keys = ["ZEROSHIP_DEV", "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS"];
-        let prev = keys
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect::<Vec<_>>();
+        // Each name is read through a literal macro call (the registering
+        // macros require a literal at the call site), in the same order as
+        // `keys`, rather than looping `var_os` over a runtime `&str`.
+        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
+            (
+                "ZEROSHIP_DEV",
+                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
+            ),
+            (
+                "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+                zeroship_core::declared_env_os!(
+                    platform,
+                    "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+                    zeroship_runtime::RuntimeConsumer
+                ),
+            ),
+        ];
         unsafe {
             std::env::set_var("ZEROSHIP_DEV", "1");
             std::env::remove_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS");

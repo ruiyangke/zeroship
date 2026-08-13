@@ -30,10 +30,39 @@ impl EnvGuard {
             "ZEROSHIP_NET_TEST_DNS_HANG_HOST",
             "ZEROSHIP_NET_TEST_DNS_HANG_MS",
         ];
-        let prev = keys
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect::<Vec<_>>();
+        // Each name is read through a literal macro call (the registering
+        // macros require a literal at the call site), in the same order as
+        // `keys`, rather than looping `var_os` over a runtime `&str`.
+        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
+            (
+                "ZEROSHIP_DEV",
+                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
+            ),
+            (
+                "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+                zeroship_core::declared_env_os!(
+                    platform,
+                    "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+                    zeroship_runtime::RuntimeConsumer
+                ),
+            ),
+            (
+                "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
+                zeroship_core::declared_env_os!(
+                    platform,
+                    "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
+                    zeroship_runtime::RuntimeConsumer
+                ),
+            ),
+            (
+                "ZEROSHIP_NET_TEST_DNS_HANG_HOST",
+                zeroship_core::test_env_os!("ZEROSHIP_NET_TEST_DNS_HANG_HOST"),
+            ),
+            (
+                "ZEROSHIP_NET_TEST_DNS_HANG_MS",
+                zeroship_core::test_env_os!("ZEROSHIP_NET_TEST_DNS_HANG_MS"),
+            ),
+        ];
         unsafe {
             for key in keys {
                 std::env::remove_var(key);

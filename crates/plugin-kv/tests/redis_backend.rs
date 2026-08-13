@@ -13,7 +13,7 @@ use zeroship_plugin_kv::backend::{Backend, Redis, TtlState};
 /// skipping — CI sets the require flag so a missing-URL misconfig fails
 /// loud rather than turning the whole suite into a no-op.
 fn redis_url() -> Option<String> {
-    let url = std::env::var("REDIS_TEST_URL").ok().filter(|s| !s.is_empty());
+    let url = zeroship_core::test_env!("REDIS_TEST_URL").filter(|s| !s.is_empty());
     if url.is_none() && require_redis() {
         panic!(
             "KV_REQUIRE_REDIS=1 but REDIS_TEST_URL is unset — refusing to skip the \
@@ -25,11 +25,11 @@ fn redis_url() -> Option<String> {
 
 /// `true` when the environment demands the Redis tests actually run.
 fn require_redis() -> bool {
-    matches!(std::env::var("KV_REQUIRE_REDIS").ok().as_deref(), Some("1"))
+    matches!(zeroship_core::test_env!("KV_REQUIRE_REDIS").as_deref(), Some("1"))
 }
 
 fn cluster_url() -> Option<String> {
-    let seeds = std::env::var("DRAGONFLY_CLUSTER_SEEDS").ok()?;
+    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS")?;
     let mut it = seeds.split(',');
     let first = it.next()?.trim().to_string();
     // Build the "plugin-kv" cluster URL: cluster=true + seeds=... with
@@ -355,7 +355,7 @@ async fn same_sorted_seeds_share_cluster_handle() {
     // via one are visible to the other — which is inherent to any
     // correctness-focused KV, but also shows the pool is re-used (no
     // flakiness from duplicate bootstrap).
-    let Some(seeds) = std::env::var("DRAGONFLY_CLUSTER_SEEDS").ok() else {
+    let Some(seeds) = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS") else {
         zeroship_test_support::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
         return;
     };

@@ -43,6 +43,7 @@
 //! not a fake Postgres).
 
 use base64::Engine as _;
+use zeroship_core::config::DeclaredEnvKey;
 
 /// Cookie name carrying the dev session identity. Distinct from the prod
 /// `__Host-zeroship_app_session` cookie so the two can never be confused, and so a
@@ -51,12 +52,13 @@ pub const DEV_SESSION_COOKIE: &str = "__zeroship_dev_session";
 
 /// Env var the Vite plugin sets to `1` on the spawned dev runtime child.
 /// Mirrors `ENV_DEV` in `sdks/vite-plugin/src/constants.ts`.
-const ENV_DEV: &str = "ZEROSHIP_DEV";
+const ENV_DEV: DeclaredEnvKey<String, crate::RuntimeConsumer> = DeclaredEnvKey::dev("ZEROSHIP_DEV");
 
 /// Env var carrying the per-dev-server HMAC secret the JS dev-auth layer uses
 /// to sign the `__zeroship_dev_session` cookie. Generated fresh by the Vite plugin
 /// for each dev server and passed to the child via the spawn env.
-const ENV_DEV_AUTH_SECRET: &str = "ZEROSHIP_DEV_AUTH_SECRET";
+const ENV_DEV_AUTH_SECRET: DeclaredEnvKey<String, crate::RuntimeConsumer> =
+    DeclaredEnvKey::dev("ZEROSHIP_DEV_AUTH_SECRET");
 
 /// Resolve the dev user identity JSON for a request from its `Cookie` header.
 ///
@@ -71,10 +73,15 @@ const ENV_DEV_AUTH_SECRET: &str = "ZEROSHIP_DEV_AUTH_SECRET";
 /// gateway-verified header body in production.
 #[must_use]
 pub fn resolve_dev_user_json(request_headers: &[(String, String)]) -> Option<String> {
-    if std::env::var(ENV_DEV).ok().as_deref() != Some("1") {
+    let dev = zeroship_core::read_declared_env!(ENV_DEV, crate::RuntimeConsumer)
+        .ok()
+        .flatten();
+    if !zeroship_core::config::env_is_exact(dev.as_deref(), "1") {
         return None;
     }
-    let secret = std::env::var(ENV_DEV_AUTH_SECRET).ok()?;
+    let secret = zeroship_core::read_declared_env!(ENV_DEV_AUTH_SECRET, crate::RuntimeConsumer)
+        .ok()
+        .flatten()?;
     if secret.is_empty() {
         return None;
     }
@@ -194,11 +201,17 @@ mod tests {
     /// (Serial-ish: mutates process env; restores afterward.)
     #[test]
     fn resolve_is_noop_without_dev_flag() {
-        let prev_dev = std::env::var_os(ENV_DEV);
-        let prev_secret = std::env::var_os(ENV_DEV_AUTH_SECRET);
+        const ENV_DEV_OS: DeclaredEnvKey<std::ffi::OsString, crate::RuntimeConsumer> =
+            DeclaredEnvKey::dev("ZEROSHIP_DEV");
+        const ENV_DEV_AUTH_SECRET_OS: DeclaredEnvKey<std::ffi::OsString, crate::RuntimeConsumer> =
+            DeclaredEnvKey::dev("ZEROSHIP_DEV_AUTH_SECRET");
+
+        let prev_dev = zeroship_core::read_declared_env_os!(ENV_DEV_OS, crate::RuntimeConsumer);
+        let prev_secret =
+            zeroship_core::read_declared_env_os!(ENV_DEV_AUTH_SECRET_OS, crate::RuntimeConsumer);
         unsafe {
-            std::env::remove_var(ENV_DEV);
-            std::env::set_var(ENV_DEV_AUTH_SECRET, "dev-secret-abc");
+            std::env::remove_var(ENV_DEV.name());
+            std::env::set_var(ENV_DEV_AUTH_SECRET.name(), "dev-secret-abc");
         }
         let token = sign_dev_session(SECRET, USER_JSON);
         let headers = vec![(
@@ -208,12 +221,12 @@ mod tests {
         assert_eq!(resolve_dev_user_json(&headers), None);
         unsafe {
             match prev_dev {
-                Some(v) => std::env::set_var(ENV_DEV, v),
-                None => std::env::remove_var(ENV_DEV),
+                Some(v) => std::env::set_var(ENV_DEV.name(), v),
+                None => std::env::remove_var(ENV_DEV.name()),
             }
             match prev_secret {
-                Some(v) => std::env::set_var(ENV_DEV_AUTH_SECRET, v),
-                None => std::env::remove_var(ENV_DEV_AUTH_SECRET),
+                Some(v) => std::env::set_var(ENV_DEV_AUTH_SECRET.name(), v),
+                None => std::env::remove_var(ENV_DEV_AUTH_SECRET.name()),
             }
         }
     }

@@ -29,6 +29,17 @@ use std::path::{Path, PathBuf};
 
 use zeroship_migrate_adapter::platform::{run_platform_migrations, PlatformMigrateConfig};
 
+zeroship_core::declare_env_consumer!(
+    /// This binary's identity in the environment-read registry.
+    ///
+    /// It is a real `[[bin]]` target with no `#[zeroship_config]` declaration
+    /// (its argument parsing is the hand-rolled loop below), so it has no
+    /// generated consumer marker and needs this one to name itself.
+    pub PlatformMigrateConsumer,
+    target = "zeroship-platform-migrate",
+    scope = "platform_migrate",
+);
+
 fn main() {
     let cfg = match parse_args() {
         Ok(cfg) => cfg,
@@ -99,7 +110,7 @@ fn parse_args() -> Result<PlatformMigrateConfig, String> {
     }
 
     let database_url = database_url
-        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| zeroship_core::declared_env!(external, "DATABASE_URL", PlatformMigrateConsumer))
         .ok_or("a --database-url (or DATABASE_URL) is required")?;
 
     let migrations_dir = migrations_dir.unwrap_or_else(default_migrations_dir);

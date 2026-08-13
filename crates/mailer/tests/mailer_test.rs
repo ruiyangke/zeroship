@@ -12,7 +12,7 @@ use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
         zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
@@ -54,7 +54,7 @@ async fn stdout_mailer_sends_when_not_suppressed() {
 
 #[compio::test]
 async fn stdout_mailer_refuses_suppressed() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
         zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
@@ -129,9 +129,9 @@ async fn stdout_mailer_refuses_suppressed() {
 /// when either is unset so CI without a sink is unaffected.
 #[compio::test]
 async fn smtp_plaintext_sink_delivers_relay_forward() {
-    let (Ok(dsn), Ok(sink)) = (
-        std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_TEST_SMTP_SINK"),
+    let (Some(dsn), Some(sink)) = (
+        zeroship_core::test_env!("AUTH_DB_URL"),
+        zeroship_core::test_env!("AUTH_TEST_SMTP_SINK"),
     ) else {
         zeroship_test_support::skip("skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)");
         return;

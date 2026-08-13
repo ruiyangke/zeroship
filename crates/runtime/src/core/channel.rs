@@ -113,8 +113,7 @@ fn stream_global_cap() -> usize {
     use std::sync::OnceLock;
     static CAP: OnceLock<usize> = OnceLock::new();
     *CAP.get_or_init(|| {
-        std::env::var("ZEROSHIP_STREAM_GLOBAL_CAP")
-            .ok()
+        zeroship_core::declared_env!(platform, "ZEROSHIP_STREAM_GLOBAL_CAP", crate::RuntimeConsumer)
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_STREAM_GLOBAL_CAP)
     })

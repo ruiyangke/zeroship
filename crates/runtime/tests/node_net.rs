@@ -19,8 +19,16 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn set(dev: bool, global_cap: Option<usize>) -> Self {
-        let prev_dev = std::env::var_os("ZEROSHIP_DEV");
-        let prev_global_cap = std::env::var_os("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS");
+        let prev_dev = zeroship_core::declared_env_os!(
+            dev,
+            "ZEROSHIP_DEV",
+            zeroship_runtime::RuntimeConsumer
+        );
+        let prev_global_cap = zeroship_core::declared_env_os!(
+            platform,
+            "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+            zeroship_runtime::RuntimeConsumer
+        );
         unsafe {
             if dev {
                 std::env::set_var("ZEROSHIP_DEV", "1");

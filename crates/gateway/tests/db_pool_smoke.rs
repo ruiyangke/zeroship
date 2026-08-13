@@ -20,7 +20,7 @@ use zeroship_gateway::db::DbConfig;
 
 #[compio::test]
 async fn pool_checkout_runs_concurrent_trivial_queries() {
-    let Ok(dsn) = std::env::var("GATEWAY_POOL_SMOKE_URL") else {
+    let Some(dsn) = zeroship_core::test_env!("GATEWAY_POOL_SMOKE_URL") else {
         zeroship_test_support::skip("skipping (no GATEWAY_POOL_SMOKE_URL)");
         return;
     };

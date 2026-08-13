@@ -18,7 +18,7 @@ use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate,
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
         zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
         return;
     };

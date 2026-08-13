@@ -391,13 +391,10 @@ async fn resolve_authorized_target(
         resolve_timeout(),
         compio::runtime::spawn_blocking(move || {
             #[cfg(debug_assertions)]
-            if std::env::var("ZEROSHIP_NET_TEST_DNS_HANG_HOST")
-                .ok()
-                .as_deref()
+            if zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_HOST").as_deref()
                 == Some(resolve_host.as_str())
             {
-                let ms = std::env::var("ZEROSHIP_NET_TEST_DNS_HANG_MS")
-                    .ok()
+                let ms = zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_MS")
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(250);
                 std::thread::sleep(Duration::from_millis(ms));
@@ -435,10 +432,13 @@ async fn resolve_authorized_target(
 }
 
 fn resolve_timeout() -> Duration {
-    std::env::var("ZEROSHIP_NET_RESOLVE_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(RESOLVE_TIMEOUT)
+    zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
+        crate::RuntimeConsumer
+    )
+    .and_then(|s| s.parse::<u64>().ok())
+    .filter(|ms| *ms > 0)
+    .map(Duration::from_millis)
+    .unwrap_or(RESOLVE_TIMEOUT)
 }

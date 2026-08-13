@@ -8,7 +8,7 @@ use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
 
 #[test]
 fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
-    let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
+    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
         zeroship_test_support::skip("skipping redpanda roundtrip: REDPANDA_BROKERS is unset");
         return;
     };
@@ -100,7 +100,7 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
 
 #[test]
 fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
-    let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
+    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
         zeroship_test_support::skip("skipping redpanda rewind: REDPANDA_BROKERS is unset");
         return;
     };

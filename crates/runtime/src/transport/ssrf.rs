@@ -37,9 +37,10 @@ pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 /// `0` or the empty string, is non-dev and must fail closed.
 #[must_use]
 pub fn dev_mode_enabled() -> bool {
-    std::env::var("ZEROSHIP_DEV")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    zeroship_core::config::env_is_exact(
+        zeroship_core::declared_env!(dev, "ZEROSHIP_DEV", crate::RuntimeConsumer).as_deref(),
+        "1",
+    )
 }
 
 fn ipv4_from_segments(high: u16, low: u16) -> Ipv4Addr {
