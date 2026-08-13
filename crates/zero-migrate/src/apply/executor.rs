@@ -2086,6 +2086,33 @@ pub enum RollbackError {
         /// Its human-readable name.
         name: String,
     },
+    /// The rollback would `force`-SKIP an irreversible SQUASH. Skipping any other
+    /// irreversible migration only forgoes its own undo; skipping a squash leaves
+    /// its supersession standing over versions this same rollback then unwinds, so
+    /// the journal ends up claiming they are covered by a squash while none of
+    /// them are present. Nothing was rolled back (refused before ANY down runs).
+    ///
+    /// `superseded_versions` only honours edges of a NET-APPLIED squash precisely
+    /// so that rolling the squash back releases its supersession. A skip keeps the
+    /// squash net-applied, which is the one way to get the covered-but-absent
+    /// state that release was designed to prevent.
+    #[error(
+        "migration {version} ('{name}') is an irreversible SQUASH superseding {superseded} \
+         version(s); rollback will not skip it, because skipping leaves its supersession \
+         standing over versions this rollback unwinds - they would be journaled as covered \
+         by a squash while none of them are present, and a later apply would skip them and \
+         report success having created nothing. Prefer ROLL-FORWARD: author a compensating \
+         migration. To unwind the squash itself, give it a `down` that reverses the prefix \
+         it collapsed."
+    )]
+    IrreversibleSquash {
+        /// The squash migration's version.
+        version: String,
+        /// Its human-readable name.
+        name: String,
+        /// How many versions it supersedes.
+        superseded: usize,
+    },
     /// The SQL guard denied a `down`'s SQL — the down is SQL too and goes through
     /// the SAME defenses as an up. The whole rollback aborts before
     /// any down runs (all-up-front, mirroring apply).
@@ -2590,6 +2617,22 @@ pub fn plan_rollback<'a>(
         //      irreversible step discards data, so it also takes an explicit backup
         //      acknowledgement.
         let Some(down) = m.down.as_deref() else {
+            // A SQUASH is never skippable. For any other migration a skip only
+            // forgoes that migration's own undo; for a squash it leaves the
+            // supersession standing over versions this same rollback unwinds, and
+            // `superseded_versions` honours a net-applied squash's edges — so the
+            // covered versions are journaled as satisfied while none of them are
+            // present, and a later apply skips them and reports success having
+            // created nothing. Refused ahead of the force check: this is not a
+            // data-loss trade the operator can acknowledge their way past, because
+            // the damage is to what the journal MEANS, not to any one table.
+            if !m.supersedes.is_empty() {
+                return Err(RollbackError::IrreversibleSquash {
+                    version: version.to_string(),
+                    name: m.name.clone(),
+                    superseded: m.supersedes.len(),
+                });
+            }
             if request.options.force && request.options.backup_acknowledged {
                 skipped_irreversible.push(version.to_string());
                 continue;

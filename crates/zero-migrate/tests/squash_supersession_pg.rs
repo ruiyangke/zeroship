@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 
 use support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
+use zero_migrate::apply::executor::{
+    rollback, LockMode, RollbackError, RollbackOptions, RollbackRequest, RollbackTarget,
+};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::{
@@ -36,8 +38,8 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    fold_ops, squash, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    PostgresBackend, SqlDialect, SquashError,
+    fold_ops, guard_for, squash, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    MigrationEngine, PostgresBackend, SqlDialect, SquashError,
 };
 
 const OWNER: &str = "app_squash_supersession_pg";
@@ -208,6 +210,25 @@ async fn supersession_edges(
                 .try_get("superseded_version")
                 .map_err(|e| format!("superseded_version: {e}"))?;
             Ok((version, superseded))
+        })
+        .collect()
+}
+
+/// The project schema's live tables, so a refusal can be checked against what is
+/// actually there rather than against what the journal claims.
+async fn live_tables(session: &PgDevSession, schema: &str) -> Result<Vec<String>, String> {
+    let rows = session
+        .query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 \
+              ORDER BY table_name",
+            &[schema.into()],
+        )
+        .await
+        .map_err(|error| format!("list live tables: {error}"))?;
+    rows.iter()
+        .map(|row| {
+            row.try_get("table_name")
+                .map_err(|e| format!("table_name: {e}"))
         })
         .collect()
 }
@@ -500,4 +521,262 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
         .await
         .expect("drop the test schemas");
     work.expect("refuse an unapplied squash on live PostgreSQL");
+}
+
+/// A squash that CAN be unwound, for the control arm below.
+fn reversible_squash(name: &str, up: &str, down: &str, supersedes: Vec<MigrationId>) -> Migration {
+    let mut m = squash_migration(name, up, supersedes);
+    m.down = Some(down.to_string());
+    m.checksum = Checksum::of(&ChecksumInput {
+        up,
+        down: Some(down),
+        flags: &m.flags,
+        owner_app: OWNER,
+        depends_on: &[],
+        supersedes: &m.supersedes,
+        preconditions: &[],
+    });
+    m
+}
+
+// ---------------------------------------------------------------------------
+// A rollback may not FORCE-SKIP an irreversible squash.
+//
+// `rollback` refuses to cross a migration with `down: None`, and offers
+// `force + backup_acknowledged` as the override, which SKIPS that migration.
+// Skipping any ordinary migration only forgoes its own undo. Skipping a SQUASH
+// is different in kind: `superseded_versions` honours the edges of a NET-APPLIED
+// squash, and that is deliberate — its doc says rolling the squash back is what
+// releases its supersession. A skip keeps the squash net-applied while this same
+// rollback unwinds everything it supersedes.
+//
+// Measured before the fix, on a live server:
+//
+//   apply v1,v2            tables = t1,t2
+//   squash S over [v1,v2]  2 edges recorded
+//   rollback All + force   rolled_back = 2, skipped = 1 (S), tables = NONE
+//   redeploy t1            Ok(applied: [], skipped: [v1]), tables = STILL NONE
+//
+// The tables are gone, the journal says they are covered by a squash, and apply
+// reports SUCCESS having created nothing. There is no state left from which the
+// normal path recovers, and nothing in the output says so.
+//
+// So the skip is refused ahead of the force check: this is not a data-loss trade
+// an operator can acknowledge their way past, because the damage is to what the
+// journal MEANS rather than to any one table.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("noskip");
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create isolated test schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure migration journal: {error}"))?;
+
+        let mut history: Vec<Op> = Vec::new();
+        let mut applied: Vec<Migration> = Vec::new();
+        for table in ["t1", "t2"] {
+            applied.extend(apply_doc(&session, &cfg, &create_doc(table), &mut history).await?);
+        }
+        let versions: Vec<MigrationId> = applied.iter().map(|m| m.version.clone()).collect();
+
+        let combined = format!(
+            "CREATE TABLE {}.t1 (id int PRIMARY KEY);",
+            quote_ident(&cfg.project_schema)
+        );
+        let s = squash_migration("squash_all", &combined, versions.clone());
+        squash(&backend, &cfg, &s, "operator")
+            .await
+            .map_err(|error| format!("record the squash: {error}"))?;
+
+        let before_events = journal_events(&session, &cfg).await?;
+        let before_edges = supersession_edges(&session, &cfg).await?;
+        let before_tables = live_tables(&session, &cfg.project_schema).await?;
+        assert_eq!(before_tables, vec!["t1", "t2"], "both tables start present");
+
+        // The set an operator still has on disk right after a squash.
+        let mut set = applied.clone();
+        set.push(s.clone());
+        let guard = guard_for(&GuardConfig::from_policy(
+            policy(&cfg.project_schema),
+            SqlDialect::Postgres,
+        ));
+        let forced = RollbackRequest::new(RollbackTarget::All).with_options(RollbackOptions {
+            force: true,
+            backup_acknowledged: true,
+        });
+
+        let error = rollback(
+            &backend,
+            &cfg,
+            &forced,
+            &set,
+            Approval::Approved,
+            "operator",
+            guard.as_ref(),
+        )
+        .await
+        .expect_err("force-skipping a squash must be refused");
+        match error {
+            RollbackError::IrreversibleSquash { superseded, .. } => {
+                assert_eq!(superseded, 2, "the refusal must name how much it covers");
+            }
+            other => return Err(format!("expected IrreversibleSquash, got: {other}")),
+        }
+
+        // Refused BEFORE any down ran: this is the whole point, since the damage
+        // is not recoverable once the covered versions are unwound.
+        assert_eq!(
+            live_tables(&session, &cfg.project_schema).await?,
+            before_tables,
+            "a refused rollback must not have dropped anything"
+        );
+        assert_eq!(
+            journal_events(&session, &cfg).await?,
+            before_events,
+            "a refused rollback must append no journal event"
+        );
+        assert_eq!(
+            supersession_edges(&session, &cfg).await?,
+            before_edges,
+            "a refused rollback must not disturb the supersession edges"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("refuse to force-skip an irreversible squash on live PostgreSQL");
+}
+
+// ---------------------------------------------------------------------------
+// CONTROL for the test above. The refusal keys on `down: None` TOGETHER WITH
+// `supersedes`, not on being a squash: a squash that can reverse itself is
+// rolled back normally.
+//
+// It needs its own schema. Sharing one with the test above would leave that
+// test's irreversible squash net-applied and absent from this set, and rollback
+// refuses that ("applied but absent from the supplied set") long before reaching
+// the question being asked.
+//
+// Without this arm, the refusal above would also pass if `force` had stopped
+// working, or if rollback had stopped rolling anything back at all.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("revsquash");
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create isolated test schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure migration journal: {error}"))?;
+
+        let mut history: Vec<Op> = Vec::new();
+        let mut applied: Vec<Migration> = Vec::new();
+        for table in ["t1", "t2"] {
+            applied.extend(apply_doc(&session, &cfg, &create_doc(table), &mut history).await?);
+        }
+        let versions: Vec<MigrationId> = applied.iter().map(|m| m.version.clone()).collect();
+
+        let quoted = quote_ident(&cfg.project_schema);
+        let reversible = reversible_squash(
+            "squash_reversible",
+            &format!("CREATE TABLE {quoted}.t1 (id int PRIMARY KEY);"),
+            &format!("DROP TABLE IF EXISTS {quoted}.t2; DROP TABLE IF EXISTS {quoted}.t1;"),
+            versions,
+        );
+        squash(&backend, &cfg, &reversible, "operator")
+            .await
+            .map_err(|error| format!("record the reversible squash: {error}"))?;
+
+        let mut set = applied.clone();
+        set.push(reversible.clone());
+        let guard = guard_for(&GuardConfig::from_policy(
+            policy(&cfg.project_schema),
+            SqlDialect::Postgres,
+        ));
+        let outcome = rollback(
+            &backend,
+            &cfg,
+            // Steps(1) — the squash alone. `All` would run the squash's own down
+            // first and then each superseded version's engine-generated down over
+            // tables the squash had already dropped, which is a question about
+            // authoring a squash's down, not about the refusal under test.
+            &RollbackRequest::new(RollbackTarget::Steps(1)).with_options(RollbackOptions {
+                force: true,
+                backup_acknowledged: true,
+            }),
+            &set,
+            Approval::Approved,
+            "operator",
+            guard.as_ref(),
+        )
+        .await
+        .map_err(|error| format!("a reversible squash must roll back: {error}"))?;
+
+        assert!(
+            outcome
+                .rolled_back
+                .contains(&reversible.version.as_str().to_string()),
+            "the reversible squash must be among the rolled-back versions, got {:?}",
+            outcome.rolled_back
+        );
+        assert!(
+            live_tables(&session, &cfg.project_schema).await?.is_empty(),
+            "the reversing down must actually have run"
+        );
+        Ok(())
+    }
+    .await;
+
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("roll back a reversible squash on live PostgreSQL");
 }
