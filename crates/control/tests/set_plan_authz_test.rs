@@ -37,8 +37,7 @@ mod common;
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> String {
-    std::env::var("CONTROL_TEST_DB")
-        .ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

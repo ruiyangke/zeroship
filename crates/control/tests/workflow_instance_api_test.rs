@@ -29,9 +29,8 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
+        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
 }
 
 fn tmpdir(label: &str) -> PathBuf {

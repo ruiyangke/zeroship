@@ -57,8 +57,7 @@ pub async fn drain_pg() {
 }
 
 pub fn require_control_db() -> String {
-    std::env::var("CONTROL_TEST_DB")
-        .ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

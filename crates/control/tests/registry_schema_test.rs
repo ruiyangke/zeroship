@@ -8,9 +8,8 @@ use zeroship_control::Registry;
 mod common;
 
 fn db_url() -> String {
-    std::env::var("CONTROL_TEST_DB")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
+        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

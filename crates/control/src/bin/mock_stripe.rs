@@ -31,6 +31,12 @@ use std::sync::{Arc, Mutex};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 
+zeroship_core::declare_env_consumer!(
+    MockStripeConsumer,
+    target = "zeroship-mock-stripe",
+    scope = "mock_stripe"
+);
+
 /// The pinned Stripe API version every call must carry (C1). Sourced from the
 /// production constant so the mock's expectation can never drift from the client.
 const PINNED_STRIPE_VERSION: &str = zeroship_control::stripe_client::STRIPE_API_VERSION;
@@ -72,7 +78,7 @@ fn main() -> std::io::Result<()> {
         .collect::<Vec<_>>()
         .windows(2)
         .find_map(|w| (w[0] == "--port").then(|| w[1].clone()))
-        .or_else(|| std::env::var("PORT").ok())
+        .or_else(|| zeroship_core::declared_env!(external, "PORT", MockStripeConsumer))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(9555);
 

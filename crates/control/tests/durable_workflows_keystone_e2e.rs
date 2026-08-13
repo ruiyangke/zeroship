@@ -73,11 +73,14 @@ static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
 static SCHEDULER_PROVISIONED_DB: OnceLock<AsyncMutex<Option<String>>> = OnceLock::new();
 
 fn enabled() -> bool {
-    std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
+    zeroship_core::test_env!("ZEROSHIP_DW_E2E").as_deref() == Some("1")
 }
 
-fn required_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set by e2e harness"))
+/// `value` is the caller's already-read result for `name` (a `test_env!` read
+/// at the call site) - the read stays at each literal call site so it remains
+/// enumerable; this helper only formats the panic.
+fn required_env(name: &str, value: Option<String>) -> String {
+    value.unwrap_or_else(|| panic!("{name} must be set by e2e harness"))
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -188,8 +191,9 @@ async fn provision_scheduler_store_once(db_url: &str, store: &WorkflowSchedulerS
 }
 
 async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id: String) -> Fixture {
-    let (blob_root, cleanup_blob_root) = match std::env::var("ZEROSHIP_DW_E2E_BLOB_ROOT") {
-        Ok(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
+    let (blob_root, cleanup_blob_root) = match zeroship_core::test_env!("ZEROSHIP_DW_E2E_BLOB_ROOT")
+    {
+        Some(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
         _ => (tmpdir("control-blob"), true),
     };
     let deploy_tmp_dir = tmpdir("deploy");
@@ -958,9 +962,8 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
     }
 }
 
-fn bench_env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
+fn bench_env_usize(value: Option<String>, default: usize) -> usize {
+    value
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
@@ -1045,18 +1048,18 @@ fn dw23_workflow_engine_load_bench() {
             return;
         }
 
-        let db_url = required_env("CONTROL_TEST_DB");
-        let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-        let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+        let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+        let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
             .parse()
             .expect("ZEROSHIP_DW_E2E_APP_ID uuid");
-        let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+        let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
         let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
         set_dispatch_paused(&fx, false).await;
 
-        let run_count = bench_env_usize("ZEROSHIP_DW23_BENCH_RUNS", 128);
-        let concurrency = bench_env_usize("ZEROSHIP_DW23_BENCH_CONCURRENCY", 32);
-        let max_secs = bench_env_usize("ZEROSHIP_DW23_BENCH_MAX_SECS", 60);
+        let run_count = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_RUNS"), 128);
+        let concurrency = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_CONCURRENCY"), 32);
+        let max_secs = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_MAX_SECS"), 60);
         let mut run_ids = Vec::with_capacity(run_count);
         for idx in 0..run_count {
             run_ids
@@ -2891,20 +2894,20 @@ async fn durable_workflows_m1_keystone_real_spine() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB");
-    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL");
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
         .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
         .parse()
         .expect("side port");
     let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
     };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
@@ -5014,12 +5017,12 @@ async fn bare_await_body_io_is_rejected() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB");
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
         .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
     // No side-effect server here: the BareAwaitWorkflow body fetch is rejected
@@ -5061,19 +5064,19 @@ async fn scheduler_misfire_lost_register_recovers() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB");
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
         .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
         .parse()
         .expect("side port");
     let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
     };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
@@ -5177,19 +5180,19 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB");
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
         .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
         .parse()
         .expect("side port");
     let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
     };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
@@ -5295,20 +5298,20 @@ async fn compensation_saga_rollback_real_spine() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB");
-    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL");
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
         .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
         .parse()
         .expect("side port");
     let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
     };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;

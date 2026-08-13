@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn origin_scheme_cli_overrides_environment_and_environment_overrides_file() {
         let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
+        let old = zeroship_core::test_env_os!("ZEROSHIP_ORIGIN_SCHEME");
         std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
 
         // The environment reaches the same clap carrier the flag does, and the

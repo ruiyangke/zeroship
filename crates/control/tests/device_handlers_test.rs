@@ -44,7 +44,7 @@ const SUPABASE_SERVICE_ROLE_KEY: &str = "test-service-role-key";
 const SUPABASE_JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
 
 fn db_url() -> String {
-    std::env::var("CONTROL_TEST_DB")
+    zeroship_core::test_env!("CONTROL_TEST_DB")
         .expect("CONTROL_TEST_DB must be set so device_handlers_test runs against Postgres")
 }
 

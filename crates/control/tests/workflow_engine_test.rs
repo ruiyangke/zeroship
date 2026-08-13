@@ -56,7 +56,7 @@ static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
 }
 
 fn tmpdir(label: &str) -> PathBuf {
