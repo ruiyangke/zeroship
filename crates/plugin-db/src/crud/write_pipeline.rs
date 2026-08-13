@@ -635,8 +635,10 @@ mod tests {
     }
 
     impl ScopedEnvVar {
-        fn set(name: &str, value: &str) -> Self {
-            let prior = std::env::var(name).ok();
+        /// `prior` is supplied by the CALLER, already read through a declared
+        /// key. Reading it here from `name: &str` made this an unattributable
+        /// read: the literal lived at the call site and the read lived here.
+        fn set(name: &str, value: &str, prior: Option<String>) -> Self {
             std::env::set_var(name, value);
             Self {
                 name: name.to_string(),
@@ -738,6 +740,7 @@ mod tests {
             let _env = ScopedEnvVar::set(
                 "ZEROSHIP_COLUMN_KEY_WRITE_PIPELINE_UNIFORM",
                 &"1".repeat(64),
+                zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_WRITE_PIPELINE_UNIFORM"),
             );
             let app_id = "app_write_pipeline";
             let collection = "users";

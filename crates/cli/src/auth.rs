@@ -84,7 +84,13 @@ pub fn cmd_login(args: &[String]) -> Result<(), String> {
         CliDeviceFlow::Supabase | CliDeviceFlow::Platform => {
             let control_url = crate::flag_str(args, "--control=")
                 .or_else(|| flag_value(args, "--control"))
-                .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
+                .or_else(|| {
+                    zeroship_core::declared_env!(
+                        cli,
+                        "ZEROSHIP_CONTROL_URL",
+                        crate::ZeroshipCliConsumer
+                    )
+                })
                 .unwrap_or_else(|| DEFAULT_CONTROL_URL.into());
             login_control_device_flow(&control_url, true)
         }
@@ -404,11 +410,25 @@ fn base64_url_decode(value: &str) -> Result<Vec<u8>, String> {
 }
 
 fn credentials_path() -> Result<PathBuf, String> {
-    let base = if let Some(path) = std::env::var_os("ZEROSHIP_CONFIG_HOME") {
+    // `var_os`, not `var`: these are filesystem paths, where a non-Unicode
+    // value is legitimate on Unix and dropping it would silently relocate the
+    // credentials file. `XDG_CONFIG_HOME` and `HOME` are external contracts;
+    // only the zeroship-owned override is class `cli`.
+    let base = if let Some(path) = zeroship_core::declared_env_os!(
+        cli,
+        "ZEROSHIP_CONFIG_HOME",
+        crate::ZeroshipCliConsumer
+    ) {
         PathBuf::from(path)
-    } else if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+    } else if let Some(path) = zeroship_core::declared_env_os!(
+        external,
+        "XDG_CONFIG_HOME",
+        crate::ZeroshipCliConsumer
+    ) {
         PathBuf::from(path)
-    } else if let Some(home) = std::env::var_os("HOME") {
+    } else if let Some(home) =
+        zeroship_core::declared_env_os!(external, "HOME", crate::ZeroshipCliConsumer)
+    {
         PathBuf::from(home).join(".config")
     } else {
         return Err("HOME is not set".into());

@@ -1446,8 +1446,8 @@ mod tests {
     // default timeout.
 
     fn pg_test_url() -> String {
-        std::env::var("PG_TEST_URL")
-            .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
+        zeroship_core::test_env!("PG_TEST_URL")
+            .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
     }
 
     #[test]

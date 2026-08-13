@@ -48,8 +48,8 @@ use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 fn pg_url() -> String {
-    std::env::var("PG_TEST_URL")
-        .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
+    zeroship_core::test_env!("PG_TEST_URL")
+        .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 
 thread_local! {

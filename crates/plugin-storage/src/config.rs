@@ -101,17 +101,30 @@ impl StorageBackendConfig {
 /// the secret access key is absent/empty.
 #[cfg(feature = "s3")]
 pub fn s3_credentials_from_env() -> Result<compio_s3::S3Credentials, StorageConfigError> {
-    let access = std::env::var("AWS_ACCESS_KEY_ID")
-        .ok()
+    // Class `external`: the `AWS_*` trio is Amazon's contract, honoured by
+    // every S3-compatible tool in the deployment, not a zeroship name.
+    let access = zeroship_core::declared_env!(
+        external,
+        "AWS_ACCESS_KEY_ID",
+        crate::PluginStorageConsumer
+    )
         .filter(|v| !v.is_empty())
         .ok_or_else(|| StorageConfigError::Credentials("AWS_ACCESS_KEY_ID is unset".into()))?;
-    let secret = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .ok()
+    let secret = zeroship_core::declared_env!(
+        external,
+        "AWS_SECRET_ACCESS_KEY",
+        crate::PluginStorageConsumer
+    )
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
             StorageConfigError::Credentials("AWS_SECRET_ACCESS_KEY is unset".into())
         })?;
-    let session = std::env::var("AWS_SESSION_TOKEN").ok().filter(|v| !v.is_empty());
+    let session = zeroship_core::declared_env!(
+        external,
+        "AWS_SESSION_TOKEN",
+        crate::PluginStorageConsumer
+    )
+    .filter(|v| !v.is_empty());
     Ok(compio_s3::S3Credentials::new(access, secret, session))
 }
 

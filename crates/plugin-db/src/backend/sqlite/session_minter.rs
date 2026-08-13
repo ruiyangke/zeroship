@@ -102,7 +102,18 @@ impl SqliteSessionMinterConfig {
     /// `DbError::Configuration { code: "not_configured", … }`;
     /// every other env var is optional.
     pub(crate) fn from_env() -> Result<Self, DbError> {
-        let secret_hex = std::env::var(ENV_SECRET).map_err(|_| {
+        // Class `test` for all three: this whole type, `from_env` included, is
+        // `#[cfg(any(test, feature = "test-helpers"))]`, so no shipped path
+        // reads them. The literals are inlined rather than taken from the
+        // `ENV_*` constants above because the source gate lifts key literals
+        // out of the syntax tree; the constants remain the spelling the
+        // diagnostics interpolate.
+        let secret_hex = zeroship_core::declared_env!(
+            test,
+            "ZEROSHIP_SESSION_SECRET",
+            crate::PluginDbConsumer
+        )
+        .ok_or_else(|| {
             DbError::Configuration {
                 code: "not_configured",
                 message: format!(
@@ -120,8 +131,12 @@ impl SqliteSessionMinterConfig {
             hint: None,
         })?;
 
-        let secret_prev = match std::env::var(ENV_SECRET_PREV) {
-            Ok(s) if !s.is_empty() => Some(hex_decode(&s).map_err(|e| {
+        let secret_prev = match zeroship_core::declared_env!(
+            test,
+            "ZEROSHIP_SESSION_SECRET_PREV",
+            crate::PluginDbConsumer
+        ) {
+            Some(s) if !s.is_empty() => Some(hex_decode(&s).map_err(|e| {
                 DbError::Configuration {
                     code: "not_configured",
                     message: format!("{ENV_SECRET_PREV} is not valid hex: {e}"),
@@ -131,8 +146,12 @@ impl SqliteSessionMinterConfig {
             _ => None,
         };
 
-        let nonce_capacity = match std::env::var(ENV_NONCE_CAPACITY) {
-            Ok(s) if !s.is_empty() => s.parse::<usize>().map_err(|e| {
+        let nonce_capacity = match zeroship_core::declared_env!(
+            test,
+            "ZEROSHIP_SESSION_NONCE_CAPACITY",
+            crate::PluginDbConsumer
+        ) {
+            Some(s) if !s.is_empty() => s.parse::<usize>().map_err(|e| {
                 DbError::Configuration {
                     code: "not_configured",
                     message: format!("{ENV_NONCE_CAPACITY} is not a valid usize: {e}"),

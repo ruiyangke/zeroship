@@ -85,8 +85,21 @@ pub struct UsageStreamSettings {
     pub wal_path: Option<String>,
 }
 
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+/// Treat a blank value as absent.
+///
+/// This takes the ALREADY-READ value. It used to be `env_nonempty(key: &str)`
+/// and perform the read itself, which is the exact shape Section 4.5 of
+/// `docs/proposals/2026-08-11-config-name-alignment.md` names: a helper that
+/// accepts a `&str` name is still a read, and no scan of this file could
+/// attribute it to `REDPANDA_BROKERS` or to anything else, because the four
+/// names lived at the CALL sites and the read lived here. Moving the read up
+/// to `from_env` puts a literal next to each `declared_env!`, so the source
+/// gate sees four named, classified reads instead of one anonymous one.
+///
+/// Note this is now a pure predicate on an `Option<String>`, so it also serves
+/// a value that did not come from the environment at all.
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
 }
 
 impl UsageStreamSettings {
@@ -94,11 +107,30 @@ impl UsageStreamSettings {
     /// `USAGE_EVENTS_TOPIC`, `REDPANDA_PRODUCER_GROUP_ID`, `USAGE_OUTBOX_WAL_PATH`).
     #[must_use]
     pub fn from_env() -> Self {
+        // All four are class `external`: the broker address, the topic and the
+        // consumer-group id are the surrounding deployment's Kafka-family
+        // contract, and none of them is a zeroship-canonical name.
         Self {
-            brokers: env_nonempty("REDPANDA_BROKERS"),
-            topic: env_nonempty("USAGE_EVENTS_TOPIC"),
-            group_id: env_nonempty("REDPANDA_PRODUCER_GROUP_ID"),
-            wal_path: env_nonempty("USAGE_OUTBOX_WAL_PATH"),
+            brokers: nonempty(zeroship_core::declared_env!(
+                external,
+                "REDPANDA_BROKERS",
+                crate::MeteringConsumer
+            )),
+            topic: nonempty(zeroship_core::declared_env!(
+                external,
+                "USAGE_EVENTS_TOPIC",
+                crate::MeteringConsumer
+            )),
+            group_id: nonempty(zeroship_core::declared_env!(
+                external,
+                "REDPANDA_PRODUCER_GROUP_ID",
+                crate::MeteringConsumer
+            )),
+            wal_path: nonempty(zeroship_core::declared_env!(
+                external,
+                "USAGE_OUTBOX_WAL_PATH",
+                crate::MeteringConsumer
+            )),
         }
     }
 

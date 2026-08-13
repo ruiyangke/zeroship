@@ -21,6 +21,18 @@ mod dev;
 mod parent_death;
 mod secrets;
 
+zeroship_core::declare_env_consumer!(
+    /// The creator CLI's own environment surface.
+    ///
+    /// `zeroship` runs on a creator's machine, not as a service an operator
+    /// configures, so its zeroship-owned names are DECLARED (class `cli`)
+    /// rather than generated: they get a recorded read site and no server
+    /// TOML overlay. Names it reads that somebody else owns - `HOME`,
+    /// `XDG_CONFIG_HOME`, `DATABASE_URL`, `PATH` - stay class `external`.
+    pub(crate) ZeroshipCliConsumer,
+    target = "zeroship",
+    scope = "cli");
+
 fn main() {
     // FIRST, before the port probe and before any state dir is opened: from
     // here on this process holds resources whose owner must not outlive the dev
@@ -73,7 +85,10 @@ fn cmd_serve(args: &[String]) {
     // worker's 128 MB default is sized for multi-tenant isolation, not for
     // single-process dev. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
     let heap_limit_bytes = parse_flag_usize(args, "--heap-limit-mb")
-        .or_else(|| std::env::var("ZEROSHIP_HEAP_LIMIT_MB").ok().and_then(|s| s.parse().ok()))
+        .or_else(|| {
+            zeroship_core::declared_env!(cli, "ZEROSHIP_HEAP_LIMIT_MB", crate::ZeroshipCliConsumer)
+                .and_then(|s| s.parse().ok())
+        })
         .map(|mb| mb * 1024 * 1024)
         .or(Some(512 * 1024 * 1024));
 
@@ -149,7 +164,9 @@ fn cmd_serve(args: &[String]) {
          no flush, no snapshot API; usage is only observable on a deployed app)"
     );
 
-    if let Ok(url) = std::env::var("DATABASE_URL") {
+    if let Some(url) =
+        zeroship_core::declared_env!(external, "DATABASE_URL", crate::ZeroshipCliConsumer)
+    {
         if !url.is_empty() {
             plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
                 url,
@@ -165,8 +182,8 @@ fn cmd_serve(args: &[String]) {
     // bare path or `file://…` → LocalFs (default `<cwd>/.zeroship/storage`);
     // `s3://…` → the S3 backend (creds from the AWS env vars). The
     // vite-plugin's scaffolded .gitignore already excludes `.zeroship/`.
-    let storage_url = std::env::var("ZEROSHIP_STORAGE_URL")
-        .ok()
+    let storage_url =
+        zeroship_core::declared_env!(cli, "ZEROSHIP_STORAGE_URL", crate::ZeroshipCliConsumer)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "file://.zeroship/storage".to_string());
     // `file://` is config ergonomics for a local path; strip the scheme so
@@ -209,8 +226,12 @@ fn cmd_serve(args: &[String]) {
     //                            store; self-host / dev tier). Path is
     //                            ZEROSHIP_KV_PATH if set, else the default
     //                            `./.zeroship/kv.redb`.
-    let kv_plugin = match std::env::var("ZEROSHIP_KV_URL") {
-        Ok(url) if !url.is_empty() => {
+    let kv_plugin = match zeroship_core::declared_env!(
+        cli,
+        "ZEROSHIP_KV_URL",
+        crate::ZeroshipCliConsumer
+    ) {
+        Some(url) if !url.is_empty() => {
             eprintln!("[zeroship] kv plugin registered (redis)");
             zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
                 Arc::new(zeroship_plugin_kv::Redis::new(url)),
@@ -218,7 +239,11 @@ fn cmd_serve(args: &[String]) {
             )
         }
         _ => {
-            let kv_path: PathBuf = std::env::var_os("ZEROSHIP_KV_PATH")
+            let kv_path: PathBuf = zeroship_core::declared_env_os!(
+                cli,
+                "ZEROSHIP_KV_PATH",
+                crate::ZeroshipCliConsumer
+            )
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb"));
             // Create the parent dir so a default `./.zeroship/kv.redb`
@@ -252,9 +277,19 @@ fn cmd_serve(args: &[String]) {
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
     // in the spawned child env. Without this, `process.env` in V8 is empty.
-    let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+    // Class `creator`, not `cli`: the names in this snapshot belong to the
+    // app being served, not to the platform, so there is nothing here for the
+    // platform to enumerate. This is the ONE legitimate whole-environment read.
+    let env_vars: std::collections::HashMap<String, String> =
+        zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
+            .into_iter()
+            .collect();
 
-    let workflow_db_path: PathBuf = std::env::var_os("ZEROSHIP_WORKFLOW_SQLITE_PATH")
+    let workflow_db_path: PathBuf = zeroship_core::declared_env_os!(
+        cli,
+        "ZEROSHIP_WORKFLOW_SQLITE_PATH",
+        crate::ZeroshipCliConsumer
+    )
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".zeroship/workflows.sqlite"));
     if let Some(parent) = workflow_db_path.parent() {
@@ -324,7 +359,9 @@ fn cmd_deploy(args: &[String]) {
     }
     let app = flag_str(args, "--app=").expect("--app=<name> is required");
     let control_url = flag_str(args, "--control=")
-        .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
+        .or_else(|| {
+            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
+        })
         .unwrap_or_else(|| "http://localhost:9090".into());
     let token = resolve_bearer_token(args).unwrap_or_else(|e| {
         eprintln!("zeroship deploy: {e}");
@@ -840,7 +877,7 @@ const MISSING_TOKEN_HINT: &str =
 pub(crate) fn resolve_bearer_token(args: &[String]) -> Result<String, String> {
     resolve_bearer_token_from(
         args,
-        || std::env::var("ZEROSHIP_TOKEN").ok(),
+        || zeroship_core::declared_env!(cli, "ZEROSHIP_TOKEN", crate::ZeroshipCliConsumer),
         crate::auth::load_credentials,
     )
 }

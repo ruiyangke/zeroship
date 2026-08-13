@@ -6,6 +6,10 @@ description = "Test-only helpers shared across the workspace. Not published; con
 publish = false
 
 [dependencies]
+# For the declared-env accessors. Safe in both directions: zeroship-core does
+# NOT depend on this crate, so there is no cycle. (`crates/bundle` is the one
+# crate that must not gain this dependency; it is unrelated to this manifest.)
+zeroship-core = { workspace = true }
 
 [lints]
 workspace = true

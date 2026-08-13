@@ -42,12 +42,33 @@ pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 /// failure, which is the same disease one stage later. The default stays a
 /// visible announcement; only an environment that claims to have provisioned
 /// the backend asks to be held to it.
+///
+/// This constant is the spelling the panic message interpolates. The READ
+/// below inlines the literal instead of using it, because the source gate
+/// lifts key literals out of the syntax tree and cannot see a name behind a
+/// `&str` constant. Keep the two in step.
 pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
+
+zeroship_core::declare_env_consumer!(
+    /// This crate's own environment reads.
+    ///
+    /// A LIBRARY consumer, so `target` is the cargo package: it is linked into
+    /// many test binaries and shipped in none.
+    pub TestSupportConsumer,
+    target = "zeroship-test-support",
+    scope = "test_support");
 
 /// `true` when the environment declares every live backend should be reachable.
 pub fn require_live_backends() -> bool {
+    // Class `test`: meaningless in a shipped image, and this crate is a
+    // dev-dependency that never links into one.
     matches!(
-        std::env::var(REQUIRE_LIVE_BACKENDS_ENV).ok().as_deref(),
+        zeroship_core::declared_env!(
+            test,
+            "ZEROSHIP_REQUIRE_LIVE_BACKENDS",
+            crate::TestSupportConsumer
+        )
+        .as_deref(),
         Some("1")
     )
 }

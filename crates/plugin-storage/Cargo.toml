@@ -5,6 +5,9 @@ edition = "2021"
 description = "Storage plugin — zeroship.storage.* native primitives (local FS + S3 later)"
 
 [dependencies]
+# Promoted from [dev-dependencies]: the declared-env accessors are used by the
+# production resolvers in `limits.rs` and `config.rs`, not only by tests.
+zeroship-core = { workspace = true }
 zeroship-runtime = { workspace = true }
 # Metering infrastructure: put/get emit raw usage metrics (storage_ops,
 # storage_bytes, storage_egress_bytes) in their success arms via a
@@ -32,8 +35,6 @@ s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
-# The metering assertions in the e2e suites read `UsageEvent` off a real Meter.
-zeroship-core = { workspace = true }
 # Backend-parity integration test drives the trait directly on a compio
 # runtime; the S3 leg (Docker-gated) needs the client to build a MinIO config.
 compio = { workspace = true }

@@ -44,6 +44,16 @@ pub mod config;
 pub mod limits;
 pub(crate) mod live_streams;
 
+zeroship_core::declare_env_consumer!(
+    /// The storage plugin's own environment reads.
+    ///
+    /// A LIBRARY consumer, so `target` is the cargo package: this crate is
+    /// linked into `zeroship-worker` AND into the CLI's `zeroship serve`
+    /// vector, and naming one binary would be a claim the other falsifies.
+    pub PluginStorageConsumer,
+    target = "zeroship-plugin-storage",
+    scope = "plugin_storage");
+
 pub use backend::{Backend, LocalFs};
 #[cfg(feature = "s3")]
 pub use backend::S3;

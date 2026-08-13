@@ -41,6 +41,7 @@ use std::collections::HashMap;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
+use zeroship_core::config::DeclaredEnvFamily;
 
 use super::aead::AeadKey;
 use crate::error::DbError;
@@ -180,13 +181,34 @@ impl KeyStore {
 /// Returns a typed `Configuration { code: "column_key_not_configured" }`
 /// if the env var is missing or malformed — operators see the hint
 /// (`openssl rand -hex 32`) in the SDK error surface.
+///
+/// The name is keyed by DATA: `key_id` is whatever the creator wrote in their
+/// schema, so the member set is open and no list of literals describes it. That
+/// is what [`zeroship_core::config::DeclaredEnvFamily`] is for - the PREFIX is
+/// declared and recorded, the suffix stays data. Class `platform`: the prefix
+/// is zeroship-owned and read on the worker path, and it has no generated
+/// declaration yet.
 fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
-    let env_name = format!("ZEROSHIP_COLUMN_KEY_{}", key_id.to_uppercase());
-    let hex = Zeroizing::new(std::env::var(&env_name).map_err(|_| DbError::Configuration {
-        code: "column_key_not_configured",
-        message: format!("Column key '{key_id}' not configured (set {env_name})"),
-        hint: Some("Generate via: openssl rand -hex 32".to_string()),
-    })?);
+    const COLUMN_KEY_FAMILY: DeclaredEnvFamily<String, crate::PluginDbConsumer> =
+        DeclaredEnvFamily::platform("ZEROSHIP_COLUMN_KEY_");
+    let suffix = key_id.to_uppercase();
+    // Derived from the family so the diagnostics cannot drift from the name
+    // that was actually read.
+    let env_name = format!("{}{suffix}", COLUMN_KEY_FAMILY.prefix());
+    let hex = Zeroizing::new(
+        zeroship_core::read_declared_env_family!(
+            COLUMN_KEY_FAMILY,
+            &suffix,
+            crate::PluginDbConsumer
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(|| DbError::Configuration {
+            code: "column_key_not_configured",
+            message: format!("Column key '{key_id}' not configured (set {env_name})"),
+            hint: Some("Generate via: openssl rand -hex 32".to_string()),
+        })?,
+    );
     let bytes = Zeroizing::new(hex_decode(&hex).map_err(|e| DbError::Configuration {
         code: "column_key_not_configured",
         message: format!("{env_name}: hex decode failed: {e}"),
