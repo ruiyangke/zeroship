@@ -3447,6 +3447,10 @@ function recordDropView(name, args) {
     materialized: args.materialized
   });
 }
+var TRIGGER_RAISE_KEYS = ["level", "message", "errcode"];
+var TRIGGER_INSERT_KEYS = ["table", "rows", "schema"];
+var TRIGGER_UPDATE_KEYS = ["table", "set", "where", "schema"];
+var TRIGGER_DELETE_KEYS = ["table", "where", "limit", "schema"];
 var TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"];
 function triggerBodyBuilder() {
   return {
@@ -3454,6 +3458,7 @@ function triggerBodyBuilder() {
       if (!args || typeof args !== "object") {
         throw structuredError("OP_INVALID", "b.raise({ level, message, errcode? }) needs an object");
       }
+      rejectUnknownKeys(args, TRIGGER_RAISE_KEYS, "b.raise(...)");
       requireString(args.level, "b.raise({ level })");
       if (!TRIGGER_RAISE_LEVELS.includes(args.level)) {
         throw structuredError(
@@ -3475,6 +3480,7 @@ function triggerBodyBuilder() {
       if (!args || typeof args !== "object") {
         throw structuredError("OP_INVALID", "b.insert({ table, rows, schema? }) needs an object");
       }
+      rejectUnknownKeys(args, TRIGGER_INSERT_KEYS, "b.insert(...)");
       requireString(args.table, "b.insert({ table })");
       const normalized = normalizeInsertRows(args.rows, "b.insert({ rows })");
       return compact({
@@ -3489,6 +3495,7 @@ function triggerBodyBuilder() {
       if (!args || typeof args !== "object") {
         throw structuredError("OP_INVALID", "b.update({ table, set, where?, schema? }) needs an object");
       }
+      rejectUnknownKeys(args, TRIGGER_UPDATE_KEYS, "b.update(...)");
       requireString(args.table, "b.update({ table })");
       return compact({
         stmt: "update",
@@ -3502,6 +3509,7 @@ function triggerBodyBuilder() {
       if (!args || typeof args !== "object") {
         throw structuredError("OP_INVALID", "b.delete({ table, where, limit?, schema? }) needs an object");
       }
+      rejectUnknownKeys(args, TRIGGER_DELETE_KEYS, "b.delete(...)");
       requireString(args.table, "b.delete({ table })");
       if (args.where === void 0 || args.where === null) {
         throw structuredError("OP_INVALID", "b.delete({ where }): where is mandatory (no unfiltered delete)");
