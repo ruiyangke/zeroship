@@ -30,16 +30,16 @@ var.
 | Env var | Default | Required? | Notes |
 |---|---|---|---|
 | `ZEROSHIP_AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Keep loopback unless a reverse proxy or orchestrator needs a pod/network bind. |
-| `AUTH_DB_URL` | unset | yes | DSN for the `zeroship_auth` role against the migrated platform database. |
+| `ZEROSHIP_AUTH_DATABASE_URL` | unset | yes | DSN for the `zeroship_auth` role against the migrated platform database. |
 | `ZEROSHIP_AUTH_PUBLIC_URL` | `http://localhost:9092` | yes in prod | Public auth origin. The issuer is `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`. |
-| `AUTH_SIGNING_KEY_FILE` | unset | yes in prod | Ed25519 private key, PEM/PKCS#8 or DER. Public JWK metadata is published to Postgres at boot. |
-| `AUTH_PAIRWISE_SALT_FILE` | unset | yes in prod | Permanent pairwise-subject salt. Do not rotate without a migration. |
-| `AUTH_BROKER_SECRET_FILE` | unset | yes in prod | Master secret used to derive per-client broker secrets. |
-| `AUTH_BROKER_SECRET_PREVIOUS_FILE` | unset | rotation only | Previous broker secret during rolling rotation. |
-| `REFRESH_HASH_KEY_FILE` | unset | yes in prod | HMAC keyring for refresh-token verifiers. |
-| `REFRESH_IDEM_KEY_FILE` | unset | yes in prod | AEAD key for refresh idempotency cache rows. |
-| `AUTH_STASH_SIGNING_KEY` | unset | yes | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
-| `AUTH_TOTP_ENC_KEY` | unset | yes | TOTP secret encryption key. |
+| `ZEROSHIP_AUTH_SIGNING_KEY_FILE` | unset | yes in prod | Ed25519 private key, PEM/PKCS#8 or DER. Public JWK metadata is published to Postgres at boot. |
+| `ZEROSHIP_AUTH_PAIRWISE_SALT_FILE` | unset | yes in prod | Permanent pairwise-subject salt. Do not rotate without a migration. |
+| `ZEROSHIP_AUTH_BROKER_SECRET_FILE` | unset | yes in prod | Master secret used to derive per-client broker secrets. |
+| `ZEROSHIP_AUTH_BROKER_SECRET_PREVIOUS_FILE` | unset | rotation only | Previous broker secret during rolling rotation. |
+| `ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE` | unset | yes in prod | HMAC keyring for refresh-token verifiers. |
+| `ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE` | unset | yes in prod | AEAD key for refresh idempotency cache rows. |
+| `ZEROSHIP_AUTH_STASH_SIGNING_KEY` | unset | yes | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
+| `ZEROSHIP_AUTH_TOTP_ENC_KEY` | unset | yes | TOTP secret encryption key. |
 | `ZEROSHIP_AUTH_REFRESH_POOL_SIZE` | `4` | no | Dedicated refresh-family DB session pool size per process. |
 | `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path for non-secret auth config and secret references. |
 
@@ -53,11 +53,11 @@ var.
 | `ZEROSHIP_AUTH_SMTP_HOST` | unset | when SMTP | SMTP relay host. |
 | `ZEROSHIP_AUTH_SMTP_PORT` | `587` | no | 587 STARTTLS or 465 implicit TLS. |
 | `ZEROSHIP_AUTH_SMTP_USERNAME` | unset | optional | SMTP username. |
-| `AUTH_SMTP_PASSWORD` | unset | paired | SMTP password. |
+| `ZEROSHIP_AUTH_SMTP_PASSWORD` | unset | paired | SMTP password. |
 | `ZEROSHIP_AUTH_SMTP_TLS` | `starttls` | no | `starttls`, `implicit`, or dev/test `plaintext`. |
-| `AUTH_RESEND_API_KEY` | unset | when Resend | Resend API key. |
+| `ZEROSHIP_AUTH_RESEND_API_KEY` | unset | when Resend | Resend API key. |
 | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` | unset | when Postmark | Basic-auth user for `/webhooks/postmark`. |
-| `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Basic-auth password. |
+| `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Basic-auth password. |
 
 The SES-SNS webhook verifies AWS-published SNS signatures and has no shared
 secret variable.
@@ -69,10 +69,10 @@ Routes are registered only when provider client IDs are present.
 | Env var | Required? | Notes |
 |---|---|---|
 | `ZEROSHIP_AUTH_GOOGLE_CLIENT_ID` | optional | Enables `/oauth/google/*`. |
-| `AUTH_GOOGLE_CLIENT_SECRET` | with Google ID | Google client secret. |
+| `ZEROSHIP_AUTH_GOOGLE_CLIENT_SECRET` | with Google ID | Google client secret. |
 | `ZEROSHIP_AUTH_GOOGLE_REDIRECT_URI` | with Google ID | Defaults to `https://auth.zeroship.ai/oauth/google/callback`. |
 | `ZEROSHIP_AUTH_GITHUB_CLIENT_ID` | optional | Enables `/oauth/github/*`. |
-| `AUTH_GITHUB_CLIENT_SECRET` | with GitHub ID | GitHub client secret. |
+| `ZEROSHIP_AUTH_GITHUB_CLIENT_SECRET` | with GitHub ID | GitHub client secret. |
 | `ZEROSHIP_AUTH_GITHUB_REDIRECT_URI` | with GitHub ID | Defaults to `https://auth.zeroship.ai/oauth/github/callback`. |
 
 Provider URL override variables exist for e2e tests with mock providers.
@@ -105,9 +105,10 @@ The command creates exactly these seven files, with a mode of 0600 on Unix (and
 
 It also adds eight 32-byte random hex values to the env overlay:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
-`GATEWAY_OIDC_SECRET` `STASH_SIGNING_KEY` `PAIRWISE_SALT`
-`AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
+`ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
+`ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
 Generation is idempotent. A rerun validates and keeps every existing value,
 creates only missing entries, and refuses to replace invalid or mismatched
@@ -125,22 +126,23 @@ openssl genpkey -algorithm ed25519 -out "$S/control-signing.pem"
 openssl rand -base64 48 > "$S/broker-secret"
 printf '1:%s\n' "$(openssl rand -hex 48)" > "$S/refresh-hash-key"
 openssl rand -base64 48 > "$S/refresh-idem-key"
-PAIRWISE_SALT="$(openssl rand -hex 32)"
-printf '%s' "$PAIRWISE_SALT" > "$S/pairwise-salt"
+ZEROSHIP_PAIRWISE_SALT="$(openssl rand -hex 32)"
+printf '%s' "$ZEROSHIP_PAIRWISE_SALT" > "$S/pairwise-salt"
 chmod 0600 "$S"/*
 ```
 
 `refresh-hash-key` is a keyring, not an unadorned random string. Each nonempty
 line is `version:hex-or-base64url-key`; the recipe starts version 1 with 48
 random bytes. The `pairwise-salt` file is different: its bytes must exactly
-equal the `PAIRWISE_SALT` env value used by control and gateway. `printf '%s'`
-is load-bearing because a trailing newline would change auth's derived `pws_`.
+equal the `ZEROSHIP_PAIRWISE_SALT` env value used by control and gateway.
+`printf '%s'` is load-bearing because a trailing newline would change auth's
+derived `pws_`.
 
 `broker-secret` is one physical file read without normalization by both auth and
-gateway. Point `AUTH_BROKER_SECRET_FILE` and `GATEWAY_BROKER_SECRET_FILE` at that
+gateway. Point `ZEROSHIP_AUTH_BROKER_SECRET_FILE` and `ZEROSHIP_GATEWAY_BROKER_SECRET_FILE` at that
 same file rather than generating one per service.
 
-`AUTH_STASH_SIGNING_KEY` and `AUTH_TOTP_ENC_KEY` may also come from files through
+`ZEROSHIP_AUTH_STASH_SIGNING_KEY` and `ZEROSHIP_AUTH_TOTP_ENC_KEY` may also come from files through
 your process manager's secret injection, but the binary accepts them as env/CLI
 values today. Use at least 32 random bytes for each; the TOTP value must be hex
 or base64url encoded.
@@ -161,21 +163,21 @@ or base64url encoded.
 2. **Verify the auth role can connect**:
 
    ```bash
-   psql "$AUTH_DB_URL" -c 'select 1'
+   psql "$ZEROSHIP_AUTH_DATABASE_URL" -c 'select 1'
    ```
 
 3. **Start `zeroship-auth`** behind your reverse proxy:
 
    ```bash
-   AUTH_DB_URL=postgres://zeroship_auth:...@db:5432/zeroship \
+   ZEROSHIP_AUTH_DATABASE_URL=postgres://zeroship_auth:...@db:5432/zeroship \
    ZEROSHIP_AUTH_PUBLIC_URL=https://auth.zeroship.ai \
-   AUTH_SIGNING_KEY_FILE=/run/secrets/auth-signing.pem \
-   AUTH_PAIRWISE_SALT_FILE=/run/secrets/pairwise-salt \
-   AUTH_BROKER_SECRET_FILE=/run/secrets/broker-secret \
-   REFRESH_HASH_KEY_FILE=/run/secrets/refresh-hash-key \
-   REFRESH_IDEM_KEY_FILE=/run/secrets/refresh-idem-key \
-   AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \
-   AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
+   ZEROSHIP_AUTH_SIGNING_KEY_FILE=/run/secrets/auth-signing.pem \
+   ZEROSHIP_AUTH_PAIRWISE_SALT_FILE=/run/secrets/pairwise-salt \
+   ZEROSHIP_AUTH_BROKER_SECRET_FILE=/run/secrets/broker-secret \
+   ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE=/run/secrets/refresh-hash-key \
+   ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE=/run/secrets/refresh-idem-key \
+   ZEROSHIP_AUTH_STASH_SIGNING_KEY="$ZEROSHIP_AUTH_STASH_SIGNING_KEY" \
+   ZEROSHIP_AUTH_TOTP_ENC_KEY="$ZEROSHIP_AUTH_TOTP_ENC_KEY" \
    ZEROSHIP_AUTH_MAILER=smtp ZEROSHIP_AUTH_SMTP_HOST=smtp.example.com \
    zeroship-auth --addr 0.0.0.0:9092
    ```
@@ -222,12 +224,12 @@ Persisted audit events live in `zeroship.audit_events`.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `/login` returns 500 | DB unavailable or auth role missing grants | Check `AUTH_DB_URL`, migrations, and database health. |
+| `/login` returns 500 | DB unavailable or auth role missing grants | Check `ZEROSHIP_AUTH_DATABASE_URL`, migrations, and database health. |
 | `/oauth2/token` returns `invalid_client` | Client row missing or broker secret mismatch | Check `zeroship.oauth_clients`, app client provisioning, and broker secret rollout. |
 | `/oauth2/token` returns `invalid_grant` | Code expired/consumed, PKCE mismatch, consent revoked, or refresh family revoked | Retry the auth flow; inspect audit logs for revocation or reuse detection. |
-| JWKS is empty | Signing key failed to load or publish | Check `AUTH_SIGNING_KEY_FILE` permissions and boot logs. |
+| JWKS is empty | Signing key failed to load or publish | Check `ZEROSHIP_AUTH_SIGNING_KEY_FILE` permissions and boot logs. |
 | New users cannot sign up | Mailer still set to `stdout` or provider credentials invalid | Set `ZEROSHIP_AUTH_MAILER=smtp` or `resend`; verify provider logs. |
-| `/webhooks/postmark` returns 401 | Basic-auth mismatch | Verify `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` and `AUTH_POSTMARK_WEBHOOK_PASSWORD`. |
+| `/webhooks/postmark` returns 401 | Basic-auth mismatch | Verify `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` and `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD`. |
 | Login p99 jumps | Argon2id CPU pressure or slow DB | Check CPU saturation, DB latency, and rate-limit table health. |
 | Magic-link or verification email missing | Recipient suppressed after prior bounce/complaint | Review `zeroship.email_suppressions` and audit before deleting. |
 
@@ -240,13 +242,13 @@ introspection flows fail until auth recovers.
 Back up the platform database and all auth secret material together:
 
 - PostgreSQL dump or snapshot of the `zeroship` schema.
-- `AUTH_SIGNING_KEY_FILE`
-- `AUTH_PAIRWISE_SALT_FILE`
-- `AUTH_BROKER_SECRET_FILE` and any previous broker secret during rollout
-- `REFRESH_HASH_KEY_FILE`
-- `REFRESH_IDEM_KEY_FILE`
-- `AUTH_STASH_SIGNING_KEY`
-- `AUTH_TOTP_ENC_KEY`
+- `ZEROSHIP_AUTH_SIGNING_KEY_FILE`
+- `ZEROSHIP_AUTH_PAIRWISE_SALT_FILE`
+- `ZEROSHIP_AUTH_BROKER_SECRET_FILE` and any previous broker secret during rollout
+- `ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE`
+- `ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE`
+- `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
+- `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
 Restore order:
 
@@ -276,16 +278,16 @@ Rough sizing guidance:
 
 ### Rotate Broker Secret
 
-1. Write the new secret to `AUTH_BROKER_SECRET_FILE`.
-2. Move the old secret to `AUTH_BROKER_SECRET_PREVIOUS_FILE`.
+1. Write the new secret to `ZEROSHIP_AUTH_BROKER_SECRET_FILE`.
+2. Move the old secret to `ZEROSHIP_AUTH_BROKER_SECRET_PREVIOUS_FILE`.
 3. Roll auth replicas.
 4. Roll gateway/control components that need to present derived broker secrets.
-5. Remove `AUTH_BROKER_SECRET_PREVIOUS_FILE` after every dependent has rolled.
+5. Remove `ZEROSHIP_AUTH_BROKER_SECRET_PREVIOUS_FILE` after every dependent has rolled.
 
 ### Rotate OP Signing Key
 
 The current implementation loads one active Ed25519 private key from
-`AUTH_SIGNING_KEY_FILE` and publishes its public JWK at boot.
+`ZEROSHIP_AUTH_SIGNING_KEY_FILE` and publishes its public JWK at boot.
 
 1. Generate the new key.
 2. Roll auth with the new key.

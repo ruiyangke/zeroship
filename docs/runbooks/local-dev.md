@@ -71,32 +71,34 @@ set -a
 set +a
 ```
 
+The `set -a` step above already exported every generated overlay value under
+its canonical `ZEROSHIP_*` name, so each binary picks its secrets straight out
+of the process environment. Each terminal below only adds the settings that
+are NOT in the generated overlay (database DSNs, key-material file paths, and
+other operational flags).
+
 Terminal 1:
 
 ```bash
-CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
-MASTER_KEY="$ZEROSHIP_MASTER_KEY" \
-WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
-PAIRWISE_SALT="$PAIRWISE_SALT" \
+ZEROSHIP_CONTROL_DATABASE_URL=postgres://localhost:5432/zeroship \
 ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ./target/release/zeroship-control \
   --port 9090 \
-  --db postgres://localhost:5432/zeroship \
   --blob-store ./bundles \
   --signing-key-file deploy/compose/secrets/control-signing.pem
 ```
 
-`STRIPE_WEBHOOK_SECRET` is not in that list and `dev init` does not generate it:
-only Stripe issues a value that verifies. Control starts without it, warns, and
-rejects every `/internal/webhooks/stripe` delivery with 500. To work on webhooks
-locally, prefix the command with the secret `stripe listen --print-secret`
-prints, and point the listener at this control instance.
+`ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is not in the generated overlay and
+`dev init` does not generate it: only Stripe issues a value that verifies.
+Control starts without it, warns, and rejects every
+`/internal/webhooks/stripe` delivery with 500. To work on webhooks locally,
+set it to the secret `stripe listen --print-secret` prints, and point the
+listener at this control instance.
 
 Terminal 2:
 
 ```bash
-CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
-WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
+ZEROSHIP_WORKER_DATABASE_URL=postgres://localhost:5432/zeroship \
 ./target/release/zeroship-worker \
   --port 8080 \
   --threads 4 \
@@ -107,11 +109,7 @@ WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
 Terminal 3:
 
 ```bash
-CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
-WORKER_KEY="$ZEROSHIP_WORKER_KEY" \
-GATEWAY_OIDC_SECRET="$GATEWAY_OIDC_SECRET" \
-STASH_SIGNING_KEY="$STASH_SIGNING_KEY" \
-PAIRWISE_SALT="$PAIRWISE_SALT" \
+ZEROSHIP_GATEWAY_DATABASE_URL=postgres://localhost:5432/zeroship \
 ./target/release/zeroship-gate \
   --port 8000 \
   --control-url http://localhost:9090 \
@@ -120,22 +118,19 @@ PAIRWISE_SALT="$PAIRWISE_SALT" \
   --auth-ui-url http://localhost:9092 \
   --public-url http://localhost:8000 \
   --signing-key-file deploy/compose/secrets/gateway-signing.pem \
-  --gateway-broker-secret-file deploy/compose/secrets/broker-secret
+  --broker-secret-file deploy/compose/secrets/broker-secret
 ```
 
 Terminal 4:
 
 ```bash
-CONTROL_KEY="$ZEROSHIP_CONTROL_KEY" \
-AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \
-AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
+ZEROSHIP_AUTH_DATABASE_URL=postgres://localhost:5432/zeroship \
 ./target/release/zeroship-auth \
   --addr 127.0.0.1:9092 \
-  --db-url postgres://localhost:5432/zeroship \
   --public-url http://localhost:9092 \
-  --auth-signing-key-file deploy/compose/secrets/auth-signing.pem \
-  --auth-pairwise-salt-file deploy/compose/secrets/pairwise-salt \
-  --auth-broker-secret-file deploy/compose/secrets/broker-secret \
+  --signing-key-file deploy/compose/secrets/auth-signing.pem \
+  --pairwise-salt-file deploy/compose/secrets/pairwise-salt \
+  --broker-secret-file deploy/compose/secrets/broker-secret \
   --refresh-hash-key-file deploy/compose/secrets/refresh-hash-key \
   --refresh-idem-key-file deploy/compose/secrets/refresh-idem-key \
   --mailer stdout \
@@ -150,10 +145,12 @@ Notes:
   security-relaxation switch.
 - Gateway and auth intentionally read the same physical `broker-secret` file.
   Auth reads `pairwise-salt` from a file while control and gateway read the
-  byte-identical `PAIRWISE_SALT` value from the overlay. The file has no trailing
-  newline; changing either value would change every derived per-app `pws_`.
+  byte-identical `ZEROSHIP_PAIRWISE_SALT` value from the overlay. The file has
+  no trailing newline; changing either value would change every derived
+  per-app `pws_`.
 - `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
-  `--bind 0.0.0.0` together with `--worker-key` if another host must reach it.
+  `--bind 0.0.0.0` together with `ZEROSHIP_WORKER_KEY` if another host must
+  reach it.
 - `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
   overlay; add `--check-config` to the normal command for a read-only dry run
   that validates CLI/env/file config and the startup guards, then exits before
@@ -182,7 +179,7 @@ Create an app:
 
 ```bash
 curl -X POST http://localhost:9090/api/apps \
-  -H "Authorization: Bearer $ZEROSHIP_MASTER_KEY" \
+  -H "Authorization: Bearer $ZEROSHIP_CONTROL_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name":"db-todos","plan_id":"free"}'
 ```
@@ -206,9 +203,10 @@ Deploy it:
 ```
 
 The CLI resolves the bearer token from `--token=<PAT>`, the `ZEROSHIP_TOKEN`
-env var, or credentials saved by `zeroship login` — in that order. (The
-`curl` example above uses the generated `ZEROSHIP_MASTER_KEY` because control's
-master key is itself a bearer principal; the deploy CLI does not read it.)
+env var, or credentials saved by `zeroship login`, in that order. (The
+`curl` example above uses the generated `ZEROSHIP_CONTROL_MASTER_KEY` because
+control's master key is itself a bearer principal; the deploy CLI does not
+read it.)
 
 Then open `http://localhost:8000/apps/db-todos/`.
 

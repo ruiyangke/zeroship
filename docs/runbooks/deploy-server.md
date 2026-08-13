@@ -147,18 +147,21 @@ existing valid material is kept byte-for-byte, missing entries are created, and
 invalid or conflicting material causes an error instead of an implicit rotation.
 
 `broker-secret` is deliberately ONE file read by both gateway
-(`GATEWAY_BROKER_SECRET_FILE`) and auth (`AUTH_BROKER_SECRET_FILE`). Same bytes
-is the requirement, not a coincidence.
+(`ZEROSHIP_GATEWAY_BROKER_SECRET_FILE`) and auth
+(`ZEROSHIP_AUTH_BROKER_SECRET_FILE`). Same bytes is the requirement, not a
+coincidence.
 
-`pairwise-salt` is not independent: auth reads the file while control and
-gateway read `PAIRWISE_SALT` from `.env`, and all three derive the same per-app
+`pairwise-salt` is not independent: auth reads the file (via
+`ZEROSHIP_AUTH_PAIRWISE_SALT_FILE`) while control and gateway read
+`ZEROSHIP_PAIRWISE_SALT` from `.env`, and all three derive the same per-app
 `pws_`. The generator writes exactly the env value to the file with NO trailing
 newline and refuses a byte mismatch on later runs. A per-service generator or a
 plain `echo` would silently break this identity invariant.
 
-Do not export a different `PAIRWISE_SALT` in the shell that launches Compose.
-Host environment values take precedence over the compose `.env` file and can
-therefore override control/gateway without changing the file auth reads.
+Do not export a different `ZEROSHIP_PAIRWISE_SALT` in the shell that launches
+Compose. Host environment values take precedence over the compose `.env` file
+and can therefore override control/gateway without changing the file auth
+reads.
 
 The refresh verifier file is also structured. Its first line has this form:
 
@@ -218,23 +221,25 @@ ZEROSHIP_ORIGIN_SCHEME=https
 
 # Safe to set: these are ${VAR}-indirected in EVERY service that reads them.
 ZEROSHIP_WORKER_KEY=<openssl rand -hex 32>
-GATEWAY_OIDC_SECRET=<openssl rand -hex 32>
-STASH_SIGNING_KEY=<openssl rand -hex 32>
-PAIRWISE_SALT=<openssl rand -hex 32>
+ZEROSHIP_GATEWAY_STASH_SIGNING_KEY=<openssl rand -hex 32>
+ZEROSHIP_AUTH_STASH_SIGNING_KEY=<openssl rand -hex 32>
+ZEROSHIP_PAIRWISE_SALT=<openssl rand -hex 32>
 ```
 
 `zeroship dev init` already added these generated values to the same file:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
-`GATEWAY_OIDC_SECRET` `MIGRATED_POLICY_SEAL_KEY` `STASH_SIGNING_KEY`
-`PAIRWISE_SALT` `AUTH_STASH_SIGNING_KEY` `AUTH_TOTP_ENC_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
+`ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
+`ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
-`STRIPE_WEBHOOK_SECRET` is **not** generated and **not** required. Only Stripe
-can issue a value that verifies, so leave it unset unless this deployment
-accepts Stripe webhooks; then set it to the `whsec_...` your Stripe dashboard
-endpoint (or `stripe listen --print-secret`) prints. While it is unset, control
-warns at boot and rejects every delivery to `/internal/webhooks/stripe` with
-500 - which is the correct answer for a deployment Stripe cannot reach anyway.
+`ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is **not** generated and **not**
+required. Only Stripe can issue a value that verifies, so leave it unset
+unless this deployment accepts Stripe webhooks; then set it to the
+`whsec_...` your Stripe dashboard endpoint (or `stripe listen
+--print-secret`) prints. While it is unset, control warns at boot and
+rejects every delivery to `/internal/webhooks/stripe` with 500 - which is
+the correct answer for a deployment Stripe cannot reach anyway.
 
 Do not replace them with shared examples or per-service values. In particular,
 one `ZEROSHIP_CONTROL_KEY` now supplies control, gateway, worker, migrated, and
