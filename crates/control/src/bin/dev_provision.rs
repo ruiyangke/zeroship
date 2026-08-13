@@ -18,6 +18,16 @@ use zeroship_bundle::{build_blob_store, StoreUrl};
 use zeroship_control::plan_catalog::{free_plan_id, seed_plans};
 use zeroship_control::registry::{Registry, RegistryError};
 
+zeroship_core::declare_env_consumer!(
+    /// This one-shot has no `#[zeroship_config]` declaration, so it declares its
+    /// own marker. The S3 credentials it reads are recorded against THIS target,
+    /// not against `zeroship-control`, because they are different processes with
+    /// different deployment surfaces.
+    DevProvisionConsumer,
+    target = "dev-provision",
+    scope = "dev_provision"
+);
+
 #[derive(Parser, Debug)]
 #[command(name = "dev-provision")]
 struct Cli {
