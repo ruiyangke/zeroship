@@ -218,6 +218,26 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
   }
 });
 
+// IF THIS TEST FAILS WITH `+ 'before'  - 'before\x00after'`, IT IS NOT FLAKY AND
+// IT IS NOT THIS FILE. Check `node --version` first.
+//
+//   Node v22.23.1   node:sqlite stores "before\0after" as "before"   TRUNCATED
+//   Node v24.18.1   stores it exactly                                 EXACT
+//
+// Reproduced with raw `node:sqlite` DatabaseSync on an in-memory database - no
+// engine, no addon, no driver - so it is a Node behaviour difference, not a
+// zero-migrate defect. The assertion below is correct and is catching real data
+// truncation on the platform `flake.nix` pins (`pkgs.nodejs_22`) and
+// CONTRIBUTING documents.
+//
+// Consequence: run this suite OUTSIDE the devShell on a newer Node and it passes,
+// which is how it stayed hidden. A green host suite says nothing about NUL-byte
+// handling unless you know which Node produced it.
+//
+// Do not weaken this assertion to make the suite green. Silencing it converts a
+// loud correct signal into the silent truncation it exists to detect. The open
+// decision - raise the Node pin, bind NUL-bearing strings as BLOB, refuse them
+// fail-closed, or document the limitation - is in `docs/review-log` F558.
 test("SQLite binds literal values and stores a NUL byte exactly", async () => {
   for (const [label, value] of [...PORTABLE, ["NUL byte", NUL_VALUE] as const]) {
     const work = mkdtempSync(join(HERE, "lit-sq-"));
