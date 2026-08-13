@@ -150,7 +150,13 @@ export function BugDetailPage({ id }: { id: string }) {
                 whole job is to stay glanceable. Here they get the main
                 column's width and pair up two-across instead of forming one
                 long ribbon. */}
-            <div className="bug-detail-extras">
+            {/* Same disabling wrapper as the rail, for the same reason: these
+                panels each carry an Add or Upload form that answers 401
+                without a session. A fieldset covers all nine and any tenth,
+                where nine readOnly props would each be a thing to remember.
+                Their CONTENT still renders -- attachments, watchers and
+                linked bugs are readable facts about a public bug. */}
+            <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
               <AttachmentsPanel bugId={id} />
               <CcPanel bugId={id} />
               <DependenciesPanel bugId={id} />
@@ -168,7 +174,7 @@ export function BugDetailPage({ id }: { id: string }) {
                 onChanged={reload}
               />
               <SecurityPanel bugId={id} onChanged={reload} />
-            </div>
+            </fieldset>
           </div>
           <Stack className="bug-detail-side" gap={3}>
             <FieldsPanel

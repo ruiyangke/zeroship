@@ -91,6 +91,19 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
     "and the field controls are disabled rather than merely doomed",
   ).toBeDisabled();
 
+  // The extras panels carry Add and Upload forms of their own; they are
+  // covered by the same wrapper rather than left as the one place a
+  // signed-out visitor can still click something that fails.
+  const liveControls = await visitor.evaluate(
+    () =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          ".bug-detail-extras button, .bug-detail-extras input, .fields-panel button, .fields-panel input",
+        ),
+      ).filter((el) => !el.closest("fieldset[disabled]")).length,
+  );
+  expect(liveControls, "nothing outside a disabled fieldset remains clickable").toBe(0);
+
   // The private comment stays private -- this is the security half, and it
   // must hold regardless of how the controls are presented.
   await expect(visitor.locator("body")).not.toContainText(secret);

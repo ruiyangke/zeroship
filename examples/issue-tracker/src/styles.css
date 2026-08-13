@@ -963,3 +963,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* The rail's fieldset is a disabling wrapper, not a visual group -- it must
    not draw the dashed box the app's other fieldsets do. */
 .rail-fields { border: 0; padding: 0; margin: 0; display: contents; }
+/* The extras wrapper IS the grid, so it must not be display:contents -- that
+   would hand the grid back to the page and break the two-across pairing. */
+fieldset.bug-detail-extras { display: grid; }
