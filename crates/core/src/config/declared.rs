@@ -67,9 +67,12 @@ pub enum EnvClass {
     /// A zeroship-owned tunable that has NOT yet been given a generated
     /// `#[zeroship_config]` declaration.
     ///
-    /// This is the transitional class, and it is the only one that may carry
-    /// the `ZEROSHIP_` prefix without being either dev, test, CLI or creator
-    /// scoped. Every member is a conversion candidate: the setting deserves a
+    /// This is the transitional class. It is the only one that may carry the
+    /// `ZEROSHIP_` prefix without being dev, test, CLI or creator scoped, and it
+    /// is also where a zeroship-owned knob that happens NOT to carry the prefix
+    /// belongs - `CONTROL_DEPLOY_RETENTION_BATCH_SIZE` is ours whatever it is
+    /// spelled, and calling it `external` would be a claim that somebody else
+    /// owns it. Every member is a conversion candidate: the setting deserves a
     /// canonical identity, a flag, a TOML path and a `--check-config` row, and
     /// until it has them an operator cannot discover it and `--check-config`
     /// cannot report it.

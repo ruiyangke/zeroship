@@ -31,14 +31,24 @@ use zeroship_config_contract::raw_env::{scan_sources_by_role, RawEnvViolation};
 /// and `the_blocker_list_cannot_go_stale` fails if an entry stops violating -
 /// so the list can only shrink, and a fixed blocker that nobody deleted is a
 /// test failure rather than a permanent exemption.
-const TRACKED_BLOCKERS: &[(&str, &str)] = &[(
-    "crates/core/src/config/secrets.rs",
-    "SecretRef::Env resolves a variable NAME that arrives at run time inside a \
-     secret reference, so it cannot become a typed key. Step 5 of the config \
-     name-alignment proposal deletes the env-to-env reference arm entirely; \
-     that is the exit, and the proposal states this read is not allowlisted in \
-     the final gate.",
-)];
+const TRACKED_BLOCKERS: &[(&str, &str)] = &[
+    (
+        "crates/core/src/config/secrets.rs",
+        "SecretRef::Env resolves a variable NAME that arrives at run time inside \
+         a secret reference, so it cannot become a typed key. Step 5 of the \
+         config name-alignment proposal deletes the env-to-env reference arm \
+         entirely; that is the exit, and the proposal states this read is not \
+         allowlisted in the final gate.",
+    ),
+    (
+        "crates/control/src/metering/provider/ctx.rs",
+        "StaticSecretResolver::resolve reads a variable NAME taken from an \
+         operator-supplied billing-provider config value spelled `env:NAME`. It \
+         is the same env-to-env indirection as the secrets.rs blocker, in a \
+         second place, and it has the same exit: Step 5 removes the facility \
+         rather than teaching this site a typed key it cannot have.",
+    ),
+];
 
 /// Fixture and vendored trees that exist in order to CONTAIN violations.
 ///
