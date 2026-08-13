@@ -731,10 +731,27 @@ async fn verify_minted_platform_deploy_token(
 
 /// Verify the explicit bearer used for device approval.
 ///
-/// A verified platform OAuth access token or a verified GoTrue access token
-/// with the `authenticated` role may identify the approving principal. The
-/// incoming OAuth scope is not an approval rule: the deploy token is restricted
-/// to the principal's stored grants later in this handler.
+/// WHAT IS CHECKED, for a platform OAuth bearer: the signature, issuer,
+/// algorithm and lifetime (by `AuthProvider::verify_token`), that the token's
+/// `aud` names THIS control plane, and that its family is not revoked. Those
+/// last two are exactly the checks `zeroship_authn`'s `oauth_guard_from_bearer`
+/// runs on the same token type, and this path calls the same revocation
+/// function rather than a second copy of it.
+///
+/// WHAT IS NOT CHECKED: the incoming OAuth scope. That is deliberate - it is
+/// not an approval rule, because the deploy token is restricted to the
+/// principal's stored grants when it is minted. But saying only that was how
+/// the other two came to be missing: the sentence answered the scope question
+/// so convincingly that nobody asked what else the path let through, and the
+/// answer was "an audience it was never issued for, and a revoked family". A
+/// stolen bearer could start a device grant (that endpoint is unauthenticated),
+/// approve it with itself, and poll out a token with a fresh `iat` - so the
+/// deploy token's TTL bounded nothing.
+///
+/// For a GoTrue bearer, `authenticated` is still the whole rule. GoTrue tokens
+/// carry `aud: "authenticated"`, not a zeroship resource audience, and there is
+/// no zeroship-side revocation marker for them; imposing either check here
+/// would refuse every valid GoTrue approval.
 async fn verified_device_approval_bearer(
     state: &AppState,
     req: &web::HttpRequest,
@@ -762,15 +779,41 @@ async fn verified_device_approval_bearer(
             }
         })?;
 
-    let accepted = match &verified.provider_authz {
-        ProviderAuthz::OAuthScope(_) => true,
-        ProviderAuthz::GoTrueRole(role) if role == "authenticated" => true,
-        ProviderAuthz::GoTrueRole(_) => false,
-    };
-    if accepted {
-        Ok(verified)
-    } else {
-        Err(unauthorized())
+    match &verified.provider_authz {
+        ProviderAuthz::OAuthScope(_) => {
+            let audience_ok = verified.aud.as_ref().is_some_and(|audiences| {
+                audiences
+                    .iter()
+                    .any(|audience| audience == &state.expected_oauth_audience)
+            });
+            if !audience_ok {
+                tracing::warn!(
+                    audiences = ?verified.aud,
+                    expected = %state.expected_oauth_audience,
+                    "control: device approve bearer was issued for another audience"
+                );
+                return Err(unauthorized());
+            }
+            state
+                .bearer_verifier()
+                .reject_revoked_platform_token(
+                    verified.client_id.as_deref(),
+                    &verified.provider_subject,
+                    verified.iat,
+                )
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        subject = %verified.provider_subject,
+                        "control: device approve bearer refused by the revocation check"
+                    );
+                    unauthorized()
+                })?;
+            Ok(verified)
+        }
+        ProviderAuthz::GoTrueRole(role) if role == "authenticated" => Ok(verified),
+        ProviderAuthz::GoTrueRole(_) => Err(unauthorized()),
     }
 }
 

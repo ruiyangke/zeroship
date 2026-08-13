@@ -295,7 +295,22 @@ impl BearerVerifier {
         Ok(revoked_after)
     }
 
-    async fn reject_revoked_platform_token(
+    /// Refuse a platform bearer whose token family has been revoked.
+    ///
+    /// Public so that every path accepting a platform OAuth bearer runs THIS
+    /// check rather than a second copy of it. Control's device-approval handler
+    /// is the other caller; it used to accept `ProviderAuthz::OAuthScope`
+    /// unconditionally, which let a revoked bearer approve a fresh device grant
+    /// and mint a token with a new `iat` that outran the marker.
+    ///
+    /// Missing `client_id` or `iat` is a REFUSAL, not a pass: without them
+    /// there is nothing to compare a marker against.
+    ///
+    /// # Errors
+    ///
+    /// A 401 rejection when the family is revoked, when the claims needed to
+    /// decide are absent, or when the marker lookup itself fails (fail closed).
+    pub async fn reject_revoked_platform_token(
         &self,
         client_id: Option<&str>,
         sub: &str,
