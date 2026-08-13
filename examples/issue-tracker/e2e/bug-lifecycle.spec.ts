@@ -61,12 +61,12 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // The component list is populated by a fetch that only fires once a product
   // is chosen, so selecting the product must change what the next select
   // offers. Waiting for the option is the assertion.
-  await chooseOption(page, page, "1. Product", `E2E ${RUN}`);
+  await chooseOption(page, page, "Product", `E2E ${RUN}`);
   // The cascade is still the assertion: chooseOption fails if the component
   // select has no "Parser" option, which is what selecting the product is
   // supposed to produce. It cannot be checked with toBeAttached any more --
   // the options only exist in the DOM while the popup is open.
-  await chooseOption(page, page, "2. Component", "Parser");
+  await chooseOption(page, page, "Component", "Parser");
 
   // Version is required because bugs.versionId is NOT NULL. Selecting it here
   // is not incidental setup: leaving the form's default in place is exactly

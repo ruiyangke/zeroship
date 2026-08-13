@@ -680,3 +680,43 @@ tbody tr:hover { background: var(--surface-2); }
    because the controls differ; that is not the defect. The defect was that
    one had a visible label and the other did not. */
 .report-filters > * { flex: 0 0 auto; }
+
+/* The filing steps, shown before you are in them. */
+.form-steps {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  max-inline-size: 640px;
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+}
+.form-steps > li { display: flex; align-items: center; gap: 0.45rem; }
+.form-steps .step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.4rem;
+  block-size: 1.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.form-steps > li.current { color: var(--ink); font-weight: 600; }
+.form-steps > li.current .step-number { border-color: var(--accent); color: var(--accent); }
+.form-steps > li.done { color: var(--ink-2); }
+.form-steps > li.done .step-number {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Card chrome, matching every other grouped surface in the app. */
+.new-bug-form {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}

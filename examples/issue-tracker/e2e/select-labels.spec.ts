@@ -47,13 +47,13 @@ test("a picker shows its placeholder when empty and a name when chosen", async (
   });
 
   await page.goto("/#/bugs/new");
-  const product = page.getByRole("combobox", { name: "1. Product" });
+  const product = page.getByRole("combobox", { name: "Product" });
 
   await expect(product, "an untouched picker shows its placeholder").toHaveText(
     "Select a product",
   );
 
-  await chooseOption(page, page, "1. Product", name);
+  await chooseOption(page, page, "Product", name);
 
   // The NAME, not the id. Asserting "not empty" would pass on the id, which
   // is the defect this half exists to catch.

@@ -85,6 +85,28 @@ export function NewBugPage() {
       <h1>New bug</h1>
       <AsyncSection state={productsQ.state} loadingLabel="Loading products..." isEmpty={(d) => d.length === 0} emptyTitle="No products to file against.">
         {(products) => (
+          <>
+          {/* The shape of the form, up front.
+              Only step 1 renders until a product is chosen, so the page opened
+              as a single select on an empty screen: you could not tell whether
+              two more fields were coming or ten, and the "1." implied a
+              sequence with nothing to compare it to. */}
+          <ol className="form-steps" aria-label="Filing steps">
+            {[
+              { n: 1, label: "Product", done: Boolean(productId) },
+              { n: 2, label: "Component", done: Boolean(componentId) },
+              { n: 3, label: "Details", done: false },
+            ].map((step, index, all) => {
+              const current = all.findIndex((s2) => !s2.done);
+              const state = step.done ? "done" : index === current ? "current" : "todo";
+              return (
+                <li key={step.n} className={state} aria-current={state === "current" ? "step" : undefined}>
+                  <span className="step-number">{step.n}</span>
+                  {step.label}
+                </li>
+              );
+            })}
+          </ol>
           <form
             className="new-bug-form"
             onSubmit={(e) => {
@@ -93,12 +115,12 @@ export function NewBugPage() {
             }}
           >
             <Field>
-              <Field.Label>1. Product</Field.Label>
+              <Field.Label>Product</Field.Label>
               <Select
                 value={productId}
                 onValueChange={(next) => void pickProduct(next ?? "")}
                 placeholder="Select a product"
-                aria-label="1. Product"
+                aria-label="Product"
                 renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
               >
                 {products.map((p) => (
@@ -113,12 +135,12 @@ export function NewBugPage() {
             {productDetail ? (
               <>
                 <Field>
-                  <Field.Label>2. Component</Field.Label>
+                  <Field.Label>Component</Field.Label>
                   <Select
                     value={componentId}
                     onValueChange={(next) => setComponentId(next ?? "")}
                     placeholder="Select a component"
-                    aria-label="2. Component"
+                    aria-label="Component"
                     renderValue={(id) => productDetail.components.find((c) => c.id === id)?.name ?? id}
                   >
                     {productDetail.components.map((c) => (
@@ -130,7 +152,7 @@ export function NewBugPage() {
                 </Field>
 
                 <fieldset disabled={!componentId}>
-                  <legend>3. Details</legend>
+                  <legend>Details</legend>
                   <Field>
                     <Field.Label>Summary</Field.Label>
                     <Input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={500} required />
@@ -257,6 +279,7 @@ export function NewBugPage() {
               </>
             ) : null}
           </form>
+          </>
         )}
       </AsyncSection>
     </div>
