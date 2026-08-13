@@ -346,7 +346,11 @@ export function BugDetailPage({ id }: { id: string }) {
               <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
               <CcPanel bugId={id} />
               <DependenciesPanel bugId={id} />
-              <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
+              <DuplicatesPanel
+                bugId={id}
+                duplicateOfId={detail.bug.duplicateOfId ?? null}
+                labels={historyLabels}
+              />
               <SeeAlsoPanel bugId={id} />
             </fieldset>
           </Stack>

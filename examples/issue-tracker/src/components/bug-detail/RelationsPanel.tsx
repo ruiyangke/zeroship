@@ -125,7 +125,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       </AsyncSection>
       {state.status !== "error" ? (
         <div className="inline-form">
-          <input aria-label="Bug this depends on" placeholder="bug_... this depends on" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
+          <input aria-label="Bug this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
           <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
           </Button>
@@ -137,7 +137,16 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
   );
 }
 
-export function DuplicatesPanel({ bugId, duplicateOfId }: { bugId: string; duplicateOfId: string | null }) {
+export function DuplicatesPanel({
+  bugId,
+  duplicateOfId,
+  labels = {},
+}: {
+  bugId: string;
+  duplicateOfId: string | null;
+  /** Ids to the names they stand for, shared with the history and timeline. */
+  labels?: Record<string, string>;
+}) {
   const { state, reload } = useAsync(() => listDuplicates({ bugId }), [bugId]);
 
   const cluster = useMemo(() => {
@@ -159,7 +168,7 @@ export function DuplicatesPanel({ bugId, duplicateOfId }: { bugId: string; dupli
       {duplicateOfId ? (
         <p className="state-hint small">
           This bug is marked as a duplicate of{" "}
-          <a href={`#/bugs/${duplicateOfId}`}>{duplicateOfId}</a>.
+          <a href={`#/bugs/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</a>.
         </p>
       ) : null}
       <AsyncSection

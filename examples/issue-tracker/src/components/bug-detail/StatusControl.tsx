@@ -139,11 +139,11 @@ export function StatusControl({
       {showDuplicate ? (
         <div className="inline-form">
           <Field>
-            <Field.Label>Duplicate of (bug id)</Field.Label>
+            <Field.Label>Duplicate of</Field.Label>
             <Input
               value={duplicateOf}
               onChange={(e) => setDuplicateOf(e.target.value)}
-              placeholder="bug_..."
+              placeholder="PARSER-12"
             />
           </Field>
           <Button variant="filled" size="small"

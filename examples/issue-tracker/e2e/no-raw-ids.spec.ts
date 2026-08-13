@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
 import { productKey } from "./keys";
+import { openMorePanels, openRailGroup } from "./more";
 
 /**
  * No page shows a raw typed_id where a name belongs.
@@ -89,6 +90,11 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
   await rpc("deps.add", { bugId: bug.id, dependsOnId: blocker.id });
   const keyword = await rpc("keywords.create", { name: `kw-${RUN}` });
   await rpc("keywords.attach", { bugId: bug.id, keywordId: keyword.id });
+  // And a DUPLICATE, the other half of the same omission. The duplicates
+  // panel states "this bug is a duplicate of X" straight from the column, and
+  // printed the raw id as the link's text -- invisible to this spec for as
+  // long as its bug was a duplicate of nothing.
+  await rpc("bugs.markDuplicate", { id: bug.id, duplicateOfId: blocker.id });
 
   const offenders: string[] = [];
   const check = async (label: string) => {
@@ -109,6 +115,21 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
   await page.goto(`/#/bugs/${bug.id}`);
   await page.waitForTimeout(1600);
   await check("bug detail");
+
+  // OPEN what is collapsed, or this audits the page's resting state only.
+  //
+  // The rail's groups render nothing until asked, so when labels, CC and the
+  // relations moved there, everything inside them left this spec's reach in
+  // the same change. It went green against a duplicates panel printing a raw
+  // id -- the panel was simply not in the DOM. A sweep of rendered text can
+  // only see what is rendered, so it has to do the opening a person does.
+  for (const group of ["Labels", "CC", "Dependencies", "Duplicates", "See also"]) {
+    await openRailGroup(page, group);
+    await check(`rail: ${group}`);
+  }
+  await openMorePanels(page);
+  await page.waitForTimeout(600);
+  await check("folded panels");
   // The history tab renders activity rows whose values are ids for several
   // fields, which is the most likely place for one to surface.
   await page.getByRole("button", { name: /^History/ }).click();

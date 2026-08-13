@@ -1254,9 +1254,12 @@ export const getBug = query(
     // not see is simply absent from the map.
     const referencedBugIds = [
       ...new Set(
-        activityRows
-          .filter((activity) => BUG_REFERENCE_FIELDS.has(activity.fieldName))
-          .flatMap((activity) => [activity.oldValue, activity.newValue])
+        [
+          ...activityRows
+            .filter((activity) => BUG_REFERENCE_FIELDS.has(activity.fieldName))
+            .flatMap((activity) => [activity.oldValue, activity.newValue]),
+          bug.duplicateOfId,
+        ]
           .filter(
             (value): value is string =>
               typeof value === "string" && value.length > 0 && !hidden.has(value),
@@ -1666,12 +1669,11 @@ export const markBugDuplicate = mutation(
   async ({ id, duplicateOfId }: { id: string; duplicateOfId: string }) => {
     const actor = await requireActor();
     const sourceId = requireId(id, "id");
-    const targetId = requireId(duplicateOfId, "duplicateOfId");
-    if (sourceId === targetId) invalid("a bug cannot duplicate itself");
     const [source, target] = await Promise.all([
       getRequired(db.bugs, sourceId, "Bug"),
-      getRequired(db.bugs, targetId, "Duplicate target"),
+      bugByIdOrKey(duplicateOfId),
     ]);
+    if (source.id === target.id) invalid("a bug cannot duplicate itself");
     await assertBugAccessible(source, actor);
     await assertBugAccessible(target, actor);
 
@@ -2201,12 +2203,17 @@ export const addDependency = mutation(
   async ({ bugId, dependsOnId }: { bugId: string; dependsOnId: string }) => {
     const actor = await requireActor();
     const sourceId = requireId(bugId, "bugId");
-    const targetId = requireId(dependsOnId, "dependsOnId");
-    if (sourceId === targetId) invalid("a bug cannot depend on itself");
+    // By UUID or by PARSER-12, for the reason bugs.get already gives: the
+    // identifier the app puts on screen must be one it accepts back. This is
+    // the field where that matters most -- nothing renders a bug's UUID where
+    // a person could copy it, so demanding one here made the control usable
+    // only by someone reading the address bar.
     const [bug, dependency] = await Promise.all([
       getRequired(db.bugs, sourceId, "Bug"),
-      getRequired(db.bugs, targetId, "Dependency"),
+      bugByIdOrKey(dependsOnId),
     ]);
+    if (bug.id === dependency.id) invalid("a bug cannot depend on itself");
+    const targetId = dependency.id;
     await assertBugAccessible(bug, actor);
     // The DEPENDENCY needs the same bug-level check as the bug being edited.
     // Checking only its product let a caller point an edge at a restricted bug
