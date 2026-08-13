@@ -220,7 +220,7 @@ async fn post_consent_accept_native(
                 &lock_conn,
                 &ctx.client.client_id,
                 session.user_id,
-                &cfg.settings.relay_domain.get(),
+                cfg.settings.relay_domain.get(),
             )
             .await
             {

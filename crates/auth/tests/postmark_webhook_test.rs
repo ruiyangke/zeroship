@@ -45,8 +45,7 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         args.push("--postmark-webhook-password".to_string());
         args.push(p.to_string());
     }
-    let mut cfg = AuthConfig::parse_from(args);
-    cfg
+    AuthConfig::parse_from(args)
 }
 
 /// Boot PG + register the `/webhooks/postmark` route. Returns `None` if

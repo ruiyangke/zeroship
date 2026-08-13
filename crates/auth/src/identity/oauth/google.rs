@@ -83,7 +83,7 @@ pub fn start_authorize_url(
     query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", &cfg.settings.google_redirect_uri.get())
+        .append_pair("redirect_uri", cfg.settings.google_redirect_uri.get())
         .append_pair("scope", "openid email profile")
         .append_pair("access_type", "online")
         .append_pair("include_granted_scopes", "true")
@@ -135,7 +135,7 @@ pub async fn complete_callback(
         .append_pair("code", code)
         .append_pair("client_id", client_id)
         .append_pair("client_secret", client_secret)
-        .append_pair("redirect_uri", &cfg.settings.google_redirect_uri.get())
+        .append_pair("redirect_uri", cfg.settings.google_redirect_uri.get())
         .append_pair("code_verifier", verifier)
         .finish();
 
