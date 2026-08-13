@@ -360,6 +360,18 @@ pub use apply::role::{migrator_role_name, RoleError};
 /// nothing compiled it, so a rename could rot every example in it and leave CI
 /// green.
 ///
+/// COVERAGE IS PARTIAL, and worth knowing before trusting a green run: the guide
+/// has seven Rust fences and **two** of them are compiled. The other five are
+/// ```` ```rust,ignore ```` because they are FRAGMENTS — they use bindings such as
+/// `session` that the surrounding prose introduces rather than the snippet — and an
+/// ignored fence is neither compiled nor run. So a rename can still rot those five
+/// and leave CI green, which is the exact failure this item was added to prevent,
+/// just narrowed rather than eliminated.
+///
+/// Closing it does not need the fragments rewritten into programs: rustdoc hides
+/// lines prefixed with `# `, so the missing setup can be supplied invisibly and the
+/// rendered guide stays as short as it is now.
+///
 /// The TypeScript docs are gated the same way from the other side, by the
 /// `doc-examples` tests in both JS packages.
 #[cfg(doctest)]
