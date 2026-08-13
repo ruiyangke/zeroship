@@ -361,6 +361,9 @@ struct Fixture {
 enum FixtureProvider {
     Platform,
     DualIssuer,
+    /// Supabase with no platform OP configured. The device flow cannot run
+    /// here: there is nothing to mint a platform deploy token through.
+    SupabaseOnly,
 }
 
 impl Fixture {
@@ -438,6 +441,7 @@ impl Fixture {
             FixtureProvider::DualIssuer => {
                 AuthProvider::DualIssuer(DualIssuerProvider::new(platform, legacy))
             }
+            FixtureProvider::SupabaseOnly => AuthProvider::from(legacy),
         });
 
         let state = Arc::new(AppState {
@@ -1468,6 +1472,46 @@ async fn platform_only_provider_refuses_a_gotrue_bearer() {
     fx.assert_device_grant_pending(&device_code_hash).await;
 
     fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// Without a platform OP the flow must refuse to start, not start and strand.
+///
+/// This is the clause that survives in `ensure_platform_device_provider` after
+/// the Supabase clause was dropped, and it is load-bearing: approval mints
+/// through the OP's `/internal/platform-token`, so a Supabase-only deployment
+/// that accepted `/api/device/auth` would hand out a device code that can never
+/// be redeemed and leave a row in `zeroship.device_grants` per attempt.
+///
+/// Added because a mutation showed nothing pinned it: replacing the whole guard
+/// body with `Ok(())` left the device suite at 5 passed, 0 failed. The suite
+/// covered the clause that was wrong and none of the one that was right.
+#[compio::test]
+async fn supabase_only_provider_cannot_start_a_device_flow() {
+    let fx = Fixture::new_with_provider(FixtureProvider::SupabaseOnly).await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "openid offline_access apps:deploy apps:read apps:write"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(auth_resp.status(), StatusCode::BAD_REQUEST);
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    assert_eq!(token_error(auth_body), "unsupported_provider");
 
     drop(app);
     drop(fx);
