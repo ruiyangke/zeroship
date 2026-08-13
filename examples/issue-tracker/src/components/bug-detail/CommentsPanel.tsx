@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Button, Checkbox, Field, NumberField } from "@zeroship/ui";
+
+import { RichText, RichTextEditor, hasText } from "../RichText";
 import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
@@ -61,18 +63,19 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
       </div>
       {editing ? (
         <div className="comment-edit">
-          <textarea
-            aria-label="Edit comment"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={4}
-          />
+          <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
           <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
             Save
           </Button>
         </div>
       ) : (
-        <p className="comment-body">{comment.body}</p>
+        <div className="comment-body">
+          {/* Rendered THROUGH tiptap, not with dangerouslySetInnerHTML. The
+              body is arbitrary text over RPC, so parsing it back through the
+              schema that writes it is what keeps a crafted comment from
+              running in every reader's browser. */}
+          <RichText html={comment.body} />
+        </div>
       )}
       {error ? <p className="field-error">{error}</p> : null}
     </li>
@@ -87,11 +90,13 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!body.trim()) return;
+    // An empty tiptap document is "<p></p>", not "". Guarding on the markup
+    // would let an empty comment through and post a blank bubble.
+    if (!hasText(body)) return;
     setBusy(true);
     setError(null);
     try {
-      await addComment({ bugId, body: body.trim(), isPrivate, workTimeMinutes });
+      await addComment({ bugId, body, isPrivate, workTimeMinutes });
       setBody("");
       setIsPrivate(false);
       setWorkTimeMinutes(0);
@@ -105,12 +110,11 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
 
   return (
     <div className="new-comment">
-      <textarea
-        aria-label="Add a comment"
-        placeholder="Add a comment..."
+      <RichTextEditor
         value={body}
-        onChange={(e) => setBody(e.target.value)}
-        rows={4}
+        onChange={setBody}
+        placeholder="Add a comment..."
+        ariaLabel="Add a comment"
       />
       <div className="new-comment-row">
         {/* Checkbox owns its own label, so the wrapping <label> that used to
