@@ -12,7 +12,7 @@ mod common;
 const PROVIDER: &str = "supabase";
 
 fn db_url() -> String {
-    std::env::var("CONTROL_TEST_DB")
+    zeroship_core::test_env!("CONTROL_TEST_DB")
         .expect("CONTROL_TEST_DB must be set so identity_bridge_test runs against Postgres")
 }
 

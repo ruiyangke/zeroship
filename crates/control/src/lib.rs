@@ -175,8 +175,7 @@ impl BillingStreamConfig {
         forwarder_group_id: impl Into<String>,
         recompute_group_id: impl Into<String>,
     ) -> Result<Self, StreamError> {
-        let replica = std::env::var("HOSTNAME")
-            .ok()
+        let replica = zeroship_core::declared_env!(external, "HOSTNAME", crate::config::ControlSettingsConsumer)
             .map(|h| h.trim().to_string())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "solo".to_string());
@@ -237,9 +236,12 @@ impl BillingStreamConfig {
             }
         );
         let topic = stream_topic(&base_config)?;
-        let control_usage_outbox_wal_path = std::env::var("CONTROL_USAGE_OUTBOX_WAL_PATH")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let control_usage_outbox_wal_path = zeroship_core::declared_env!(
+            external,
+            "CONTROL_USAGE_OUTBOX_WAL_PATH",
+            crate::config::ControlSettingsConsumer
+        )
+        .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH));
         let this = Self {

@@ -11,14 +11,19 @@ use chrono::{DateTime, Utc};
 use compio_postgres::GenericClient;
 use uuid::Uuid;
 
+use zeroship_core::config::DeclaredEnvKey;
+
+use crate::config::ControlSettingsConsumer;
 use crate::registry::RegistryError;
 use crate::AppState;
 
 pub const DEFAULT_TICK_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_SIZE: i64 = 128;
 pub const DEFAULT_GRACE_WINDOW_MS: i64 = 0;
-pub const GRACE_WINDOW_ENV: &str = "CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS";
-pub const BATCH_SIZE_ENV: &str = "CONTROL_DEPLOY_RETENTION_BATCH_SIZE";
+pub const GRACE_WINDOW_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+    DeclaredEnvKey::external("CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS");
+pub const BATCH_SIZE_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+    DeclaredEnvKey::external("CONTROL_DEPLOY_RETENTION_BATCH_SIZE");
 
 const SWEEP_LOCK: &str = "zeroship.deploy_retention";
 
@@ -30,10 +35,17 @@ pub struct DeployRetentionConfig {
 
 impl Default for DeployRetentionConfig {
     fn default() -> Self {
+        let grace_window_raw = zeroship_core::read_declared_env!(GRACE_WINDOW_ENV, ControlSettingsConsumer)
+            .ok()
+            .flatten();
+        let batch_size_raw = zeroship_core::read_declared_env!(BATCH_SIZE_ENV, ControlSettingsConsumer)
+            .ok()
+            .flatten();
         Self {
-            grace_window_ms: nonnegative_env_i64(GRACE_WINDOW_ENV)
+            grace_window_ms: nonnegative_env_i64(GRACE_WINDOW_ENV.name(), grace_window_raw)
                 .unwrap_or(DEFAULT_GRACE_WINDOW_MS),
-            batch_size: positive_env_i64(BATCH_SIZE_ENV).unwrap_or(DEFAULT_BATCH_SIZE),
+            batch_size: positive_env_i64(BATCH_SIZE_ENV.name(), batch_size_raw)
+                .unwrap_or(DEFAULT_BATCH_SIZE),
         }
     }
 }
@@ -313,8 +325,8 @@ where
     Ok(rows.first().is_some_and(|row| row.get("locked")))
 }
 
-fn positive_env_i64(name: &str) -> Option<i64> {
-    let raw = std::env::var(name).ok()?;
+fn positive_env_i64(name: &str, raw: Option<String>) -> Option<i64> {
+    let raw = raw?;
     match raw.parse::<i64>() {
         Ok(value) if value > 0 => Some(value),
         Ok(_) | Err(_) => {
@@ -324,8 +336,8 @@ fn positive_env_i64(name: &str) -> Option<i64> {
     }
 }
 
-fn nonnegative_env_i64(name: &str) -> Option<i64> {
-    let raw = std::env::var(name).ok()?;
+fn nonnegative_env_i64(name: &str, raw: Option<String>) -> Option<i64> {
+    let raw = raw?;
     match raw.parse::<i64>() {
         Ok(value) if value >= 0 => Some(value),
         Ok(_) | Err(_) => {

@@ -154,10 +154,9 @@ mod live_db_tests {
     use super::*;
 
     async fn pg() -> compio_postgres::Client {
-        let db_url = std::env::var("CONTROL_TEST_DB")
-            .or_else(|_| std::env::var("AUTH_DB_URL"))
-            .or_else(|_| std::env::var("PG_TEST_URL"))
-            .ok()
+        let db_url = zeroship_core::test_env!("CONTROL_TEST_DB")
+            .or_else(|| zeroship_core::test_env!("AUTH_DB_URL"))
+            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| {
                 "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

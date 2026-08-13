@@ -32,9 +32,8 @@ const PLATFORM_KID: &str = "platform-control-authz-kid";
 const PLATFORM_KEY_SEED: u8 = 31;
 
 fn db_url() -> String {
-    std::env::var("AUTH_DB_URL")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .ok()
+    zeroship_core::test_env!("AUTH_DB_URL")
+        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

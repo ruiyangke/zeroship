@@ -30,8 +30,7 @@ use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 mod common;
 
 fn db_url() -> String {
-    std::env::var("CONTROL_TEST_DB")
-        .ok()
+    zeroship_core::test_env!("CONTROL_TEST_DB")
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
@@ -138,7 +137,7 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
 
 #[compio::test]
 async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
-    let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
+    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
         zeroship_test_support::skip("skip: REDPANDA_BROKERS unset — real-broker e2e");
         return;
     };

@@ -13,6 +13,9 @@ use chrono::{DateTime, Utc};
 use compio_postgres::GenericClient;
 use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
+use zeroship_core::config::DeclaredEnvKey;
+
+use crate::config::ControlSettingsConsumer;
 use crate::cron::workflow_blob_gc;
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -20,8 +23,10 @@ use crate::AppState;
 pub const DEFAULT_TICK_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_SIZE: i64 = 128;
 pub const DEFAULT_RETENTION_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-pub const RETENTION_WINDOW_ENV: &str = "CONTROL_WORKFLOW_RETENTION_WINDOW_MS";
-pub const BATCH_SIZE_ENV: &str = "CONTROL_WORKFLOW_RETENTION_BATCH_SIZE";
+pub const RETENTION_WINDOW_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+    DeclaredEnvKey::external("CONTROL_WORKFLOW_RETENTION_WINDOW_MS");
+pub const BATCH_SIZE_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+    DeclaredEnvKey::external("CONTROL_WORKFLOW_RETENTION_BATCH_SIZE");
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorkflowRetentionConfig {
@@ -31,10 +36,18 @@ pub struct WorkflowRetentionConfig {
 
 impl Default for WorkflowRetentionConfig {
     fn default() -> Self {
+        let retention_window_raw =
+            zeroship_core::read_declared_env!(RETENTION_WINDOW_ENV, ControlSettingsConsumer)
+                .ok()
+                .flatten();
+        let batch_size_raw =
+            zeroship_core::read_declared_env!(BATCH_SIZE_ENV, ControlSettingsConsumer)
+                .ok()
+                .flatten();
         Self {
-            retention_window_ms: positive_env_i64(RETENTION_WINDOW_ENV)
+            retention_window_ms: positive_env_i64(retention_window_raw)
                 .unwrap_or(DEFAULT_RETENTION_WINDOW_MS),
-            batch_size: positive_env_i64(BATCH_SIZE_ENV).unwrap_or(DEFAULT_BATCH_SIZE),
+            batch_size: positive_env_i64(batch_size_raw).unwrap_or(DEFAULT_BATCH_SIZE),
         }
     }
 }
@@ -347,8 +360,8 @@ fn nonnegative_count(row: &compio_postgres::Row, column: &str) -> usize {
     row.get::<_, i64>(column).max(0) as usize
 }
 
-fn positive_env_i64(name: &str) -> Option<i64> {
-    std::env::var(name).ok()?.trim().parse::<i64>().ok().filter(|v| *v > 0)
+fn positive_env_i64(raw: Option<String>) -> Option<i64> {
+    raw?.trim().parse::<i64>().ok().filter(|v| *v > 0)
 }
 
 #[cfg(test)]
