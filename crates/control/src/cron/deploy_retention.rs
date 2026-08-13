@@ -21,9 +21,9 @@ pub const DEFAULT_TICK_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_SIZE: i64 = 128;
 pub const DEFAULT_GRACE_WINDOW_MS: i64 = 0;
 pub const GRACE_WINDOW_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
-    DeclaredEnvKey::external("CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS");
+    DeclaredEnvKey::platform("CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS");
 pub const BATCH_SIZE_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
-    DeclaredEnvKey::external("CONTROL_DEPLOY_RETENTION_BATCH_SIZE");
+    DeclaredEnvKey::platform("CONTROL_DEPLOY_RETENTION_BATCH_SIZE");
 
 const SWEEP_LOCK: &str = "zeroship.deploy_retention";
 

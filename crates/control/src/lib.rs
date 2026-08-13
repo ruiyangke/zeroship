@@ -237,7 +237,7 @@ impl BillingStreamConfig {
         );
         let topic = stream_topic(&base_config)?;
         let control_usage_outbox_wal_path = zeroship_core::declared_env!(
-            external,
+            platform,
             "CONTROL_USAGE_OUTBOX_WAL_PATH",
             crate::config::ControlSettingsConsumer
         )

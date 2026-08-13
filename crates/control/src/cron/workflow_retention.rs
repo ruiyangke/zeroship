@@ -24,9 +24,9 @@ pub const DEFAULT_TICK_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_SIZE: i64 = 128;
 pub const DEFAULT_RETENTION_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 pub const RETENTION_WINDOW_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
-    DeclaredEnvKey::external("CONTROL_WORKFLOW_RETENTION_WINDOW_MS");
+    DeclaredEnvKey::platform("CONTROL_WORKFLOW_RETENTION_WINDOW_MS");
 pub const BATCH_SIZE_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
-    DeclaredEnvKey::external("CONTROL_WORKFLOW_RETENTION_BATCH_SIZE");
+    DeclaredEnvKey::platform("CONTROL_WORKFLOW_RETENTION_BATCH_SIZE");
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorkflowRetentionConfig {
