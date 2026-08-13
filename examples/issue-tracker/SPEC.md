@@ -178,6 +178,21 @@ Email delivery is also out: notifications are in-app rows, and nothing sends
 mail. Full-text search is out -- `search.quick` matches structured tokens and
 an indexed prefix of the summary, not comment bodies.
 
+## Procedures with no UI, on purpose
+
+`users.get` and `users.updatePrefs` have no screen. This example has no
+profile page: identity comes from the platform, and the app stores a name,
+timezone and a prefs blob it never asks anyone to edit. They stay in the
+surface because the data model has the columns and an example that models a
+field it cannot write is worse than one that documents the gap.
+
+Everything else IS reachable. That is checked, not asserted: a sweep over the
+source fails when a component is defined and rendered nowhere, which is how
+`QuickSearchBox` and the old `Nav` were found after the pages that
+hosted them were deleted. The same shape one layer down -- a procedure no
+client code calls -- is how the flag types, group membership, user watching
+and vote list were found; all four now have UI.
+
 ## Known limits
 
 **Reference-data lists are not paginated, and adding a limit alone would break

@@ -233,6 +233,13 @@ interface Collection<Row> {
   update(idOrFilter: string | DbFilter, patch: DbPatch): Promise<DbResult<Row | null>>;
   delete(idOrFilter: string | DbFilter): Promise<DbResult<Row | null>>;
   deleteMany(filter: DbFilter): Promise<DbResult<{ deletedCount: number }>>;
+  // HARD delete. `delete` stamps deleted_at and leaves the row, which a
+  // unique index still counts -- so a join row removed with `delete` can
+  // never be recreated. This interface is a hand-written mirror of the SDK
+  // Collection and omitted purge entirely, so the method the runtime has read
+  // as one that does not exist.
+  purge(idOrFilter: string | DbFilter): Promise<DbResult<Row | null>>;
+  purgeMany(filter: DbFilter): Promise<DbResult<{ deletedCount: number }>>;
   count(filter?: DbFilter): Promise<DbResult<number>>;
 }
 
@@ -1196,7 +1203,14 @@ export const createBug = mutation(
       );
       return bug;
     });
-    return must(result);
+    const created = must(result);
+    // Filing is an event too. Watchers only ever heard about CHANGES, so
+    // watching someone whose new bugs never reached you was close to
+    // pointless -- and in Bugzilla a watch delivers their bugmail, which
+    // starts at the report. The fanout already excludes the actor, so the
+    // reporter does not notify themselves.
+    await notifyBugChange(created, actor.id, `${created.summary} was filed`);
+    return created;
   },
   { id: "bugs.create" },
 );
@@ -4525,10 +4539,26 @@ async function fanOutBugChange(
 export const addWatcher = mutation(
   async ({ watchedId }: { watchedId: string }) => {
     const actor = await requireActor();
-    const watched = await getRequired(db.users, watchedId, "User");
+    // requireId first. Without it a missing watchedId reached the row lookup
+    // and came back 500, so a caller that simply forgot the argument got
+    // "internal error" instead of being told which argument was wrong -- and
+    // a 500 sends you looking at the server rather than the call.
+    const watched = await getRequired(db.users, requireId(watchedId, "watchedId"), "User");
     if (watched.id === actor.id) invalid("you cannot watch yourself");
-    const existing = must(await db.watchers.get({ watcherId: actor.id, watchedId: watched.id }));
+    // readAll, not .get with a composite filter. That form returned null for
+    // a row that existed, so the idempotency guard never fired and watching
+    // someone you already watch hit the (watcherId, watchedId) unique index
+    // and came back 500 -- "internal error" for an action whose correct
+    // answer is "you already do".
+    const [existing] = await readAll(db.watchers, {
+      watcherId: actor.id,
+      watchedId: watched.id,
+    });
     if (existing) return existing;
+    // Clear any tombstone for this pair first. readAll cannot see a
+    // soft-deleted row but the unique index can, so without this an insert
+    // after an old-style delete fails forever and self-heals for nobody.
+    await db.watchers.purgeMany({ watcherId: actor.id, watchedId: watched.id });
     return must(await db.watchers.insert({ watcherId: actor.id, watchedId: watched.id }));
   },
   { id: "watchers.add" },
@@ -4537,9 +4567,20 @@ export const addWatcher = mutation(
 export const removeWatcher = mutation(
   async ({ watchedId }: { watchedId: string }) => {
     const actor = await requireActor();
-    const existing = must(await db.watchers.get({ watcherId: actor.id, watchedId }));
+    const [existing] = await readAll(db.watchers, {
+      watcherId: actor.id,
+      watchedId: requireId(watchedId, "watchedId"),
+    });
     if (!existing) notFound("Watch");
-    must(await db.watchers.delete(existing.id));
+    // PURGE, not delete. delete is a soft delete: it stamps deleted_at and
+    // leaves the row, which the (watcherId, watchedId) unique index still
+    // counts while readAll no longer returns it. So unwatching someone made
+    // them permanently unwatchable -- the guard could not see the row and the
+    // insert hit the index, answering "internal error" forever after.
+    //
+    // A join row carries no history worth keeping: the fact that you once
+    // watched somebody is not data this app reports on.
+    must(await db.watchers.purge(existing.id));
     return { removed: true };
   },
   { id: "watchers.remove" },

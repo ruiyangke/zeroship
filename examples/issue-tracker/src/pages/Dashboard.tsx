@@ -1,8 +1,17 @@
 import { useMemo } from "react";
 import { PageHeader } from "@zeroship/ui";
-import { currentUser, getAttachment, getBug, listFlagRequests, listMyCc, searchBugs } from "../api";
+import {
+  currentUser,
+  getAttachment,
+  getBug,
+  listFlagRequests,
+  listMyCc,
+  listMyVotes,
+  searchBugs,
+} from "../api";
 import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable";
 import { NotificationsPanel } from "../components/NotificationsPanel";
+import { WatchingPanel } from "../components/WatchingPanel";
 import { AsyncSection, ErrorState } from "../components/StateViews";
 import { isUnauthenticated, toPromise, useAsync } from "../components/rpc";
 import type { Bug, BugDetail, FlagRequestEntry } from "../components/types";
@@ -97,6 +106,7 @@ export function DashboardPage() {
   );
   const flagRequestsQ = useAsync(() => listFlagRequests({}), []);
   const ccQ = useAsync(() => listMyCc({}), []);
+  const votesQ = useAsync(() => listMyVotes({}), []);
 
   const setByMe = useMemo(
     () => (flagRequestsQ.state.status === "ready" ? flagRequestsQ.state.data.setByMe : []),
@@ -161,6 +171,26 @@ export function DashboardPage() {
       {/* Was a hardcoded "(0)" with a note saying no reverse index existed.
           The index did exist (bugCc.userId); what was missing was a procedure
           reading it, which cc.listMine now is. */}
+      {/* Voting had a panel on every bug and nowhere to see what you had
+          voted for, so the budget it enforces -- votesPerUser, per product --
+          was spendable and unauditable. */}
+      <AsyncSection
+        state={votesQ.state}
+        onRetry={votesQ.reload}
+        loadingLabel="Loading votes..."
+        isEmpty={(rows) => rows.length === 0}
+        emptyTitle="You have not voted for any bug."
+      >
+        {(rows) => (
+          <BugSection
+            title="Bugs I voted for"
+            bugs={rows.map((row) => row.bug)}
+          />
+        )}
+      </AsyncSection>
+
+      <WatchingPanel />
+
       <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd bugs...">
         {(bugs) => <BugSection title="Bugs I'm CC'd on" bugs={bugs} />}
       </AsyncSection>
