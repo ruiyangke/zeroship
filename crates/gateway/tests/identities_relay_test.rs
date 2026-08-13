@@ -21,7 +21,7 @@ use zeroship_gateway::identities;
 
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::test_env!("AUTH_DB_URL")?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;

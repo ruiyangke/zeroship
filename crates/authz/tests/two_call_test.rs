@@ -362,7 +362,7 @@ where
     F: FnOnce(Client) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
         zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
         return;
     };

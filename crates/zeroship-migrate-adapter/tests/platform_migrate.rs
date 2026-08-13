@@ -118,9 +118,7 @@ mod platform_cli {
     }
 
     fn pg_url() -> Option<String> {
-        std::env::var("ZERO_MIGRATE_TEST_PG_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL").filter(|s| !s.trim().is_empty())
     }
 
     /// DB-FREE proof: EVERY platform `.ts` migration authors (V8, v1 recorder) +

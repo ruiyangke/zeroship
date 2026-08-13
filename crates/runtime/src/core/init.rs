@@ -2513,7 +2513,9 @@ fn console_log_callback(
     // operators don't get app-console spam by default. A future tracing-
     // native gate can use `RUST_LOG=app=info` once the env-var gate is
     // retired in a follow-up.
-    if std::env::var("ZEROSHIP_LOG").is_ok() || cfg!(debug_assertions) {
+    if zeroship_core::declared_env!(platform, "ZEROSHIP_LOG", crate::RuntimeConsumer).is_some()
+        || cfg!(debug_assertions)
+    {
         match req_id {
             Some(rid) => tracing::info!(target: "app", req_id = rid, "{line}"),
             None => tracing::info!(target: "app", "{line}"),

@@ -6918,6 +6918,7 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "uuid",
+ "zeroship-core",
  "zeroship-test-support",
 ]
 
@@ -7057,6 +7058,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-bundle",
+ "zeroship-config-contract",
  "zeroship-config-macros",
  "zeroship-test-support",
 ]
@@ -7125,6 +7127,7 @@ dependencies = [
  "tracing",
  "uuid",
  "x509-parser",
+ "zeroship-core",
  "zeroship-test-support",
 ]
 
@@ -7159,6 +7162,7 @@ dependencies = [
  "zero-migrate",
  "zero-migrate-ir",
  "zero-migrate-policy",
+ "zeroship-core",
  "zeroship-runtime",
  "zeroship-test-support",
 ]
@@ -7362,12 +7366,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "zeroship-core",
  "zeroship-test-support",
 ]
 
 [[package]]
 name = "zeroship-test-support"
 version = "0.1.0"
+dependencies = [
+ "zeroship-core",
+]
 
 [[package]]
 name = "zeroship-worker"

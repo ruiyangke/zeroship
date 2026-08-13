@@ -562,8 +562,7 @@ fn main() -> std::io::Result<()> {
     // the WAL is named for it. The uuid below is the part that must CHANGE per
     // boot, because two live producers must not share a client id. They were
     // one string until the WAL turned out to be keyed on the changing half.
-    let gate_base = std::env::var("HOSTNAME")
-        .ok()
+    let gate_base = zeroship_core::declared_env!(external, "HOSTNAME", zeroship_gateway::config::GateSettingsConsumer)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("gate-{port}"));
     let gate_meter_source = format!("gate-{gate_base}-{}", uuid::Uuid::new_v4());
@@ -777,8 +776,8 @@ mod tests {
     #[test]
     fn topology_cli_overrides_environment_and_environment_overrides_file() {
         let _guard = CLI_ENV_LOCK.lock().expect("env lock");
-        let old_scheme = std::env::var_os("ZEROSHIP_ORIGIN_SCHEME");
-        let old_origins = std::env::var_os("ZEROSHIP_TRUSTED_ORIGINS");
+        let old_scheme = zeroship_core::test_env_os!("ZEROSHIP_ORIGIN_SCHEME");
+        let old_origins = zeroship_core::test_env_os!("ZEROSHIP_TRUSTED_ORIGINS");
         std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
         std::env::set_var(
             "ZEROSHIP_TRUSTED_ORIGINS",
@@ -841,7 +840,11 @@ mod tests {
     #[test]
     fn obsolete_security_relaxation_environment_variable_is_ignored() {
         let _guard = CLI_ENV_LOCK.lock().expect("env lock");
-        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
+        let old = zeroship_core::declared_env_os!(
+            dev,
+            "ZEROSHIP_DEV_INSECURE",
+            zeroship_gateway::config::GateSettingsConsumer
+        );
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate"]);
         restore_env_var("ZEROSHIP_DEV_INSECURE", old);

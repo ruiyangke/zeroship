@@ -1128,10 +1128,10 @@ async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
 /// no-ops in CI. Locally (no `CI`), `None` ⇒ the test prints a skip line and
 /// returns, the established env-skip convention for a dev box without PG.
 fn db_url() -> Option<String> {
-    match std::env::var("GATEWAY_ANCHORS_DB_URL") {
-        Ok(dsn) if !dsn.is_empty() => Some(dsn),
+    match zeroship_core::test_env!("GATEWAY_ANCHORS_DB_URL") {
+        Some(dsn) if !dsn.is_empty() => Some(dsn),
         _ => {
-            if std::env::var("CI").is_ok() {
+            if zeroship_core::declared_env!(external, "CI", zeroship_core::config::TestHarness).is_some() {
                 panic!(
                     "GATEWAY_ANCHORS_DB_URL must be set in CI so the DB-backed anchor handler \
                      tests run the real /token→anchor→/session?mint=1 path instead of silently \
@@ -2372,8 +2372,8 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         zeroship_test_support::skip("[anchors] skip cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let auth_dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(d) if !d.is_empty() => d,
+    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+        Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };
 
@@ -2505,8 +2505,8 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         zeroship_test_support::skip("[anchors] skip interactive_cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let auth_dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(d) if !d.is_empty() => d,
+    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+        Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };
 
@@ -2644,8 +2644,8 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         zeroship_test_support::skip("[anchors] skip mint_racing_concurrent_reset (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let auth_dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(d) if !d.is_empty() => d,
+    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+        Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };
 

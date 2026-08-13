@@ -559,10 +559,10 @@ mod tests {
         "invalid migration transition: expected approved status";
 
     fn test_dsn() -> String {
-        std::env::var("MIGRATED_TEST_DB")
-            .or_else(|_| std::env::var("CONTROL_TEST_DB"))
-            .or_else(|_| std::env::var("PG_TEST_URL"))
-            .unwrap_or_else(|_| DEFAULT_TEST_DSN.to_string())
+        zeroship_core::test_env!("MIGRATED_TEST_DB")
+            .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+            .unwrap_or_else(|| DEFAULT_TEST_DSN.to_string())
     }
 
     async fn test_client() -> Client {

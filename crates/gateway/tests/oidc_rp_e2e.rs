@@ -44,9 +44,7 @@ const BROKER_MASTER: &[u8] = b"gateway-oidc-rp-e2e-broker-master-32-bytes";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
 
 fn db_url() -> Option<String> {
-    std::env::var("AUTH_DB_URL")
-        .or_else(|_| std::env::var("CONTROL_TEST_DB"))
-        .ok()
+    zeroship_core::test_env!("AUTH_DB_URL").or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
 }
 
 fn location(resp: &cyper::Response) -> String {

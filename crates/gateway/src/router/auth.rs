@@ -2408,7 +2408,7 @@ mod tests {
     // could never match the `pws_…` subject).
 
     async fn connect_auth_db() -> Option<crate::db::DbConfig> {
-        let dsn = std::env::var("AUTH_DB_URL").ok()?;
+        let dsn = zeroship_core::test_env!("AUTH_DB_URL")?;
         Some(crate::db::DbConfig::new(dsn, 4))
     }
 

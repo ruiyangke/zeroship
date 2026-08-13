@@ -131,11 +131,14 @@ pub(crate) fn release_global_socket() {
 }
 
 fn configured_global_max_sockets() -> u32 {
-    std::env::var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS)
+    zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+        crate::RuntimeConsumer
+    )
+    .and_then(|s| s.parse::<u32>().ok())
+    .filter(|n| *n > 0)
+    .unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS)
 }
 
 #[cfg(test)]

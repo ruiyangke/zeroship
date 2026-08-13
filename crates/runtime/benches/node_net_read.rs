@@ -30,7 +30,11 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn set_dev() -> Self {
-        let prev_dev = std::env::var_os("ZEROSHIP_DEV");
+        let prev_dev = zeroship_core::declared_env_os!(
+            dev,
+            "ZEROSHIP_DEV",
+            zeroship_runtime::RuntimeConsumer
+        );
         unsafe {
             std::env::set_var("ZEROSHIP_DEV", "1");
         }

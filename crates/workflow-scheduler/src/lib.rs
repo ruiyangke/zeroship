@@ -112,9 +112,8 @@ mod tests {
     use uuid::Uuid;
 
     fn test_db_url() -> Option<String> {
-        std::env::var("ZEROSHIP_SCHEDULER_TEST_DB")
-            .ok()
-            .or_else(|| std::env::var("CONTROL_TEST_DB").ok())
+        zeroship_core::test_env!("ZEROSHIP_SCHEDULER_TEST_DB")
+            .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
     }
 
     async fn store(label: &str) -> Option<WorkflowSchedulerStore> {

@@ -52,8 +52,16 @@ struct DevEnvGuard {
 
 impl DevEnvGuard {
     fn set() -> Self {
-        let prev_dev = std::env::var_os("ZEROSHIP_DEV");
-        let prev_secret = std::env::var_os("ZEROSHIP_DEV_AUTH_SECRET");
+        let prev_dev = zeroship_core::declared_env_os!(
+            dev,
+            "ZEROSHIP_DEV",
+            zeroship_runtime::RuntimeConsumer
+        );
+        let prev_secret = zeroship_core::declared_env_os!(
+            dev,
+            "ZEROSHIP_DEV_AUTH_SECRET",
+            zeroship_runtime::RuntimeConsumer
+        );
         unsafe {
             std::env::set_var("ZEROSHIP_DEV", "1");
             std::env::set_var("ZEROSHIP_DEV_AUTH_SECRET", DEV_SECRET);
