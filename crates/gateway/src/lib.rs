@@ -22,6 +22,7 @@ pub mod db;
 pub mod dispatch;
 pub mod enforce;
 pub mod error;
+pub mod health;
 pub mod op_client;
 pub mod identities;
 pub mod idempotency;

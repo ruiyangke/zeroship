@@ -6,6 +6,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use uuid::Uuid;
 
+use zeroship_core::readiness::SyncFreshness;
 use zeroship_core::types::{RouteEntry, RouteMap};
 
 use zeroship_core::types::SpendState;
@@ -33,6 +34,9 @@ pub struct CompiledRoute {
 pub struct RouteCache {
     routes: RwLock<HashMap<Uuid, Arc<CompiledRoute>>>,
     name_index: RwLock<HashMap<String, Uuid>>,
+    /// When the control plane last served a route table this cache accepted.
+    /// `/readyz` reads it instead of issuing its own control-plane request.
+    sync_freshness: SyncFreshness,
 }
 
 impl Default for RouteCache {
@@ -47,7 +51,14 @@ impl RouteCache {
         Self {
             routes: RwLock::new(HashMap::new()),
             name_index: RwLock::new(HashMap::new()),
+            sync_freshness: SyncFreshness::new(),
         }
+    }
+
+    /// Freshness stamp of the control-plane route pull, for `/readyz`.
+    #[must_use]
+    pub fn sync_freshness(&self) -> &SyncFreshness {
+        &self.sync_freshness
     }
 
     /// Replace the route table, recompiling each manifest.
@@ -181,6 +192,11 @@ async fn sync_once(state: &GateState) -> Result<(), String> {
     state
         .routes
         .update(routes, &state.rate_limiters, &state.concurrency);
+    // Stamped only on a FULL successful cycle - reached the control plane,
+    // parsed the table, applied it. A fetch that fails or a body that does not
+    // parse returns early above and leaves the stamp where it was, so the
+    // route table ages out of `/readyz`'s staleness budget.
+    state.routes.sync_freshness().mark_success();
     Ok(())
 }
 

@@ -15,8 +15,8 @@ use zeroship_core::config::{
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
 use zeroship_gateway::{
-    auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
-    router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
+    auth_token, backchannel_logout, blob_cache, browser_auth, enforce, health, idempotency,
+    oidc_rp, proxy, router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -690,9 +690,7 @@ fn main() -> std::io::Result<()> {
                     ))
                     .route(web::route().to(router::handle)),
             )
-            .service(web::resource("/health").route(web::get().to(|| async {
-                web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
-            })))
+            .configure(health::configure)
             .service(
                 web::resource("/__zeroship/internal/workflow-advance")
                     .route(web::post().to(router::workflow_advance_internal)),
