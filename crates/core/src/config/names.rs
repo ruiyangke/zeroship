@@ -622,33 +622,97 @@ impl<T> Operational<T> {
     }
 }
 
-/// A resolved secret whose standard formatting surface cannot expose its value.
+/// A resolved secret: WHICH tier supplied it, and the material only when this
+/// run actually resolved it.
+///
+/// The `Option` on the material is not an oversight, it is the `--check-config`
+/// contract made structural. A dry run establishes the SOURCE of every secret
+/// without opening a file or dereferencing a reference, so on that path there is
+/// no material to hold and the type says so. A report can therefore only ever
+/// ask [`Secret::is_configured`], and a consumer that wants material has to
+/// handle its absence rather than receive a plausible-looking empty string.
+///
+/// Nothing here can format the material: [`fmt::Debug`] prints the source tier
+/// and nothing else - not the value, not a prefix of it, not its length.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Secret<T>(T);
+pub struct Secret<T> {
+    source: Option<SourceKind>,
+    material: Option<T>,
+}
 
 impl<T> Secret<T> {
-    /// Wrap resolved secret material.
+    /// A secret no enabled source supplied.
     #[must_use]
-    pub const fn new(value: T) -> Self {
-        Self(value)
+    pub const fn absent() -> Self {
+        Self {
+            source: None,
+            material: None,
+        }
+    }
+
+    /// A secret supplied by `source`, carrying `material` when it was resolved.
+    ///
+    /// `material` is `None` on the `--check-config` path for any source that
+    /// would need I/O to read: the secret is configured, and that is all the run
+    /// is entitled to know.
+    #[must_use]
+    pub const fn supplied(source: SourceKind, material: Option<T>) -> Self {
+        Self {
+            source: Some(source),
+            material,
+        }
+    }
+
+    /// True when some enabled source supplied this secret.
+    ///
+    /// This is the ONLY fact a generated report may publish about a secret.
+    #[must_use]
+    pub const fn is_configured(&self) -> bool {
+        self.source.is_some()
+    }
+
+    /// The tier that supplied the secret, if any. A tier name, never material.
+    #[must_use]
+    pub const fn source(&self) -> Option<SourceKind> {
+        self.source
     }
 
     /// Explicitly borrow secret material at its true consumption boundary.
+    ///
+    /// `None` means either "no source supplied it" or "this run resolved the
+    /// source but deliberately did not read the material". Both are cases a
+    /// consumer must handle; neither is an empty secret.
     #[must_use]
-    pub const fn expose_secret(&self) -> &T {
-        &self.0
+    pub const fn expose_secret(&self) -> Option<&T> {
+        self.material.as_ref()
     }
 
     /// Explicitly consume the wrapper.
     #[must_use]
-    pub fn into_inner(self) -> T {
-        self.0
+    pub fn into_inner(self) -> Option<T> {
+        self.material
+    }
+}
+
+impl Secret<String> {
+    /// Borrow the material as a string slice, or `""` when there is none.
+    ///
+    /// The bridge to the existing strength validators, which take `&str` and
+    /// already treat an empty value as "required and missing". Using it on the
+    /// `--check-config` path would make an unread file look like an empty
+    /// secret, so callers there must branch on [`Secret::expose_secret`] first.
+    #[must_use]
+    pub fn expose_str(&self) -> &str {
+        self.material.as_deref().unwrap_or_default()
     }
 }
 
 impl<T> fmt::Debug for Secret<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Secret(<redacted>)")
+        match self.source {
+            Some(source) => write!(formatter, "Secret(configured from {source:?})"),
+            None => formatter.write_str("Secret(<unset>)"),
+        }
     }
 }
 
@@ -845,63 +909,98 @@ where
         })
 }
 
-/// Resolve secret path, canonical environment, then canonical TOML input.
+/// How far a run is entitled to take a secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretResolution {
+    /// Real startup: dereference the supplying source down to the material.
+    Boot,
+    /// `--check-config`: establish the SOURCE and validate its source policy and
+    /// format, and stop there. No file is opened and no reference is followed.
+    CheckConfig,
+}
+
+/// Resolve secret path flag, canonical environment, then canonical TOML input.
 ///
-/// A TOML literal is accepted. Parse/resolver errors deliberately expose only
-/// the canonical identity, never secret material or a parser message.
+/// Precedence is `CLI -file > env > TOML`, matching every other class. Each of
+/// the latter two may carry a literal or a `urn:zeroship:file:<path>` reference;
+/// a reference in any other scheme is rejected by source policy in BOTH modes,
+/// which is what makes an env-to-env alias or a Vault URN a `--check-config`
+/// failure rather than a boot-time surprise.
+///
+/// Under [`SecretResolution::CheckConfig`] nothing is read: a `-file` flag and a
+/// file reference resolve to `is_configured() == true` with no material, while a
+/// literal already in memory keeps its material so the caller's strength
+/// validators still have something real to check.
+///
+/// An absent secret is [`Secret::absent`], NOT an error. There is no compiled
+/// default for a secret, so "required" is a property of the consumer, and the
+/// consumer's own validator produces a far better message than a generic
+/// missing-value diagnostic could.
+///
+/// Errors deliberately expose only the canonical identity, never secret material
+/// and never a parser message that might quote it.
 ///
 /// # Errors
 ///
-/// Returns name-only I/O or missing-input diagnostics.
+/// Returns name-only source-policy, overlay-type, and I/O diagnostics.
 pub fn resolve_secret_sources(
     name: CanonicalName<'static>,
     cli_file: Option<PathBuf>,
     env: Option<String>,
     overlay: Option<&toml::Value>,
+    mode: SecretResolution,
 ) -> Result<Secret<String>, ConfigResolveError> {
     if let Some(path) = cli_file {
-        return std::fs::read_to_string(&path)
-            .map(|mut value| {
-                if value.ends_with('\n') {
-                    value.pop();
-                    if value.ends_with('\r') {
-                        value.pop();
-                    }
-                }
-                Secret::new(value)
-            })
-            .map_err(|_| ConfigResolveError::SecretFile {
+        if mode == SecretResolution::CheckConfig {
+            return Ok(Secret::supplied(SourceKind::CliFile, None));
+        }
+        let material = super::secrets::read_secret_file(&path.to_string_lossy()).map_err(|_| {
+            ConfigResolveError::SecretFile {
                 canonical: name.as_str(),
                 path,
-            });
+            }
+        })?;
+        return Ok(Secret::supplied(SourceKind::CliFile, Some(material)));
     }
     if let Some(value) = env {
-        validate_secret_input(name, &value)?;
-        return Ok(Secret::new(value));
+        return resolve_secret_input(name, SourceKind::Env, &value, mode);
     }
     if let Some(root) = overlay {
         if let Some(value) = lookup_overlay(root, name)? {
-            if let Some(literal_or_reference) = value.as_str() {
-                validate_secret_input(name, literal_or_reference)?;
-                return Ok(Secret::new(literal_or_reference.to_owned()));
-            }
-            return Err(ConfigResolveError::InvalidValue {
-                canonical: name.as_str(),
-            });
+            let Some(literal_or_reference) = value.as_str() else {
+                return Err(ConfigResolveError::InvalidValue {
+                    canonical: name.as_str(),
+                });
+            };
+            return resolve_secret_input(name, SourceKind::Toml, literal_or_reference, mode);
         }
     }
-    Err(ConfigResolveError::Missing {
-        canonical: name.as_str(),
-    })
+    Ok(Secret::absent())
 }
 
-fn validate_secret_input(
+/// Apply source policy to one in-band secret input, then resolve it if asked.
+fn resolve_secret_input(
     name: CanonicalName<'static>,
+    source: SourceKind,
     value: &str,
-) -> Result<(), ConfigResolveError> {
-    super::secrets::validate_secret_ref(value).map_err(|_| ConfigResolveError::InvalidValue {
-        canonical: name.as_str(),
-    })
+    mode: SecretResolution,
+) -> Result<Secret<String>, ConfigResolveError> {
+    let parsed = super::secrets::parse_secret_ref(value).map_err(|_| {
+        ConfigResolveError::InvalidSecretSource {
+            canonical: name.as_str(),
+        }
+    })?;
+    let material = match (parsed, mode) {
+        (super::secrets::SecretRef::Literal(literal), _) => Some(literal.to_owned()),
+        (super::secrets::SecretRef::File(_), SecretResolution::CheckConfig) => None,
+        (super::secrets::SecretRef::File(path), SecretResolution::Boot) => Some(
+            super::secrets::read_secret_file(path).map_err(|_| ConfigResolveError::SecretFile {
+                canonical: name.as_str(),
+                path: PathBuf::from(path),
+            })?,
+        ),
+    };
+    Ok(Secret::supplied(source, material))
 }
 
 /// A generated-source resolution failure with value-free diagnostics.
@@ -916,6 +1015,20 @@ pub enum ConfigResolveError {
     /// A supplied value failed typed validation.
     #[error("configuration {canonical} has an invalid value")]
     InvalidValue {
+        /// Canonical identity.
+        canonical: &'static str,
+    },
+    /// A secret input named a source outside the supply set.
+    ///
+    /// Distinct from [`ConfigResolveError::InvalidValue`] because it is the one
+    /// diagnostic an operator migrating off an env-to-env alias, a Vault URN or
+    /// an AWS ARN will see, and it must say what IS allowed. The offending text
+    /// is still withheld: it sits where a secret sits.
+    #[error(
+        "configuration {canonical} names an unsupported secret source; supply the value \
+         itself or a urn:zeroship:file:<path> reference"
+    )]
+    InvalidSecretSource {
         /// Canonical identity.
         canonical: &'static str,
     },
@@ -959,8 +1072,8 @@ pub trait GeneratedConfig: Sized {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalName, Consumer, ConfigSpec, Secret, Sensitivity, SourceKind, SupplyClass,
-        lookup_overlay, resolve_control, resolve_secret_sources,
+        CanonicalName, Consumer, ConfigSpec, Secret, SecretResolution, Sensitivity, SourceKind,
+        SupplyClass, lookup_overlay, resolve_control, resolve_secret_sources,
     };
 
     #[test]
@@ -1015,15 +1128,17 @@ database_url = "postgres://operator-mounted-secret"
             None,
             None,
             Some(&overlay),
+            SecretResolution::Boot,
         )
         .expect("literal secret is allowed");
         assert_eq!(
-            secret.expose_secret(),
-            "postgres://operator-mounted-secret"
+            secret.expose_secret().map(String::as_str),
+            Some("postgres://operator-mounted-secret")
         );
+        assert_eq!(secret.source(), Some(SourceKind::Toml));
 
         // This does not inspect tracked files or runtime permissions. Those are
-        // amendment Section 4.7 gates and deliberately are not Step 1 behavior.
+        // amendment Section 4.7 gates and deliberately are not this step's.
     }
 
     #[test]
@@ -1034,15 +1149,53 @@ database_url = "postgres://operator-mounted-secret"
                 panic!("inner secret formatter must not run")
             }
         }
-        assert_eq!(format!("{:?}", Secret::new(Hostile)), "Secret(<redacted>)");
+        assert_eq!(
+            format!("{:?}", Secret::supplied(SourceKind::Env, Some(Hostile))),
+            "Secret(configured from Env)"
+        );
+        assert_eq!(
+            format!("{:?}", Secret::<Hostile>::absent()),
+            "Secret(<unset>)"
+        );
 
         // This does not prevent an explicit expose_secret call. The wrapper
         // removes accidental formatting, not deliberate value consumption.
     }
 
+    // The presence-only claim, at the type. A report may ask is_configured();
+    // there is no accessor that yields a prefix or a length, and Debug names
+    // only the tier. A sentinel long enough to be recognisable is used so a
+    // substring leak would show.
+    #[test]
+    fn a_secret_publishes_presence_and_source_but_never_material() {
+        const SENTINEL: &str = "zeroship-presence-sentinel-9d2f7a4c1e";
+        let secret = Secret::supplied(SourceKind::Env, Some(SENTINEL.to_owned()));
+        assert!(secret.is_configured());
+        assert_eq!(secret.source(), Some(SourceKind::Env));
+
+        let rendered = format!("{secret:?}");
+        assert!(!rendered.contains(SENTINEL));
+        for length in 4..=SENTINEL.len() {
+            assert!(
+                !rendered.contains(&SENTINEL[..length]),
+                "Debug leaked a {length}-char prefix of the secret: {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains(&SENTINEL.len().to_string()),
+            "Debug leaked the secret's length: {rendered}"
+        );
+
+        // Does NOT cover a caller that calls expose_secret and prints the result
+        // itself. Nothing in a type can stop deliberate disclosure; the binaries'
+        // report construction is checked separately by the e2e sentinel case.
+    }
+
     #[test]
     fn malformed_secret_urn_is_rejected_without_echoing_the_value() {
-        let sentinel = "urn:zeroship:file:";
+        // The body carries a recognisable sentinel: a diagnostic that echoed the
+        // rejected input would carry it too, and a secret sits exactly here.
+        let sentinel = "urn:zeroship:nope:h4nd3d-back-to-the-operator";
         let overlay: toml::Value = toml::from_str(&format!(
             "[control]\ndatabase_url = {sentinel:?}\n"
         ))
@@ -1052,14 +1205,111 @@ database_url = "postgres://operator-mounted-secret"
             None,
             None,
             Some(&overlay),
+            SecretResolution::CheckConfig,
         )
         .expect_err("empty URN body must fail");
         let diagnostic = error.to_string();
         assert!(diagnostic.contains("control.database_url"));
         assert!(!diagnostic.contains(sentinel));
+    }
 
-        // This does not resolve a referenced backend. It proves only format
-        // rejection and value-free diagnostics in the inert resolver.
+    // THE `--check-config` PAIR. Both halves name a secret FILE that does not
+    // exist and differ in exactly one variable: the scheme. The file scheme is
+    // inside the supply set, so the dry run succeeds WITHOUT opening anything;
+    // the deleted env scheme is outside it, so the dry run fails. A dry run that
+    // passed only when the file happened to exist would fail the first half, and
+    // one that validated no source policy at all would fail the second.
+    #[test]
+    fn check_config_validates_source_policy_without_opening_the_file() {
+        let name = CanonicalName::from_static("control.master_key");
+        let missing = "/no/such/zeroship/check-config/secret";
+        assert!(
+            !std::path::Path::new(missing).exists(),
+            "the fixture path must really be absent"
+        );
+
+        let accepted = resolve_secret_sources(
+            name,
+            None,
+            Some(format!("urn:zeroship:file:{missing}")),
+            None,
+            SecretResolution::CheckConfig,
+        )
+        .expect("a file reference is format-valid whether or not the path exists");
+        assert!(accepted.is_configured());
+        assert_eq!(
+            accepted.expose_secret(),
+            None,
+            "--check-config must not have read the file"
+        );
+
+        let rejected = resolve_secret_sources(
+            name,
+            None,
+            Some(format!("urn:zeroship:env:SOME_OTHER_VAR")),
+            None,
+            SecretResolution::CheckConfig,
+        )
+        .expect_err("an env-to-env alias is outside the supply set");
+        assert!(rejected.to_string().contains("control.master_key"));
+        assert!(rejected.to_string().contains("urn:zeroship:file:"));
+
+        // The same absent path on the BOOT path must fail, so "no error" above
+        // is a property of the mode and not of the resolver ignoring files.
+        assert!(resolve_secret_sources(
+            name,
+            None,
+            Some(format!("urn:zeroship:file:{missing}")),
+            None,
+            SecretResolution::Boot,
+        )
+        .is_err());
+
+        // Does NOT cover the CLI `-file` flag arm, which is asserted below, nor
+        // whether a real binary routes --check-config to CheckConfig mode; that
+        // is the macro's job and tests/config_check_e2e.sh proves it end to end.
+    }
+
+    #[test]
+    fn a_check_config_run_never_reads_a_secret_path_flag() {
+        let name = CanonicalName::from_static("control.master_key");
+        let missing = std::path::PathBuf::from("/no/such/zeroship/path-flag/secret");
+
+        let checked = resolve_secret_sources(
+            name,
+            Some(missing.clone()),
+            None,
+            None,
+            SecretResolution::CheckConfig,
+        )
+        .expect("a path flag is not opened during a dry run");
+        assert!(checked.is_configured());
+        assert_eq!(checked.source(), Some(SourceKind::CliFile));
+        assert_eq!(checked.expose_secret(), None);
+
+        // One-variable control: only the mode differs, and boot does open it.
+        assert!(
+            resolve_secret_sources(name, Some(missing), None, None, SecretResolution::Boot)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unsupplied_secret_is_absent_rather_than_an_error() {
+        let secret = resolve_secret_sources(
+            CanonicalName::from_static("control.master_key"),
+            None,
+            None,
+            None,
+            SecretResolution::Boot,
+        )
+        .expect("no source is not a resolution failure");
+        assert!(!secret.is_configured());
+        assert_eq!(secret.expose_secret(), None);
+        assert_eq!(secret.expose_str(), "");
+
+        // Does NOT cover whether any given consumer REQUIRES the secret. That
+        // stays with the consumer's own validator and its own message.
     }
 
     #[test]
