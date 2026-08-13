@@ -8,7 +8,7 @@ import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync, type AsyncState } from "../rpc";
 import type { Activity, Attachment, Comment } from "../types";
 import { buildTimeline } from "./timeline";
-import { fieldLabel, personLabel } from "./activity";
+import { displayValue, fieldLabel, personLabel } from "./activity";
 import type { PeopleMap } from "./people";
 
 function formatDate(ms: number): string {
@@ -420,7 +420,7 @@ export function CommentsPanel({
                       <span key={i}>
                         {i > 0 ? ", " : ""}
                         set <span className="timeline-field">{fieldLabel(change.fieldName)}</span> to{" "}
-                        <span className="timeline-value">{change.newValue || "nothing"}</span>
+                        <span className="timeline-value">{displayValue(change.newValue) || "nothing"}</span>
                       </span>
                     ))}
                     <span className="timeline-when" title={formatDate(item.at)}>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildTimeline } from "../src/components/bug-detail/timeline";
+import { displayValue } from "../src/components/bug-detail/activity";
 
 /**
  * Unit-level because the ordering rule is arithmetic, not layout.
@@ -73,5 +74,27 @@ describe("bug timeline", () => {
   it("leaves bookkeeping fields out of the conversation", () => {
     const items = buildTimeline([comment("c0", 1000, 0)], [activity(9000, "commentCount")]);
     expect(items.filter((i) => i.kind === "event")).toHaveLength(0);
+  });
+});
+
+describe("logged values", () => {
+  it("shows the filename, not the typed id it is stored with", () => {
+    // The server stores `id:filename` on purpose so the log still points at
+    // the file after a rename. The id is the durable half; it is not the
+    // readable half.
+    expect(displayValue("atta_0346OnsDKnCnUWHpzUByI3:upload-trace.log")).toBe("upload-trace.log");
+  });
+
+  it("leaves a value that merely contains a colon alone", () => {
+    // The stripping is anchored to a LEADING typed id. A URL or a whiteboard
+    // note has colons too, and losing everything before the first one would
+    // be a worse bug than the one this fixes.
+    expect(displayValue("https://example.com/spec")).toBe("https://example.com/spec");
+    expect(displayValue("blocked: waiting on infra")).toBe("blocked: waiting on infra");
+  });
+
+  it("treats an absent value as empty rather than printing null", () => {
+    expect(displayValue(null)).toBe("");
+    expect(displayValue(undefined)).toBe("");
   });
 });

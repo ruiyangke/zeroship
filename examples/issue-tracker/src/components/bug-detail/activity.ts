@@ -38,3 +38,22 @@ export function fieldLabel(field: string): string {
 export function personLabel(actorId: string, people: PeopleMap): string {
   return personName(actorId, people, "Someone");
 }
+
+/**
+ * A logged value, as a person should read it.
+ *
+ * Some values carry a typed id on purpose. An attachment change is stored as
+ * `atta_0346...:upload-trace.log` so the log still points at the file after a
+ * rename or a delete -- the id is the durable half and worth keeping. What
+ * nobody should read is the id: it rendered in the timeline as
+ * "set Attachment to atta_0346OnsDKnCnUWHpzUByI3:upload-trace.log", which is
+ * the raw-id leak this app has a whole spec class about.
+ *
+ * Only a LEADING typed id followed by a colon is stripped, so a value that
+ * merely contains a colon -- a URL, a whiteboard note -- survives intact.
+ */
+export function displayValue(value: string | null | undefined): string {
+  if (!value) return "";
+  const match = /^[a-z]{3,6}_[0-9A-Za-z]{16,}:(.+)$/.exec(value);
+  return match ? match[1] : value;
+}

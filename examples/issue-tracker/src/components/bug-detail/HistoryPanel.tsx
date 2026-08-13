@@ -8,13 +8,13 @@ import { Avatar } from "@zeroship/ui";
 import { EmptyState } from "../StateViews";
 import type { Activity } from "../types";
 import { personName, type PeopleMap } from "./people";
-import { fieldLabel } from "./activity";
+import { displayValue, fieldLabel } from "./activity";
 
 function name(value: string | null | undefined, labels: Record<string, string>) {
   if (value === null || value === undefined || value === "") {
     return <span className="dim">unset</span>;
   }
-  return labels[value] ?? value;
+  return labels[value] ?? displayValue(value);
 }
 
 function formatDate(ms: number): string {

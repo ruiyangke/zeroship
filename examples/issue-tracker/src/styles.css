@@ -1160,3 +1160,31 @@ fieldset.bug-detail-extras { display: grid; }
 /* While editing, the control takes the value column and the row gives it room. */
 .rail-choice.is-editing { grid-template-columns: 7.5rem minmax(0, 1fr); row-gap: 0.35rem; }
 .rail-choice.is-editing > button { grid-column: 2; opacity: 1; justify-self: start; }
+
+/* The last two boxes on the page.
+   A file entry framed inside a band that no longer frames anything, and the
+   rail's assignee/move blocks still laid out as headed sub-groups while every
+   property beside them is a single line. Both now follow the page. */
+.attachment {
+  border: 0;
+  border-radius: 0;
+  padding: 0.35rem 0;
+}
+.attachment + .attachment { border-block-start: 1px solid var(--line); }
+/* Assignee and Move read as rail rows: label, value, action. */
+.fields-panel .field-block-head {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-block-size: 1.9rem;
+}
+.fields-panel .field-block-head > button { justify-self: end; opacity: 0; transition: opacity 0.12s ease; }
+.fields-panel .field-block:hover .field-block-head > button,
+.fields-panel .field-block:focus-within .field-block-head > button { opacity: 1; }
+@media (hover: none) { .fields-panel .field-block-head > button { opacity: 1; } }
+
+/* An action row in the rail is a single control, not a label with a hidden
+   button beside it. */
+.fields-panel .field-block-head.is-action { display: block; min-block-size: 0; }
+.fields-panel .field-block-head.is-action > button { opacity: 1; }

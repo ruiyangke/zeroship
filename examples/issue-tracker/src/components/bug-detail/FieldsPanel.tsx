@@ -149,8 +149,11 @@ function MoveControl({
 
   return (
     <div className="field-block">
-      <div className="field-block-head">
-        <span className="field-label">Move</span>
+      {/* No label. Every other rail line is "property: value"; this one had
+          no value to state, so hiding its button until hover left the word
+          "Move" sitting alone like a field whose contents had gone missing.
+          It is an action, and it is written as one. */}
+      <div className="field-block-head is-action">
         <Button variant="gray" size="small" onClick={() => setOpen((v) => !v)}>
           {/* Short enough to fit the rail. The full sentence ran past the
               column edge, which is how a rail says "this control does not
