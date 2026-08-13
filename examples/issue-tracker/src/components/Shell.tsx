@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { AppShell, Badge, Button, Cluster, Stack } from "@zeroship/ui";
 
 import type { RouteName } from "../App";
-import { UnreadBadge, UserChip } from "./Nav";
+import { UnreadBadge, UserChip } from "./SessionChips";
 import type { AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
 

@@ -1,16 +1,14 @@
+// The two session chips the app shell header renders: who you are, and how
+// many unread notifications you have.
+//
+// This file used to hold the horizontal Nav as well. AppShell's sidebar rail
+// replaced it and the component stayed behind, exported and rendered nowhere
+// -- the same orphan QuickSearchBox became. Navigation lives in Shell.tsx.
 import { useEffect, useState } from "react";
 import { unreadNotificationCount } from "../api";
-import type { RouteName } from "../App";
 import { errorMessage, isUnauthenticated, toPromise, type AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
 
-const LINKS: { route: RouteName; label: string; href: string }[] = [
-  { route: "bugs", label: "Bugs", href: "#/bugs" },
-  { route: "new-bug", label: "New bug", href: "#/bugs/new" },
-  { route: "dashboard", label: "My dashboard", href: "#/dashboard" },
-  { route: "products", label: "Products", href: "#/products" },
-  { route: "reports", label: "Reports", href: "#/reports" },
-];
 
 export function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) {
   if (userState.status === "loading") {
@@ -58,34 +56,4 @@ export function UnreadBadge({ signedIn }: { signedIn: boolean }) {
 
   if (count === null || count === 0) return null;
   return <span className="unread-badge">{count}</span>;
-}
-
-export function Nav({
-  route,
-  userState,
-}: {
-  route: RouteName;
-  userState: AsyncState<CurrentUser>;
-}) {
-  const signedIn = userState.status === "ready";
-  return (
-    <header className="nav">
-      <a className="brand" href="#/bugs">
-        Issue Tracker
-      </a>
-      <nav className="nav-links">
-        {LINKS.map((link) => (
-          <a
-            key={link.route}
-            href={link.href}
-            className={route === link.route ? "active" : undefined}
-          >
-            {link.label}
-            {link.route === "dashboard" ? <UnreadBadge signedIn={signedIn} /> : null}
-          </a>
-        ))}
-      </nav>
-      <UserChip userState={userState} />
-    </header>
-  );
 }

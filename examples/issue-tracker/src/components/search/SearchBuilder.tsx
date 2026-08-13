@@ -1,3 +1,10 @@
+// The structured field builder and saved searches, rendered as a modal over
+// the bug list.
+//
+// The QuickSearch box that used to live beside them is gone: its shorthand is
+// parsed in the list's own search input now, so the feature is reachable
+// without a second box. Leaving the component here exported and unrendered is
+// how it became unreachable in the first place.
 import { useState } from "react";
 import { Button, Input, PageHeader, Select } from "@zeroship/ui";
 import {
@@ -59,71 +66,6 @@ type WhereNode =
 let conditionSeq = 0;
 function newCondition(): Condition {
   return { id: ++conditionSeq, field: "summary", operator: "contains", value: "" };
-}
-
-export function QuickSearchBox() {
-  const [text, setText] = useState("");
-  const [result, setResult] = useState<
-    | { status: "idle" }
-    | { status: "loading" }
-    | { status: "error"; error: unknown }
-    | { status: "ready"; data: Awaited<ReturnType<typeof quickSearch>> }
-  >({ status: "idle" });
-
-  const run = async () => {
-    if (!text.trim()) return;
-    setResult({ status: "loading" });
-    try {
-      const data = await quickSearch({ text: text.trim(), limit: 50 });
-      setResult({ status: "ready", data });
-    } catch (error) {
-      setResult({ status: "error", error });
-    }
-  };
-
-  return (
-    <section className="quicksearch">
-      <h2>QuickSearch</h2>
-      <p className="state-hint small">
-        e.g. <code>P1 @alice comp:parser</code> -- priority, assignee, and component shorthand in one box.
-      </p>
-      <form
-        className="inline-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void run();
-        }}
-      >
-        <Input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="P1 @alice comp:parser"
-          aria-label="QuickSearch"
-        />
-        <Button type="submit" variant="filled" size="small">
-          Search
-        </Button>
-      </form>
-      {result.status === "loading" ? <Loading label="Searching..." /> : null}
-      {result.status === "error" ? <ErrorState error={result.error} onRetry={run} /> : null}
-      {result.status === "ready" ? (
-        <>
-          <div className="quicksearch-clauses">
-            {result.data.clauses.map((clause, i) => (
-              <span key={i} className="chip">
-                {clause.field}: {clause.value}
-              </span>
-            ))}
-          </div>
-          {result.data.bugs.length === 0 ? (
-            <p className="state-hint small">No bugs match.</p>
-          ) : (
-            <BugResultsTable bugs={result.data.bugs} columns={RESULT_COLUMNS} />
-          )}
-        </>
-      ) : null}
-    </section>
-  );
 }
 
 function conditionsToWhere(conditions: Condition[]): WhereNode {
