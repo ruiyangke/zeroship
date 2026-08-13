@@ -110,8 +110,8 @@ be set, which is what made the four `flags.*` procedures unreachable)
 `cc.add` `cc.remove` `cc.list` `cc.listMine` (the bugs I am CC'd on)
 
 ### Access control
-`groups.create` `groups.list` `groups.members` `groups.addMember`
-`groups.removeMember`
+`groups.create` `groups.delete` `groups.list` `groups.members`
+`groups.addMember` `groups.removeMember`
 `products.restrict` `products.unrestrict` (product-level visibility)
 `bugs.restrict` `bugs.unrestrict` (Bugzilla's bug_group_map: a confidential
 bug inside an otherwise readable product)
