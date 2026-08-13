@@ -1,0 +1,11 @@
+error: no rules expected `name`
+ --> tests/ui/declared_env_name_must_be_literal.rs
+  |
+  |     let _ = zeroship_core::declared_env!(external, name, FixtureControlConfigConsumer);
+  |                                                    ^^^^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$name:literal`
+ --> $WORKSPACE/crates/core/src/config/declared.rs
+  |
+  |     ($class:ident, $name:literal, $consumer:path $(,)?) => {{
+  |                    ^^^^^^^^^^^^^

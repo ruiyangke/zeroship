@@ -15,7 +15,7 @@
 //! `--storage-root` is gone; the worker / CLI parse `--storage-url` once and
 //! construct the matching `Backend` behind `StoragePlugin`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::backend::{Backend, LocalFs};
@@ -162,7 +162,7 @@ mod tests {
     fn absolute_path_is_local() {
         let c = StorageBackendConfig::parse("/var/lib/zeroship/storage").unwrap();
         assert!(
-            matches!(c, StorageBackendConfig::Local(p) if p == Path::new("/var/lib/zeroship/storage"))
+            matches!(c, StorageBackendConfig::Local(p) if p == std::path::Path::new("/var/lib/zeroship/storage"))
         );
     }
 
