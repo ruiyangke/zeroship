@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# The configuration-name contract, as one CI-blocking gate.
+#
+# WHAT IT CHECKS, and where each half comes from:
+#
+#   1 cargo-metadata     every workspace bin target is a registered platform
+#                        binary or an explicitly classified non-platform one
+#   2 compiled contract  the six linked ConfigSpec registries have no colliding
+#                        projection, no declared-but-unread source and no
+#                        undeclared reader (crates/config-contract/src/contract.rs)
+#   3 THE AUDIT          the syn source extraction re-derives every projection
+#                        with its own parser and its own transforms, and the two
+#                        sets must be equal in BOTH directions
+#   4 the reference      docs/reference/env-vars.md's generated region equals a
+#                        fresh render of the compiled contract
+#   5 raw environment    no undeclared std::env read outside the planted fixtures,
+#                        AND the planted fixtures are still detected
+#   6 Compose            every ZEROSHIP_* variable a platform service sets is a
+#                        name that exact binary declares
+#   7 ops TOML           every leaf in deploy/ops/*.toml is a generated overlay
+#                        path with a real consumer
+#
+# WHY THE EXPECTED SETS ARE NOT IN THIS FILE. Checks 6 and 7 join against
+# `zeroship-config-contract contract`, which prints the COMPILED registry. A
+# shell gate carrying its own list of names is satisfiable by editing the list,
+# and this repository has been burned by that shape before (the [[inject]]
+# ceilings, the AGENTS.md command index). The only names written here are the
+# non-zeroship ambient inputs in AMBIENT_COMPOSE_KEYS, which no registry can
+# produce and which are listed with a reason each.
+#
+# WHAT IT DOES NOT CHECK. The Compose alias-equality rule of the proposal's
+# Section 4.3 - that a container value which is exactly one interpolation must
+# satisfy LEFT == RIGHT - is NOT enforced. Measured 2026-08-13: eight pairs in
+# deploy/compose/docker-compose.yml violate it (CONTROL_DATABASE_URL ->
+# ZEROSHIP_CONTROL_DATABASE_URL and seven siblings), so arming it would fail the
+# first run. See the "Gates that are NOT armed" section of
+# docs/reference/env-vars.md. It also cannot see a variable that exists only in
+# an operator's host shell.
+#
+# Run `tests/config_name_alignment_gate.sh --self-test` to prove checks 6 and 7
+# still FAIL on a planted violation. A gate that accepts everything and a gate
+# that is broken print the same thing.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+COMPOSE="deploy/compose/docker-compose.yml"
+PLATFORM_IMAGE="zeroship-platform:dev"
+
+PASS=0
+FAIL=0
+pass() { PASS=$((PASS + 1)); echo "PASS: $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
+
+# Non-zeroship variables a platform service is allowed to carry. Each is an
+# EXTERNAL or ambient input with no ConfigSpec by construction, so the registry
+# cannot produce it and a reason has to be written down instead.
+AMBIENT_COMPOSE_KEYS="
+SANDBOX_URL      control reaches the extracted zeroship-sandbox project over HTTP
+SANDBOX_TOKEN    the same, its bearer
+OPENAI_API_KEY   forwarded to creator apps; the platform itself does not read it
+POSTGRES_DB      the postgres image's own variable
+POSTGRES_PASSWORD the postgres image's own variable
+POSTGRES_USER    the postgres image's own variable
+"
+
+# Overlay leaves that are file-and-default ONLY by design, so they have no
+# ConfigSpec to join against. Each needs a reason, because the difference
+# between "deliberately outside the contract" and "never converted" is invisible
+# from the TOML alone.
+#
+# Kept as short as it is: two entries were REMOVED from this list rather than
+# added to it when the check first ran. `[gateway] broker_secret` configured
+# nothing (the gateway reads a PATH) and `ZEROSHIP_CONTROL_URL` on the control
+# service was read by no code in crates/control/. Both were deleted; see
+# crates/core/src/config/file.rs and deploy/compose/docker-compose.yml.
+FILE_ONLY_OVERLAY_LEAVES="
+auth.trusted_oauth_clients  file-and-default only: no flag and no env by design (crates/core/src/config/file.rs)
+"
+
+TMP="$(mktemp -d -t zeroship-config-gate-XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------------------
+# Extractors. Pure text in, text out; no docker, no network.
+# ---------------------------------------------------------------------------
+
+# Emit `service<TAB>binary<TAB>KEY` for every explicit environment variable a
+# service using the platform image sets. The binary is taken from the service's
+# own command, so there is no service-name-to-binary table to keep in step.
+compose_service_env() {
+    awk -v image="$PLATFORM_IMAGE" '
+        /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ {
+            svc = $1; sub(/:$/, "", svc); incmd = 0; inenv = 0; next
+        }
+        svc == "" { next }
+        /^    image:/ { img[svc] = $2; next }
+        /^    command:/ { incmd = 1; inenv = 0; next }
+        /^    environment:/ { inenv = 1; incmd = 0; next }
+        /^    [a-zA-Z_]+:/ { incmd = 0; inenv = 0; next }
+        incmd && match($0, /zeroship-[a-z-]+/) {
+            if (!(svc in bin)) bin[svc] = substr($0, RSTART, RLENGTH)
+            next
+        }
+        inenv && match($0, /^      -?[[:space:]]*[A-Z][A-Z0-9_]*/) {
+            key = substr($0, RSTART, RLENGTH)
+            gsub(/[ -]/, "", key)
+            n = ++count[svc]
+            keys[svc, n] = key
+            next
+        }
+        END {
+            for (s in img) {
+                if (img[s] != image) continue
+                b = (s in bin) ? bin[s] : "-"
+                for (i = 1; i <= count[s]; i++) print s "\t" b "\t" keys[s, i]
+            }
+        }
+    ' "$1"
+}
+
+# Emit every `section.leaf` in a TOML file, comments and blanks discarded.
+toml_leaves() {
+    awk '
+        { sub(/[[:space:]]*#.*$/, "") }
+        /^[[:space:]]*$/ { next }
+        /^\[/ { sec = $0; gsub(/[][[:space:]]/, "", sec); next }
+        /^[a-z_][a-z_0-9]*[[:space:]]*=/ {
+            k = $1; sub(/=.*/, "", k); gsub(/[[:space:]]/, "", k)
+            print (sec == "" ? k : sec "." k)
+        }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# The checks
+# ---------------------------------------------------------------------------
+
+check_compose() {
+    local compose="$1" label="$2" contract="$3"
+    local rows services=0 bad=0 checked=0
+    rows="$(compose_service_env "$compose")"
+    if [ -z "$rows" ]; then
+        fail "$label: extracted zero environment variables from $compose"
+        return 1
+    fi
+    services="$(echo "$rows" | cut -f1 | sort -u | wc -l)"
+    if [ "$services" -lt 5 ]; then
+        fail "$label: only $services platform services found (expected at least 5);"
+        echo "      the extraction stopped matching, so a clean result would mean nothing."
+        return 1
+    fi
+    while IFS=$'\t' read -r svc bin key; do
+        [ -n "$key" ] || continue
+        case "$key" in
+            ZEROSHIP_*) ;;
+            *)
+                if echo "$AMBIENT_COMPOSE_KEYS" | grep -q "^$key "; then
+                    continue
+                fi
+                echo "  $svc sets $key, which is neither a zeroship name nor a listed ambient input"
+                bad=$((bad + 1))
+                continue
+                ;;
+        esac
+        checked=$((checked + 1))
+        if [ "$bin" = "-" ]; then
+            echo "  $svc uses the platform image but names no zeroship binary in its command"
+            bad=$((bad + 1))
+            continue
+        fi
+        if ! awk -F'\t' -v b="$bin" -v e="$key" '$1==b && $5==e {found=1} END{exit !found}' "$contract"; then
+            echo "  $svc sets $key, which $bin does not declare"
+            bad=$((bad + 1))
+        fi
+    done <<<"$rows"
+    if [ "$checked" -lt 20 ]; then
+        fail "$label: only $checked zeroship variables checked across $services services"
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad undeclared variable(s) across $services platform services"
+        return 1
+    fi
+    pass "$label: $checked zeroship variables on $services platform services are all declared by the binary that reads them"
+    return 0
+}
+
+check_ops_toml() {
+    local file="$1" label="$2" contract="$3"
+    local bad=0 checked=0 leaf
+    while read -r leaf; do
+        [ -n "$leaf" ] || continue
+        checked=$((checked + 1))
+        if echo "$FILE_ONLY_OVERLAY_LEAVES" | grep -q "^$leaf "; then
+            continue
+        fi
+        if ! awk -F'\t' -v t="$leaf" '$6==t {found=1} END{exit !found}' "$contract"; then
+            echo "  $file carries $leaf, which is not a generated overlay path"
+            bad=$((bad + 1))
+        fi
+    done < <(toml_leaves "$file")
+    if [ "$checked" -eq 0 ]; then
+        fail "$label: extracted zero leaves from $file"
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad leaf/leaves in $file are not overlay paths"
+        return 1
+    fi
+    pass "$label: all $checked leaves in $file are generated overlay paths"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Drive
+# ---------------------------------------------------------------------------
+
+echo "=== Build the compiled checker ==="
+if cargo build -q -p zeroship-config-contract 2>"$TMP/build.log"; then
+    pass "built zeroship-config-contract"
+else
+    fail "built zeroship-config-contract"
+    sed 's/^/  /' "$TMP/build.log"
+    exit 1
+fi
+BIN="$ROOT/target/debug/zeroship-config-contract"
+
+if ! "$BIN" contract >"$TMP/contract.tsv" 2>"$TMP/contract.err"; then
+    fail "dumped the compiled contract"
+    sed 's/^/  /' "$TMP/contract.err"
+    exit 1
+fi
+CONTRACT_ROWS=$(($(wc -l <"$TMP/contract.tsv") - 1))
+if [ "$CONTRACT_ROWS" -lt 150 ]; then
+    fail "the compiled contract has only $CONTRACT_ROWS projections; every check below joins"
+    echo "      against it, so a short dump would make all of them pass on nothing."
+    exit 1
+fi
+pass "compiled contract dumped: $CONTRACT_ROWS projections"
+
+if [ "${1:-}" = "--self-test" ]; then
+    echo ""
+    echo "=== Self-test: the text checks must FAIL on a planted violation ==="
+    mkdir -p "$TMP/self"
+    sed 's/^      ZEROSHIP_CONTROL_KEY:/      ZEROSHIP_CONTROL_NOT_A_SETTING:/' \
+        "$COMPOSE" >"$TMP/self/compose.yml"
+    if ! grep -q ZEROSHIP_CONTROL_NOT_A_SETTING "$TMP/self/compose.yml"; then
+        fail "self-test: the compose mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose "$TMP/self/compose.yml" "compose self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: an undeclared ZEROSHIP_* compose variable is rejected"
+    else
+        fail "self-test: the compose check PASSED a variable no binary declares"
+    fi
+
+    printf '[control]\nnot_a_real_setting = 1\n' >"$TMP/self/ops.toml"
+    before=$FAIL
+    check_ops_toml "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: an overlay leaf outside the contract is rejected"
+    else
+        fail "self-test: the ops-toml check PASSED a leaf no declaration produces"
+    fi
+
+    # And the one-variable partner: the SAME checks on the real inputs must pass,
+    # or the mutations above proved only that the checks reject everything.
+    check_compose "$COMPOSE" "compose control" "$TMP/contract.tsv"
+    check_ops_toml "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
+
+    echo ""
+    echo "Self-test summary: $PASS passed, $FAIL failed"
+    [ "$FAIL" -eq 0 ] || exit 1
+    exit 0
+fi
+
+echo ""
+echo "=== 1. Every workspace bin target is classified ==="
+if "$BIN" check-metadata >"$TMP/meta.log" 2>&1; then
+    pass "$(cat "$TMP/meta.log")"
+else
+    fail "cargo-metadata classification"
+    sed 's/^/  /' "$TMP/meta.log"
+fi
+
+echo ""
+echo "=== 2+3. Compiled contract, and the source extraction that must equal it ==="
+if "$BIN" audit >"$TMP/audit.log" 2>&1; then
+    pass "$(tail -1 "$TMP/audit.log")"
+else
+    fail "compiled contract vs source extraction"
+    sed 's/^/  /' "$TMP/audit.log"
+fi
+
+echo ""
+echo "=== 4. docs/reference/env-vars.md is a fresh render ==="
+if "$BIN" env-vars-doc --check >"$TMP/doc.log" 2>&1; then
+    pass "$(tail -1 "$TMP/doc.log")"
+else
+    fail "the generated region of docs/reference/env-vars.md is stale"
+    sed 's/^/  /' "$TMP/doc.log"
+fi
+
+echo ""
+echo "=== 5. No undeclared raw environment read ==="
+if "$BIN" raw-env --gate >/dev/null 2>"$TMP/rawenv.log"; then
+    pass "$(tail -1 "$TMP/rawenv.log")"
+else
+    fail "raw environment access"
+    sed 's/^/  /' "$TMP/rawenv.log"
+fi
+
+echo ""
+echo "=== 6. Compose sets only variables the receiving binary declares ==="
+check_compose "$COMPOSE" "compose" "$TMP/contract.tsv"
+
+echo ""
+echo "=== 7. Every ops-TOML leaf is a generated overlay path ==="
+for file in deploy/ops/zeroship.toml deploy/ops/zeroship.example.toml; do
+    [ -f "$file" ] || { fail "expected $file to exist"; continue; }
+    check_ops_toml "$file" "ops-toml" "$TMP/contract.tsv"
+done
+
+echo ""
+echo "============================================"
+echo "Summary: $PASS passed, $FAIL failed"
+echo "============================================"
+
+[ "$FAIL" -eq 0 ] || exit 1
+
+# ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
+# matching, and this catches the case where several do at once. MEASURED on a
+# clean tree 2026-08-13: 9.
+CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-9}"
+if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
+    echo "" >&2
+    echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2
+    echo "  Nothing FAILED, so this is not a broken check - it is MISSING ones." >&2
+    exit 1
+fi

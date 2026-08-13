@@ -305,7 +305,11 @@ fn region(path: &str, document: &str) -> Result<(usize, usize), DocError> {
 /// region cannot be located, and [`DocError::EmptyRender`] when the contract
 /// produced nothing to write.
 pub fn splice(path: &str, document: &str, generated: &str) -> Result<String, DocError> {
-    if generated.lines().count() < 4 {
+    // Count TABLE ROWS, not lines. The region's markers, do-not-edit note,
+    // summary sentence and column headers are emitted unconditionally, so a
+    // line count is satisfied by a render carrying no settings at all - which
+    // is the exact state that would make every later `check` pass on nothing.
+    if !generated.lines().any(|line| line.starts_with("| `")) {
         return Err(DocError::EmptyRender);
     }
     let (begin, end) = region(path, document)?;
@@ -444,10 +448,16 @@ mod tests {
 
     #[test]
     fn an_empty_contract_refuses_to_render_a_passing_document() {
-        // The vacuity case: with zero specs the region is a heading and two
-        // markers, and splicing it into a document would make every later
-        // `check` pass while documenting nothing.
+        // The vacuity case, and the reason the guard counts table rows rather
+        // than lines: with zero specs the region still carries its markers, its
+        // do-not-edit note, a summary sentence and no rows at all. Splicing
+        // that in would make every later `check` pass while documenting
+        // nothing. A line-count guard passed this and had to be replaced.
         let generated = render(&collect(&[]));
+        assert!(
+            generated.lines().count() > 10,
+            "an empty render is not SHORT, which is why counting lines missed it"
+        );
         assert_eq!(
             splice("doc.md", "x", &generated),
             Err(DocError::EmptyRender)

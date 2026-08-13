@@ -190,8 +190,18 @@ pub struct GatewaySection {
     pub database_url: Option<String>,
     /// HMAC key for short-lived OIDC stash cookies.
     pub stash_signing_key: Option<String>,
-    /// Shared platform broker master secret. Must be byte-identical to auth's.
-    pub broker_secret: Option<String>,
+    /// Broker master-secret source FILE, byte-identical to auth's.
+    ///
+    /// This section carried `broker_secret: Option<String>` instead until
+    /// 2026-08-13, which was wrong in both directions and neither half was
+    /// visible from here. Nothing read `broker_secret`, so an operator who set
+    /// it configured nothing; and the gateway's actual declaration is
+    /// `gateway.broker_secret_file`, which `deny_unknown_fields` REJECTED,
+    /// so the overlay tier the contract advertises could not be used at all.
+    /// Found by the generated-TOML-path check in `zeroship-config-contract
+    /// audit`, which now requires every `ConfigSpec` overlay path to be a leaf
+    /// this schema accepts.
+    pub broker_secret_file: Option<std::path::PathBuf>,
     /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
     /// See `ControlSection::signing_key_file` for why this stays a path.
     pub signing_key_file: Option<std::path::PathBuf>,
