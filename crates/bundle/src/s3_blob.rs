@@ -534,6 +534,19 @@ impl BlobStore for S3BlobStore {
             .is_some())
     }
 
+    /// HEAD a key that is never written. A 404 is the EXPECTED answer and
+    /// means the endpoint answered, the bucket exists and the credentials
+    /// signed - everything a put or get needs. Only a transport, DNS, or
+    /// auth failure surfaces as `Err`, and no object is read or written.
+    async fn probe(&self) -> Result<(), BlobError> {
+        let key = Self::blob_key(&"0".repeat(64));
+        self.client
+            .head_object(&key)
+            .await
+            .map(|_| ())
+            .map_err(|e| map_s3(&key, e))
+    }
+
     async fn get_blob_to_file(
         &self,
         hash: &str,

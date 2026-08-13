@@ -88,6 +88,19 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
 
     async fn has_blob(&self, hash: &str) -> Result<bool, BlobError>;
 
+    /// Cheapest call that distinguishes "this backend is reachable and usable"
+    /// from "it is not". Backs the worker's and control plane's `/readyz`.
+    ///
+    /// There is deliberately NO default implementation. A default `Ok(())`
+    /// would make every future backend's readiness probe vacuously green while
+    /// still reading like a check, which is the failure mode readiness
+    /// endpoints exist to avoid.
+    ///
+    /// `has_blob` is NOT a substitute: a local store answers `Ok(false)` for a
+    /// missing blob and cannot tell that apart from a blob root that has been
+    /// unmounted out from under it.
+    async fn probe(&self) -> Result<(), BlobError>;
+
     /// Stream a blob by hash into an already-open temp file while hashing,
     /// returning the verified byte count. This is the gateway's hot-path
     /// refill primitive: the caller (`DiskBlobCache::reserve_temp`) owns an
@@ -385,6 +398,22 @@ impl BlobStore for LocalDiskBlobStore {
             Ok(m) => Ok(m.is_file()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(BlobError::Io(e)),
+        }
+    }
+
+    /// Stat the `blobs/` directory `new()` created. This catches the failure
+    /// this backend actually has - the blob root deleted, unmounted, or on a
+    /// filesystem that has gone read-only/EIO - and costs one stat.
+    async fn probe(&self) -> Result<(), BlobError> {
+        let dir = self.root.join("blobs");
+        let meta = compio::fs::metadata(&dir).await.map_err(BlobError::Io)?;
+        if meta.is_dir() {
+            Ok(())
+        } else {
+            Err(BlobError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "blob root is not a directory",
+            )))
         }
     }
 
