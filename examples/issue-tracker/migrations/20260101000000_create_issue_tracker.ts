@@ -215,10 +215,9 @@ export default {
         // Counters are integers. They were doubles.
         voteCount: t.int().notNull().default(0),
         commentCount: t.int().notNull().default(0),
-        // Bugzilla's time tracking is a SET: estimated / actual / remaining /
-        // deadline. Shipping only actual+deadline was half a feature.
-        estimatedTimeMinutes: t.int().notNull().default(0),
-        remainingTimeMinutes: t.int().notNull().default(0),
+        // A date to finish BY -- not elapsed effort. Bugzilla's time
+        // tracking (estimated / actual / remaining) is deliberately absent:
+        // see the note on the comments table.
         deadline: t.timestamp(),
         // Without this, reports.timeToResolve and reports.trend can only be
         // answered by mining `activities` for fieldName = 'status' -- a full
@@ -257,6 +256,14 @@ export default {
     });
 
     // commentNumber 0 is the original description, exactly as in Bugzilla.
+    //
+    // No workTimeMinutes, and no estimated/remaining on bugs. Bugzilla logs
+    // effort per comment and reads it per bug, and only the whole set means
+    // anything: minutes logged against one comment answers a question nobody
+    // asks. We shipped the logging without the totals, so the composer spent
+    // a full row collecting a number that was never added up. Removed rather
+    // than completed -- time tracking is a niche most trackers have dropped,
+    // and a dead control teaches the wrong thing in an example app.
     table("comments").create({
       columns: {
         bugId: t.text().notNull().references("bugs", "id"),
@@ -264,7 +271,6 @@ export default {
         body: t.text().notNull(),
         commentNumber: t.int().notNull().default(0),
         isPrivate: t.boolean().notNull().default(false),
-        workTimeMinutes: t.int().notNull().default(0),
       },
       indexes: [
         // Also the ordering index for comments.list, and the backstop for the

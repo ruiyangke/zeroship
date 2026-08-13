@@ -85,8 +85,6 @@ const schema = {
     isConfirmed: t.boolean().required().default(false),
     voteCount: t.number().required().default(0),
     commentCount: t.number().required().default(0),
-    estimatedTimeMinutes: t.number().required().default(0),
-    remainingTimeMinutes: t.number().required().default(0),
     deadline: t.timestamp(),
     resolvedAt: t.timestamp(),
   }).index("bugs_product_idx", ["productId"]).uniqueIndex("bugs_product_number_uniq", ["productId","number"]).index("bugs_component_idx", ["componentId"]).index("bugs_status_idx", ["status"]).index("bugs_assignee_idx", ["assigneeId"]).index("bugs_reporter_idx", ["reporterId"]).index("bugs_duplicate_of_idx", ["duplicateOfId"]).index("bugs_resolved_at_idx", ["resolvedAt"]).uniqueIndex("bugs_alias_uniq", ["alias"]).index("bugs_deleted_at_idx", ["deleted_at"]).index("bugs_updated_at_idx", ["updated_at"]).index("bugs_created_by_idx", ["created_by"]),
@@ -96,7 +94,6 @@ const schema = {
     body: t.string().required(),
     commentNumber: t.number().required().default(0),
     isPrivate: t.boolean().required().default(false),
-    workTimeMinutes: t.number().required().default(0),
   }).uniqueIndex("comments_bug_number_uniq", ["bugId","commentNumber"]).index("comments_deleted_at_idx", ["deleted_at"]).index("comments_updated_at_idx", ["updated_at"]).index("comments_created_by_idx", ["created_by"]),
   components: defineSchema({
     productId: t.string().required(),

@@ -23,13 +23,12 @@ const FIELD_LABELS: Record<string, string> = {
   isConfirmed: "Confirmed",
   voteCount: "Votes",
   commentCount: "Comments",
-  workTimeMinutes: "Work time",
 };
 
 export function fieldLabel(field: string): string {
   if (FIELD_LABELS[field]) return FIELD_LABELS[field];
-  // camelCase and snake_case both become words, so "workTimeMinutes" reads as
-  // "Work time minutes" rather than as a property name.
+  // camelCase and snake_case both become words, so "resolvedAt" reads as
+  // "Resolved at" rather than as a property name.
   const spaced = field.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }

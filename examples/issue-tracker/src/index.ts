@@ -129,8 +129,6 @@ type BugRow = SystemRow & {
   isConfirmed: boolean;
   voteCount: number;
   commentCount: number;
-  estimatedTimeMinutes?: number;
-  remainingTimeMinutes?: number;
   deadline?: number | null;
   // Stamped by bugs.resolve / bugs.markDuplicate and cleared by bugs.reopen.
   // reports.timeToResolve reads this instead of mining the activities table
@@ -144,7 +142,6 @@ type CommentRow = SystemRow & {
   body: string;
   commentNumber: number;
   isPrivate: boolean;
-  workTimeMinutes: number;
 };
 
 type AttachmentRow = SystemRow & {
@@ -1174,7 +1171,6 @@ export const createBug = mutation(
         body: cleanDescription,
         commentNumber: 0,
         isPrivate: false,
-        workTimeMinutes: 0,
       });
       await recordChanges(
         tx.activities,
@@ -1808,19 +1804,14 @@ export const addComment = mutation(
     bugId,
     body,
     isPrivate = false,
-    workTimeMinutes = 0,
   }: {
     bugId: string;
     body: string;
     isPrivate?: boolean;
-    workTimeMinutes?: number;
   }) => {
     const actor = await requireActor();
     const bug = await getRequired(db.bugs, bugId, "Bug");
     await assertBugAccessible(bug, actor);
-    if (!Number.isFinite(workTimeMinutes) || workTimeMinutes < 0) {
-      invalid("workTimeMinutes must be non-negative");
-    }
     const cleanBody = requireNonEmpty(body, "body");
 
     const result = await db.transaction(async (tx) => {
@@ -1836,7 +1827,6 @@ export const addComment = mutation(
         body: cleanBody,
         commentNumber,
         isPrivate,
-        workTimeMinutes,
       });
       await recordChanges(
         tx.activities,

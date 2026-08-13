@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Avatar, Button, Checkbox, Cluster, Field, NumberField, Tag } from "@zeroship/ui";
+import { Avatar, Button, Checkbox, Cluster, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { addComment, editComment, listAttachments, listComments, setCommentPrivate, uploadAttachment } from "../../api";
@@ -139,9 +139,6 @@ function CommentRow({
           {timeAgo(comment.created_at)}
         </span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
-        {comment.workTimeMinutes > 0 ? (
-          <span className="comment-worktime">{comment.workTimeMinutes}m logged</span>
-        ) : null}
         {/* The permalink the "#3" used to be. It was a bare label doing
             nothing; anchors already exist on the <li>, so it may as well be
             the thing you can copy. */}
@@ -224,7 +221,6 @@ function CommentRow({
 function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void }) {
   const [body, setBody] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
-  const [workTimeMinutes, setWorkTimeMinutes] = useState(0);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Named separately from the input so the chosen files can be listed back.
   // A bare file input shows one filename and silently hides the rest.
@@ -247,7 +243,7 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
     setBusy(true);
     setError(null);
     try {
-      const comment = await addComment({ bugId, body, isPrivate, workTimeMinutes });
+      const comment = await addComment({ bugId, body, isPrivate });
       // The comment first, then its files -- an attachment names the comment
       // it arrived with, so the comment has to exist to be named. If a file
       // fails here the comment still stands, which is the right way round:
@@ -263,7 +259,6 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
       }
       setBody("");
       setIsPrivate(false);
-      setWorkTimeMinutes(0);
       if (fileRef.current) fileRef.current.value = "";
       setFileNames([]);
       onAdded();
@@ -294,14 +289,6 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
           onCheckedChange={(next) => setIsPrivate(next === true)}
           label="Private"
         />
-        <Field orientation="horizontal">
-          <Field.Label>Work time (min)</Field.Label>
-          <NumberField
-            min={0}
-            value={workTimeMinutes}
-            onValueChange={(next) => setWorkTimeMinutes(next ?? 0)}
-          />
-        </Field>
         {/* hasText, not body.trim(). The body is HTML: clearing the editor
             leaves "<p></p>", which trims to a NON-empty string, so the button
             enabled itself while submit() -- which already guarded on hasText --

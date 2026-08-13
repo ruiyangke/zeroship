@@ -764,16 +764,6 @@
           "required": true,
           "default": 0
         },
-        "estimatedTimeMinutes": {
-          "type": "int",
-          "required": true,
-          "default": 0
-        },
-        "remainingTimeMinutes": {
-          "type": "int",
-          "required": true,
-          "default": 0
-        },
         "deadline": {
           "type": "date"
         },
@@ -920,11 +910,6 @@
           "type": "boolean",
           "required": true,
           "default": false
-        },
-        "workTimeMinutes": {
-          "type": "int",
-          "required": true,
-          "default": 0
         }
       },
       "options": {
