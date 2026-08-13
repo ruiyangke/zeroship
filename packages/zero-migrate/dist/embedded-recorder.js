@@ -2496,6 +2496,22 @@ function rejectUnknownKeys(args, accepted, what) {
     `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}`
   );
 }
+var RENAME_TABLE_KEYS = ["to", "ifExists", "schema"];
+var ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"];
+var DROP_COLUMN_KEYS = ["ifExists", "schema"];
+var RENAME_COLUMN_KEYS = ["to", "type", "schema"];
+var INDEX_ADD_KEYS = [
+  "on",
+  "unique",
+  "ifNotExists",
+  "schema",
+  "using",
+  "where",
+  "include",
+  "with",
+  "only",
+  "nullsNotDistinct"
+];
 var CREATE_TABLE_KEYS = [
   "columns",
   "options",
@@ -3011,6 +3027,7 @@ function recordDropConstraint(table2, name, args) {
   });
 }
 function recordCreateIndex(table2, name, args) {
+  rejectUnknownKeys(args, INDEX_ADD_KEYS, `table("${table2}").index("${name}").add(...)`);
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
   }
@@ -3519,6 +3536,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       return handle;
     },
     rename(args) {
+      rejectUnknownKeys(args, RENAME_TABLE_KEYS, `table("${name}").rename(...)`);
       requireString(args.to, "table(name).rename({ to })");
       recordRenameTable(name, args.to, {
         ifExists: args.ifExists,
@@ -3652,6 +3670,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       const id = registerSelector("column", col);
       return {
         add(args) {
+          rejectUnknownKeys(args, ADD_COLUMN_KEYS, `table("${name}").column("${col}").add(...)`);
           requireColumnDef(args.type, ".column(name).add({ type })");
           terminateSelector(id);
           recordAddColumn(name, col, args.type, {
@@ -3661,11 +3680,13 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         drop(args = {}) {
+          rejectUnknownKeys(args, DROP_COLUMN_KEYS, `table("${name}").column("${col}").drop(...)`);
           terminateSelector(id);
           recordDropColumn(name, col, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
           return handle;
         },
         rename(args) {
+          rejectUnknownKeys(args, RENAME_COLUMN_KEYS, `table("${name}").column("${col}").rename(...)`);
           requireString(args.to, ".column(name).rename({ to })");
           requireColumnDef(args.type, ".column(name).rename({ type })");
           terminateSelector(id);
