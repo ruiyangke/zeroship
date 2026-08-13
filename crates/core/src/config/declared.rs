@@ -721,7 +721,6 @@ macro_rules! declare_env_consumer {
 #[cfg(test)]
 mod tests {
     use super::{is_valid_env_name, DeclaredEnvKey, EnvClass};
-    use crate::declare_env_consumer;
 
     declare_env_consumer!(TestConsumer, target = "zeroship-core", scope = "core");
 
