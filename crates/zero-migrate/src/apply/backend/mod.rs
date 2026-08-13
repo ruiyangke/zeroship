@@ -838,7 +838,16 @@ pub trait MigrationBackend {
     /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — PG infrastructure
     ///   failures.
     /// - [`BaselineError::Backend`] — a non-PG (e.g. SQLite) backend's internal
-    ///   failure, mapped onto the dialect-neutral arm.
+    ///   failure, mapped onto the dialect-neutral arm. **MySQL also returns this
+    ///   arm to say the operation is UNSUPPORTED**, not that it failed:
+    ///   `"mysql backend: schema baseline/adoption is not supported on MySQL"`.
+    ///
+    /// SUPPORTED ON PostgreSQL AND SQLite ONLY. Every backend implements this
+    /// method because the trait requires it; MySQL's implementation is a refusal
+    /// stub, since adoption relies on the guard, advisory-lock and record-not-run
+    /// machinery that is PG-specific and has no MySQL equivalent. Reading the impl
+    /// list is therefore misleading — a trait impl existing is not the feature
+    /// working, and this one is three lines that always return `Err`.
     async fn baseline_one(
         &self,
         cfg: &ExecutorConfig,
