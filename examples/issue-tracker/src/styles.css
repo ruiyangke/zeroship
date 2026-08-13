@@ -571,7 +571,9 @@ tbody tr:hover { background: var(--surface-2); }
   flex-wrap: wrap;
 }
 .new-comment-row label,
-.new-comment-row .zs-field { margin: 0; }
+/* Positional, not by design-system class name: everything laid out in this
+   row loses its own vertical margin so the row stays on one baseline. */
+.new-comment-row > * { margin-block: 0; }
 
 /* The status block is a rail card like the others. It was a grey rounded
    panel matching nothing else on the page, which implied a grouping that was
@@ -669,3 +671,12 @@ tbody tr:hover { background: var(--surface-2); }
   font-size: 0.82rem;
   color: var(--ink-2);
 }
+
+/* The reports filters are LABELLED alike, and left to size themselves.
+   An earlier version of this pinned them to 14rem and 11rem so they would
+   look symmetrical. NumberField needs room for a decrement button, the value
+   and an increment button: at 11rem the increment button rendered 108px
+   outside its own field, so the "+" was unreachable. The widths differ
+   because the controls differ; that is not the defect. The defect was that
+   one had a visible label and the other did not. */
+.report-filters > * { flex: 0 0 auto; }

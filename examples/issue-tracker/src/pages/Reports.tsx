@@ -281,8 +281,14 @@ export function ReportsPage() {
       <PageHeader>
         <PageHeader.Title>Reports</PageHeader.Title>
       </PageHeader>
-      <div className="filter-bar">
-        <Select
+      {/* Both filters read the same way. The product picker carried only an
+          aria-label while "Window (days)" beside it showed a visible one, so
+          the bar had one labelled control and one bare box whose meaning you
+          inferred from its placeholder. */}
+      <div className="filter-bar report-filters">
+        <Field className="report-filter report-filter--product">
+          <Field.Label>Product</Field.Label>
+          <Select
           value={productId}
           onValueChange={(next) => setProductId(next ?? "")}
           placeholder="All products"
@@ -300,8 +306,9 @@ export function ReportsPage() {
                 {p.name}
               </Select.Item>
             ))}
-        </Select>
-        <Field>
+          </Select>
+        </Field>
+        <Field className="report-filter report-filter--window">
           <Field.Label>Window (days)</Field.Label>
           <NumberField
             min={1}
