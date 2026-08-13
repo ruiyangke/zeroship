@@ -958,6 +958,83 @@ async fn view_lifecycle() {
     .await;
 }
 
+/// A trigger and function lifecycle APPLIES cleanly - and this oracle cannot see
+/// either object.
+///
+/// Read the name of this test as a warning, not as coverage. It was written to
+/// add triggers to the fold==live oracle for the same reason views and constraint
+/// facets are here, and it passes - VACUOUSLY.
+///
+/// `snapshot_schema` builds the live side with
+///
+///     functions: BTreeMap::new(),
+///     policies:  BTreeMap::new(),
+///     triggers:  BTreeMap::new(),
+///
+/// hardcoded (`apply/drift.rs`), and `diff_snapshots` never compares those three
+/// maps. The FOLD does record the trigger (`fold.rs` `triggers.insert`), so if the
+/// comparison looked at them this test would fail on the difference. It passes,
+/// which is the proof that it does not look.
+///
+/// So what this scenario actually establishes is narrower than its shape suggests,
+/// and both halves are worth having:
+///
+///   * the APPLY path really does create a function, create a trigger with an
+///     ordered event set and a `WHEN` predicate, and drop the trigger, against
+///     live PostgreSQL, without error - that part is real;
+///   * the ORACLE is blind to triggers, functions and policies, so no scenario
+///     added here can ever measure them.
+///
+/// The second half matters beyond this file: the same `diff_snapshots` powers
+/// structural DRIFT DETECTION, so an out-of-band change to a trigger, a function,
+/// or an RLS policy is invisible to it. Dropping a trigger by hand produces no
+/// drift report.
+///
+/// If those three maps are ever populated and compared, this test starts failing
+/// on a genuine fold-vs-live difference, and that is the moment to turn it into
+/// the real round-trip scenario it looks like.
+#[compio::test]
+async fn trigger_lifecycle_applies_but_is_invisible_to_this_oracle() {
+    let source = r#"{
+      "ir_version": 1,
+      "name": "trigger_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"trigger_rows","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"payload","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createFunction","name":"trigger_rows_audit",
+         "returns":"trigger","language":"plpgsql",
+         "body":"BEGIN RETURN NEW; END;"},
+        {"op":"createTrigger","name":"trigger_rows_audit_trg","table":"trigger_rows",
+         "timing":"after","events":["insert","update"],"forEach":"row",
+         "action":{"kind":"executeFunction","name":"trigger_rows_audit"},
+         "when":{"node":"unaryOp","op":"isNotNull",
+                 "operand":{"node":"colRef","name":"payload","table":"new"}}},
+        {"op":"dropTrigger","name":"trigger_rows_audit_trg","table":"trigger_rows"}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "trigger lifecycle",
+        source,
+        &[
+            ("create table", 1),
+            ("create function", 2),
+            ("create trigger", 3),
+            ("drop trigger", 4),
+        ],
+        // `operator_charter` rather than `no_inject`: a function is a charter-gated
+        // vendor primitive, and under the default charter this scenario is refused
+        // at policy load with VENDOR_OP_DENIED - above the fold, before anything
+        // this file measures runs. That is the F457 trap, and it would have made
+        // the scenario look covered while never reaching the oracle.
+        support::operator_charter,
+    )
+    .await;
+}
+
 #[compio::test]
 async fn constraint_facet_lifecycle() {
     // Exercise the constraint facets `pg_get_constraintdef` spells and
