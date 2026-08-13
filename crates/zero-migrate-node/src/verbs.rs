@@ -270,16 +270,33 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     applied_by: &str,
 ) -> std::result::Result<ApplyReply, String> {
     let charter_refs = charter_layer_refs(charter_layers);
-    backend
-        .ensure_journal(cfg)
-        .await
-        .map_err(|error| error.to_string())?;
+    // The project lock comes FIRST, so it serializes the journal bootstrap too.
+    //
+    // Bootstrapping ahead of the lock left the one window nothing serialized: on a
+    // first deploy the journal namespace, its types, its table and its triggers do
+    // not exist yet, so two processes both found them absent and both tried to
+    // create them. PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there,
+    // and the loser surfaced a raw catalog error -- `duplicate key value violates
+    // unique constraint "pg_type_typname_nsp_index"`, `tuple concurrently
+    // updated`, or a trigger that "already exists" -- which reads like corruption
+    // but is only contention. Measured three times out of three before this order
+    // changed.
+    //
+    // Nothing in the acquisition needs the journal: it is an advisory lock keyed
+    // on the project id. Taking it first also means a failed acquisition no longer
+    // leaves journal objects behind for a deploy that never ran.
     backend
         .acquire_project_lock(cfg)
         .await
         .map_err(|error| format!("failed to acquire project lock: {error}"))?;
 
     let result = async {
+        // Inside the bracket on purpose: the lock is released after this block, so
+        // bootstrapping outside it would leak the lock whenever the bootstrap failed.
+        backend
+            .ensure_journal(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
         let snapshot = backend
             .snapshot_schema(cfg)
             .await
@@ -549,16 +566,33 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
     applied_by: &str,
 ) -> std::result::Result<RollbackReply, String> {
     let charter_refs = charter_layer_refs(charter_layers);
-    backend
-        .ensure_journal(cfg)
-        .await
-        .map_err(|error| error.to_string())?;
+    // The project lock comes FIRST, so it serializes the journal bootstrap too.
+    //
+    // Bootstrapping ahead of the lock left the one window nothing serialized: on a
+    // first deploy the journal namespace, its types, its table and its triggers do
+    // not exist yet, so two processes both found them absent and both tried to
+    // create them. PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there,
+    // and the loser surfaced a raw catalog error -- `duplicate key value violates
+    // unique constraint "pg_type_typname_nsp_index"`, `tuple concurrently
+    // updated`, or a trigger that "already exists" -- which reads like corruption
+    // but is only contention. Measured three times out of three before this order
+    // changed.
+    //
+    // Nothing in the acquisition needs the journal: it is an advisory lock keyed
+    // on the project id. Taking it first also means a failed acquisition no longer
+    // leaves journal objects behind for a deploy that never ran.
     backend
         .acquire_project_lock(cfg)
         .await
         .map_err(|error| format!("failed to acquire project lock: {error}"))?;
 
     let result = async {
+        // Inside the bracket on purpose: the lock is released after this block, so
+        // bootstrapping outside it would leak the lock whenever the bootstrap failed.
+        backend
+            .ensure_journal(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
         let snapshot = backend
             .snapshot_schema(cfg)
             .await

@@ -7,10 +7,11 @@
 // journaled twice, and the schema ends up exactly as one run would have left it.
 // The project lock does its job, and the first test asserts that.
 //
-// THE ROBUSTNESS PROPERTY DOES NOT, ON A FIRST DEPLOY. The journal bootstrap runs
-// BEFORE the project lock serialises anything, so two fresh processes race to
-// CREATE the journal namespace and its types. The loser surfaces PostgreSQL's own
-// catalog error:
+// THE ROBUSTNESS PROPERTY NOW HOLDS TOO, and the second test pins it. It did not
+// when this file was written: the journal bootstrap ran BEFORE the project lock
+// serialised anything, so two fresh processes raced to CREATE the journal
+// namespace and its types, and the loser surfaced PostgreSQL's own catalog
+// error:
 //
 //   duplicate key value violates unique constraint "pg_namespace_nspname_index"
 //   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
@@ -19,9 +20,21 @@
 //
 // None of those tells an operator what happened. They are benign contention -
 // re-running succeeds - but they read like corruption, and nothing in the CLI
-// output or the docs says otherwise. PostgreSQL's own `CREATE ... IF NOT EXISTS`
-// is racy in exactly this way, so tolerating these codes is the standard fix
-// rather than a novel one.
+// output or the docs said otherwise.
+//
+// The fix was not to tolerate those codes, and it needed no new lock. `verbs.rs`
+// bootstrapped the journal BEFORE acquiring the project lock, which left the one
+// window nothing serialized; the deploy verbs now take the lock first and
+// bootstrap inside it. Serializing needs no judgement about which catalog errors
+// are benign, and that judgement is what had kept the fix parked.
+//
+// The bootstrap moved INSIDE the lock bracket rather than merely after the
+// acquisition, because the release runs after that block - bootstrapping outside
+// it would leak the project lock on any bootstrap failure.
+//
+// MySQL never had this bug: its `ensure_journal` already took a dedicated
+// bootstrap lock. The same race measured 0/3 there against 3/3 on PostgreSQL,
+// which is what identified the missing serialization.
 //
 // FIRST DEPLOY IS NOW THE WHOLE OF IT. This file originally recorded the same
 // errors against a project whose journal ALREADY existed, which made them
@@ -194,28 +207,31 @@ test("TODAY a racing first deploy can fail with a raw PostgreSQL catalog error",
     );
     assert.equal(duplicated[0].n, 0, "even in the bootstrap race, nothing may be applied twice");
 
-    if (failures.length === 0) {
-      // The race is real but not certain; when both win there is nothing to pin.
-      return;
-    }
-
-    // What TODAY looks like: PostgreSQL's own catalog error, verbatim. When the
-    // bootstrap learns to tolerate these, this assertion fails - and the fix
-    // should replace it with one asserting a contention message an operator can
-    // act on, or a clean success.
-    assert.match(
-      failures[0].err,
-      // Whichever bootstrap statement the two processes happen to collide on.
-      // Enumerating the ones observed so far turned out to be a flake waiting to
-      // happen: a fourth variant appeared later, from the `pg_trigger`-guarded
-      // CREATE TRIGGER, which two FRESH bootstraps both find absent and both try
-      // to create. (F471 measured that guard race-clean, but only on the
-      // already-exists path, which is the steady state and not this one.) What is
-      // being pinned is "a raw PostgreSQL error reaches the operator", so the
-      // match is on that shape rather than on a list that has already grown once.
-      /duplicate key value violates unique constraint "pg_|tuple concurrently updated|already exists/,
-      `the loser surfaces a raw catalog error today; got: ${failures[0].err}`,
+    // FIXED by ordering: the deploy verbs acquire the project lock before
+    // bootstrapping the journal, so the bootstrap is serialized by the lock that
+    // already existed. Both processes complete - one bootstraps, the other waits
+    // for the lock and then finds the journal present.
+    //
+    // Serializing beat tolerating SQLSTATEs, which is what this test used to
+    // record as the open judgement. The set of colliding statements had already
+    // grown once (the `pg_trigger`-guarded CREATE TRIGGER appeared after the
+    // first three), and a swallow-list broad enough to cover an open-ended set
+    // would hide real failures.
+    assert.deepEqual(
+      failures.map((failure) => failure.err),
+      [],
+      "a racing first deploy must not surface a raw catalog error",
     );
+
+    // Asserted on the SHAPE the failure used to take, so a regression that
+    // reintroduces it is named rather than just counted.
+    for (const result of [a, b]) {
+      assert.doesNotMatch(
+        result.err,
+        /duplicate key value violates unique constraint "pg_|tuple concurrently updated|already exists/,
+        `no raw PostgreSQL catalog error may reach the operator; got: ${result.err}`,
+      );
+    }
   } finally {
     await client
       .query(
