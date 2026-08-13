@@ -6843,3 +6843,299 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// A plan carrying the obligation's contract ids but innocuous SQL does not
+/// discharge it.
+///
+/// `engine.rs` names this attack in its own words: "a forged plan that carries the
+/// obligation's `contract_versions` but innocuous `up` SQL (a `SELECT 1` / a
+/// harmless `COMMENT ON`) therefore does NOT discharge: the obligation stays
+/// outstanding, the dual-write trigger + `from` column stay live, and the
+/// touched-table refusal still fires."
+///
+/// That is why recognition is a re-author-compare rather than a version-id match.
+/// The contract ids are deterministic and server-stamped, so they are DERIVABLE by
+/// anyone who can read the journal - which makes "carries the right ids" a test an
+/// attacker passes for free. Only re-authoring the real C1 (drop trigger and
+/// function) and C2 (drop column) discharges.
+///
+/// Nothing measured it. The recognizer had no test at all, and its failure mode is
+/// silent: a forged discharge does not error, it simply un-gates a table whose
+/// rename window is still open, after which an ordinary op can drop or rewrite the
+/// column the window was protecting.
+///
+/// Every assertion is on the DATABASE and on the derived obligation, not on the
+/// reply, because the forged apply is expected to SUCCEED - its steps are
+/// legitimate DDL on an unrelated table. Success is not the defect; discharging
+/// would be.
+#[compio::test]
+async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    use zero_migrate::driver::SqlSession;
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+
+    let base = mig(
+        MigrationId::derive("forge_base", tok.as_bytes()),
+        "create_forge_users",
+        &format!(
+            "CREATE TABLE \"{}\".forge_users (id bigint PRIMARY KEY, email text)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("create the table the rename targets");
+    session
+        .batch(&format!(
+            "INSERT INTO \"{}\".forge_users (id, email) VALUES (1, 'keep@example.test')",
+            cfg.project_schema
+        ))
+        .await
+        .expect("seed the row the window protects");
+
+    // Open the window.
+    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "forge_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author the rename");
+    let pending_version = plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))],
+            &["forge_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand the rename");
+
+    let pending = backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability");
+    let outstanding = pending
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read the outstanding obligation");
+    assert_eq!(outstanding.len(), 1, "the window is open");
+    let obligation = outstanding.into_iter().next().expect("one obligation");
+    assert_eq!(obligation.pending_version, pending_version);
+    assert!(
+        !obligation.contract_versions.is_empty(),
+        "the obligation records the C1/C2 ids the forgery will reuse"
+    );
+
+    // The forgery. The recorded contract ids, verbatim, on steps that do something
+    // else entirely - real DDL, on a table the obligation knows nothing about. An
+    // engine that recognized a discharge by version id alone would accept these.
+    let forged: Vec<PlanStep> = obligation
+        .contract_versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| {
+            PlanStep::Ddl(mig(
+                MigrationId::parse(version).expect("a recorded contract id parses"),
+                "not_the_contract",
+                &format!(
+                    "CREATE TABLE \"{}\".decoy_{index} (id bigint PRIMARY KEY)",
+                    cfg.project_schema
+                ),
+            ))
+        })
+        .collect();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &forged,
+            &[],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the forged steps are ordinary DDL and do apply");
+
+    // The obligation is untouched. This is the whole claim.
+    let after = pending
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("re-read the obligation");
+    assert_eq!(
+        after.len(),
+        1,
+        "the forged plan must not have discharged the obligation"
+    );
+    assert_eq!(after[0].pending_version, pending_version);
+
+    // And the physical window it stands for is still in place.
+    assert!(
+        column_exists(&session, &cfg.project_schema, "forge_users", "email").await,
+        "the source column the window protects must still exist"
+    );
+    let trigger_present: bool = session
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = $1 AND c.relname = 'forge_users' AND NOT t.tgisinternal
+             ) AS present",
+            &[(&cfg.project_schema).into()],
+        )
+        .await
+        .expect("probe the dual-write trigger")
+        .try_get("present")
+        .expect("decode present");
+    assert!(trigger_present, "the dual-write trigger must still be live");
+
+    // The gate the obligation exists to hold is still holding. A discharge that
+    // left the obligation row behind but un-gated the table would pass every
+    // assertion above.
+    let touching = mig(
+        MigrationId::derive("forge_touch", tok.as_bytes()),
+        "touch_the_gated_table",
+        &format!(
+            "ALTER TABLE \"{}\".forge_users ADD COLUMN must_not_land text",
+            cfg.project_schema
+        ),
+    );
+    let refusal = engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::Ddl(touching)],
+            &["forge_users".to_string()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("the still-outstanding obligation must refuse same-table DDL");
+    assert!(
+        matches!(
+            &refusal,
+            DeclarativeApplyError::Plain(EngineError::PendingContract(_))
+        ),
+        "expected the pending-contract refusal, got {refusal:?}"
+    );
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "forge_users",
+            "must_not_land"
+        )
+        .await,
+        "the refused op must not have landed"
+    );
+
+    // THE CONTROL, and it must run in its OWN schema.
+    //
+    // The obvious control - resolve THIS obligation now and watch the column go -
+    // does not work, and the reason is worth recording. The forged steps journalled
+    // the obligation's C1/C2 ids against unrelated SQL, so a later legitimate
+    // resolution finds those versions already net-applied and idempotent-skips
+    // them: the obligation clears while the trigger and source column stay live.
+    // That is a fail-open, but it is NOT creator-reachable - a contract id is
+    // `MigrationId::derive`d into a 0xFF-marked space that a file version can never
+    // occupy, so only a Rust host building `Migration` values by hand can put one
+    // in the journal. Asserting it here would pin a state the threat model does not
+    // admit, and would leave the control claiming something it never showed.
+    //
+    // So the control proves what it is supposed to prove - that this rename is
+    // dischargeable and the machinery closes windows - on an identical rename that
+    // the forgery never touched.
+    let control_tok = token();
+    let control_cfg = cfg_for(&control_tok);
+    drop_schemas(&session, &control_cfg).await;
+    let _control_schemas = ensure_project_schema(&session, &control_cfg).await;
+    let control_backend = PostgresBackend::new_generic(&session);
+    let control_base = mig(
+        MigrationId::derive("forge_control_base", control_tok.as_bytes()),
+        "create_forge_users",
+        &format!(
+            "CREATE TABLE \"{}\".forge_users (id bigint PRIMARY KEY, email text)",
+            control_cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &control_cfg,
+        std::slice::from_ref(&control_base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("control base table");
+    let control_plan = ExpandContractAuthor::new(control_cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "forge_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author the control rename");
+    let control_pending = control_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                control_plan,
+            ))],
+            &["forge_users".into()],
+            &[],
+            Approval::Approved,
+            &control_backend,
+            &control_cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("control expand");
+    engine
+        .resolve_pending_contract(
+            &control_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &control_backend,
+            &control_cfg,
+            "operator",
+        )
+        .await
+        .expect("the untouched rename discharges");
+    assert!(
+        !column_exists(
+            &session,
+            &control_cfg.project_schema,
+            "forge_users",
+            "email"
+        )
+        .await,
+        "the real contract drops the source column when nothing forged its ids"
+    );
+
+    drop_schemas(&session, &control_cfg).await;
+    drop_schemas(&session, &cfg).await;
+}
