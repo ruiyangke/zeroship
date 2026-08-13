@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { otherUser, signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * The two clusters nothing drove end to end: saved searches, and the unread
@@ -68,7 +69,7 @@ test("the unread count rises on someone else's change and falls when read", asyn
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { key: `NOTI${String(Date.now()).slice(-5)}`,
+  const product = await rpc("products.create", { key: productKey("NOTI"),
     name: `Notify ${RUN}`, description: "n" });
   const component = await rpc("components.create", {
     productId: product.id,

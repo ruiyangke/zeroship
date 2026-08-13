@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { chooseOption } from "./select";
 import { signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * A dropdown shows a NAME when something is chosen and its PLACEHOLDER when
@@ -41,7 +42,7 @@ test("a picker shows its placeholder when empty and a name when chosen", async (
   const name = `Picker ${RUN}`;
   await rpc("products.create", {
     name,
-    key: `PICK${String(Date.now()).slice(-5)}`,
+    key: productKey("PICK"),
     description: "picker",
   });
 

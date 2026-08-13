@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
 import { chooseOption } from "./select";
+import { productKey } from "./keys";
 
 /**
  * Setting a flag on a bug, through the UI, end to end.
@@ -35,7 +36,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { key: `FLAG${String(Date.now()).slice(-5)}`,
+  const product = await rpc("products.create", { key: productKey("FLAG"),
     name: `Flags ${RUN}`, description: "flags" });
   const component = await rpc("components.create", {
     productId: product.id,
@@ -85,7 +86,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   await expect(flags).not.toContainText(/defines no bug-level flag types/i);
 
   // And it must NOT have leaked onto an unrelated product.
-  const other = await rpc("products.create", { key: `UNRE${String(Date.now()).slice(-5)}`,
+  const other = await rpc("products.create", { key: productKey("UNRE"),
     name: `Unrelated ${RUN}`, description: "other" });
   const otherComponent = await rpc("components.create", {
     productId: other.id,

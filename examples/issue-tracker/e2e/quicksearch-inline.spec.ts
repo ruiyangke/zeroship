@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * The QuickSearch shorthand works in the list's own search box.
@@ -30,7 +31,7 @@ test("typing P1 in the search box filters by priority", async ({ page, baseURL, 
 
   const product = await rpc("products.create", {
     name: `Quick ${RUN}`,
-    key: `QCK${String(Date.now()).slice(-5)}`,
+    key: productKey("QCK"),
     description: "quick",
   });
   const component = await rpc("components.create", {

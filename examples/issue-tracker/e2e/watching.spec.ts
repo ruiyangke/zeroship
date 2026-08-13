@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { otherUser, signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * User watching, end to end: watch someone, hear about their bug, stop.
@@ -40,7 +41,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   // That made the "no notification after unwatching" half unfalsifiable.
   await rpc("products.create", {
     name: `Watch ${RUN}`,
-    key: `WCH${String(Date.now()).slice(-5)}`,
+    key: productKey("WCH"),
     description: "watching",
   });
 
@@ -58,7 +59,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   // bug to Alice is the watch.
   const product = await bobRpc("products.create", {
     name: `Watched ${RUN}`,
-    key: `WBB${String(Date.now()).slice(-5)}`,
+    key: productKey("WBB"),
     description: "bob owns this",
   });
   const component = await bobRpc("components.create", {

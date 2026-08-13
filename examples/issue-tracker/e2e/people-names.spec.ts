@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { devUser, signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * A bug names people. It has to name them the way a person is named.
@@ -33,7 +34,7 @@ test("the bug page names people rather than printing their ids", async ({
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { key: `PEOP${String(Date.now()).slice(-5)}`,
+  const product = await rpc("products.create", { key: productKey("PEOP"),
     name: `People ${RUN}`, description: "people" });
   const component = await rpc("components.create", {
     productId: product.id,

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { chooseOption } from "./select";
 import { otherUser, signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * Group access can be revoked, not only granted.
@@ -36,7 +37,7 @@ test("an admin can see who is in a group and remove them", async ({
   // Alice writes first so she is the admin; Bob provisions by reading later.
   const product = await rpc("products.create", {
     name: `Member ${RUN}`,
-    key: `MEM${String(Date.now()).slice(-5)}`,
+    key: productKey("MEM"),
     description: "membership",
   });
   const component = await rpc("components.create", {

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * No page shows a raw typed_id where a name belongs.
@@ -49,7 +50,7 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
   // each panel. An empty page cannot show an id it never renders.
   const product = await rpc("products.create", {
     name: `Ids ${RUN}`,
-    key: `IDS${String(Date.now()).slice(-5)}`,
+    key: productKey("IDS"),
     description: "ids",
   });
   const component = await rpc("components.create", {

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { chooseOption } from "./select";
 import { signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * Advanced search is a modal over the bug list, not a page of its own.
@@ -35,7 +36,7 @@ test("the builder runs a search into the bug list and hands it back", async ({
 
   const product = await rpc("products.create", {
     name: `Modal ${RUN}`,
-    key: `MOD${String(Date.now()).slice(-5)}`,
+    key: productKey("MOD"),
     description: "modal",
   });
   const component = await rpc("components.create", {

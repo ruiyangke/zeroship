@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { signIn } from "./session";
+import { productKey } from "./keys";
 
 /**
  * An attachment survives a round trip through `env.storage`, byte for byte.
@@ -34,7 +35,7 @@ test("an attachment uploads, reads back byte-identical, and deletes", async ({
     return (await res.json()).json;
   };
 
-  const product = await rpc("products.create", { key: `ATTA${String(Date.now()).slice(-5)}`,
+  const product = await rpc("products.create", { key: productKey("ATTA"),
     name: `Attach ${RUN}`, description: "attach" });
   const component = await rpc("components.create", {
     productId: product.id,
