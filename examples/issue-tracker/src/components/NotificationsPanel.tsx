@@ -1,5 +1,6 @@
 import { listNotifications, markNotificationRead } from "../api";
 import { Button } from "@zeroship/ui";
+import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
 import { useAsync } from "./rpc";
 
@@ -52,7 +53,17 @@ export function NotificationsPanel() {
                 ) : (
                   <span>{row.title}</span>
                 )}
-                {row.body ? <p className="notification-body">{row.body}</p> : null}
+                {/* Rendered, not printed. Comment bodies are markdown now, so
+                    this row was showing literal asterisks and backticks --
+                    the inbox was the surface that never got checked when the
+                    storage format changed. Through the same read-only
+                    renderer as the thread, so the same schema decides what a
+                    notification may contain. */}
+                {row.body ? (
+                  <div className="notification-body">
+                    <RichText markdown={row.body} />
+                  </div>
+                ) : null}
                 {row.isRead ? null : (
                   <Button variant="gray" size="small"
                     onClick={() => void markRead(row.id)}

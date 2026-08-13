@@ -864,3 +864,8 @@ tbody tr:hover { background: var(--surface-2); }
 /* File inputs are sized by the browser from the filename, so they overflow a
    narrow card. Let it shrink instead. */
 .attachments-panel input[type="file"] { inline-size: 100%; }
+
+/* A notification is a preview, not the document. Clamp it so a long comment
+   or one with a heading cannot turn an inbox row into a page. */
+.notification-body { max-block-size: 3.2em; overflow: hidden; }
+.notification-body .rich-text > * { margin-block: 0; font-size: 0.82rem; }
