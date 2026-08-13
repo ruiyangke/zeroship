@@ -1264,3 +1264,52 @@ async fn standalone_sequence_lifecycle() {
     )
     .await;
 }
+
+#[compio::test]
+async fn view_comment_lifecycle() {
+    // `comment_lifecycle` says it "does not cover constraint or view comments,
+    // which structural equality does not carry". That is true of `SchemaSnapshot`'s
+    // structural equality — and it is NOT the check this oracle runs.
+    // `diff_snapshots` compares `ViewSnapshot::comment` explicitly and reports an
+    // `altered` entry with field `comment` when the two sides disagree.
+    //
+    // So a view comment is a field the oracle CAN see and nothing ever moved. The
+    // distinction matters beyond this test: "excluded from structural equality" is
+    // the reason a trigger is not worth a roundtrip (nothing to compare), and it is
+    // not the reason a view comment was not worth one.
+    //
+    // The clearing stage is the half that catches a fold modelling `COMMENT ON` as
+    // set-only. PostgreSQL removes the `pg_description` row for a comment set to
+    // NULL rather than storing an empty string, so a fold that recorded `Some("")`
+    // would round-trip on the setting stage and diverge only here.
+    let source = r#"{
+      "ir_version": 1,
+      "name": "view_comment_lifecycle",
+      "owner_app": "app_fold_roundtrip_pg",
+      "ops": [
+        {"op":"createTable","name":"view_comment_rows","columns":[
+          {"name":"id","type":"int","nullable":false},
+          {"name":"label","type":"text","nullable":true}
+        ],"primaryKey":["id"]},
+        {"op":"createView","name":"view_comment_labels",
+         "query":{"kind":"structured","select":{"from":{"name":"view_comment_rows"},
+           "projection":[{"kind":"colRef","name":"id"},{"kind":"colRef","name":"label"}]}}},
+        {"op":"comment","target":{"kind":"view","name":"view_comment_labels"},
+         "comment":"labels a reader may annotate"},
+        {"op":"comment","target":{"kind":"view","name":"view_comment_labels"}}
+      ]
+    }"#;
+
+    assert_lifecycle_roundtrip(
+        "view comment lifecycle",
+        source,
+        &[
+            ("create the backing table", 1),
+            ("create the view", 2),
+            ("comment on the view", 3),
+            ("clear the view comment", 4),
+        ],
+        support::no_inject,
+    )
+    .await;
+}
