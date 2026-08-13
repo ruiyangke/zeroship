@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Checkbox, Cluster, Field, NumberField, Tag } from "@zeroship/ui";
+import { Avatar, Button, Checkbox, Cluster, Field, NumberField, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
@@ -11,7 +11,40 @@ function formatDate(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
+/**
+ * How long ago, in words.
+ *
+ * Every comment carried a full "8/12/2026, 11:52:21 PM". Four of those down a
+ * page is a column of digits competing with the prose, and second-level
+ * precision answers a question nobody asked. The exact stamp stays in the
+ * title attribute, where it costs nothing until wanted.
+ */
+function timeAgo(ms: number): string {
+  const seconds = Math.round((Date.now() - ms) / 1000);
+  if (seconds < 60) return "just now";
+  const units: [number, string][] = [
+    [60, "minute"],
+    [3600, "hour"],
+    [86400, "day"],
+    [604800, "week"],
+    [2592000, "month"],
+    [31536000, "year"],
+  ];
+  let unit = units[0];
+  for (const candidate of units) if (seconds >= candidate[0]) unit = candidate;
+  const value = Math.floor(seconds / unit[0]);
+  return value + " " + unit[1] + (value === 1 ? "" : "s") + " ago";
+}
+
+/** Initials for the avatar fallback: "Alice Dev" becomes "AD". */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
+}
+
 function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () => void }) {
+  const author = comment.author?.name || comment.author?.handle || comment.authorId;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(comment.body);
   const [busy, setBusy] = useState(false);
@@ -45,7 +78,23 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
   };
 
   return (
-    <li className={`comment ${comment.isPrivate ? "private" : ""}`} id={`comment-${comment.commentNumber}`}>
+    <li
+      className={[
+        "comment",
+        comment.isPrivate ? "private" : "",
+        comment.commentNumber === 0 ? "is-description" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      id={`comment-${comment.commentNumber}`}
+    >
+      {/* Identity leads. Previously the loudest things in this row were the
+          Edit and Make private buttons, which sat at full weight beside a
+          timestamp at full precision, so the eye met the controls before the
+          author. The avatar and name come first now and the actions wait for
+          a hover or a keyboard focus. */}
+      <Avatar size="sm" fallback={initials(author)} aria-hidden="true" />
+      <div className="comment-body-column">
       <div className="comment-head">
         {/* Comment 0 IS the description -- `bugs.create` writes the description
             as the first comment, the way Bugzilla does, so there is no separate
@@ -53,23 +102,48 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
             hid that: the one piece of text stating what the bug IS looked like
             the first reply to it. Named rather than restyled, so it reads
             correctly to a screen reader too. */}
+        <span className="comment-author">{author}</span>
         {comment.commentNumber === 0 ? (
           <Tag size="sm">Description</Tag>
-        ) : (
-          <span className="comment-number">#{comment.commentNumber}</span>
-        )}
-        <span className="comment-author">{comment.author?.name || comment.author?.handle || comment.authorId}</span>
-        <span className="comment-when">{formatDate(comment.created_at)}</span>
+        ) : null}
+        <span className="comment-when" title={formatDate(comment.created_at)}>
+          {timeAgo(comment.created_at)}
+        </span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
         {comment.workTimeMinutes > 0 ? (
           <span className="comment-worktime">{comment.workTimeMinutes}m logged</span>
         ) : null}
-        <Button variant="gray" size="small" disabled={busy} onClick={() => setEditing((v) => !v)}>
-          Edit
-        </Button>
-        <Button variant="gray" size="small" disabled={busy} onClick={() => void togglePrivate()}>
-          {comment.isPrivate ? "Make public" : "Make private"}
-        </Button>
+        {/* The permalink the "#3" used to be. It was a bare label doing
+            nothing; anchors already exist on the <li>, so it may as well be
+            the thing you can copy. */}
+        {comment.commentNumber > 0 ? (
+          <a className="comment-number" href={`#comment-${comment.commentNumber}`}>
+            #{comment.commentNumber}
+          </a>
+        ) : null}
+        <span className="comment-actions">
+          <Button
+            variant="plain"
+            size="small"
+            disabled={busy}
+            aria-label={`Edit comment ${comment.commentNumber}`}
+            onClick={() => setEditing((v) => !v)}
+          >
+            Edit
+          </Button>
+          <Button
+            variant="plain"
+            size="small"
+            disabled={busy}
+            aria-label={
+              (comment.isPrivate ? "Make comment public " : "Make comment private ") +
+              comment.commentNumber
+            }
+            onClick={() => void togglePrivate()}
+          >
+            {comment.isPrivate ? "Make public" : "Make private"}
+          </Button>
+        </span>
       </div>
       {editing ? (
         <div className="comment-edit">
@@ -88,6 +162,7 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
         </div>
       )}
       {error ? <p className="field-error">{error}</p> : null}
+      </div>
     </li>
   );
 }

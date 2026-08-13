@@ -169,7 +169,10 @@ function MoveControl({
       <div className="field-block-head">
         <span className="field-label">Move</span>
         <Button variant="gray" size="small" onClick={() => setOpen((v) => !v)}>
-          {open ? "Cancel" : "Move to another product/component..."}
+          {/* Short enough to fit the rail. The full sentence ran past the
+              column edge, which is how a rail says "this control does not
+              belong here" -- the dialog it opens explains the rest. */}
+          {open ? "Cancel" : "Move bug..."}
         </Button>
       </div>
       {open ? (
@@ -222,6 +225,17 @@ function MoveControl({
       {error ? <p className="field-error">{error}</p> : null}
     </div>
   );
+}
+
+/**
+ * A labelled divider between groups of rail fields.
+ *
+ * The rail was one uninterrupted column of thirteen controls, so status,
+ * classification, people and location all had the same standing and the eye
+ * had nowhere to rest. These are the joints.
+ */
+function RailSection({ title }: { title: string }) {
+  return <p className="rail-section">{title}</p>;
 }
 
 function GeneralField({
@@ -349,21 +363,25 @@ export function FieldsPanel({
           }}
         />
       ) : (
-        <Cluster gap={2} align="center">
-          <span className="field-label">Summary</span>
+        /* "Summary / Edit" alone at the top of the rail read as a field whose
+           value had gone missing -- a label and a button with nothing between
+           them. It is an action, so it is written as one. */
+        <Cluster gap={2} align="center" className="rail-action">
           <Button variant="plain" size="small" onClick={() => setEditingSummary(true)}>
-            Edit
+            Edit summary
           </Button>
         </Cluster>
       )}
 
       <StatusControl bug={bug} onUpdated={onUpdated} />
+      <RailSection title="Classification" />
       <SeverityPriority bug={bug} onUpdated={onUpdated} />
       <AssigneeControl bug={bug} people={people} onUpdated={onUpdated} />
 
       {/* The facts you read rather than change, as a description list. They
           were four spans in a row with hand-rolled "Label: value" strings and
           inconsistent emphasis -- two bold values, two not. */}
+      <RailSection title="Where" />
       <DescriptionList>
         <DescriptionList.Item>
           <DescriptionList.Term>Product</DescriptionList.Term>
@@ -439,6 +457,7 @@ export function FieldsPanel({
       )}
       {versionMilestoneError ? <p className="field-error">{versionMilestoneError}</p> : null}
 
+      <RailSection title="Other" />
       <GeneralField bug={bug} field="whiteboard" label="Whiteboard" value={bug.whiteboard ?? ""} onUpdated={onUpdated} />
       <div className="field-row">
         <GeneralField bug={bug} field="opSys" label="OS" value={bug.opSys} onUpdated={onUpdated} />

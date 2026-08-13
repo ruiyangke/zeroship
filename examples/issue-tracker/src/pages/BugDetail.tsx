@@ -74,23 +74,27 @@ export function BugDetailPage({ id }: { id: string }) {
 
   return (
     <div className="page bug-detail-page">
-      <div className="page-head">
-        <h1>
-          {/* The key, not the UUID. This heading is what a person copies into
-              a commit message or reads out in a standup. */}
-          <span className="bug-id">
-            {detail.product ? `${detail.product.key}-${detail.bug.number}` : detail.bug.id}
-          </span>{" "}
-          {detail.bug.summary}
-        </h1>
-        {/* State belongs beside the title, not eleven fields down. Someone
-            opening a bug asks "what is this and where is it up to" before
-            anything else. */}
+      {/* The key, the title and the state, in that reading order.
+          These used to share one line: a mono key, a long summary and four
+          badges all at the same height, so a title that ran long squeezed the
+          badges and the eye had no obvious place to start. The key is now a
+          quiet line above, the summary owns its own line at heading size, and
+          the state sits under it where it reads as a caption about the bug
+          rather than as more title. */}
+      <div className="page-head bug-head">
+        <span className="bug-id">
+          {detail.product ? `${detail.product.key}-${detail.bug.number}` : detail.bug.id}
+        </span>
+        <h1 className="bug-title">{detail.bug.summary}</h1>
         <Cluster gap={2} align="center" className="bug-state">
           <StatusBadge status={detail.bug.status} />
           <ResolutionBadge resolution={detail.bug.resolution ?? null} />
           <SeverityBadge severity={detail.bug.severity} />
           <PriorityBadge priority={detail.bug.priority} />
+          <span className="bug-head-meta">
+            {detail.product ? detail.product.name : null}
+            {detail.component ? ` / ${detail.component.name}` : null}
+          </span>
         </Cluster>
       </div>
 
