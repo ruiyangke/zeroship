@@ -88,7 +88,6 @@ impl MagicFixture {
             "--public-url",
             "http://auth.test",
         ]);
-        cfg.resolve(zeroship_core::config::AuthSection::default());
         let cfg = Arc::new(cfg);
 
         let mailer = Arc::new(CaptureMailer::default());

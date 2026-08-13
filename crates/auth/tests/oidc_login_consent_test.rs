@@ -18,7 +18,9 @@ use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions as session_store, totp as totp_store};
 
-use common::{location, pkce_challenge_s256, pkce_verifier, read_set_cookie, test_auth_config};
+use common::{
+    location, pkce_challenge_s256, pkce_verifier, read_set_cookie, test_auth_config_with,
+};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
@@ -72,8 +74,10 @@ impl Fixture {
         let email = format!("p4-{}@zeroship.test", Uuid::new_v4().simple());
         seed_user_client(&db, user_id, app_id, &client_id, &email).await;
 
-        let mut cfg_inner = test_auth_config(&db_url);
-        cfg_inner.google_client_id = Some("mock-google-client".into());
+        let cfg_inner = test_auth_config_with(
+            &db_url,
+            &["--google-client-id", "mock-google-client"],
+        );
         let cfg = Arc::new(cfg_inner);
         let cfg_state = cfg.clone();
         let db_state = db.clone();
@@ -258,7 +262,7 @@ async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
     assert_eq!(provider_start.status().as_u16(), 302);
     let upstream = location(&provider_start);
     assert!(
-        upstream.starts_with(fx.cfg.google_auth_url.as_str()),
+        upstream.starts_with(fx.cfg.settings.google_auth_url.get().as_str()),
         "provider start should redirect to upstream google authorize, got {upstream}"
     );
     assert_eq!(
@@ -843,7 +847,7 @@ async fn totp_login_preserves_native_return_to() {
         return;
     };
     let secret = totp::generate_secret();
-    let key = totp::key_from_config(&fx.cfg.totp_enc_key).expect("totp key");
+    let key = totp::key_from_config(&fx.cfg.secrets.totp_enc_key).expect("totp key");
     totp_store::enroll(
         &fx.db,
         fx.user_id,

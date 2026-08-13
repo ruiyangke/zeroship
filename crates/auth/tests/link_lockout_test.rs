@@ -40,7 +40,6 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
     ]);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }
 
@@ -109,7 +108,7 @@ async fn locked_account_cannot_link_with_correct_password() {
         )
         .expect("exp fits i64"),
     };
-    let token = pending.encode(cfg.stash_signing_key.as_bytes());
+    let token = pending.encode(cfg.secrets.stash_signing_key.as_bytes());
 
     let app = test::init_service(
         web::App::new()

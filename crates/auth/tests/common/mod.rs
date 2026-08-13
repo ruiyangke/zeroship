@@ -51,7 +51,17 @@ pub const TEST_CONSOLE_ORIGIN: &str = "http://localhost:5173";
 
 #[must_use]
 pub fn test_auth_config(db_url: &str) -> AuthConfig {
-    let mut cfg = AuthConfig::parse_from([
+    test_auth_config_with(db_url, &[])
+}
+
+/// [`test_auth_config`] plus EXTRA command-line arguments.
+///
+/// Extra settings arrive as flags rather than as field writes, because a
+/// resolved `Operational<T>` has no setter: a test that reached past the
+/// resolver would be configuring a shape production never produces.
+#[allow(dead_code)]
+pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
+    let mut args: Vec<&str> = Vec::from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
@@ -64,7 +74,7 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
         // Admit the console origin so the framed login routes (/login, /signup,
         // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
         // model test pins this NEW contract.
-        "--frame-ancestor-origin",
+        "--frame-ancestor-origins",
         TEST_CONSOLE_ORIGIN,
         "--mail-from-email",
         "test@zeroship.test",
@@ -73,9 +83,9 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
         "--public-url",
         "http://localhost:0",
     ]);
-    // Apply the same overlay-resolution step as `main`.
-    cfg.resolve(zeroship_core::config::AuthSection::default());
-    cfg
+    args.extend_from_slice(extra);
+    // `parse_from` runs the generated resolver, exactly as real boot does.
+    AuthConfig::parse_from(args)
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
@@ -284,7 +294,7 @@ impl Fixture {
         // Thread the configured console origin into the route-aware security
         // headers exactly as `server::run` does in prod (§4.3), so the booted
         // fixture serves the relaxed `frame-ancestors` on the framed routes.
-        let frame_ancestor_origins = cfg.frame_ancestor_origins.clone();
+        let frame_ancestor_origins = cfg.frame_ancestor_origins().to_vec();
         let srv = web::test::server(move || {
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();

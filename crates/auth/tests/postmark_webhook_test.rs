@@ -46,7 +46,6 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         args.push(p.to_string());
     }
     let mut cfg = AuthConfig::parse_from(args);
-    cfg.resolve(zeroship_core::config::AuthSection::default());
     cfg
 }
 
