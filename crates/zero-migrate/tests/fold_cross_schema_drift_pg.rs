@@ -18,12 +18,20 @@
 //! demonstrably exists, and `is_clean()` is false for a database that matches
 //! exactly what the migrations authored.
 //!
-//! THE SAME FUNCTION ALREADY HAS THE OTHER RULE. Roles are compared only when
-//! present on both sides — absent from `actual` means "not observed", not
-//! "missing" — and there is no missing-loop for them at all. Schemas and
-//! extensions instead report absence as drift. Which of those two rules is right
-//! for an object the snapshot's window cannot contain is a semantics decision on
-//! a public API, so this test RECORDS today's behaviour rather than choosing.
+//! THE DIFFER IS UNIFORM; THE SNAPSHOT IS NOT. All three object classes report
+//! an expected object absent from `actual` as missing - roles at drift.rs:1759,
+//! schemas at 1770, extensions at 1781. That rule is sound for the classes whose
+//! live query is CLUSTER-WIDE, which roles and extensions both are: absence is
+//! then real evidence. Measured, both behave correctly - a role dropped out of
+//! band is reported, and a cluster carrying `plpgsql` against a fold naming no
+//! extensions still diffs clean.
+//!
+//! Schemas are the only class whose query is narrowed to a single name, so they
+//! are the only one where absence is not evidence but an artefact of the window.
+//! Whether to widen that query - and accept that a cluster-wide namespace list
+//! pulls in `pg_catalog`, `information_schema`, every `pg_temp_*`, and every
+//! other tenant.s schemas - is a decision about a public API, so this test
+//! RECORDS today.s behaviour rather than choosing.
 //!
 //! It is written to fail if that changes: a fix makes the drift clean, and this
 //! file should then assert cleanliness and say why.
