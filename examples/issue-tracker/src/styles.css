@@ -410,8 +410,27 @@ tbody tr:hover { background: var(--surface-2); }
 .dashboard-section { margin-bottom: 1.6rem; }
 
 /* ── products admin ──────────────────────────────────────────────────── */
-.products-admin-layout { display: grid; grid-template-columns: 220px 1fr; gap: 1.5rem; align-items: start; }
-.product-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.products-admin-layout { display: grid; grid-template-columns: 220px 1fr; gap: 0.4rem 1.5rem; align-items: start; }
+/* The count belongs above the list it counts, in the list column -- as a
+   plain grid child it took the first cell and shoved the list into the
+   editor pane. */
+.products-admin-layout > .state-hint { grid-column: 1; margin: 0; }
+.products-admin-layout > .product-list { grid-column: 1; }
+.products-admin-layout > .product-detail { grid-column: 2; grid-row: 1 / span 2; }
+/* BOUNDED, for the third time in this app and the same reason each time: an
+   unbounded list pushes the rest of its page off the bottom. The group list
+   did it to products, the inbox did it to the dashboard, and this one buried
+   groups and flag types under every product ever created. */
+.product-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-block-size: 24rem;
+  overflow-y: auto;
+}
 .product-list button { width: 100%; justify-content: flex-start; }
 .product-detail { min-width: 0; }
 .admin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
@@ -869,3 +888,12 @@ tbody tr:hover { background: var(--surface-2); }
    or one with a heading cannot turn an inbox row into a page. */
 .notification-body { max-block-size: 3.2em; overflow: hidden; }
 .notification-body .rich-text > * { margin-block: 0; font-size: 0.82rem; }
+
+/* Admin sections get the same card chrome as every other grouped surface. */
+.admin-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-block-end: 1.25rem;
+}

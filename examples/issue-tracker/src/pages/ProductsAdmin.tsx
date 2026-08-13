@@ -322,8 +322,10 @@ export function ProductsAdminPage() {
   return (
     <div className="page products-admin-page">
       <h1>Products administration</h1>
-      <GroupsAdmin />
-      <FlagTypesAdmin />
+      {/* Products lead the page named after them. Groups and flag types are
+          administered HERE for convenience, but they were rendered first, so
+          a page titled "Products administration" opened on a list of 176
+          groups and the products themselves began below the fold. */}
       <NewProductForm onCreated={reload} />
       <AsyncSection
         state={state}
@@ -335,6 +337,11 @@ export function ProductsAdminPage() {
       >
         {(products) => (
           <div className="products-admin-layout">
+            {/* Counted, because a scroll container hides how much is inside
+                it -- the same reason the group list and the inbox say so. */}
+            <p className="state-hint small">
+              {products.length} {products.length === 1 ? "product" : "products"}
+            </p>
             <ul className="product-list">
               {products.map((p) => (
                 <li key={p.id}>
@@ -356,6 +363,8 @@ export function ProductsAdminPage() {
           </div>
         )}
       </AsyncSection>
+      <GroupsAdmin />
+      <FlagTypesAdmin />
     </div>
   );
 }
