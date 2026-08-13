@@ -354,6 +354,15 @@ export function FieldsPanel({
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
   const [editingSummary, setEditingSummary] = useState(false);
+  const [showOther, setShowOther] = useState(false);
+  // "Unspecified" is the server's default for opSys and platform, so a bug
+  // that has never been touched reads as unset rather than as configured.
+  const hasOther = Boolean(
+    bug.whiteboard ||
+      bug.url ||
+      (bug.opSys && bug.opSys !== "Unspecified") ||
+      (bug.platform && bug.platform !== "Unspecified"),
+  );
   return (
     <Card className="fields-panel">
       <fieldset className="rail-fields" disabled={readOnly}>
@@ -469,13 +478,28 @@ export function FieldsPanel({
       )}
       {versionMilestoneError ? <p className="field-error">{versionMilestoneError}</p> : null}
 
+      {/* Four rows that usually say nothing.
+          Whiteboard, OS, platform and URL are unset on most bugs, so the rail
+          ended with "Whiteboard --", "OS Unspecified", "Platform Unspecified",
+          "URL --" -- four lines of absence at the bottom of a column whose job
+          is to be glanceable. They appear when they HAVE a value, and behind
+          one line when they do not, so setting them is still one click and
+          reading a bug that never used them costs nothing. */}
       <RailSection title="Other" />
-      <GeneralField bug={bug} field="whiteboard" label="Whiteboard" value={bug.whiteboard ?? ""} onUpdated={onUpdated} />
-      <div className="field-row">
-        <GeneralField bug={bug} field="opSys" label="OS" value={bug.opSys} onUpdated={onUpdated} />
-        <GeneralField bug={bug} field="platform" label="Platform" value={bug.platform} onUpdated={onUpdated} />
-      </div>
-      <GeneralField bug={bug} field="url" label="URL" value={bug.url ?? ""} onUpdated={onUpdated} />
+      {hasOther || showOther ? (
+        <>
+          <GeneralField bug={bug} field="whiteboard" label="Whiteboard" value={bug.whiteboard ?? ""} onUpdated={onUpdated} />
+          <div className="field-row">
+            <GeneralField bug={bug} field="opSys" label="OS" value={bug.opSys} onUpdated={onUpdated} />
+            <GeneralField bug={bug} field="platform" label="Platform" value={bug.platform} onUpdated={onUpdated} />
+          </div>
+          <GeneralField bug={bug} field="url" label="URL" value={bug.url ?? ""} onUpdated={onUpdated} />
+        </>
+      ) : (
+        <Button variant="plain" size="small" onClick={() => setShowOther(true)}>
+          Set whiteboard, OS, platform or URL
+        </Button>
+      )}
       </fieldset>
     </Card>
   );
