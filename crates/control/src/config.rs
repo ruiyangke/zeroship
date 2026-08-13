@@ -185,9 +185,9 @@ pub struct ControlSettings {
 
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     ///
-    /// Keeps the `auth.` canonical path because it is the SAME URL the auth
-    /// service reads; when auth converts, both declare it by shared symbol.
-    #[config(name = "auth.supabase_url", default = String::new())]
+    /// Shared with the auth service: it is the SAME URL, so one operator-visible
+    /// name governs both.
+    #[config(shared = AUTH_SUPABASE_URL, default = String::new())]
     pub supabase_url: Operational<String>,
 
     /// JWKS URL for asymmetric GoTrue JWT verification. Mutually exclusive with

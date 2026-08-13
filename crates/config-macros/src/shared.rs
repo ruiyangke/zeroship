@@ -146,6 +146,17 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "String",
     },
+    // The GoTrue base URL is ONE deployment fact read by two binaries: control
+    // verifies Supabase tokens against it and auth drives the browser-side
+    // GoTrue login with it. It became shared the moment auth converted; before
+    // that it was a single-consumer `#[config(name = "auth.supabase_url")]` on
+    // control, which is what a single consumer is required to write.
+    SharedIdentity {
+        symbol: "AUTH_SUPABASE_URL",
+        canonical: "auth.supabase_url",
+        wrapper: "Operational",
+        inner: "String",
+    },
 ];
 
 /// Look up a shared identity by the symbol a declaration wrote.
