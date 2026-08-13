@@ -15,6 +15,7 @@
 //   duplicate key value violates unique constraint "pg_namespace_nspname_index"
 //   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
 //   tuple concurrently updated
+//   trigger "zs_immutable_truncate_trg" for relation "..." already exists
 //
 // None of those tells an operator what happened. They are benign contention -
 // re-running succeeds - but they read like corruption, and nothing in the CLI
@@ -204,7 +205,15 @@ test("TODAY a racing first deploy can fail with a raw PostgreSQL catalog error",
     // act on, or a clean success.
     assert.match(
       failures[0].err,
-      /duplicate key value violates unique constraint "pg_(namespace|type)_|tuple concurrently updated/,
+      // Whichever bootstrap statement the two processes happen to collide on.
+      // Enumerating the ones observed so far turned out to be a flake waiting to
+      // happen: a fourth variant appeared later, from the `pg_trigger`-guarded
+      // CREATE TRIGGER, which two FRESH bootstraps both find absent and both try
+      // to create. (F471 measured that guard race-clean, but only on the
+      // already-exists path, which is the steady state and not this one.) What is
+      // being pinned is "a raw PostgreSQL error reaches the operator", so the
+      // match is on that shape rather than on a list that has already grown once.
+      /duplicate key value violates unique constraint "pg_|tuple concurrently updated|already exists/,
       `the loser surfaces a raw catalog error today; got: ${failures[0].err}`,
     );
   } finally {

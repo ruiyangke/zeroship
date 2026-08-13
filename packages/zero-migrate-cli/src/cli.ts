@@ -1530,6 +1530,7 @@ Flags:
   --config <path>       Use this zero-migrate.toml instead of upward discovery
   --env <name>          Select [env.<name>] (default dev, or the sole block)
   --version             Print the zero-migrate version
+  --verbose             version only: also report the engine build identity
   --help                This help
 
 Configuration precedence is flag, ZERO_MIGRATE_* environment variable, selected
