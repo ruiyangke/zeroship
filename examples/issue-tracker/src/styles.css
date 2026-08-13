@@ -1001,3 +1001,13 @@ fieldset.bug-detail-extras { display: grid; }
   white-space: nowrap;
   border: 0;
 }
+
+/* The fold's label enumerates what is inside, which is the point of it -- but
+   at 390px that ran off the screen and was clipped, so the one thing it exists
+   to tell you was the part cut off. Buttons do not wrap by default; inside
+   this container it may. Selected by element, not by a design-system class. */
+.bug-detail-more button {
+  white-space: normal;
+  text-align: start;
+  max-inline-size: 100%;
+}
