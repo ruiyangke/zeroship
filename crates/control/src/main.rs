@@ -98,6 +98,13 @@ fn split_legacy_master_keys(
 /// can read the exact string an operator sees. Every other auth-provider
 /// diagnostic is already reachable through the function that produces it.
 const PLATFORM_ISSUER_INPUT: &str = "--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER";
+/// Operator-facing spelling of the bundle master key, for a diagnostic that has
+/// to name something the operator can actually set. The bare `MASTER_KEY` this
+/// used to interpolate is not settable any more, so an operator reading the
+/// refusal had no name to act on.
+const MASTER_KEY_LABEL: &str = "ZEROSHIP_CONTROL_MASTER_KEY";
+/// Same, for the rotation list. The index is appended per entry.
+const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
 
 fn build_control_auth_provider(
     auth_provider: AuthProviderKind,
@@ -357,16 +364,16 @@ fn main() -> std::io::Result<()> {
     }
     if let Err(message) = zeroship_core::config::validate_secret_material(
         &settings.master_key,
-        |material| validate_master_key_material("MASTER_KEY", material),
+        |material| validate_master_key_material(MASTER_KEY_LABEL, material),
     ) {
-        tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+        tracing::error!(error = %message, "control: refusing to start with weak master key");
         std::process::exit(1);
     }
     // The list is one secret, so its ENTRIES are always material by the time
     // they are split: either the run resolved the whole value, or it is a dry
     // run that read nothing and `legacy_keys` is empty.
     for (idx, legacy_key) in legacy_keys.iter().enumerate() {
-        let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+        let label = format!("{LEGACY_MASTER_KEYS_LABEL}[{idx}]");
         if let Err(message) = validate_master_key_material(&label, legacy_key) {
             tracing::error!(
                 error = %message,
@@ -380,7 +387,7 @@ fn main() -> std::io::Result<()> {
         // reject with 500, so warn before Stripe-side retries reveal it.
         tracing::warn!(
             "control: stripe_webhook_secret unset; /internal/webhooks/stripe will reject every request. \
-             Set --stripe-webhook-secret if you need Stripe integration."
+             Set ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET if you need Stripe integration."
         );
     }
     // STRIPE_SECRET_KEY is optional at process scope because a deployment may
