@@ -403,3 +403,145 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         .expect("drop the test schemas");
     work.expect("fold an attributed role against live PostgreSQL");
 }
+
+/// `dropOwnedBy` against a live server, with a bystander that must survive.
+///
+/// This is the most destructive verb in the vocabulary — `DROP OWNED BY <role>`
+/// removes every object the named role owns, across the whole database. It is
+/// rendered and validated offline (`vendor.rs` refuses an empty list and refuses
+/// the reserved `PUBLIC`, both fail-closed), and it appears in the envelope,
+/// support-matrix and faithfulness tests. None of those APPLY it. Nothing had ever
+/// watched it run.
+///
+/// THE BYSTANDER IS THE ASSERTION. Confirming the owned table disappeared would
+/// pass equally on an implementation that dropped everything in the schema, which
+/// is the failure this op is shaped to cause. So a second table, identical except
+/// for its owner, sits beside it and has to still be there afterwards.
+///
+/// What this does NOT claim: that the engine confines the blast radius to the
+/// project schema. It cannot and does not — `DROP OWNED BY` is role-scoped by
+/// PostgreSQL's design, and `docs/security-model.md` delegates that bound to the
+/// database itself ("use a dedicated, non-login migrator role with only the
+/// project-schema permissions required"). The engine's part is to render the
+/// statement faithfully and refuse the two footguns; the operator's part is the
+/// migrator role. This pins the engine's half.
+#[compio::test]
+async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("schema");
+    let owner_role = token("owned").to_lowercase();
+    let bystander_role = token("bystnd").to_lowercase();
+    let policy = charter(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
+    let _guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create the project schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure journal: {error}"))?;
+
+        // Two roles, two tables, identical but for their owner.
+        let project = quote_ident(&cfg.project_schema);
+        session
+            .batch(&format!(
+                "CREATE ROLE {owner} NOLOGIN; \
+                 CREATE ROLE {bystander} NOLOGIN; \
+                 CREATE TABLE {project}.owned_rows (id bigint PRIMARY KEY); \
+                 CREATE TABLE {project}.bystander_rows (id bigint PRIMARY KEY); \
+                 ALTER TABLE {project}.owned_rows OWNER TO {owner}; \
+                 ALTER TABLE {project}.bystander_rows OWNER TO {bystander}",
+                owner = quote_ident(&owner_role),
+                bystander = quote_ident(&bystander_role),
+            ))
+            .await
+            .map_err(|error| format!("seed the two owned tables: {error}"))?;
+
+        let doc = serde_json::json!({
+            "ir_version": 1,
+            "name": "drop_owned",
+            "owner_app": OWNER,
+            "ops": [ { "op": "dropOwnedBy", "roles": [owner_role] } ]
+        })
+        .to_string();
+
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
+            .map_err(|error| format!("fold the empty base: {error}"))?;
+        let live = LiveSchema::from_catalog_snapshot(base, OWNER);
+        let artifact = author
+            .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
+            .map_err(|error| format!("lower: {error}"))?;
+        MigrationEngine::new()
+            .apply_plan(
+                &artifact.plan.steps,
+                Approval::Approved,
+                &backend,
+                &cfg,
+                OWNER,
+                LockMode::Acquire,
+            )
+            .await
+            .map_err(|error| format!("apply: {error}"))?;
+
+        let remaining = session
+            .query(
+                "SELECT c.relname AS name FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = $1 AND c.relkind = 'r'
+                  ORDER BY c.relname",
+                &[(&cfg.project_schema).into()],
+            )
+            .await
+            .map_err(|error| format!("list the surviving tables: {error}"))?;
+        let names: Vec<String> = remaining
+            .iter()
+            .map(|row| row.try_get::<_, String>("name").expect("decode relname"))
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["bystander_rows".to_string()],
+            "the owned table must be gone and the bystander's must remain"
+        );
+        Ok(())
+    }
+    .await;
+
+    let _ = session
+        .batch(&format!(
+            "DROP OWNED BY {}, {} CASCADE",
+            quote_ident(&owner_role),
+            quote_ident(&bystander_role)
+        ))
+        .await;
+    let _ = session
+        .batch(&format!(
+            "DROP ROLE IF EXISTS {}; DROP ROLE IF EXISTS {}",
+            quote_ident(&owner_role),
+            quote_ident(&bystander_role)
+        ))
+        .await;
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("drop owned by against live PostgreSQL");
+}
