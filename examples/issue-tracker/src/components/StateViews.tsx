@@ -100,6 +100,7 @@ export function AsyncSection<T>({
   emptyTitle,
   emptyHint,
   emptyTone,
+  renderLoading,
   children,
 }: {
   // The shared AsyncState, not a re-spelling of it. This was an inline copy
@@ -113,9 +114,19 @@ export function AsyncSection<T>({
   emptyHint?: ReactNode;
   /** Passed through to EmptyState -- "inline" for small side panels. */
   emptyTone?: "block" | "inline";
+  /**
+   * What to show while the FIRST load is in flight, instead of a spinner.
+   *
+   * A table should be marked as loading, not replaced by one: swapping the
+   * whole surface for a spinner throws away the column headers, the filter
+   * context and the page height, so the layout jumps when data lands and you
+   * lose the thing you were looking at. A caller that can render its own
+   * skeleton passes it here.
+   */
+  renderLoading?: () => ReactNode;
   children: (data: T, refreshing: boolean) => ReactNode;
 }) {
-  if (state.status === "loading") return <Loading label={loadingLabel} />;
+  if (state.status === "loading") return renderLoading ? <>{renderLoading()}</> : <Loading label={loadingLabel} />;
   if (state.status === "error") return <ErrorState error={state.error} onRetry={onRetry} />;
   if (isEmpty?.(state.data)) {
     return (

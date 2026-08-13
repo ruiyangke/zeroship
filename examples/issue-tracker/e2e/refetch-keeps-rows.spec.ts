@@ -30,7 +30,12 @@ test("the bug table stays on screen and marks itself busy while reloading", asyn
 
   await page.goto("/#/bugs");
   const rows = page.locator("table tbody tr");
-  await expect(rows.first()).toBeVisible();
+  // Wait for REAL rows, not the skeleton. The first load now renders the table
+  // in its loading state instead of a spinner, so "a tbody tr is visible" is
+  // satisfied by placeholder rows -- this sampled five of those as `before`
+  // and then compared them against twenty-five real ones. A bug link only
+  // exists on a row with data behind it.
+  await expect(page.locator("a.bug-link").first()).toBeVisible();
   const before = await rows.count();
   expect(before, "the fixture needs rows for there to be anything to keep").toBeGreaterThan(0);
 

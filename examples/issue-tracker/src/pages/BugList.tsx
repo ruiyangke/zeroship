@@ -377,6 +377,23 @@ export function BugListPage() {
         state={state}
         onRetry={reload}
         loadingLabel="Loading bugs..."
+        /* The table marks itself as loading rather than being replaced by a
+           spinner. Swapping the whole surface out discards the headers and
+           the page height, so the layout jumped when rows arrived -- the
+           first load was the one case still doing it, because `loading` on
+           the table below only applies once there is data to keep. */
+        renderLoading={() => (
+          <BugResultsTable
+            bugs={[]}
+            columns={columns}
+            loading
+            sort={{
+              key: SORT_COLUMN[sortBy] ?? "updated",
+              direction: sortDirection === 1 ? "asc" : "desc",
+            }}
+            onSortChange={() => {}}
+          />
+        )}
         isEmpty={(data) => data.length === 0}
         emptyTitle={
           text || status || severity || priority || productId
