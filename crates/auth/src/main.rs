@@ -13,7 +13,7 @@ use zeroship_core::config::{
 };
 use zeroship_core::oidc_verify::JwksCache;
 
-use zeroship_auth::config::{AuthConfig, AuthControls};
+use zeroship_auth::config::{AuthCli, AuthConfig, AuthSettings};
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::server;
@@ -22,23 +22,29 @@ use zeroship_mailer::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cfg = AuthConfig::parse();
-    let (controls, boot) = bootstrap_or_exit::<AuthControls>(
-        cfg.controls.clone(),
+    let cli = AuthCli::parse();
+    let (settings, boot) = bootstrap_or_exit::<AuthSettings>(
+        cli.settings.clone(),
         zeroship_auth::config::DEFAULT_LOG_FILTER,
         "auth",
     );
-    let check_config = *controls.check_config.get();
+    let check_config = *settings.check_config.get();
     // Snapshot the [secrets] file overlay so each secret can consult its file-tier
-    // reference. `file` stays a shared borrow of the overlay and `cfg.resolve` below
-    // gets a clone of the `[auth]` section, so nothing is moved out of the overlay;
-    // this `.clone()` of `.secrets` is a small defensive snapshot for clarity.
+    // reference. `file` stays a shared borrow of the overlay, so nothing is moved
+    // out of it; this `.clone()` of `.secrets` is a small defensive snapshot for
+    // clarity.
     let file_secrets = boot.overlay.config.secrets.clone();
     let file = &boot.overlay.config;
-    if let Err(message) = cfg.try_resolve(file.auth.clone()) {
-        tracing::error!("{message}");
-        std::process::exit(1);
-    }
+    // `bootstrap_or_exit` already applied CLI > env > overlay > default to every
+    // operational value. This is auth's own resolve-time work: the fail-closed
+    // frame-ancestor filter and the Supabase completeness guard.
+    let mut cfg = match AuthConfig::from_resolved(settings, cli.secrets) {
+        Ok(cfg) => cfg,
+        Err(message) => {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    };
 
     // Resolve secret-reference inputs (urn:zeroship:env|file|vault, arn:…) before
     // any guard or use. On real boot we resolve to the literal value (env/file
@@ -49,15 +55,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // redacting Debug impl prints as "<redacted>" minus the OAuth client *IDs*.
     resolve_auth_secrets(&mut cfg, &file_secrets, check_config);
 
-    tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
+    tracing::info!(addr = %cfg.settings.addr.get(), "starting zeroship-auth");
 
     // Strength guard runs on the RESOLVED value at real boot (cfg.stash_signing_key
     // is already the literal there). During --check-config a secret REFERENCE is
     // still the raw `urn:`/`arn:` string — running a strength check on it would
     // wrongly fail, so skip it for a reference in that mode only (format was
     // already validated by resolve_auth_secrets).
-    if !check_config || !is_secret_ref(&cfg.stash_signing_key) {
-        if let Err(message) = validate_stash_key(&cfg.stash_signing_key) {
+    if !check_config || !is_secret_ref(&cfg.secrets.stash_signing_key) {
+        if let Err(message) = validate_stash_key(&cfg.secrets.stash_signing_key) {
             tracing::error!("{message}");
             std::process::exit(1);
         }
@@ -67,10 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --check-config (the format was already validated in resolve_auth_secrets),
     // but always validate the resolved literal on real boot. Decodes (hex or
     // base64url) to ≥32 bytes, identical to the bundle/master key posture.
-    if !check_config || !is_secret_ref(&cfg.totp_enc_key) {
+    if !check_config || !is_secret_ref(&cfg.secrets.totp_enc_key) {
         if let Err(message) = validate_master_key_material(
             "AUTH_TOTP_ENC_KEY / --totp-enc-key",
-            &cfg.totp_enc_key,
+            &cfg.secrets.totp_enc_key,
         ) {
             tracing::error!("{message}");
             std::process::exit(1);
@@ -85,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // constructed drivers, so it stands alone ahead of mailer construction.
     if check_config {
         let mut report = CheckConfigReport::new();
-        report.field("addr", CheckValue::Plain(cfg.addr.clone()));
+        report.field("addr", CheckValue::Plain(cfg.settings.addr.get().clone()));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -104,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field(
             "gotrue_email_hook_secret_configured",
-            CheckValue::Secret(cfg.gotrue_email_hook_secret.is_some()),
+            CheckValue::Secret(cfg.secrets.gotrue_email_hook_secret.is_some()),
         );
         report.field(
             "control_url",
@@ -112,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field(
             "control_key_configured",
-            CheckValue::Secret(!cfg.control_key.is_empty()),
+            CheckValue::Secret(!cfg.secrets.control_key.is_empty()),
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field(
@@ -125,47 +131,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field("op_issuer_url", CheckValue::Plain(cfg.op_issuer_url()));
         report.field(
             "auth_signing_key_file_configured",
-            CheckValue::Secret(cfg.auth_signing_key_file.is_some()),
+            CheckValue::Secret(cfg.secrets.auth_signing_key_file.is_some()),
         );
         report.field(
             "auth_pairwise_salt_file_configured",
-            CheckValue::Secret(cfg.auth_pairwise_salt_file.is_some()),
+            CheckValue::Secret(cfg.secrets.auth_pairwise_salt_file.is_some()),
         );
         report.field(
             "auth_broker_secret_file_configured",
-            CheckValue::Secret(cfg.auth_broker_secret_file.is_some()),
+            CheckValue::Secret(cfg.secrets.auth_broker_secret_file.is_some()),
         );
         report.field(
             "auth_broker_secret_previous_file_configured",
-            CheckValue::Secret(cfg.auth_broker_secret_previous_file.is_some()),
+            CheckValue::Secret(cfg.secrets.auth_broker_secret_previous_file.is_some()),
         );
         report.field(
             "refresh_hash_key_file_configured",
-            CheckValue::Secret(cfg.refresh_hash_key_file.is_some()),
+            CheckValue::Secret(cfg.secrets.refresh_hash_key_file.is_some()),
         );
         report.field(
             "refresh_idem_key_file_configured",
-            CheckValue::Secret(cfg.refresh_idem_key_file.is_some()),
+            CheckValue::Secret(cfg.secrets.refresh_idem_key_file.is_some()),
         );
         report.field(
             "refresh_pool_size",
-            CheckValue::Plain(cfg.refresh_pool_size.to_string()),
+            CheckValue::Plain(cfg.refresh_pool_size().to_string()),
         );
         report.field(
             "frame_ancestor_origins",
-            CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
+            CheckValue::Plain(cfg.frame_ancestor_origins().join(",")),
         );
-        report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
-        report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
+        report.field("db_configured", CheckValue::Secret(!cfg.secrets.db_url.is_empty()));
+        report.field("mailer", CheckValue::Plain(cfg.settings.mailer.get().clone()));
         report.field(
             "google_oauth_configured",
-            CheckValue::Flag(cfg.google_client_id.is_some()),
+            CheckValue::Flag(cfg.google_client_id().is_some()),
         );
         report.field(
             "github_oauth_configured",
-            CheckValue::Flag(cfg.github_client_id.is_some()),
+            CheckValue::Flag(cfg.github_client_id().is_some()),
         );
-        report.emit(*controls.check_config_format.get());
+        report.emit(*cfg.settings.check_config_format.get());
         return Ok(());
     }
 
@@ -174,12 +180,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // named env var, so a misconfigured SMTP block (transactional or relay-forward)
     // fails fast. The constructed drivers are threaded into `server::run` below.
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.mailer, "mailer ready");
+    tracing::info!(driver = %cfg.settings.mailer.get(), "mailer ready");
 
     // The SECOND, dedicated relay-forward mailer (sub-spec §5.2a). Forced to
     // SMTP/stdout — Resend can't pin envelope-from (§3.2).
     let relay_forward_mailer: RelayForwardMailer = build_relay_forward_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.relay_forward_mailer, "relay-forward mailer ready");
+    tracing::info!(driver = %cfg.settings.relay_forward_mailer.get(), "relay-forward mailer ready");
 
     ntex::rt::System::build()
         .name("zeroship-auth")
@@ -188,19 +194,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // OAuth provider credentials are optional. We log a warning per disabled
     // provider so it's obvious during boot which federation arms aren't wired
     // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
-    if cfg.google_client_id.is_none() {
+    if cfg.google_client_id().is_none() {
         tracing::warn!(
             "Google OAuth disabled — set AUTH_GOOGLE_CLIENT_ID + AUTH_GOOGLE_CLIENT_SECRET to enable"
         );
     }
-    if cfg.github_client_id.is_none() {
+    if cfg.github_client_id().is_none() {
         tracing::warn!(
             "GitHub OAuth disabled — set AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
         );
     }
 
     // 1. Open PG.
-    let (client, connection) = connect(&cfg.db_url, NoTls).await?;
+    let (client, connection) = connect(&cfg.secrets.db_url, NoTls).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             tracing::error!(error = %e, "auth/pg connection error");
@@ -212,27 +218,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compose `migrate` service / `deploy/ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 
-    let auth_signing_key_file = cfg.auth_signing_key_file.as_deref().ok_or_else(|| {
+    let auth_signing_key_file = cfg.secrets.auth_signing_key_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "AUTH_SIGNING_KEY_FILE / --auth-signing-key-file is required".into(),
         )
     })?;
-    let auth_pairwise_salt_file = cfg.auth_pairwise_salt_file.as_deref().ok_or_else(|| {
+    let auth_pairwise_salt_file = cfg.secrets.auth_pairwise_salt_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "AUTH_PAIRWISE_SALT_FILE / --auth-pairwise-salt-file is required".into(),
         )
     })?;
-    let auth_broker_secret_file = cfg.auth_broker_secret_file.as_deref().ok_or_else(|| {
+    let auth_broker_secret_file = cfg.secrets.auth_broker_secret_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "AUTH_BROKER_SECRET_FILE / --auth-broker-secret-file is required".into(),
         )
     })?;
-    cfg.refresh_hash_key_file.as_deref().ok_or_else(|| {
+    cfg.secrets.refresh_hash_key_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "REFRESH_HASH_KEY_FILE / --refresh-hash-key-file is required".into(),
         )
     })?;
-    cfg.refresh_idem_key_file.as_deref().ok_or_else(|| {
+    cfg.secrets.refresh_idem_key_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "REFRESH_IDEM_KEY_FILE / --refresh-idem-key-file is required".into(),
         )
@@ -244,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .with_broker_secrets(zeroship_auth::oidc::BrokerSecrets::from_files(
         auth_broker_secret_file,
-        cfg.auth_broker_secret_previous_file.as_deref(),
+        cfg.secrets.auth_broker_secret_previous_file.as_deref(),
     )?);
     op_issuer.publish_active_key(&client).await?;
     tracing::info!(
@@ -257,15 +263,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Build the Google JWKS cache. Only constructed when Google OAuth
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
-    let google_jwks = if cfg.google_client_id.is_some() {
-        Some(Arc::new(JwksCache::new(&cfg.google_jwks_url)))
+    let google_jwks = if cfg.google_client_id().is_some() {
+        Some(Arc::new(JwksCache::new(cfg.settings.google_jwks_url.get())))
     } else {
         None
     };
 
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(
-        cfg.db_url.clone(),
-        cfg.refresh_pool_size,
+        cfg.secrets.db_url.clone(),
+        cfg.refresh_pool_size(),
     );
     tracing::info!(
         pool_size = refresh_pool.pool_size(),
@@ -321,82 +327,82 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection, chec
     let check = check_config;
 
     // Required-string secrets (always present on the CLI struct).
-    cfg.db_url = obtain_secret(
+    cfg.secrets.db_url = obtain_secret(
         "AUTH_DB_URL / --db-url",
-        &cfg.db_url,
+        &cfg.secrets.db_url,
         file_secrets.auth_db_url.as_deref(),
         check,
     );
-    cfg.stash_signing_key = obtain_secret(
+    cfg.secrets.stash_signing_key = obtain_secret(
         "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
-        &cfg.stash_signing_key,
+        &cfg.secrets.stash_signing_key,
         file_secrets.stash_signing_key.as_deref(),
         check,
     );
-    cfg.control_key = obtain_secret(
+    cfg.secrets.control_key = obtain_secret(
         "CONTROL_KEY / --control-key",
-        &cfg.control_key,
+        &cfg.secrets.control_key,
         file_secrets.control_key.as_deref(),
         check,
     );
-    cfg.totp_enc_key = obtain_secret(
+    cfg.secrets.totp_enc_key = obtain_secret(
         "AUTH_TOTP_ENC_KEY / --totp-enc-key",
-        &cfg.totp_enc_key,
+        &cfg.secrets.totp_enc_key,
         file_secrets.totp_enc_key.as_deref(),
         check,
     );
 
     // Optional secrets — obtain only when the CLI/env or file tier supplies a
     // value; an all-empty result leaves the provider arm disabled (`None`).
-    cfg.google_client_secret = resolve_optional(
+    cfg.secrets.google_client_secret = resolve_optional(
         check,
         "AUTH_GOOGLE_CLIENT_SECRET / --google-client-secret",
-        cfg.google_client_secret.as_deref(),
+        cfg.secrets.google_client_secret.as_deref(),
         file_secrets.google_client_secret.as_deref(),
     );
-    cfg.github_client_secret = resolve_optional(
+    cfg.secrets.github_client_secret = resolve_optional(
         check,
         "AUTH_GITHUB_CLIENT_SECRET / --github-client-secret",
-        cfg.github_client_secret.as_deref(),
+        cfg.secrets.github_client_secret.as_deref(),
         file_secrets.github_client_secret.as_deref(),
     );
-    cfg.smtp_password = resolve_optional(
+    cfg.secrets.smtp_password = resolve_optional(
         check,
         "AUTH_SMTP_PASSWORD / --smtp-password",
-        cfg.smtp_password.as_deref(),
+        cfg.secrets.smtp_password.as_deref(),
         file_secrets.smtp_password.as_deref(),
     );
-    cfg.resend_api_key = resolve_optional(
+    cfg.secrets.resend_api_key = resolve_optional(
         check,
         "AUTH_RESEND_API_KEY / --resend-api-key",
-        cfg.resend_api_key.as_deref(),
+        cfg.secrets.resend_api_key.as_deref(),
         file_secrets.resend_api_key.as_deref(),
     );
-    cfg.gotrue_email_hook_secret = resolve_optional(
+    cfg.secrets.gotrue_email_hook_secret = resolve_optional(
         check,
         "AUTH_GOTRUE_EMAIL_HOOK_SECRET / --gotrue-email-hook-secret",
-        cfg.gotrue_email_hook_secret.as_deref(),
+        cfg.secrets.gotrue_email_hook_secret.as_deref(),
         None,
     );
-    cfg.postmark_webhook_password = resolve_optional(
+    cfg.secrets.postmark_webhook_password = resolve_optional(
         check,
         "AUTH_POSTMARK_WEBHOOK_PASSWORD / --postmark-webhook-password",
-        cfg.postmark_webhook_password.as_deref(),
+        cfg.secrets.postmark_webhook_password.as_deref(),
         file_secrets.postmark_webhook_password.as_deref(),
     );
     // Relay secrets (Slice 5). No dedicated [secrets] file slot yet, so the
     // file tier is `None` — CLI/env resolution + reference-format validation
     // still apply, exactly like the optional SMTP/Resend secrets.
-    cfg.relay_inbound_password = resolve_optional(
+    cfg.secrets.relay_inbound_password = resolve_optional(
         check,
         "AUTH_RELAY_INBOUND_PASSWORD / --relay-inbound-password",
-        cfg.relay_inbound_password.as_deref(),
+        cfg.secrets.relay_inbound_password.as_deref(),
         None,
     );
-    cfg.relay_smtp_password = resolve_optional(
+    cfg.secrets.relay_smtp_password = resolve_optional(
         check,
         "AUTH_RELAY_SMTP_PASSWORD / --relay-smtp-password",
-        cfg.relay_smtp_password.as_deref(),
+        cfg.secrets.relay_smtp_password.as_deref(),
         None,
     );
 }
@@ -431,26 +437,26 @@ fn resolve_optional(
 /// driver's required credentials aren't set, so the startup error
 /// names exactly which env var is missing.
 fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
-    match cfg.mailer.as_str() {
+    match cfg.settings.mailer.get().as_str() {
         "stdout" => Ok(Arc::new(StdoutMailer)),
         "smtp" => {
-            let host = cfg.smtp_host.clone().ok_or_else(|| {
+            let host = cfg.smtp_host().map(str::to_owned).ok_or_else(|| {
                 AuthError::Config(
                     "AUTH_SMTP_HOST is required when --mailer=smtp".into(),
                 )
             })?;
             let driver = SmtpMailer::new(&SmtpConfig {
                 host,
-                port: cfg.smtp_port,
-                username: cfg.smtp_username.clone(),
-                password: cfg.smtp_password.clone(),
-                tls: cfg.smtp_tls,
+                port: *cfg.settings.smtp_port.get(),
+                username: cfg.smtp_username().map(str::to_owned),
+                password: cfg.secrets.smtp_password.clone(),
+                tls: *cfg.settings.smtp_tls.get(),
             })
             .map_err(|e| AuthError::Config(format!("smtp mailer: {e}")))?;
             Ok(Arc::new(driver))
         }
         "resend" => {
-            let api_key = cfg.resend_api_key.clone().ok_or_else(|| {
+            let api_key = cfg.secrets.resend_api_key.clone().ok_or_else(|| {
                 AuthError::Config(
                     "AUTH_RESEND_API_KEY is required when --mailer=resend".into(),
                 )
@@ -470,19 +476,19 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
 /// this role: the relay forward path must pin the SMTP envelope-from to the
 /// relay bounce mailbox, which Resend's HTTP API cannot do (§3.2).
 fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, AuthError> {
-    match cfg.relay_forward_mailer.as_str() {
+    match cfg.settings.relay_forward_mailer.get().as_str() {
         "smtp" => {
-            let host = cfg.relay_smtp_host.clone().ok_or_else(|| {
+            let host = cfg.relay_smtp_host().map(str::to_owned).ok_or_else(|| {
                 AuthError::Config(
                     "AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp".into(),
                 )
             })?;
             let driver = SmtpMailer::new(&SmtpConfig {
                 host,
-                port: cfg.relay_smtp_port,
-                username: cfg.relay_smtp_username.clone(),
-                password: cfg.relay_smtp_password.clone(),
-                tls: cfg.relay_smtp_tls,
+                port: *cfg.settings.relay_smtp_port.get(),
+                username: cfg.relay_smtp_username().map(str::to_owned),
+                password: cfg.secrets.relay_smtp_password.clone(),
+                tls: *cfg.settings.relay_smtp_tls.get(),
             })
             .map_err(|e| AuthError::Config(format!("relay smtp mailer: {e}")))?;
             Ok(RelayForwardMailer(Arc::new(driver)))
