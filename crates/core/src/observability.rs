@@ -15,11 +15,20 @@
 //! Those two reads are now DECLARED keys owned by [`TracingInitConsumer`]
 //! rather than raw `std::env::var` calls: `RUST_LOG` is `external` (the
 //! `tracing`/`env_filter` convention, not ours), and `ZEROSHIP_LOG_FORMAT` is
-//! `platform` - a zeroship-owned name whose exit is that these three callers
-//! grow a `#[zeroship_config]` declaration and read the generated
-//! `observability.log_format` like the server binaries already do, at which
-//! point this spelling disappears rather than being reclassified. See
-//! [`TracingInitConsumer`] for why the values are not passed in by the caller.
+//! `cli`.
+//!
+//! `cli` rather than `platform`, and the distinction was argued twice. The
+//! generated `observability.log_format` identity ALREADY exists
+//! (`ZEROSHIP_OBSERVABILITY_LOG_FORMAT`, a shared symbol), and every server
+//! binary resolves it through `config::bootstrap`; none of them reaches
+//! [`init_tracing`]. What is left on this path is the creator-CLI and
+//! single-tenant-runtime vector, which Step 4 of
+//! `docs/proposals/2026-08-11-config-name-alignment.md` says lands as a `CliEnv`
+//! registration without CLI TOML support. Calling it `platform` would have put
+//! it in a debt ledger for a declaration that is not missing. Its exit is that
+//! these three callers grow their own declaration, at which point the spelling
+//! disappears rather than being reclassified. See [`TracingInitConsumer`] for
+//! why the values are not passed in by the caller.
 //!
 //! Calling either init more than once in a process is a no-op after the first
 //! (the global subscriber is locked in by `tracing_subscriber::registry().init()`).
