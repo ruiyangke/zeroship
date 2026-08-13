@@ -70,6 +70,7 @@ export default defineApp({
     "rpc:flagTypes.create": { auth: "user" },
     "rpc:flagTypes.list": { auth: "user" },
     "rpc:groups.list": { auth: "user" },
+    "rpc:groups.members": { auth: "user" },
     "rpc:groups.addMember": { auth: "user" },
     "rpc:groups.removeMember": { auth: "user" },
     "rpc:products.restrict": { auth: "user" },

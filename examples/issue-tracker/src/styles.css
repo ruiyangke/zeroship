@@ -440,3 +440,19 @@ tbody tr:hover { background: var(--surface-2); }
   border-radius: 0.5rem;
   padding-block: 0.5rem;
 }
+
+/* Group members: one row each, name against its Remove. */
+.member-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+.member-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  max-inline-size: 22rem;
+}

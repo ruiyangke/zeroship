@@ -4138,6 +4138,31 @@ export const listGroups = query(
   { id: "groups.list" },
 );
 
+/**
+ * Who is in a group.
+ *
+ * groups.addMember and groups.removeMember both existed and nothing could
+ * list the members between them, so the app could grant access to a group and
+ * never show or revoke it. For an access-control feature that is the half
+ * that matters: a grant you cannot see is a grant you cannot audit.
+ *
+ * Admin-only, like the rest of the group surface, and returns the public view
+ * of each member rather than the row.
+ */
+export const listGroupMembers = query(
+  async ({ groupId }: { groupId: string }) => {
+    await requireAdmin();
+    await getRequired(db.groups, groupId, "Group");
+    const rows = await readAll(db.groupMembers, { groupId });
+    if (rows.length === 0) return [];
+    const users = await readByIds(db.users, rows.map((row) => row.userId));
+    return users.map(publicUserView).sort((left, right) =>
+      (left.name ?? left.handle ?? "").localeCompare(right.name ?? right.handle ?? ""),
+    );
+  },
+  { id: "groups.members" },
+);
+
 export const addGroupMember = mutation(
   async ({ groupId, userId }: { groupId: string; userId: string }) => {
     await requireAdmin();

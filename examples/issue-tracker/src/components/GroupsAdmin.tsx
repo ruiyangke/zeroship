@@ -3,6 +3,8 @@ import { Button, Field, Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
+  listGroupMembers,
+  removeGroupMember,
   createGroup,
   listGroups,
   listProducts,
@@ -33,6 +35,7 @@ export function GroupsAdmin() {
   const [memberGroup, setMemberGroup] = useState("");
   const [memberQuery, setMemberQuery] = useState("");
   const [matches, setMatches] = useState<Awaited<ReturnType<typeof listUsers>>>([]);
+  const [members, setMembers] = useState<Awaited<ReturnType<typeof listGroupMembers>>>([]);
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +82,7 @@ export function GroupsAdmin() {
       await addGroupMember({ groupId: memberGroup, userId });
       setMatches([]);
       setMemberQuery("");
+      await loadMembers(memberGroup);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -97,6 +101,31 @@ export function GroupsAdmin() {
       </section>
     );
   }
+
+  const loadMembers = async (groupId: string) => {
+    if (!groupId) {
+      setMembers([]);
+      return;
+    }
+    try {
+      setMembers(await listGroupMembers({ groupId }));
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const removeMember = async (userId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await removeGroupMember({ groupId: memberGroup, userId });
+      await loadMembers(memberGroup);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <section className="admin-section groups-admin">
@@ -148,7 +177,10 @@ export function GroupsAdmin() {
             Add member to
             <Select
             value={memberGroup}
-            onValueChange={(next) => setMemberGroup(next ?? "")}
+            onValueChange={(next) => {
+              setMemberGroup(next ?? "");
+              void loadMembers(next ?? "");
+            }}
             placeholder="Select a group"
             aria-label="Add member to"
             renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
@@ -171,6 +203,37 @@ export function GroupsAdmin() {
           <Button variant="gray" size="small" onClick={() => void search()}>
             Search
           </Button>
+        </div>
+      ) : null}
+
+      {/* Who is already in the chosen group, and a way out.
+          groups.addMember and groups.removeMember both existed with nothing
+          between them to list members, so access could be granted here and
+          never seen or revoked -- the half of an access-control surface that
+          actually matters. */}
+      {memberGroup ? (
+        <div className="group-members">
+          <h3>Members</h3>
+          {members.length === 0 ? (
+            <p className="state-hint small">Nobody is in this group yet.</p>
+          ) : (
+            <ul className="member-list">
+              {members.map((member) => (
+                <li key={member.id}>
+                  <span>{member.name ?? member.handle}</span>
+                  <Button
+                    variant="gray"
+                    size="small"
+                    intent="destructive"
+                    disabled={busy}
+                    onClick={() => void removeMember(member.id)}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       ) : null}
 
