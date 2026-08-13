@@ -93,8 +93,8 @@ DEV_PORT="${DEV_PORT:-3011}"
 VITE_PORT="${VITE_PORT:-5011}"
 REDIS_PORT="${REDIS_PORT:-6396}"
 REDIS_CONTAINER="zs-devdeploy-redis"
-CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
-export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
+ZEROSHIP_CONTROL_KEY="dd-ck"; ZEROSHIP_CONTROL_MASTER_KEY="dd-mk"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="kvdash"
 MUTATE="${MUTATE:-none}"
 
@@ -318,22 +318,24 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { fail "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+e2e_export_database_urls "$DB_URL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+ > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
-# Without --kv-url the env.kv namespace is absent BY DESIGN and every handler
+# Without ZEROSHIP_WORKER_KV_URL the env.kv namespace is absent BY DESIGN and every handler
 # fails loudly (crates/worker/src/main.rs). Omitting it here would look like an
 # app bug, not a harness bug.
+ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
-  --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
+ --blob-store "$WORK/bundles" --poll-interval 2 \
+ > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
-  --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+ --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
+  --broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
 for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
   curl -sf "http://localhost:${svc##*:}/readyz" >/dev/null \
@@ -341,7 +343,7 @@ for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gate
 done
 pass "control + worker + gateway healthy"
 
-OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 [ -n "$API_KEY" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 sleep 5   # gateway route-sync poll

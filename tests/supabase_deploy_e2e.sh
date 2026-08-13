@@ -8,7 +8,7 @@
 #   bearer -> gateway serves the deployed app.
 #
 # This uses a tiny localhost prefix proxy so control can talk to GoTrue with the
-# hosted-Supabase URL shape (`{SUPABASE_URL}/auth/v1/...`) while the raw GoTrue
+# hosted-Supabase URL shape (`{ZEROSHIP_AUTH_SUPABASE_URL}/auth/v1/...`) while the raw GoTrue
 # container remains the actual auth server.
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -38,9 +38,9 @@ JWT_SECRET="${SUPABASE_E2E_JWT_SECRET:-zs-supabase-e2e-jwt-secret-at-least-32-by
 SUPABASE_JWT_KID="${SUPABASE_E2E_JWT_KID:-zs-supabase-e2e-rs256}"
 SUPABASE_JWT_PRIVATE_JWK=""
 GOTRUE_JWT_KEYS=""
-CONTROL_KEY="${CONTROL_KEY:-supabase-e2e-control-key}"
-WORKER_KEY="${WORKER_KEY:-supabase-e2e-worker-key-0123456789abcdef}"
-MASTER_KEY="${MASTER_KEY:-supabase-e2e-master-key-0123456789abcdef}"
+ZEROSHIP_CONTROL_KEY="${ZEROSHIP_CONTROL_KEY:-supabase-e2e-control-key}"
+ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-supabase-e2e-worker-key-0123456789abcdef}"
+ZEROSHIP_CONTROL_MASTER_KEY="${ZEROSHIP_CONTROL_MASTER_KEY:-supabase-e2e-master-key-0123456789abcdef}"
 AUTH_STASH_KEY="${AUTH_STASH_KEY:-supabase-e2e-auth-stash-key-0123456789abcdef}"
 GOTRUE_EMAIL_HOOK_SECRET="${GOTRUE_EMAIL_HOOK_SECRET:-v1,whsec_c3VwYWJhc2UtZTJlLWdvdHJ1ZS1lbWFpbC1ob29rLXNlY3JldC0zMmI=}"
 APP_NAME="supabase-e2e-$(date +%s)-$RANDOM"
@@ -117,9 +117,9 @@ AUTH_PORT="${AUTH_PORT:-$(pick_port)}"
 
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 GATE_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT"
-SUPABASE_URL="http://localhost:$GOTRUE_PROXY_PORT"
-GOTRUE_URL="$SUPABASE_URL/auth/v1"
-SUPABASE_ISSUER="$SUPABASE_URL/auth/v1"
+ZEROSHIP_AUTH_SUPABASE_URL="http://localhost:$GOTRUE_PROXY_PORT"
+GOTRUE_URL="$ZEROSHIP_AUTH_SUPABASE_URL/auth/v1"
+SUPABASE_ISSUER="$ZEROSHIP_AUTH_SUPABASE_URL/auth/v1"
 ZEROSHIP_CONTROL_SUPABASE_JWKS_URL="$GOTRUE_URL/.well-known/jwks.json"
 CONTROL_DB_URL="postgres://postgres:zeroship@localhost:$CONTROL_PG_PORT/zeroship"
 
@@ -345,24 +345,21 @@ prepare_auth_native_op_secrets() {
 
 start_auth_service() {
   prepare_auth_native_op_secrets
+  ZEROSHIP_AUTH_GOTRUE_EMAIL_HOOK_SECRET="$GOTRUE_EMAIL_HOOK_SECRET" \
   "$BIN/zeroship-auth" \
     --addr "0.0.0.0:$AUTH_PORT" \
-    --db-url "$CONTROL_DB_URL" \
     --public-url "http://localhost:$AUTH_PORT" \
-    --stash-signing-key "$AUTH_STASH_KEY" \
-    --totp-enc-key "$AUTH_TOTP_ENC_KEY" \
-    --auth-signing-key-file "$AUTH_SIGNING_KEY_FILE" \
-    --auth-pairwise-salt-file "$AUTH_PAIRWISE_SALT_FILE" \
-    --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
-    --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
-    --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
+    --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
+    --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \
+    --broker-secret-file "$ZEROSHIP_AUTH_BROKER_SECRET_FILE" \
+    --refresh-hash-key-file "$ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE" \
+    --refresh-idem-key-file "$ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE" \
     --provider supabase \
-    --supabase-url "$SUPABASE_URL" \
-    --supabase-anon-key "$SUPABASE_ANON_KEY" \
+    --supabase-url "$ZEROSHIP_AUTH_SUPABASE_URL" \
+    --supabase-anon-key "$ZEROSHIP_AUTH_SUPABASE_ANON_KEY" \
     --control-url "$CONTROL_URL" \
     --mailer stdout \
     --relay-forward-mailer stdout \
-    --gotrue-email-hook-secret "$GOTRUE_EMAIL_HOOK_SECRET" \
     >"$WORK/auth.log" 2>&1 &
   PIDS+=("$!")
   wait_http "http://localhost:$AUTH_PORT/healthz" \
@@ -533,24 +530,21 @@ SQL
 }
 
 start_zeroship_stack() {
-  export WORKER_KEY
+  export ZEROSHIP_WORKER_KEY
   local control_verify_args=(--supabase-jwt-issuer "$SUPABASE_ISSUER")
   if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
     control_verify_args+=(--supabase-jwks-url "$ZEROSHIP_CONTROL_SUPABASE_JWKS_URL")
   else
-    control_verify_args+=(--supabase-jwt-secret "$JWT_SECRET")
+    # A secret has no value flag, so the shared HS256 verifier arrives by its
+    # canonical env name rather than through argv.
+    export ZEROSHIP_AUTH_SUPABASE_JWT_SECRET="$JWT_SECRET"
   fi
 
-  "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$CONTROL_DB_URL" \
-    --provision-db "$CONTROL_DB_URL" \
+  "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" \
-    --control-key "$CONTROL_KEY" \
-    --worker-key "$WORKER_KEY" \
-    --master-key "$MASTER_KEY" \
     --auth-provider supabase \
-    --supabase-url "$SUPABASE_URL" \
-    --supabase-anon-key "$SUPABASE_ANON_KEY" \
-    --supabase-service-role-key "$SUPABASE_SERVICE_ROLE_KEY" \
+    --auth-supabase-url "$ZEROSHIP_AUTH_SUPABASE_URL" \
+    --auth-supabase-anon-key "$ZEROSHIP_AUTH_SUPABASE_ANON_KEY" \
     "${control_verify_args[@]}" \
     --app-base-domain zeroship.localhost \
     >"$WORK/control.log" 2>&1 &
@@ -559,9 +553,6 @@ start_zeroship_stack() {
 
   "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
     --control-url "$CONTROL_URL" \
-    --control-key "$CONTROL_KEY" \
-    --worker-key "$WORKER_KEY" \
-    --db "$CONTROL_DB_URL" \
     --blob-store "$WORK/blobs" \
     --poll-interval 2 \
     >"$WORK/worker.log" 2>&1 &
@@ -570,10 +561,7 @@ start_zeroship_stack() {
 
   "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" \
     --control-url "$CONTROL_URL" \
-    --control-key "$CONTROL_KEY" \
-    --worker-key "$WORKER_KEY" \
     --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
-    --db "$CONTROL_DB_URL" \
     --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" \
     --poll-interval 2 \
@@ -586,8 +574,8 @@ refresh_gotrue_session() {
   local refresh_token="$1"
   post_json "$GOTRUE_URL/token?grant_type=refresh_token" \
     "$(jq -nc --arg refresh_token "$refresh_token" '{refresh_token:$refresh_token}')" \
-    -H "apikey: $SUPABASE_ANON_KEY" \
-    -H "Authorization: Bearer $SUPABASE_ANON_KEY"
+    -H "apikey: $ZEROSHIP_AUTH_SUPABASE_ANON_KEY" \
+    -H "Authorization: Bearer $ZEROSHIP_AUTH_SUPABASE_ANON_KEY"
 }
 
 query_control_db() {
@@ -629,16 +617,16 @@ if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
   generate_jwks_signing_key
   export SUPABASE_JWT_PRIVATE_JWK
 fi
-SUPABASE_ANON_KEY="$(mint_gotrue_key anon)"
-SUPABASE_SERVICE_ROLE_KEY="$(mint_gotrue_key service_role)"
-export SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY
-echo "  anon key:         $(redact_jwt "$SUPABASE_ANON_KEY")"
-echo "  service_role key: $(redact_jwt "$SUPABASE_SERVICE_ROLE_KEY")"
+ZEROSHIP_AUTH_SUPABASE_ANON_KEY="$(mint_gotrue_key anon)"
+ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY="$(mint_gotrue_key service_role)"
+export ZEROSHIP_AUTH_SUPABASE_ANON_KEY ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY
+echo "  anon key:         $(redact_jwt "$ZEROSHIP_AUTH_SUPABASE_ANON_KEY")"
+echo "  service_role key: $(redact_jwt "$ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY")"
 echo "  shared issuer:    $SUPABASE_ISSUER"
 if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
   echo "  JWKS URL:         $ZEROSHIP_CONTROL_SUPABASE_JWKS_URL"
-  assert_jwt_mode_header "$SUPABASE_ANON_KEY" "anon apikey"
-  assert_jwt_mode_header "$SUPABASE_SERVICE_ROLE_KEY" "service_role apikey"
+  assert_jwt_mode_header "$ZEROSHIP_AUTH_SUPABASE_ANON_KEY" "anon apikey"
+  assert_jwt_mode_header "$ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY" "service_role apikey"
 else
   echo "  HS256 secret:     ${JWT_SECRET:0:8}...<redacted>"
 fi
@@ -650,15 +638,15 @@ docker pull "$GOTRUE_IMAGE" >/dev/null || fail "docker pull $GOTRUE_IMAGE failed
 start_postgres "$CONTROL_PG_CONTAINER" "$CONTROL_PG_PORT"
 pass "control Postgres ready on :$CONTROL_PG_PORT"
 apply_control_migrations
-STASH_SIGNING_KEY="$AUTH_STASH_KEY"
-AUTH_STASH_SIGNING_KEY="$AUTH_STASH_KEY"
-PAIRWISE_SALT="$(openssl rand -hex 32)"
-AUTH_SIGNING_KEY_FILE="$WORK/auth-signing.pem"
-AUTH_PAIRWISE_SALT_FILE="$WORK/auth-pairwise-salt"
-GATEWAY_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
-AUTH_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
-REFRESH_HASH_KEY_FILE="$WORK/refresh-hash-key"
-REFRESH_IDEM_KEY_FILE="$WORK/refresh-idem-key"
+ZEROSHIP_GATEWAY_STASH_SIGNING_KEY="$AUTH_STASH_KEY"
+ZEROSHIP_AUTH_STASH_SIGNING_KEY="$AUTH_STASH_KEY"
+ZEROSHIP_PAIRWISE_SALT="$(openssl rand -hex 32)"
+ZEROSHIP_AUTH_SIGNING_KEY_FILE="$WORK/auth-signing.pem"
+ZEROSHIP_AUTH_PAIRWISE_SALT_FILE="$WORK/auth-pairwise-salt"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
+ZEROSHIP_AUTH_BROKER_SECRET_FILE="$WORK/auth-broker-secret"
+ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE="$WORK/refresh-hash-key"
+ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE="$WORK/refresh-idem-key"
 e2e_export_runtime_secrets "$WORK" || exit 1
 start_auth_service
 start_postgres "$GOTRUE_PG_CONTAINER"
@@ -673,8 +661,8 @@ EMAIL="supabase-e2e+$(date +%s)-$RANDOM@example.com"
 PASSWORD="Zs-e2e-$(openssl rand -hex 12)!aA1"
 SIGNUP="$(post_json "$GOTRUE_URL/signup" \
   "$(jq -nc --arg email "$EMAIL" --arg password "$PASSWORD" '{email:$email,password:$password}')" \
-  -H "apikey: $SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $SUPABASE_ANON_KEY")"
+  -H "apikey: $ZEROSHIP_AUTH_SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $ZEROSHIP_AUTH_SUPABASE_ANON_KEY")"
 echo "  signup response keys: $(jq -r 'keys | join(",")' <<<"$SIGNUP")"
 VERIFY_LINK="$(wait_for_gotrue_hook_mail "$EMAIL")" || fail "zeroship-auth stdout mailer did not capture GoTrue signup verify email"
 echo "  hook verify link: $VERIFY_LINK"
@@ -689,8 +677,8 @@ esac
 pass "captured GoTrue verify link confirmed the signup email"
 LOGIN="$(post_json "$GOTRUE_URL/token?grant_type=password" \
   "$(jq -nc --arg email "$EMAIL" --arg password "$PASSWORD" '{email:$email,password:$password}')" \
-  -H "apikey: $SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $SUPABASE_ANON_KEY")"
+  -H "apikey: $ZEROSHIP_AUTH_SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $ZEROSHIP_AUTH_SUPABASE_ANON_KEY")"
 ACCESS_TOKEN="$(json_get '.access_token' <<<"$LOGIN")"
 REFRESH_TOKEN="$(json_get '.refresh_token' <<<"$LOGIN")"
 [ -n "$ACCESS_TOKEN" ] || fail "GoTrue password grant returned no access_token: $LOGIN"
@@ -706,8 +694,8 @@ echo "  token claims: role=$GOTRUE_ROLE aud=$GOTRUE_AUD"
 [ "$GOTRUE_ROLE" = "authenticated" ] || fail "GoTrue access token role was $GOTRUE_ROLE"
 [ "$GOTRUE_AUD" = "authenticated" ] || fail "GoTrue access token aud was $GOTRUE_AUD"
 ADMIN_USER="$(curl -fsS "$GOTRUE_URL/admin/users/$GOTRUE_SUB" \
-  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")" \
+  -H "apikey: $ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Authorization: Bearer $ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY")" \
   || fail "service_role admin user lookup failed"
 EMAIL_CONFIRMED_AT="$(json_get '.email_confirmed_at' <<<"$ADMIN_USER")"
 [ -n "$EMAIL_CONFIRMED_AT" ] || fail "GoTrue admin lookup did not show email_confirmed_at: $ADMIN_USER"

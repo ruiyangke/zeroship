@@ -50,7 +50,7 @@ WORKER_PORTS=(8080 8081 8082)
 ZEROSHIP_GATEWAY_PORT=8000
 PG_PORT="${PG_PORT:-5456}"
 PG_CONTAINER="${PG_CONTAINER:-zs-e2e-platform-pg}"
-CONTROL_KEY="test-ck"
+ZEROSHIP_CONTROL_KEY="test-ck"
 
 PASS=0
 FAIL=0
@@ -241,8 +241,8 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 # tokens against the key it was started with. Without the flag every
 # `/api/apps` call answers 401 "platform token verification failed" — which
 # is exactly how this harness died before, silently, inside a `$(curl -sf)`.
-"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" --blob-store "$WORK/blobs" \
-    --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --blob-store "$WORK/blobs" \
+ --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -251,7 +251,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/ready
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
     "$BIN/zeroship-worker" --port "$port" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-        --control-key "$CONTROL_KEY" --db "$DBURL" --blob-store "$WORK/blobs" \
+ --blob-store "$WORK/blobs" \
         --poll-interval 2 > "$WORK/worker-$port.log" 2>&1 &
     PIDS+=($!)
     [ -n "$WORKER_URL_LIST" ] && WORKER_URL_LIST="$WORKER_URL_LIST,"
@@ -261,10 +261,10 @@ done
 # Start gateway. cd54028e7 made it refuse to start without a broker master
 # secret; $WORK/gate-secret comes from stack_workspace.
 "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-    --control-key "$CONTROL_KEY" --worker-urls "$WORKER_URL_LIST" --poll-interval 2 \
-    --db "$DBURL" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+ --worker-urls "$WORKER_URL_LIST" --poll-interval 2 \
+ --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
     --signing-key-file "$WORK/signing-key.pem" \
-    --gateway-broker-secret-file "$WORK/gate-secret" \
+    --broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -308,7 +308,7 @@ if [ -n "$APP_ID" ]; then
     fi
 
     sleep 3
-    if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/internal/versions" -H "Authorization: Bearer $CONTROL_KEY"; then
+    if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/internal/versions" -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY"; then
         if printf '%s' "$HTTP_BODY" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1; then
             pass "version in internal API"
         else

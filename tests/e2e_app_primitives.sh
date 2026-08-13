@@ -172,11 +172,12 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
@@ -184,9 +185,10 @@ for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # worker: generated worker_key; direct /dispatch calls present its bearer;
-# shared blob-store with control (single-host shared-volume pattern); --db for env.db.
+# shared blob-store with control (single-host shared-volume pattern);
+# ZEROSHIP_WORKER_DATABASE_URL for env.db.
 "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -200,8 +202,8 @@ chmod 600 "$WORK/gate-secret"
 
 "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
+  --broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -350,7 +352,7 @@ fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
 
 zs_frame "$WORK/frame-users.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
-WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
+WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
 WK_CODE="$(echo "$WK_RESP" | tail -1)"
 WK_BODY="$(echo "$WK_RESP" | head -1)"
 if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
@@ -360,11 +362,11 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
   if [ -n "$UID_VAL" ]; then
     zs_frame "$WORK/frame-create.bin" POST "http://x/__zeroship/v1/todos.create" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}}))' "$UID_VAL")"
-    C_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
+    C_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
     echo "$C_RESP" | grep -q '"json"' && pass "env.db mutation todos.create over worker" || fail "todos.create failed: $C_RESP"
     zs_frame "$WORK/frame-list.bin" POST "http://x/__zeroship/v1/todos.list" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1]}}))' "$UID_VAL")"
-    L_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
+    L_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else

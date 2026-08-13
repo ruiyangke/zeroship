@@ -109,7 +109,7 @@ DEV_PORT="${DEV_PORT:-3061}"
 # Checked the rest of the mapping against that list too -- 5011, 5021, 5081,
 # 5091, 5092, 5093, 5097 are all clear; 5061 was the only collision.
 VITE_PORT="${VITE_PORT:-5062}"
-export WORKER_KEY="${WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
 APP_NAME="streamp"
 # Set to 1 to run the buffering mutation described in the header.
 MUTATE_BUFFERED="${MUTATE_BUFFERED:-0}"
@@ -319,26 +319,24 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 "$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
-  --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+e2e_export_database_urls "$DB_URL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+  --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" \
   --blob-store "$WORK/bundles" --poll-interval 2 > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
-  --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
-  --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+  --broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
-OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$KEY" ] && ok "deployed stream-probe" || { no "provision: $OUT"; exit 1; }
 sleep 6

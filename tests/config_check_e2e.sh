@@ -194,9 +194,9 @@ cat >"$TMPDIR/secrets-table.toml" <<'TOML'
 master_key = "urn:zeroship:file:/etc/zeroship/master.key"
 TOML
 
-GATEWAY_BROKER_SECRET_FILE="$TMPDIR/gateway-broker-secret"
-printf '%s' "gateway-broker-secret-32-bytes-minimum-ok" >"$GATEWAY_BROKER_SECRET_FILE"
-chmod 0600 "$GATEWAY_BROKER_SECRET_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$TMPDIR/gateway-broker-secret"
+printf '%s' "gateway-broker-secret-32-bytes-minimum-ok" >"$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
+chmod 0600 "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
 
 echo "============================================"
 echo "  zeroship config --check-config E2E"
@@ -250,7 +250,7 @@ GATEWAY_RUN=(
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
     "$GATEWAY"
 )
-GATEWAY_COMMON=(--broker-secret-file "$GATEWAY_BROKER_SECRET_FILE")
+GATEWAY_COMMON=(--broker-secret-file "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE")
 
 AUTH_RUN=(
     env
@@ -406,9 +406,9 @@ fi
 # The flag surface itself: a secret gets a PATH flag and no value flag, because
 # a value flag would put the material in a world-readable argument list.
 if grep -Eq -- '--db[ ,=]|--db$' "$HELP_OUT"; then
-    fail "control --help still offers a --db VALUE flag for a secret"
+    fail "control --help still offers a flag for a secret"
 else
-    pass "control offers no --db value flag"
+    pass "control offers no flag"
 fi
 echo ""
 
@@ -514,7 +514,7 @@ run_cmd control-overlay-weak-literal "${CONTROL_RUN_NO_MASTER[@]}" --check-confi
     --config "$TMPDIR/secret-weak-literal.toml" \
     "${CONTROL_COMMON[@]}" --auth-platform-issuer http://platform.test/oauth2
 show_last_output
-expect_rejected "MASTER_KEY" "control still strength-checks a secret literal under --check-config"
+expect_rejected "ZEROSHIP_CONTROL_MASTER_KEY" "control still strength-checks a secret literal under --check-config"
 echo ""
 
 echo "=== Case 11b: the deleted [secrets] table is rejected, not ignored ==="
@@ -543,7 +543,7 @@ run_cmd control-legacy-weak "${CONTROL_ENV[@]}" "${CONTROL_MASTER[@]}" \
     "$CONTROL" --check-config --config "$TMPDIR/shared.toml" \
     "${CONTROL_COMMON[@]}"
 show_last_output
-expect_rejected "LEGACY_MASTER_KEYS[1]" \
+expect_rejected "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS[1]" \
     "control rejects a weak entry inside the legacy master-key list"
 echo ""
 

@@ -200,10 +200,11 @@ chmod 600 "$WORK/signing-key.pem"
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -212,7 +213,7 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pas
 
 # worker — capture its PID explicitly for RSS sampling
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --storage-url "$STORAGE_S3" \
   --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
@@ -223,7 +224,7 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass
 # gateway
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$BLOB_S3" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -262,7 +263,7 @@ dispatch_to() {
   local out="$1" proc="$2" body="$3"
   curl -s -o "$out" -w '%{http_code} %{time_total}' --max-time 1800 \
     -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$ST_APP" \
-    -H "Authorization: Bearer $WORKER_KEY" \
+    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
     -H 'content-type: application/json' -d "$(envelope "$proc" "$body")"
 }
 jget_json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json'"$1"')??"")}catch(e){console.log("")}})'; }

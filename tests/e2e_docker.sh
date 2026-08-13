@@ -100,7 +100,7 @@ RUNNING=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
 command -v node >/dev/null 2>&1 || { fail "node is required to mint a test PAT"; exit 1; }
 [ -f "$E2E_JOSE_JS" ] || { fail "workspace jose is required to mint a test PAT"; exit 1; }
 WORK="$ROOT/deploy/compose/secrets"
-SIGNING_KEY_FILE="$WORK/control-signing.pem"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/control-signing.pem"
 PG_CONTAINER="$(docker compose ps -q postgres)"
 E2E_PG_DATABASE=zeroship
 [ -n "$PG_CONTAINER" ] || { fail "compose postgres container is missing"; exit 1; }

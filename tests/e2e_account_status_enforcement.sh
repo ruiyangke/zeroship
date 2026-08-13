@@ -123,13 +123,15 @@ openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-brok
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 
-SIGNING_KEY_FILE="$WORK/sk.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+e2e_export_database_urls "$DBURL"
+ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
-  --stripe-base-url "http://127.0.0.1:1" --stripe-secret-key "sk_test_unused" \
+  --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -137,14 +139,14 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy (lite provider)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --config "$CFG_TOML" --control-url "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+  --config "$CFG_TOML" --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
 
 USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
   --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
-  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
+ --poll-interval 2 --signing-key-file "$WORK/sk.pem" --broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
@@ -196,7 +198,7 @@ echo ""; echo "=== Stage 5: Suspended 402s BEFORE spend is consulted (gate order
 # Give the app a tiny spend limit (would 402 SPEND_LIMIT) AND suspend it; assert
 # the 402 is ACCOUNT_SUSPENDED, proving check_account runs first (enforce.rs).
 curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"cents":1}'
-curl -s -o /dev/null -X POST -H "Authorization: Bearer $CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
 set_acct "$CREATOR" suspended
 code=000; bc=none
 for _ in $(seq 1 8); do rr="$(probe_req ordering)"; code="${rr%% *}"; bc="${rr##* }"; { [ "$code" = "402" ] && [ "$bc" = "ACCOUNT_SUSPENDED" ]; } && break; sleep 1.5; done

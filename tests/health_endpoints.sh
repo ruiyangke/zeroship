@@ -139,7 +139,7 @@ for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   > "$WORK/control.log" 2>&1 &
 EXTRA_PIDS+=($!)
@@ -148,7 +148,7 @@ for _ in $(seq 1 30); do
 done
 
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 EXTRA_PIDS+=($!)
 for _ in $(seq 1 30); do
@@ -158,9 +158,9 @@ done
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --broker-secret-file "$WORK/gate-secret" \
   > "$WORK/gate.log" 2>&1 &
 EXTRA_PIDS+=($!)
 for _ in $(seq 1 30); do
@@ -169,7 +169,7 @@ done
 
 echo ""
 echo "=== Stack: migrated + auth ==="
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
   --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 EXTRA_PIDS+=($!)
@@ -179,14 +179,12 @@ done
 
 AUTH_URL="http://localhost:$AUTH_PORT"
 "$BIN/zeroship-auth" \
-  --addr "127.0.0.1:$AUTH_PORT" --db-url "$DBURL" --public-url "$AUTH_URL" \
-  --stash-signing-key "$STASH_SIGNING_KEY" \
-  --totp-enc-key "$AUTH_TOTP_ENC_KEY" \
-  --auth-signing-key-file "$AUTH_SIGNING_KEY_FILE" \
-  --auth-pairwise-salt-file "$AUTH_PAIRWISE_SALT_FILE" \
-  --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
-  --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
-  --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
+  --addr "127.0.0.1:$AUTH_PORT" --public-url "$AUTH_URL" \
+  --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
+  --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \
+  --broker-secret-file "$ZEROSHIP_AUTH_BROKER_SECRET_FILE" \
+  --refresh-hash-key-file "$ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE" \
+  --refresh-idem-key-file "$ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE" \
   --mailer stdout --relay-forward-mailer stdout \
   > "$WORK/auth.log" 2>&1 &
 EXTRA_PIDS+=($!)
@@ -214,7 +212,7 @@ echo "=== Down case A: gateway that has never reached a control plane ==="
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache-down" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --broker-secret-file "$WORK/gate-secret" \
   > "$WORK/gate-down.log" 2>&1 &
 EXTRA_PIDS+=($!)
 GDOWN="http://localhost:$GATEWAY_DOWN_PORT"

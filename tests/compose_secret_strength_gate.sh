@@ -9,9 +9,9 @@
 # of the three failures were the same root cause: the compose file shipped
 # placeholder secrets shorter than the minimum the binaries refused below.
 #
-#   worker:   worker: refusing to start with unsafe WORKER_KEY
-#             WORKER_KEY is too short (10 bytes); minimum 32 bytes
-#   control:  config: WORKER_KEY / --worker-key: secret reference env var
+#   worker:   worker: refusing to start with unsafe ZEROSHIP_WORKER_KEY
+#             ZEROSHIP_WORKER_KEY is too short (10 bytes); minimum 32 bytes
+#   control:  config: ZEROSHIP_WORKER_KEY / --worker-key: secret reference env var
 #             'ZEROSHIP_WORKER_KEY' is not set
 #
 # Both refusals are the PRODUCT BEHAVING CORRECTLY - crates/worker/src/main.rs:460
@@ -25,9 +25,9 @@
 # picked up here without anyone remembering to update this file.
 #
 # WHAT BOUNDING FIRST BOUGHT, recorded because it is the reason this gate covers
-# more than the one failure that fired: WORKER_KEY (10 bytes) is what actually
-# crashed. STASH_SIGNING_KEY shipped at 27 bytes and was checked by the same
-# code, so fixing only WORKER_KEY would have moved the failure to the gateway on
+# more than the one failure that fired: ZEROSHIP_WORKER_KEY (10 bytes) is what actually
+# crashed. ZEROSHIP_GATEWAY_STASH_SIGNING_KEY shipped at 27 bytes and was checked by the same
+# code, so fixing only ZEROSHIP_WORKER_KEY would have moved the failure to the gateway on
 # the next bring-up rather than clearing it.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:

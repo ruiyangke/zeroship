@@ -112,8 +112,8 @@ VITE_PORT="${VITE_PORT:-5021}"
 PG_PORT="${PG_PORT:-5487}"
 PGC="zs-devdeploy-db-pg"
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-CONTROL_KEY="dd-ck"; MASTER_KEY="dd-mk"
-export WORKER_KEY="${WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
+ZEROSHIP_CONTROL_KEY="dd-ck"; ZEROSHIP_CONTROL_MASTER_KEY="dd-mk"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="dbtodos"
 
 # One identity per RUN, used VERBATIM on both tiers. `users.email` and
@@ -819,14 +819,14 @@ openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null
 chmod 600 "$WORK/sk.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
 
-SIGNING_KEY_FILE="$WORK/sk.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --blob-store "$WORK/bundles" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   --signing-key-file "$WORK/sk.pem" > "$WORK/control.log" 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" --db "$DBURL" --provision-db "$DBURL" \
+"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -839,22 +839,22 @@ curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 \
 # The worker needs --db: without it the env.db namespace is absent BY DESIGN
 # and every handler fails loudly, which would read as an app bug.
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
-  --db "$DBURL" --blob-store "$WORK/bundles" --poll-interval 2 \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+ --blob-store "$WORK/bundles" --poll-interval 2 \
  > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker did not come up"; tail -30 "$WORK/worker.log"; exit 1; }
 
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
-  --blob-store "$WORK/bundles" --gateway-broker-secret-file "$WORK/gate-secret" \
+ --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
+  --blob-store "$WORK/bundles" --broker-secret-file "$WORK/gate-secret" \
   --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
 
-OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
+OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" \
   --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')

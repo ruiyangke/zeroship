@@ -11,8 +11,8 @@
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with generated keys. The worker gets
-#      `--kv-url redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
-#      (enables env.storage). Without those flags the namespaces simply are
+#      `ZEROSHIP_WORKER_KV_URL=redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
+#      (enables env.storage). Without those inputs the namespaces simply are
 #      not registered.
 #   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + seeded
 #      permission_tokens row), exactly as e2e_app_primitives.sh does.
@@ -95,7 +95,7 @@ dispatch() {
   local frame="$WORK/frame-$$.bin"
   zs_rpc_frame "$frame" "$id" "$args"
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-    -H "Authorization: Bearer $WORKER_KEY" \
+    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
     -H 'content-type: application/octet-stream' --data-binary @"$frame"
 }
 
@@ -165,7 +165,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot secured stack (worker with --kv-url + --storage-url) ==="
+echo "=== Stage 2: boot secured stack (worker with --storage-url) ==="
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
@@ -173,22 +173,24 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: env.kv ← --kv-url (Redis), env.storage ← --storage-url (LocalFs path),
+# worker: env.kv <- ZEROSHIP_WORKER_KV_URL (Redis), env.storage <- --storage-url (LocalFs path),
 # env.db comes from --db; direct /dispatch uses the generated worker bearer.
+ZEROSHIP_WORKER_KV_URL="$KVURL" \
 "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
-  --kv-url "$KVURL" --storage-url "$WORK/storage" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+ --storage-url "$WORK/storage" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -202,8 +204,8 @@ chmod 600 "$WORK/gate-secret"
 
 "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
+  --broker-secret-file "$WORK/gate-secret" \
  > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done

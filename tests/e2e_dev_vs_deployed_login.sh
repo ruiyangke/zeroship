@@ -595,7 +595,7 @@ done
 # `stack_workspace` generated the shared broker and pairwise inputs before the
 # database came up. The OP, control, and gateway deliberately reuse those exact
 # bytes; generating a second auth-only value would break their token topology.
-STASH_KEY="$STASH_SIGNING_KEY"
+STASH_KEY="$ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"
 AUTH_URL="http://localhost:$AUTH_PORT"
 
 # --- auth (the OP) ----------------------------------------------------------
@@ -604,14 +604,12 @@ AUTH_URL="http://localhost:$AUTH_PORT"
 # `Config("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
 # regardless of environment. Recorded in the spine; kept explicit here.
 "$BIN/zeroship-auth" \
-  --addr "0.0.0.0:$AUTH_PORT" --db-url "$DBURL" --public-url "$AUTH_URL" \
-  --stash-signing-key "$STASH_KEY" \
-  --totp-enc-key "$AUTH_TOTP_ENC_KEY" \
-  --auth-signing-key-file "$AUTH_SIGNING_KEY_FILE" \
-  --auth-pairwise-salt-file "$AUTH_PAIRWISE_SALT_FILE" \
-  --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
-  --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
-  --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
+  --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
+  --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
+  --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \
+  --broker-secret-file "$ZEROSHIP_AUTH_BROKER_SECRET_FILE" \
+  --refresh-hash-key-file "$ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE" \
+  --refresh-idem-key-file "$ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE" \
   --mailer stdout --relay-forward-mailer stdout \
   > "$WORK/auth.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -621,10 +619,9 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
 # --- control ---------------------------------------------------------------
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --app-base-domain "$ZEROSHIP_CONTROL_APP_BASE_DOMAIN" \
-  --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -633,7 +630,7 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
 
 # --- worker ----------------------------------------------------------------
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+  --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -643,12 +640,10 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
 # --- gateway (the confidential RP) ------------------------------------------
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+  --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" \
-  --gateway-broker-secret-file "$WORK/gate-secret" \
+  --broker-secret-file "$WORK/gate-secret" \
   --auth-ui-url "$AUTH_URL" \
-  --stash-signing-key "$STASH_KEY" \
-  --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done

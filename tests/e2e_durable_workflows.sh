@@ -584,14 +584,14 @@ echo "=== DW-07 services ==="
 for port in "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_WORKER_PORT" "$ZEROSHIP_GATEWAY_PORT" "$SIDE_PORT"; do
   lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
-GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
-printf '%s' "dw07-gateway-broker-secret-32-bytes-minimum-ok" > "$GATEWAY_BROKER_SECRET_FILE"
-chmod 0600 "$GATEWAY_BROKER_SECRET_FILE"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
+printf '%s' "dw07-gateway-broker-secret-32-bytes-minimum-ok" > "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
+chmod 0600 "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
 
 e2e_export_runtime_secrets "$WORK" || exit 1
+e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" \
-  --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
@@ -602,7 +602,6 @@ ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --port "$ZEROSHIP_WORKER_PORT" \
   --threads 1 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --poll-interval 1 \
   --max-step-blob-bytes 2097152 \
@@ -616,8 +615,7 @@ wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" "$WORK/worker
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" \
-  --gateway-broker-secret-file "$GATEWAY_BROKER_SECRET_FILE" \
-  --db "$DBURL" \
+  --broker-secret-file "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE" \
   --poll-interval 1 \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -625,7 +623,6 @@ wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate
 
 echo "=== DW-07 deploy ==="
 "$BIN/dev-provision" \
-  --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out"

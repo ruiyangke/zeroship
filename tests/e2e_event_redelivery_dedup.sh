@@ -160,10 +160,11 @@ pass "Lago customer + subscription for creator $CREATOR"
 openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null; chmod 600 "$WORK/sk.pem"
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
-SIGNING_KEY_FILE="$WORK/sk.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+e2e_export_database_urls "$DBURL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"$LAGO_KEY\",\"billable_metric_code\":\"requests\"}}" \

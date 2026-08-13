@@ -51,7 +51,7 @@
 # WEBHOOK LEGS use the SAME self-signed-real-shaped helper as
 # tests/e2e_stripe_billing.sh: events are built from REAL fetched Stripe objects
 # (real acct_/pi_/po_ ids) and HMAC-SHA256-signed with the control instance's
-# STRIPE_WEBHOOK_SECRET — the REAL signature-verification + handler path. Only
+# ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET — the REAL signature-verification + handler path. Only
 # the delivery is self-driven. Object SHAPES + the signature verify are real.
 #
 # ── CONNECT IS CURRENTLY DISABLED ON THIS TEST ACCOUNT ──────────────────────
@@ -293,11 +293,12 @@ chmod 600 "$WORK/signing-key.pem"
 # control — REAL https://api.stripe.com, the operator's TEST secret key (from env,
 # NEVER on argv where it'd hit /proc/cmdline), and a known throwaway webhook
 # secret so the harness can produce VALID signatures (the REAL verify path).
-SIGNING_KEY_FILE="$WORK/signing-key.pem"
-GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
+ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
+e2e_export_database_urls "$DBURL"
+ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &

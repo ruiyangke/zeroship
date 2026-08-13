@@ -88,7 +88,7 @@ SEC_B="ZS_EXPOSED_B"        # secret set --expose   (the union: A must survive)
 SEC_C="ZS_STORED_ONLY"      # secret set, never exposed
 SEC_D="ZS_UNEXPOSED_D"      # secret set --expose, then secret unexpose
 # The plaintext var control. Must match examples/env-probe/src/index.ts's
-# CONTROL_KEY, re-asserted against that file below so the pair cannot drift.
+# ZEROSHIP_CONTROL_KEY, re-asserted against that file below so the pair cannot drift.
 VAR_CONTROL="ZS_ENV_CONTROL"
 FIXTURE_MARKER="ZSENVP-3c9d-fixture"
 

@@ -41,7 +41,7 @@ ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
 REDIS_PORT="${REDIS_PORT:-6397}"
 REDIS_CONTAINER="zs-redeploy-redis"
-export WORKER_KEY="${WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
+export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
 APP_NAME="redep"
 ZSHIP_A="${ZSHIP_A:-$ROOT/examples/kv-dashboard/dist/app.zship}"
 ZSHIP_B="${ZSHIP_B:-$ROOT/examples/starter/dist/app.zship}"
@@ -86,22 +86,22 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 
-GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DB_URL" --blob-store "$WORK/bundles" \
-  --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
-  --signing-key-file "$SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+e2e_export_database_urls "$DB_URL"
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+  --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
-# env.kv is absent without --kv-url by design, and kv-dashboard needs it.
+# env.kv is absent without ZEROSHIP_WORKER_KV_URL by design, and kv-dashboard needs it.
+ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
-  --control-key "$CONTROL_KEY" --worker-key "$WORKER_KEY" --blob-store "$WORK/bundles" --poll-interval 2 \
-  --kv-url "redis://127.0.0.1:$REDIS_PORT" > "$WORK/worker.log" 2>&1 & PIDS+=($!)
+ --blob-store "$WORK/bundles" --poll-interval 2 \
+ > "$WORK/worker.log" 2>&1 & PIDS+=($!)
 sleep 3
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --control-key "$CONTROL_KEY" \
-  --worker-key "$WORKER_KEY" --stash-signing-key "$STASH_SIGNING_KEY" --pairwise-salt "$PAIRWISE_SALT" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/bundles" \
-  --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
+  --broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
@@ -123,7 +123,7 @@ rpc() {
 absent() { printf '%s' "$1" | grep -qE "Method not found|no resource matched"; }
 
 echo "=== deploy A"
-OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_A" 2>&1)
+OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_A" 2>&1)
 KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 APPID=$(echo "$OUT" | awk -F= '$1=="app_id"{print $2}')
 [ -n "$KEY" ] && ok "deployed A (app_id=$APPID)" || { no "provision A: $OUT"; exit 1; }
@@ -168,7 +168,7 @@ STOPFILE="$WORK/traffic.stop"; rm -f "$STOPFILE"
 
 echo "=== redeploy B under the SAME name"
 DEPLOY_T0=$(date +%s%3N)
-OUT2=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
+OUT2=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
 APPID2=$(echo "$OUT2" | awk -F= '$1=="app_id"{print $2}')
 KEY=$(echo "$OUT2" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$APPID2" ] && ok "redeployed B (app_id=$APPID2)" || { no "provision B: $OUT2"; exit 1; }
