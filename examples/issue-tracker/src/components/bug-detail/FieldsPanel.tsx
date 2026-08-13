@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Card, DescriptionList, Select } from "@zeroship/ui";
+import { Button, Card, DescriptionList, Select } from "@zeroship/ui";
 import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
 
@@ -110,9 +110,9 @@ function AssigneeControl({
       <div className="field-block-head">
         <span className="field-label">Assignee</span>
         <span>{personName(bug.assigneeId, people, "unassigned")}</span>
-        <button type="button" className="btn ghost small" disabled={busy} onClick={() => setPicking((v) => !v)}>
+        <Button variant="gray" size="small" disabled={busy} onClick={() => setPicking((v) => !v)}>
           Change
-        </button>
+        </Button>
       </div>
       {picking ? <UserPicker onPick={(user) => void assign(user.id)} /> : null}
       {error ? <p className="field-error">{error}</p> : null}
@@ -168,9 +168,9 @@ function MoveControl({
     <div className="field-block">
       <div className="field-block-head">
         <span className="field-label">Move</span>
-        <button type="button" className="btn ghost small" onClick={() => setOpen((v) => !v)}>
+        <Button variant="gray" size="small" onClick={() => setOpen((v) => !v)}>
           {open ? "Cancel" : "Move to another product/component..."}
-        </button>
+        </Button>
       </div>
       {open ? (
         <div className="inline-form">
@@ -207,14 +207,12 @@ function MoveControl({
               ))}
             </Select>
           </label>
-          <button
-            type="button"
-            className="btn primary small"
+          <Button variant="filled" size="small"
             disabled={busy || !targetProductId || !targetComponentId}
             onClick={() => void move()}
           >
             Confirm move
-          </button>
+          </Button>
           <p className="state-hint small">
             Moving a bug that already has a version or milestone set is rejected by the
             server today (it cannot clear those fields).
@@ -262,9 +260,9 @@ function GeneralField({
       <span className="field-block-head">
         <input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
         {dirty ? (
-          <button type="button" className="btn ghost small" disabled={busy} onClick={() => void save()}>
+          <Button variant="gray" size="small" disabled={busy} onClick={() => void save()}>
             Save
-          </button>
+          </Button>
         ) : null}
       </span>
       {error ? <p className="field-error">{error}</p> : null}

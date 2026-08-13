@@ -4,7 +4,7 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Button, Select } from "@zeroship/ui";
 import { changeBugStatus, markBugDuplicate, reopenBug, resolveBug } from "../../api";
 import {
   BUG_RESOLUTIONS,
@@ -97,18 +97,18 @@ export function StatusControl({
 
       <div className="status-actions">
         {targets.includes("RESOLVED") ? (
-          <button type="button" className="btn ghost small" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
+          <Button variant="gray" size="small" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
             Resolve...
-          </button>
+          </Button>
         ) : null}
         {currentStatus && !isOpenBugStatus(currentStatus) ? (
-          <button type="button" className="btn ghost small" disabled={busy} onClick={() => void run(() => reopenBug({ id: bug.id }))}>
+          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopenBug({ id: bug.id }))}>
             Reopen
-          </button>
+          </Button>
         ) : null}
-        <button type="button" className="btn ghost small" disabled={busy} onClick={() => setShowDuplicate((v) => !v)}>
+        <Button variant="gray" size="small" disabled={busy} onClick={() => setShowDuplicate((v) => !v)}>
           Mark as duplicate...
-        </button>
+        </Button>
       </div>
 
       {showResolve ? (
@@ -127,14 +127,12 @@ export function StatusControl({
               ))}
             </Select>
           </label>
-          <button
-            type="button"
-            className="btn primary small"
+          <Button variant="filled" size="small"
             disabled={busy}
             onClick={() => void run(() => resolveBug({ id: bug.id, resolution }))}
           >
             Confirm resolve
-          </button>
+          </Button>
         </div>
       ) : null}
 
@@ -148,14 +146,12 @@ export function StatusControl({
               placeholder="bug_..."
             />
           </label>
-          <button
-            type="button"
-            className="btn primary small"
+          <Button variant="filled" size="small"
             disabled={busy || !duplicateOf.trim()}
             onClick={() => void run(() => markBugDuplicate({ id: bug.id, duplicateOfId: duplicateOf.trim() }))}
           >
             Confirm duplicate
-          </button>
+          </Button>
         </div>
       ) : null}
 

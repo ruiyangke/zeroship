@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Tag } from "@zeroship/ui";
+import { Button, Tag } from "@zeroship/ui";
 import { attachKeyword, createKeyword, detachKeyword, listKeywords } from "../../api";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
@@ -104,9 +104,9 @@ export function KeywordsPanel({
           value={newKeyword}
           onChange={(e) => setNewKeyword(e.target.value)}
         />
-        <button type="button" className="btn ghost small" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
+        <Button variant="gray" size="small" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
           Create + attach
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </section>

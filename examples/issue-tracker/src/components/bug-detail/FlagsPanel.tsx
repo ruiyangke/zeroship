@@ -9,7 +9,7 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Select } from "@zeroship/ui";
+import { Button, Badge, Select } from "@zeroship/ui";
 
 import { clearFlag, listFlags, setFlag } from "../../api";
 import { errorMessage } from "../rpc";
@@ -103,14 +103,12 @@ function FlagRow({
             {/* Clearing works for ANY live flag now, not only one this panel
                 set, because the id comes from the server rather than from a
                 setFlag response held in component state. */}
-            <button
-              type="button"
-              className="btn ghost small"
+            <Button variant="gray" size="small"
               disabled={busy}
               onClick={() => void clear(entry.flag.id)}
             >
               Clear
-            </button>
+            </Button>
           </span>
         ))
       )}
@@ -130,19 +128,17 @@ function FlagRow({
           {requesteeId ? (
             <span className="dim">requestee: {requesteeId}</span>
           ) : (
-            <button
-              type="button"
-              className="btn ghost small"
+            <Button variant="gray" size="small"
               onClick={() => setPickingRequestee((v) => !v)}
             >
               set requestee
-            </button>
+            </Button>
           )}
         </span>
       ) : null}
-      <button type="button" className="btn ghost small" disabled={busy} onClick={() => void apply()}>
+      <Button variant="gray" size="small" disabled={busy} onClick={() => void apply()}>
         Set
-      </button>
+      </Button>
       {pickingRequestee ? (
         <UserPicker
           onPick={(u) => {

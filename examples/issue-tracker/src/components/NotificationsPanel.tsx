@@ -1,4 +1,5 @@
 import { listNotifications, markNotificationRead } from "../api";
+import { Button } from "@zeroship/ui";
 import { AsyncSection } from "./StateViews";
 import { useAsync } from "./rpc";
 
@@ -43,13 +44,11 @@ export function NotificationsPanel() {
                 )}
                 {row.body ? <p className="notification-body">{row.body}</p> : null}
                 {row.isRead ? null : (
-                  <button
-                    type="button"
-                    className="btn ghost small"
+                  <Button variant="gray" size="small"
                     onClick={() => void markRead(row.id)}
                   >
                     Mark read
-                  </button>
+                  </Button>
                 )}
               </li>
             ))}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Field, Input, Select } from "@zeroship/ui";
+import { Button, Field, Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -111,9 +111,9 @@ export function GroupsAdmin() {
           <Field.Label>New group</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
         </Field>
-        <button type="button" className="btn primary small" disabled={busy || !name.trim()} onClick={() => void create()}>
+        <Button variant="filled" size="small" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
-        </button>
+        </Button>
       </div>
 
       {groups === null ? (
@@ -157,9 +157,9 @@ export function GroupsAdmin() {
               placeholder="name or email"
             />
           </Field>
-          <button type="button" className="btn ghost small" onClick={() => void search()}>
+          <Button variant="gray" size="small" onClick={() => void search()}>
             Search
-          </button>
+          </Button>
         </div>
       ) : null}
 
@@ -168,14 +168,12 @@ export function GroupsAdmin() {
           {matches.map((user) => (
             <li key={user.id}>
               {user.name} <span className="dim">@{user.handle}</span>
-              <button
-                type="button"
-                className="btn ghost small"
+              <Button variant="gray" size="small"
                 disabled={busy || !memberGroup}
                 onClick={() => void add(user.id)}
               >
                 Add
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -271,22 +269,18 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
             ))}
           </Select>
         </label>
-        <button
-          type="button"
-          className="btn ghost small"
+        <Button variant="gray" size="small"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("restrict")}
         >
           Restrict
-        </button>
-        <button
-          type="button"
-          className="btn ghost small"
+        </Button>
+        <Button variant="gray" size="small"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("unrestrict")}
         >
           Remove
-        </button>
+        </Button>
       </div>
       {note ? <p className="state-hint small">{note}</p> : null}
       {error ? <p className="field-error">{error}</p> : null}

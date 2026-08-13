@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { Field, Input, Select } from "@zeroship/ui";
+import { Button, Field, Input, Select } from "@zeroship/ui";
 
 import { createFlagType, listFlagTypes, listProducts } from "../api";
 import { errorMessage } from "./rpc";
@@ -104,14 +104,12 @@ export function FlagTypesAdmin() {
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
         </label>
-        <button
-          type="button"
-          className="btn primary small"
+        <Button variant="filled" size="small"
           disabled={busy || !name.trim()}
           onClick={() => void create()}
         >
           Create
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
       {types === null ? (

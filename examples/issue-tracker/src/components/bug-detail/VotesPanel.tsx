@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "@zeroship/ui";
 
 import { castVote } from "../../api";
 import { errorMessage } from "../rpc";
@@ -66,9 +67,9 @@ export function VotesPanel({
               onChange={(e) => setCount(Math.max(0, Number(e.target.value) || 0))}
             />
           </label>
-          <button type="button" className="btn ghost small" disabled={busy} onClick={() => void submit()}>
+          <Button variant="gray" size="small" disabled={busy} onClick={() => void submit()}>
             {busy ? "Voting..." : "Vote"}
-          </button>
+          </Button>
           {maxVotesPerBug > 0 ? (
             <p className="state-hint small">At most {maxVotesPerBug} on this bug.</p>
           ) : null}

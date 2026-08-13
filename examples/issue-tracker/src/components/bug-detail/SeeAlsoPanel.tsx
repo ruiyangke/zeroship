@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button } from "@zeroship/ui";
 
 import { addSeeAlso, listSeeAlso, removeSeeAlso } from "../../api";
 import { errorMessage } from "../rpc";
@@ -73,14 +74,12 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
               <a href={link.url} target="_blank" rel="noreferrer noopener">
                 {link.url}
               </a>
-              <button
-                type="button"
-                className="btn ghost small"
+              <Button variant="gray" size="small"
                 disabled={busy}
                 onClick={() => void remove(link.id)}
               >
                 Remove
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
@@ -94,9 +93,9 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
             placeholder="https://bugzilla.example.org/show_bug.cgi?id=1"
           />
         </label>
-        <button type="button" className="btn ghost small" disabled={busy || !url.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </section>

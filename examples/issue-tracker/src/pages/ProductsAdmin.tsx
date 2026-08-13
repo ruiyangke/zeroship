@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Checkbox, Input } from "@zeroship/ui";
+import { Button, Checkbox, Input } from "@zeroship/ui";
 import {
   createComponent,
   createMilestone,
@@ -65,9 +65,9 @@ function NewProductForm({ onCreated }: { onCreated: () => void }) {
         <input type="checkbox" checked={allowsUnconfirmed} onChange={(e) => setAllowsUnconfirmed(e.target.checked)} />
         Allows UNCONFIRMED
       </label>
-      <button type="submit" className="btn primary small" disabled={busy || !name.trim()}>
+      <Button type="submit" variant="filled" size="small" disabled={busy || !name.trim()}>
         Create product
-      </button>
+      </Button>
       {error ? <p className="field-error">{error}</p> : null}
     </form>
   );
@@ -132,9 +132,9 @@ function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onCha
           />
           Allows UNCONFIRMED
         </label>
-        <button type="button" className="btn primary small" disabled={busy} onClick={() => void save()}>
+        <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
           Save product
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
 
@@ -198,18 +198,18 @@ function ComponentsAdmin({
           {components.map((c) => (
             <li key={c.id}>
               {c.name} {!c.isActive ? <span className="dim">(inactive)</span> : null}
-              <button type="button" className="btn ghost small" disabled={busy} onClick={() => void toggleActive(c.id, c.isActive)}>
+              <Button variant="gray" size="small" disabled={busy} onClick={() => void toggleActive(c.id, c.isActive)}>
                 {c.isActive ? "Deactivate" : "Activate"}
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
       )}
       <div className="inline-form">
         <Input aria-label="New component" placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
@@ -258,9 +258,9 @@ function VersionsAdmin({
       )}
       <div className="inline-form">
         <Input aria-label="New version" placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
       <p className="state-hint small">No versions.update RPC exists yet -- versions can be created but not edited.</p>
@@ -310,9 +310,9 @@ function MilestonesAdmin({
       )}
       <div className="inline-form">
         <Input aria-label="New milestone" placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
-        <button type="button" className="btn ghost small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
           Add
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
       <p className="state-hint small">No milestones.update RPC exists yet -- milestones can be created but not edited.</p>
@@ -343,13 +343,11 @@ export function ProductsAdminPage() {
             <ul className="product-list">
               {products.map((p) => (
                 <li key={p.id}>
-                  <button
-                    type="button"
-                    className={selected === p.id ? "btn ghost small active" : "btn ghost small"}
+                  <Button className={selected === p.id ? "btn ghost small active" : "btn ghost small"}
                     onClick={() => setSelected(p.id)}
                   >
                     {p.name} {!p.isActive ? <span className="dim">(inactive)</span> : null}
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>

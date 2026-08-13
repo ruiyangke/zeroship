@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { Button } from "@zeroship/ui";
 import { deleteAttachment, getAttachment, listAttachments, setAttachmentObsolete, uploadAttachment } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
@@ -82,19 +83,19 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
   return (
     <li className={`attachment ${attachment.isObsolete ? "obsolete" : ""}`}>
       <div className="attachment-head">
-        <button type="button" className="btn ghost small" disabled={downloading} onClick={() => void download()}>
+        <Button variant="gray" size="small" disabled={downloading} onClick={() => void download()}>
           {downloading ? "..." : attachment.filename}
-        </button>
+        </Button>
         <span className="dim">{formatBytes(attachment.sizeBytes)}</span>
         <span className="dim">{attachment.contentType}</span>
         {attachment.isPatch ? <span className="badge patch-badge">patch</span> : null}
         {attachment.isObsolete ? <span className="badge obsolete-badge">obsolete</span> : null}
-        <button type="button" className="btn ghost small" disabled={busy} onClick={() => void toggleObsolete()}>
+        <Button variant="gray" size="small" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
-        </button>
-        <button type="button" className="btn ghost small danger" disabled={busy} onClick={() => void remove()}>
+        </Button>
+        <Button variant="gray" size="small" intent="destructive" disabled={busy} onClick={() => void remove()}>
           Delete
-        </button>
+        </Button>
       </div>
       {attachment.description ? <p className="attachment-description">{attachment.description}</p> : null}
       {error ? <p className="field-error">{error}</p> : null}
@@ -151,9 +152,9 @@ function UploadForm({ bugId, onUploaded }: { bugId: string; onUploaded: () => vo
         <input type="checkbox" checked={isPatch} onChange={(e) => setIsPatch(e.target.checked)} />
         Patch
       </label>
-      <button type="button" className="btn primary small" disabled={busy} onClick={() => void submit()}>
+      <Button variant="filled" size="small" disabled={busy} onClick={() => void submit()}>
         Upload
-      </button>
+      </Button>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
   );

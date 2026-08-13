@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Button, Select } from "@zeroship/ui";
 
 import { listGroups, restrictBug, unrestrictBug } from "../../api";
 import { errorMessage } from "../rpc";
@@ -105,22 +105,18 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
               ))}
             </Select>
           </label>
-          <button
-            type="button"
-            className="btn ghost small"
+          <Button variant="gray" size="small"
             disabled={busy || !selected}
             onClick={() => void apply("restrict")}
           >
             Restrict
-          </button>
-          <button
-            type="button"
-            className="btn ghost small"
+          </Button>
+          <Button variant="gray" size="small"
             disabled={busy || !selected}
             onClick={() => void apply("unrestrict")}
           >
             Remove
-          </button>
+          </Button>
           {note ? <p className="state-hint small">{note}</p> : null}
           {error ? <p className="field-error">{error}</p> : null}
         </>

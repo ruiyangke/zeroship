@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Button } from "@zeroship/ui";
 import { addDependency, dependencyGraph, listDuplicates, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
 import { AsyncSection } from "../StateViews";
@@ -75,9 +76,9 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
                       return (
                         <li key={id}>
                           {node ? <BugLink id={id} summary={node.summary} status={node.status} /> : id}
-                          <button type="button" className="btn ghost small" disabled={busy} onClick={() => void remove(id)}>
+                          <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(id)}>
                             Remove
-                          </button>
+                          </Button>
                         </li>
                       );
                     })}
@@ -106,9 +107,9 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       {state.status !== "error" ? (
         <div className="inline-form">
           <input placeholder="bug_... this depends on" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
-          <button type="button" className="btn ghost small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
+          <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
-          </button>
+          </Button>
         </div>
       ) : null}
       {error ? <p className="field-error">{error}</p> : null}

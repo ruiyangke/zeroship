@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Button, Select } from "@zeroship/ui";
 import { createBug, currentUser, getProduct, listProducts } from "../api";
 import { AsyncSection } from "../components/StateViews";
 import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
@@ -246,13 +246,13 @@ export function NewBugPage() {
                     </p>
                   )}
 
-                  <button
+                  <Button
                     type="submit"
-                    className="btn primary"
+                    variant="filled"
                     disabled={busy || !summary.trim() || !description.trim()}
                   >
                     {busy ? "Filing..." : "File bug"}
-                  </button>
+                  </Button>
                   {error ? <p className="field-error">{error}</p> : null}
                 </fieldset>
               </>

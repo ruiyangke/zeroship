@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Button, Input, PageHeader, Select } from "@zeroship/ui";
 import {
   deleteSavedSearch,
   listSavedSearches,
@@ -94,10 +94,15 @@ function QuickSearchBox() {
           void run();
         }}
       >
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="P1 @alice comp:parser" />
-        <button type="submit" className="btn primary small">
+        <Input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="P1 @alice comp:parser"
+          aria-label="QuickSearch"
+        />
+        <Button type="submit" variant="filled" size="small">
           Search
-        </button>
+        </Button>
       </form>
       {result.status === "loading" ? <Loading label="Searching..." /> : null}
       {result.status === "error" ? <ErrorState error={result.error} onRetry={run} /> : null}
@@ -158,7 +163,11 @@ function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
 
   return (
     <section className="field-builder">
-      <h2>Advanced search</h2>
+      {/* Not "Advanced search" again. The page heading already says that, and
+          the two sat one above the other -- the same duplicate-heading defect
+          the bug page had. This names what the section IS: the structured
+          builder, as opposed to the QuickSearch box above it. */}
+      <h2>Field builder</h2>
       {conditions.map((condition, index) => (
         <div className="condition-row" key={condition.id}>
           <Select
@@ -200,23 +209,21 @@ function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
               placeholder="value"
             />
           ) : null}
-          <button
-            type="button"
-            className="btn ghost small"
+          <Button variant="gray" size="small"
             disabled={conditions.length === 1}
             onClick={() => setConditions((cs) => cs.filter((_, i) => i !== index))}
           >
             Remove
-          </button>
+          </Button>
         </div>
       ))}
       <div className="field-builder-actions">
-        <button type="button" className="btn ghost small" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
+        <Button variant="gray" size="small" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
           Add condition (AND)
-        </button>
-        <button type="button" className="btn primary small" disabled={busy} onClick={() => void run()}>
+        </Button>
+        <Button variant="filled" size="small" disabled={busy} onClick={() => void run()}>
           {busy ? "Searching..." : "Run search"}
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
       <SavedSearchesPanel currentWhere={lastWhere} />
@@ -274,24 +281,25 @@ function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }
               <li key={row.id}>
                 {row.name}
                 {row.isShared ? <span className="chip">shared</span> : null}
-                <button type="button" className="btn ghost small" disabled={busy} onClick={() => void remove(row.id)}>
+                <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(row.id)}>
                   Delete
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
         )}
       </AsyncSection>
       <div className="inline-form">
-        <input
+        <Input
+          aria-label="Save current search as"
           placeholder="Save current search as..."
           value={name}
           onChange={(e) => setName(e.target.value)}
           disabled={!currentWhere}
         />
-        <button type="button" className="btn ghost small" disabled={busy || !currentWhere || !name.trim()} onClick={() => void save()}>
+        <Button variant="gray" size="small" disabled={busy || !currentWhere || !name.trim()} onClick={() => void save()}>
           Save
-        </button>
+        </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
@@ -306,7 +314,9 @@ export function AdvancedSearchPage() {
 
   return (
     <div className="page advanced-search-page">
-      <h1>Advanced search</h1>
+      <PageHeader>
+        <PageHeader.Title>Advanced search</PageHeader.Title>
+      </PageHeader>
       <QuickSearchBox />
       {authGate ? (
         <p className="state-hint">Sign in to use the structured field builder and saved searches.</p>

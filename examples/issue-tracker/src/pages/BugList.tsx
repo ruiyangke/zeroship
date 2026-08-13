@@ -285,25 +285,21 @@ export function BugListPage() {
               }}
             />
             <div className="pager">
-              <button
-                type="button"
-                className="btn ghost small"
+              <Button variant="gray" size="small"
                 disabled={offset === 0}
                 onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
               >
                 Previous
-              </button>
+              </Button>
               <span>
                 {offset + 1}-{offset + bugs.length}
               </span>
-              <button
-                type="button"
-                className="btn ghost small"
+              <Button variant="gray" size="small"
                 disabled={bugs.length < PAGE_SIZE}
                 onClick={() => setOffset((o) => o + PAGE_SIZE)}
               >
                 Next
-              </button>
+              </Button>
             </div>
           </>
         )}
