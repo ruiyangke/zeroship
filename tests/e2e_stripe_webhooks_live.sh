@@ -233,8 +233,8 @@ STRIPE_SECRET_KEY="$SK" STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control healthy (→ REAL api.stripe.com; STRIPE_WEBHOOK_SECRET = the stripe-listen secret)" \
   || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 

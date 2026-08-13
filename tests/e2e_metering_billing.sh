@@ -338,8 +338,8 @@ e2e_export_runtime_secrets "$WORK" || exit 1
   --spend-recompute-interval 2 \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control healthy (lite provider, stream=redpanda, stripe→mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
 # worker — publishes drained usage events to redpanda. The [metering] stream
@@ -351,8 +351,8 @@ USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
   --control-url "$CONTROL_URL" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
   && pass "worker healthy (usage outbox → redpanda $USAGE_TOPIC)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
 # gateway — pulls routes (incl. spend_state) every 2s; ALSO a usage producer
@@ -366,8 +366,8 @@ USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
   --gateway-broker-secret-file "$WORK/gateway-broker-secret" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
@@ -375,8 +375,8 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
   --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$MIGRATED_URL/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 \
   && pass "zeroship-migrated healthy (applies the probe's committed migrations)" \
   || { fail "zeroship-migrated unhealthy"; tail -30 "$WORK/migrated.log"; exit 1; }
 

@@ -596,7 +596,7 @@ e2e_export_runtime_secrets "$WORK" || exit 1
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
 ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --port "$ZEROSHIP_WORKER_PORT" \
@@ -608,7 +608,7 @@ ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --max-step-blob-bytes 2097152 \
   --workflow-advance-unsigned > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/health" "$WORK/worker.log"
+wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" "$WORK/worker.log"
 
 "$BIN/zeroship-gate" \
   --port "$ZEROSHIP_GATEWAY_PORT" \
@@ -621,7 +621,7 @@ wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/health" "$WORK/worker
   --poll-interval 1 \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate.log"
 
 echo "=== DW-07 deploy ==="
 "$BIN/dev-provision" \

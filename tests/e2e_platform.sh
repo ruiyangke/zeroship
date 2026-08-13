@@ -245,7 +245,7 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
     --control-key "$CONTROL_KEY" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
@@ -267,7 +267,7 @@ done
     --gateway-broker-secret-file "$WORK/gate-secret" \
     > "$WORK/gate.log" 2>&1 &
 PIDS+=($!)
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 echo "  control=$ZEROSHIP_CONTROL_PORT workers=${WORKER_PORTS[*]} gateway=$ZEROSHIP_GATEWAY_PORT pg=$PG_PORT"
 echo "  logs in $WORK"
 
@@ -276,13 +276,13 @@ echo "  logs in $WORK"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Test 1: Health checks ==="
-if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/health"; then pass "control healthy"
+if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz"; then pass "control healthy"
 else fail "control unhealthy"; tail -15 "$WORK/control.log" | sed 's/^/      /'; fi
 for port in "${WORKER_PORTS[@]}"; do
-    if http_ok GET "http://localhost:$port/health"; then pass "worker:$port healthy"
+    if http_ok GET "http://localhost:$port/readyz"; then pass "worker:$port healthy"
     else fail "worker:$port unhealthy"; tail -15 "$WORK/worker-$port.log" | sed 's/^/      /'; fi
 done
-if http_ok GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/health"; then pass "gateway healthy"
+if http_ok GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz"; then pass "gateway healthy"
 else fail "gateway unhealthy"; tail -15 "$WORK/gate.log" | sed 's/^/      /'; fi
 
 # The whole suite needs an admin PAT. Without it nothing below can run, so

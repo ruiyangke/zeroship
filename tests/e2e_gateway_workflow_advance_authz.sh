@@ -306,7 +306,7 @@ e2e_export_runtime_secrets "$WORK" || exit 1
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
 start_worker() {
   local extra="$1"
@@ -316,7 +316,7 @@ start_worker() {
     --blob-store "$WORK/blobs" --poll-interval 1 --max-step-blob-bytes 2097152 \
  $extra > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
-  wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/health" "$WORK/worker.log"
+  wait_health worker "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" "$WORK/worker.log"
 }
 start_worker "--workflow-advance-unsigned"
 
@@ -326,7 +326,7 @@ start_worker "--workflow-advance-unsigned"
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
   --db "$DBURL" --poll-interval 1 > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate.log"
 
 echo "=== deploy + enable workflows ==="
 "$BIN/dev-provision" \
@@ -457,7 +457,7 @@ kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/health" "$WORK/control2.log"
+wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control2.log"
 start_worker ""   # no --workflow-advance-unsigned
 "$BIN/zeroship-gate" \
   --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
@@ -465,7 +465,7 @@ start_worker ""   # no --workflow-advance-unsigned
   --blob-cache-disk-root "$WORK/blob-cache" --gateway-broker-secret-file "$GBS" \
   --db "$DBURL" --poll-interval 1 > "$WORK/gate2.log" 2>&1 &
 echo $! >> "$PIDFILE"
-wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" "$WORK/gate2.log"
+wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate2.log"
 sleep 3
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || true
 

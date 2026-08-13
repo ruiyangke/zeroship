@@ -336,7 +336,7 @@ openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
   --gateway-broker-secret-file "$WORK/gate-secret" --poll-interval 2 > "$WORK/gate.log" 2>&1 & PIDS+=($!)
 sleep 4
 for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gateway:$ZEROSHIP_GATEWAY_PORT"; do
-  curl -sf "http://localhost:${svc##*:}/health" >/dev/null \
+  curl -sf "http://localhost:${svc##*:}/readyz" >/dev/null \
     || { fail "${svc%%:*} did not come up"; tail -20 "$WORK/${svc%%:*}.log"; exit 1; }
 done
 pass "control + worker + gateway healthy"

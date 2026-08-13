@@ -627,8 +627,8 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
 # --- worker ----------------------------------------------------------------
@@ -636,8 +636,8 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
   && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
 
 # --- gateway (the confidential RP) ------------------------------------------
@@ -651,8 +651,8 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 \
   --pairwise-salt "$PAIRWISE_SALT" \
  > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (auth-ui-url=$AUTH_URL)" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
 mint_admin_pat || exit 1

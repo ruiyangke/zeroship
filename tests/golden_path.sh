@@ -857,7 +857,7 @@ gp_start_worker() {
   PIDS+=($WORKER_PID)
   local i
   for i in $(seq 1 30); do
-    curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && return 0
+    curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && return 0
     sleep 1
   done
   return 1
@@ -876,7 +876,7 @@ chmod 600 "$GATE_BROKER_SECRET"
 # "gracefully return 401 when `db` is None instead of panicking".
 #
 # Harmless today, MEASURED: the only paths this file requests from the gateway
-# are /health and /apps/<name>/... dispatch and assets - seven distinct paths,
+# are /readyz and /apps/<name>/... dispatch and assets - seven distinct paths,
 # enumerated 2026-08-11, none of them on the db-backed auth surface. Scenario 6
 # is walked by tests/e2e_dev_vs_deployed_auth.sh, which runs a real OP.
 #
@@ -927,10 +927,10 @@ chmod 600 "$GATE_BROKER_SECRET"
   --signing-key-file "$GP_SIGNING_KEY" --db "$DB_URL" >/tmp/gp-gate.log 2>&1 & PIDS+=($!)
 sleep 3
 
-curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
-curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/health" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
 
 # --- 2b. The OPERATOR config seam: control's DSN through the [secrets] overlay ---
 #
@@ -971,8 +971,8 @@ env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
   "$BIN/zeroship-control" --port "$CFG_PORT" --config "$GP_OVERLAY" \
   --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
-for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-if curl -sf "http://localhost:$CFG_PORT/health" >/dev/null 2>&1; then
+for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+if curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1; then
   pass "control boots with its DSN from [secrets] database_url (no --db, no DATABASE_URL)"
 else
   fail "control did not come up on the [secrets] overlay DSN"
@@ -991,7 +991,7 @@ env -u DATABASE_URL GP_OVERLAY_DB_URL="$DB_URL" \
   --blob-store /tmp/gp-bundles --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" \
   --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
 sleep 6
-if curl -sf "http://localhost:$CFG_PORT_B/health" >/dev/null 2>&1; then
+if curl -sf "http://localhost:$CFG_PORT_B/readyz" >/dev/null 2>&1; then
   fail "an explicit --db was ignored in favour of the [secrets] overlay (precedence inverted)"
 else
   pass "an explicit --db still beats the [secrets] overlay"
@@ -1060,8 +1060,8 @@ else
   # started would report 0 == 0 and read as a pass.
   lp_up=0
   for _i in $(seq 1 25); do
-    a=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_A/health" 2>/dev/null)
-    b=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_B/health" 2>/dev/null)
+    a=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_A/readyz" 2>/dev/null)
+    b=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$LP_PORT_B/readyz" 2>/dev/null)
     [ "$a" = "200" ] && [ "$b" = "200" ] && { lp_up=1; break; }
     sleep 1
   done

@@ -170,8 +170,8 @@ LAGO_API_KEY="$LAGO_KEY" \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \
   --billing-forwarder-group-id "$FWD_GROUP" --spend-recompute-interval 5 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (forwarder → REAL Lago)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy (forwarder → REAL Lago)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
 echo ""; echo "=== Stage 2: produce 3 distinct 'requests' events → forwarder → REAL Lago ==="
 E1="evt-$(node -e 'console.log(require("crypto").randomUUID())')"

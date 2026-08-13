@@ -207,8 +207,8 @@ e2e_export_runtime_secrets "$WORK" || exit 1
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
 # worker — capture its PID explicitly for RSS sampling
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
@@ -217,8 +217,8 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/health" >/dev/null 2>&1 && pas
   --blob-store "$BLOB_S3" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
 echo $WORKER_PID >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (pid=$WORKER_PID, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy (pid=$WORKER_PID, env.storage=s3)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
 # gateway
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
@@ -226,8 +226,8 @@ curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/health" >/dev/null 2>&1 && pass
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
   --signing-key-file "$WORK/signing-key.pem" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/health" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy (blob-store=s3)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
