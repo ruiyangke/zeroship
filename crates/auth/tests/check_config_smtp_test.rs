@@ -3,7 +3,7 @@
 //! transactional mailer SMTP-host requirement). It is a config DRY-RUN — it must
 //! not be gated by boot-time mailer construction, exactly like control / gateway
 //! / worker. A NORMAL boot (no `--check-config`) must STILL fail fast on a
-//! missing `AUTH_RELAY_SMTP_HOST` so the real boot path is not weakened.
+//! missing `ZEROSHIP_AUTH_RELAY_SMTP_HOST` so the real boot path is not weakened.
 //!
 //! These are process-level: `--check-config` exits inside `main` before the DB /
 //! server come up, so no live services are needed. We drive the compiled
@@ -45,9 +45,9 @@ fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
 }
 
 /// RED before the fix: with the default `--relay-forward-mailer=smtp` and NO
-/// `AUTH_RELAY_SMTP_HOST`, the build-relay-mailer validation ran BEFORE the
+/// `ZEROSHIP_AUTH_RELAY_SMTP_HOST`, the build-relay-mailer validation ran BEFORE the
 /// `--check-config` short-circuit, so the dry-run exited 1 with
-/// `AUTH_RELAY_SMTP_HOST is required …` and never printed the resolved config.
+/// `ZEROSHIP_AUTH_RELAY_SMTP_HOST is required …` and never printed the resolved config.
 /// After the fix the dry-run resolves + reports the config and exits 0.
 #[test]
 fn check_config_short_circuits_before_relay_smtp_validation() {
@@ -67,7 +67,7 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
     );
     // The runtime-only SMTP requirement must NOT have fired in dry-run mode.
     assert!(
-        !stderr.contains("AUTH_RELAY_SMTP_HOST is required"),
+        !stderr.contains("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required"),
         "the relay-SMTP requirement must not gate --check-config; stderr=\n{stderr}"
     );
     // The resolved config report must actually be emitted (it is the whole point
@@ -79,7 +79,7 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
 }
 
 /// The transactional mailer SMTP-host requirement must likewise not gate the
-/// dry-run: `--mailer=smtp` with no `AUTH_SMTP_HOST` still exits 0 under
+/// dry-run: `--mailer=smtp` with no `ZEROSHIP_AUTH_SMTP_HOST` still exits 0 under
 /// `--check-config`.
 #[test]
 fn check_config_short_circuits_before_transactional_smtp_validation() {
@@ -94,11 +94,11 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
 
     assert!(
         status.success(),
-        "--check-config must exit 0 even with --mailer=smtp and no AUTH_SMTP_HOST.\n\
+        "--check-config must exit 0 even with --mailer=smtp and no ZEROSHIP_AUTH_SMTP_HOST.\n\
          status={status:?}\nstdout=\n{stdout}\nstderr=\n{stderr}"
     );
     assert!(
-        !stderr.contains("AUTH_SMTP_HOST is required"),
+        !stderr.contains("ZEROSHIP_AUTH_SMTP_HOST is required"),
         "the transactional SMTP requirement must not gate --check-config; stderr=\n{stderr}"
     );
     assert!(
@@ -109,7 +109,7 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
 
 /// The fix must NOT weaken the REAL boot path: a normal boot (no
 /// `--check-config`) with `--relay-forward-mailer=smtp` and no
-/// `AUTH_RELAY_SMTP_HOST` must STILL fail fast with the named env var, before any
+/// `ZEROSHIP_AUTH_RELAY_SMTP_HOST` must STILL fail fast with the named env var, before any
 /// DB work. We assert it exits non-zero AND emits the exact requirement
 /// message — proving the runtime validation was merely relocated past the
 /// dry-run early-return, not deleted.
@@ -124,12 +124,12 @@ fn real_boot_still_enforces_relay_smtp_host() {
 
     assert!(
         !status.success(),
-        "a real boot with --relay-forward-mailer=smtp and no AUTH_RELAY_SMTP_HOST \
+        "a real boot with --relay-forward-mailer=smtp and no ZEROSHIP_AUTH_RELAY_SMTP_HOST \
          must fail fast.\nstatus={status:?}\nstdout=\n{stdout}\nstderr=\n{stderr}"
     );
     assert!(
-        stderr.contains("AUTH_RELAY_SMTP_HOST is required")
-            || stdout.contains("AUTH_RELAY_SMTP_HOST is required"),
+        stderr.contains("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required")
+            || stdout.contains("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required"),
         "the real boot must still surface the named SMTP-host requirement \
          (the runtime validation must survive the dry-run relocation).\n\
          stdout=\n{stdout}\nstderr=\n{stderr}"

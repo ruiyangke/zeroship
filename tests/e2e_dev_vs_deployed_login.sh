@@ -601,7 +601,7 @@ AUTH_URL="http://localhost:$AUTH_PORT"
 # --- auth (the OP) ----------------------------------------------------------
 # `--relay-forward-mailer stdout` is NOT optional decoration: it defaults to
 # `smtp` and the process exits with
-# `Config("AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
+# `Config("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
 # regardless of environment. Recorded in the spine; kept explicit here.
 "$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --db-url "$DBURL" --public-url "$AUTH_URL" \

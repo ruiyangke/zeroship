@@ -356,7 +356,7 @@ start_auth_service() {
     --auth-broker-secret-file "$AUTH_BROKER_SECRET_FILE" \
     --refresh-hash-key-file "$REFRESH_HASH_KEY_FILE" \
     --refresh-idem-key-file "$REFRESH_IDEM_KEY_FILE" \
-    --auth-provider supabase \
+    --provider supabase \
     --supabase-url "$SUPABASE_URL" \
     --supabase-anon-key "$SUPABASE_ANON_KEY" \
     --control-url "$CONTROL_URL" \

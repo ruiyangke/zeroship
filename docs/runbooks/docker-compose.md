@@ -184,7 +184,7 @@ gateway redirects unauthenticated end users to the Caddy-fronted host
 secrets and applies its normal cookie, CSRF, signature, and secret-strength
 checks in the local topology.
 
-`AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
+`ZEROSHIP_AUTH_PUBLIC_URL` is built from `ZEROSHIP_ORIGIN_SCHEME`, so its local default
 is `http://auth.zeroship.localhost` and a TLS-terminating deployment can set the
 public scheme to `https`. Discovery and token `iss` use that URL plus `/oauth2`.
 The DB DSN comes from
@@ -284,7 +284,7 @@ defined ONCE instead of being repeated as per-service flags:
   tier wins over a file value. It does not inject an empty trusted-origin env;
   add exact origins to the TOML only when the deployment needs them.
 - `[auth]` - native OP trust settings: `trusted_oauth_clients` and
-  `frame_ancestor_origins`. `AUTH_PUBLIC_URL` stays on the `auth` service env
+  `frame_ancestor_origins`. `ZEROSHIP_AUTH_PUBLIC_URL` stays on the `auth` service env
   because it is the auth-service issuer setting for this deployment.
 - `[observability]` - shared `log_filter` / `log_format` (every service, worker
   included).
