@@ -244,3 +244,162 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         .expect("drop the test schemas");
     work.expect("fold a role and an extension against live PostgreSQL");
 }
+
+/// Role ATTRIBUTES, not just role existence.
+///
+/// The test above creates a bare-named role and proves the oracle notices when it
+/// is dropped. That exercises the existence half of the comparison and none of the
+/// attribute half: `diff_role_attrs` compares `login`, `superuser`, `create_db`,
+/// `create_role` and the rest, and produces `altered` entries — a path nothing has
+/// ever driven against a live server.
+///
+/// Those fields are authorable (`createRole` carries `login` / `createDb` /
+/// `createRole` / `bypassRls`; `superuser` is denied at render in every profile),
+/// so this is a fold the oracle can genuinely check rather than a blind spot.
+///
+/// The second arm is the load-bearing one. A round-trip alone would pass on a fold
+/// that recorded a role as nothing but a name and on a snapshot that read the same
+/// — both sides defaulting identically and agreeing about nothing. Altering ONE
+/// attribute out of band and requiring the oracle to name that field is what shows
+/// the attributes are really being compared.
+#[compio::test]
+async fn role_attributes_round_trip_and_drift_is_named() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("schema");
+    let role = token("rolattr").to_lowercase();
+    let policy = charter(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
+    let _guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create the project schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure journal: {error}"))?;
+
+        let doc = serde_json::json!({
+            "ir_version": 1,
+            "name": "role_attributes",
+            "owner_app": OWNER,
+            "ops": [
+                {
+                    "op": "createRole",
+                    "name": role,
+                    "login": true,
+                    "createDb": true,
+                    "createRole": true,
+                    "bypassRls": false
+                }
+            ]
+        })
+        .to_string();
+
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
+            .map_err(|error| format!("fold the empty base: {error}"))?;
+        let live = LiveSchema::from_catalog_snapshot(base, OWNER);
+        let artifact = author
+            .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
+            .map_err(|error| format!("lower: {error}"))?;
+        MigrationEngine::new()
+            .apply_plan(
+                &artifact.plan.steps,
+                Approval::Approved,
+                &backend,
+                &cfg,
+                OWNER,
+                LockMode::Acquire,
+            )
+            .await
+            .map_err(|error| format!("apply: {error}"))?;
+
+        let authored: MigrationIr =
+            serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
+        let expected = fold_ops(
+            &authored.ops,
+            SqlDialect::Postgres,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the authored ops: {error}"))?;
+
+        // Non-vacuity: the fold must have recorded the attributes, not just a name.
+        let folded = expected
+            .roles
+            .get(&role)
+            .ok_or_else(|| format!("the fold must record the role: {:?}", expected.roles.keys()))?;
+        if !(folded.login && folded.create_db && folded.create_role) {
+            return Err(format!(
+                "the fold must carry the authored attributes, got login={} create_db={} create_role={}",
+                folded.login, folded.create_db, folded.create_role
+            ));
+        }
+
+        let actual = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot: {error}"))?;
+        let drift = diff_snapshots(&expected, &actual);
+        assert!(
+            drift.is_clean(),
+            "an attributed role must round-trip: missing={:?} altered={:?}",
+            drift.missing_objects,
+            drift.altered_objects
+        );
+
+        // The arm that shows the attributes are compared at all. One attribute,
+        // changed out of band; the oracle must name that field and only it.
+        session
+            .batch(&format!("ALTER ROLE {} NOCREATEDB", quote_ident(&role)))
+            .await
+            .map_err(|error| format!("alter the role out of band: {error}"))?;
+        let after = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot after the alter: {error}"))?;
+        let drifted = diff_snapshots(&expected, &after);
+        assert!(
+            drifted.missing_objects.is_empty(),
+            "the role still exists, so nothing may be reported missing: {:?}",
+            drifted.missing_objects
+        );
+        let fields: Vec<&str> = drifted
+            .altered_objects
+            .iter()
+            .filter(|entry| entry.object == format!("role {role}"))
+            .map(|entry| entry.field.as_str())
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["create_db"],
+            "the oracle must name the one attribute that moved: {:?}",
+            drifted.altered_objects
+        );
+        Ok(())
+    }
+    .await;
+
+    let _ = session
+        .batch(&format!("DROP ROLE IF EXISTS {}", quote_ident(&role)))
+        .await;
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("fold an attributed role against live PostgreSQL");
+}
