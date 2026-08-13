@@ -1187,9 +1187,15 @@ fn main() -> std::io::Result<()> {
     let bind_addr = format!("{bind_host}:{port}");
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
+    // ONE gate for the whole process, shared by every ntex worker thread, so
+    // the TTL bounds probe-driven Postgres traffic per PROCESS rather than
+    // per thread.
+    let readiness = Arc::new(zeroship_core::readiness::ReadinessGate::with_defaults());
+
     web::server(async move || {
         web::App::new()
             .state(state.clone())
+            .state(readiness.clone())
             .configure(admin_handlers::configure)
             .configure(oauth_handlers::configure)
             // --- Admin API ---
@@ -1404,8 +1410,12 @@ fn main() -> std::io::Result<()> {
             )
             // --- Health ---
             .service(
-                web::resource("/health")
-                    .route(web::get().to(internal::health)),
+                web::resource("/healthz")
+                    .route(web::get().to(internal::healthz)),
+            )
+            .service(
+                web::resource("/readyz")
+                    .route(web::get().to(internal::readyz)),
             )
     })
     .bind(&bind_addr)?
