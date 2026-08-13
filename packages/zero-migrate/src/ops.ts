@@ -2987,6 +2987,7 @@ function indexWithToIr(params: IndexStorageParamsArg | undefined): Node | undefi
 }
 
 function recordCreateEnum(name: string, args: CreateEnumArgs): void {
+  rejectUnknownKeys(args, CREATE_ENUM_KEYS, `enumType("${name}").create(...)`);
   requireString(name, "enumType(name)");
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "enumType(name).create({ values, ... }) needs an object");
@@ -3015,6 +3016,7 @@ function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
 }
 
 function recordCreateDomain(name: string, args: CreateDomainArgs): void {
+  rejectUnknownKeys(args, CREATE_DOMAIN_KEYS, `domain("${name}").create(...)`);
   requireString(name, "domain(name)");
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "domain(name).create({ as, ... }) needs an object");
@@ -3042,6 +3044,7 @@ function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
 }
 
 function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_SEQUENCE_KEYS, `sequence("${name}").create(...)`);
   requireString(name, "sequence(name)");
   if (args === null || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
@@ -3071,6 +3074,7 @@ function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void
 }
 
 function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
+  rejectUnknownKeys(args, ALTER_SEQUENCE_KEYS, `sequence("${name}").alter(...)`);
   requireString(name, "sequence(name)");
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
@@ -3107,6 +3111,7 @@ function requirePlainArgs(args: unknown, what: string): asserts args is Record<s
 }
 
 function recordCreateSchema(name: string, args: SchemaCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_SCHEMA_KEYS, `schema("${name}").create(...)`);
   requireString(name, "schema(name)");
   requirePlainArgs(args, "schema(name).create(args)");
   emitCreateSchema({
@@ -3117,6 +3122,7 @@ function recordCreateSchema(name: string, args: SchemaCreateArgs = {}): void {
 }
 
 function recordDropSchema(name: string, args: SchemaDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_SCHEMA_KEYS, `schema("${name}").drop(...)`);
   requireString(name, "schema(name)");
   requirePlainArgs(args, "schema(name).drop(args)");
   emitDropSchema({
@@ -3127,6 +3133,7 @@ function recordDropSchema(name: string, args: SchemaDropArgs = {}): void {
 }
 
 function recordCreateExtension(name: string, args: ExtensionCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_EXTENSION_KEYS, `extension("${name}").create(...)`);
   requireString(name, "extension(name)");
   requirePlainArgs(args, "extension(name).create(args)");
   emitCreateExtension({
@@ -3137,6 +3144,7 @@ function recordCreateExtension(name: string, args: ExtensionCreateArgs = {}): vo
 }
 
 function recordDropExtension(name: string, args: ExtensionDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_EXTENSION_KEYS, `extension("${name}").drop(...)`);
   requireString(name, "extension(name)");
   requirePlainArgs(args, "extension(name).drop(args)");
   emitDropExtension({
@@ -3146,6 +3154,7 @@ function recordDropExtension(name: string, args: ExtensionDropArgs = {}): void {
 }
 
 function recordCreateRole(name: string, args: RoleCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_ROLE_KEYS, `role("${name}").create(...)`);
   requireString(name, "role(name)");
   requirePlainArgs(args, "role(name).create(args)");
   emitCreateRole({
@@ -3163,6 +3172,7 @@ function recordCreateRole(name: string, args: RoleCreateArgs = {}): void {
 }
 
 function recordSetRoleOptions(name: string, args: RoleSetOptionsArgs): void {
+  rejectUnknownKeys(args, SET_ROLE_OPTIONS_KEYS, `role("${name}").setOptions(...)`);
   requireString(name, "role(name)");
   requirePlainArgs(args, "role(name).setOptions(args)");
   emitAlterRole({
@@ -3173,6 +3183,7 @@ function recordSetRoleOptions(name: string, args: RoleSetOptionsArgs): void {
 }
 
 function recordDropRole(name: string, args: RoleDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_ROLE_KEYS, `role("${name}").drop(...)`);
   requireString(name, "role(name)");
   requirePlainArgs(args, "role(name).drop(args)");
   emitDropRole({
@@ -3261,6 +3272,18 @@ const RENAME_TABLE_KEYS = ["to", "ifExists", "schema"] as const;
 const ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"] as const;
 const DROP_COLUMN_KEYS = ["ifExists", "schema"] as const;
 const RENAME_COLUMN_KEYS = ["to", "type", "schema"] as const;
+const CREATE_ENUM_KEYS = ["values", "schema"] as const;
+const CREATE_DOMAIN_KEYS = ["as", "check", "default", "notNull", "schema"] as const;
+const CREATE_SEQUENCE_KEYS = ["as", "increment", "start", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"] as const;
+const ALTER_SEQUENCE_KEYS = ["increment", "restart", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"] as const;
+const CREATE_SCHEMA_KEYS = ["ifNotExists", "authorization"] as const;
+const DROP_SCHEMA_KEYS = ["ifExists", "cascade"] as const;
+const CREATE_EXTENSION_KEYS = ["ifNotExists", "schema"] as const;
+const DROP_EXTENSION_KEYS = ["ifExists"] as const;
+const CREATE_ROLE_KEYS = ["login", "password", "bypassRls", "createRole", "createDb", "superuser", "inRole", "setSearchPath", "ifNotExists"] as const;
+const SET_ROLE_OPTIONS_KEYS = ["setSearchPath", "resetSearchPath"] as const;
+const DROP_ROLE_KEYS = ["ifExists"] as const;
+const BACKFILL_KEYS = ["set", "where", "cursorColumns", "cursorStability", "batchSize", "name", "schema"] as const;
 const DROP_TABLE_KEYS = ["ifExists", "cascade", "schema"] as const;
 const DROP_VIEW_KEYS = ["ifExists", "materialized", "schema"] as const;
 const CREATE_VIEW_KEYS = ["as", "columns", "replace", "materialized", "schema"] as const;
@@ -4115,12 +4138,17 @@ function resolveCursorStability(value: unknown): CursorStability {
 }
 
 function recordBackfill(table: string, args: BackfillArgs): void {
+  // The RENAMED-key check runs first, deliberately. `cursorColumn` is a key this
+  // API used to have, and its message tells the author what to write instead;
+  // the generic unknown-key refusal below would preempt that with a strictly
+  // less useful "does not accept". Specific diagnostics before generic ones.
   if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
     throw structuredError(
       "OP_INVALID",
       "backfill({ cursorColumn }) was removed; use cursorColumns: [\"column\"]",
     );
   }
+  rejectUnknownKeys(args, BACKFILL_KEYS, `table("${table}").backfill(...)`);
   if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
   requireOrderedColumns(args.cursorColumns, "backfill({ cursorColumns })");
   emitBackfill({
