@@ -623,6 +623,7 @@ wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate
 
 echo "=== DW-07 deploy ==="
 "$BIN/dev-provision" \
+  --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out"

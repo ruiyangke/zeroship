@@ -331,7 +331,7 @@ wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate
 
 echo "=== deploy + enable workflows ==="
 "$BIN/dev-provision" \
- --blob-store "$WORK/blobs" --name "$APP_NAME" \
+  --db "$DBURL" --blob-store "$WORK/blobs" --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out" 2>&1 \
   || { fail "dev-provision failed"; cat "$WORK/provision.out"; exit 1; }
 APP_ID="$(awk -F= '/^app_id=/{print $2}' "$WORK/provision.out")"

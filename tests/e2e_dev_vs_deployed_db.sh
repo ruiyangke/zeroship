@@ -854,7 +854,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
 
-OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" \
+OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
   --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')

@@ -224,7 +224,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot secured stack (worker with --kv-url) ==="
+echo "=== Stage 2: boot secured stack (worker with ZEROSHIP_WORKER_KV_URL) ==="
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null

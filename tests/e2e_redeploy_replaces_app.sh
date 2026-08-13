@@ -123,7 +123,7 @@ rpc() {
 absent() { printf '%s' "$1" | grep -qE "Method not found|no resource matched"; }
 
 echo "=== deploy A"
-OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_A" 2>&1)
+OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_A" 2>&1)
 KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 APPID=$(echo "$OUT" | awk -F= '$1=="app_id"{print $2}')
 [ -n "$KEY" ] && ok "deployed A (app_id=$APPID)" || { no "provision A: $OUT"; exit 1; }
@@ -168,7 +168,7 @@ STOPFILE="$WORK/traffic.stop"; rm -f "$STOPFILE"
 
 echo "=== redeploy B under the SAME name"
 DEPLOY_T0=$(date +%s%3N)
-OUT2=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
+OUT2=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
 APPID2=$(echo "$OUT2" | awk -F= '$1=="app_id"{print $2}')
 KEY=$(echo "$OUT2" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$APPID2" ] && ok "redeployed B (app_id=$APPID2)" || { no "provision B: $OUT2"; exit 1; }

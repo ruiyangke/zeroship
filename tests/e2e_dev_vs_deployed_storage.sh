@@ -30,7 +30,7 @@
 #   MUTATE=no-storage-url   boot the deployed worker with no --storage-url, so
 #                           the env.storage namespace is absent by design and
 #                           every deployed procedure fails. (The kv harness
-#                           learned this with --kv-url.)
+#                           learned this with ZEROSHIP_WORKER_KV_URL.)
 #   MUTATE=no-config        build without src/server/config.ts, so every
 #                           procedure resolves to `auth: "user"` and the
 #                           gateway refuses all fourteen -- green in dev, 401
@@ -343,7 +343,7 @@ for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gate
 done
 pass "control + worker + gateway healthy"
 
-OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 [ -n "$API_KEY" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 sleep 6   # gateway route-sync poll
