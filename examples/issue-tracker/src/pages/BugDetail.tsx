@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Card, Cluster, Stack } from "@zeroship/ui";
+import { Banner, Card, Cluster, Stack } from "@zeroship/ui";
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { getBug, getProduct, listProducts } from "../api";
+import { currentUser, getBug, getProduct, listProducts } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
+import { isUnauthenticated } from "../components/rpc";
 import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
 import { CcPanel } from "../components/bug-detail/CcPanel";
 import { CommentsPanel } from "../components/bug-detail/CommentsPanel";
@@ -24,6 +25,10 @@ export function BugDetailPage({ id }: { id: string }) {
   const [tab, setTab] = useState<Tab>("details");
   const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
   const productsQ = useAsync(() => listProducts({}), []);
+  // Bugs are public, so unlike the dashboard this page stays READABLE without
+  // an identity -- what it must not do is offer controls that cannot work.
+  const { state: userState } = useAsync(() => currentUser({}), []);
+  const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
 
   const productId = state.status === "ready" ? state.data.product?.id ?? null : null;
 
@@ -98,6 +103,17 @@ export function BugDetailPage({ id }: { id: string }) {
         </Cluster>
       </div>
 
+      {/* Said once, at the top, rather than discovered one 401 at a time.
+          A signed-out visitor could read this page and still be offered a
+          comment box, an Edit button on every comment and three editable
+          selects -- every one of which fails on use. The bug stays readable
+          because bugs are public; the controls that cannot work go away. */}
+      {signedOut ? (
+        <Banner intent="info" title="You are not signed in">
+          This bug is public, so you can read it. Sign in to comment or change any
+          of its fields.
+        </Banner>
+      ) : null}
       <div className="tabs">
         <button
           type="button"
@@ -126,7 +142,7 @@ export function BugDetailPage({ id }: { id: string }) {
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
           <div className="bug-detail-main">
-            <CommentsPanel bugId={id} />
+            <CommentsPanel bugId={id} readOnly={signedOut} />
             {/* Everything below is about the bug WITHOUT being metadata about
                 it: files, links to other bugs, who is watching, what is
                 pending review. They lived in the rail, where measurement put
@@ -168,6 +184,7 @@ export function BugDetailPage({ id }: { id: string }) {
               }
               fetchProductDetail={(pid) => toPromise(getProduct({ id: pid }))}
               onUpdated={() => reload()}
+              readOnly={signedOut}
             />
           </Stack>
         </div>

@@ -331,6 +331,7 @@ export function FieldsPanel({
   products,
   fetchProductDetail,
   onUpdated,
+  readOnly = false,
 }: {
   bug: Bug;
   people: PeopleMap;
@@ -340,11 +341,22 @@ export function FieldsPanel({
   products: { id: string; name: string }[];
   fetchProductDetail: (id: string) => Promise<ProductDetail>;
   onUpdated: (b: Bug) => void;
+  /**
+   * No identity: every control here would 401 on use, so none is offered.
+   *
+   * A native <fieldset disabled> rather than a flag threaded into each of the
+   * dozen controls below. The browser disables every form control inside it,
+   * including ones added later, so a field added next month is covered
+   * without anyone remembering -- the same reason the panel chrome is
+   * selected structurally rather than by a list of class names.
+   */
+  readOnly?: boolean;
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
   const [editingSummary, setEditingSummary] = useState(false);
   return (
     <Card className="fields-panel">
+      <fieldset className="rail-fields" disabled={readOnly}>
       {/* No heading here. The page head already states the summary, and this
           panel repeated it as an h2 immediately above an input containing the
           same text -- the same string three times in the top 200 pixels. */}
@@ -464,6 +476,7 @@ export function FieldsPanel({
         <GeneralField bug={bug} field="platform" label="Platform" value={bug.platform} onUpdated={onUpdated} />
       </div>
       <GeneralField bug={bug} field="url" label="URL" value={bug.url ?? ""} onUpdated={onUpdated} />
+      </fieldset>
     </Card>
   );
 }

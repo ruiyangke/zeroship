@@ -959,3 +959,7 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .history-creation > summary:hover { color: var(--accent); }
 .history-creation[open] > summary { margin-block-end: 0.4rem; }
+
+/* The rail's fieldset is a disabling wrapper, not a visual group -- it must
+   not draw the dashed box the app's other fieldsets do. */
+.rail-fields { border: 0; padding: 0; margin: 0; display: contents; }

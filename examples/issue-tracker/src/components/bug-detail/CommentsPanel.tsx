@@ -43,7 +43,15 @@ function initials(name: string): string {
   return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
 }
 
-function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () => void }) {
+function CommentRow({
+  comment,
+  onChanged,
+  readOnly = false,
+}: {
+  comment: Comment;
+  onChanged: () => void;
+  readOnly?: boolean;
+}) {
   const author = comment.author?.name || comment.author?.handle || comment.authorId;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(comment.body);
@@ -121,6 +129,7 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
             #{comment.commentNumber}
           </a>
         ) : null}
+        {readOnly ? null : (
         <span className="comment-actions">
           <Button
             variant="plain"
@@ -144,6 +153,7 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
             {comment.isPrivate ? "Make public" : "Make private"}
           </Button>
         </span>
+        )}
       </div>
       {editing ? (
         <div className="comment-edit">
@@ -239,7 +249,14 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
   );
 }
 
-export function CommentsPanel({ bugId }: { bugId: string }) {
+export function CommentsPanel({
+  bugId,
+  readOnly = false,
+}: {
+  bugId: string;
+  /** No identity: the thread is readable, the controls are not offered. */
+  readOnly?: boolean;
+}) {
   const { state, reload } = useAsync(() => listComments({ bugId }), [bugId]);
 
   return (
@@ -255,12 +272,17 @@ export function CommentsPanel({ bugId }: { bugId: string }) {
         {(comments) => (
           <ul className="comment-list">
             {comments.map((comment) => (
-              <CommentRow key={comment.id} comment={comment} onChanged={reload} />
+              <CommentRow
+                key={comment.id}
+                comment={comment}
+                onChanged={reload}
+                readOnly={readOnly}
+              />
             ))}
           </ul>
         )}
       </AsyncSection>
-      <NewCommentForm bugId={bugId} onAdded={reload} />
+      {readOnly ? null : <NewCommentForm bugId={bugId} onAdded={reload} />}
     </section>
   );
 }
