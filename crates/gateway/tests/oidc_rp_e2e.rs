@@ -320,8 +320,8 @@ async fn start_platform_op(
         b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.refresh_hash_key_file = Some(hash_key_file);
-    cfg.refresh_idem_key_file = Some(idem_key_file);
+    cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
+    cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.to_string(), 4);
 
@@ -730,8 +730,8 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.refresh_hash_key_file = Some(hash_key_file);
-    cfg.refresh_idem_key_file = Some(idem_key_file);
+    cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
+    cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = {

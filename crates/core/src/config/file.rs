@@ -267,11 +267,29 @@ pub struct MeteringSection {
 }
 
 /// Auth-domain values that can be supplied by the shared file overlay.
+///
+/// Like [`ControlSection`], most of this exists so `deny_unknown_fields` still
+/// ACCEPTS an `[auth]` table and still rejects a typo inside it; the values the
+/// auth service uses come from its generated declaration walking the same
+/// canonical `auth.*` paths.
+///
+/// `trusted_oauth_clients` is the exception: it is file-and-default ONLY, with
+/// no flag and no environment variable, so this field is where it is actually
+/// read from.
+///
+/// The bootstrap and command controls on the auth declaration (`config`,
+/// `no_config`, `check_config`, `check_config_format`) are deliberately absent -
+/// they are root-scoped names with no overlay tier at all, so a key here would
+/// be accepted by the parser and then ignored by the resolver.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
-    /// Platform auth provider backend (`platform` or `supabase`).
-    pub auth_provider: Option<String>,
+    /// Platform auth provider backend (`native` or `supabase`).
+    ///
+    /// `provider`, not `auth_provider`: the canonical identity is
+    /// `auth.provider`, and control's `platform|supabase` setting is a separate
+    /// identity at `control.auth_provider`.
+    pub provider: Option<String>,
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     pub supabase_url: Option<String>,
     /// Supabase anon API key used by browser-side GoTrue session calls.
@@ -280,8 +298,6 @@ pub struct AuthSection {
     pub platform_issuer: Option<String>,
     /// Platform OP JWKS URL. Defaults to `{platform_issuer}/.well-known/jwks.json`.
     pub platform_jwks_url: Option<String>,
-    /// Control-plane base URL used by auth-service browser flows.
-    pub control_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
     ///
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
@@ -290,11 +306,77 @@ pub struct AuthSection {
     /// Console origin(s) the auth-service login/signup/consent documents admit
     /// via CSP `frame-ancestors` so the console's immersive iframe login can
     /// embed them (design §4.3/§10.1). Deployment-injected, mirroring the
-    /// `trusted_oauth_clients` pattern: core has no console host. `None` (key
-    /// absent) ⇒ the CLI/env tier (`--frame-ancestor-origin` /
-    /// `FRAME_ANCESTOR_ORIGINS`) decides; `Some(vec)` supplies the overlay tier
-    /// when the CLI/env is empty. EXACT origins only — NO wildcards.
+    /// `trusted_oauth_clients` pattern: core has no console host.
+    ///
+    /// EXACT origins only - NO wildcards. Whatever lands here is still filtered
+    /// fail-closed by the auth service before it can reach a CSP header: a
+    /// non-concrete origin, or one that is not same-site with the auth issuer,
+    /// is DROPPED.
     pub frame_ancestor_origins: Option<Vec<String>>,
+    /// Listen address.
+    pub addr: Option<String>,
+    /// Google OAuth 2.0 client ID.
+    pub google_client_id: Option<String>,
+    /// Redirect URI registered with Google.
+    pub google_redirect_uri: Option<String>,
+    /// Google's authorize endpoint.
+    pub google_auth_url: Option<String>,
+    /// Google's token endpoint.
+    pub google_token_url: Option<String>,
+    /// Google's JWKS endpoint.
+    pub google_jwks_url: Option<String>,
+    /// Expected `iss` claim on Google ID tokens.
+    pub google_issuer: Option<String>,
+    /// GitHub OAuth App client ID.
+    pub github_client_id: Option<String>,
+    /// Callback URL registered on the GitHub OAuth App.
+    pub github_redirect_uri: Option<String>,
+    /// GitHub's authorize endpoint.
+    pub github_authorize_url: Option<String>,
+    /// GitHub's token endpoint.
+    pub github_token_url: Option<String>,
+    /// GitHub's `/user` endpoint.
+    pub github_user_url: Option<String>,
+    /// GitHub's `/user/emails` endpoint.
+    pub github_emails_url: Option<String>,
+    /// Transactional mailer driver.
+    pub mailer: Option<String>,
+    /// Transactional SMTP host.
+    pub smtp_host: Option<String>,
+    /// Transactional SMTP port.
+    pub smtp_port: Option<u16>,
+    /// Transactional SMTP username.
+    pub smtp_username: Option<String>,
+    /// Transactional SMTP transport encryption mode.
+    pub smtp_tls: Option<String>,
+    /// `From` address for transactional mail.
+    pub mail_from_email: Option<String>,
+    /// `From` display name for transactional mail.
+    pub mail_from_name: Option<String>,
+    /// Public, externally-reachable origin of the auth server.
+    pub public_url: Option<String>,
+    /// Refresh-family database session ceiling per auth worker.
+    pub refresh_pool_size: Option<usize>,
+    /// Relay alias domain.
+    pub relay_domain: Option<String>,
+    /// Relay inbound webhook Basic-auth username.
+    pub relay_inbound_user: Option<String>,
+    /// Relay-forward mailer driver.
+    pub relay_forward_mailer: Option<String>,
+    /// Relay-forward SMTP host.
+    pub relay_smtp_host: Option<String>,
+    /// Relay-forward SMTP port.
+    pub relay_smtp_port: Option<u16>,
+    /// Relay-forward SMTP username.
+    pub relay_smtp_username: Option<String>,
+    /// Relay-forward SMTP transport encryption mode.
+    pub relay_smtp_tls: Option<String>,
+    /// Postmark webhook Basic-auth username.
+    pub postmark_webhook_user: Option<String>,
+    /// Auth cron tick interval in seconds.
+    pub cron_tick_secs: Option<u64>,
+    /// Audit-retention sweeper tick interval in seconds.
+    pub audit_retention_check_secs: Option<u64>,
 }
 
 /// Secret references that can be supplied by the shared file overlay.
@@ -459,14 +541,13 @@ mod tests {
     fn load_none_returns_defaults() {
         let config = FileConfig::load(None).expect("load default config");
 
-        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.provider.is_none());
         assert!(config.origin_scheme.is_none());
         assert!(config.trusted_origins.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
         assert!(config.auth.platform_issuer.is_none());
         assert!(config.auth.platform_jwks_url.is_none());
-        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
         assert!(config.observability.log_filter.is_none());
@@ -508,12 +589,11 @@ origin_scheme = "http"
 trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
 
 [auth]
-auth_provider = "supabase"
+provider = "supabase"
 supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-test-key"
 platform_issuer = "https://auth.zeroship.ai"
 platform_jwks_url = "https://auth.zeroship.ai/.well-known/jwks.json"
-control_url = "https://control.zeroship.ai"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
@@ -536,7 +616,7 @@ log_format = "json"
             vec!["https://console.zeroship.ai", "http://localhost:3000"]
         );
 
-        assert_eq!(config.auth.auth_provider.as_deref(), Some("supabase"));
+        assert_eq!(config.auth.provider.as_deref(), Some("supabase"));
         assert_eq!(
             config.auth.supabase_url.as_deref(),
             Some("https://project.supabase.test")
@@ -552,10 +632,6 @@ log_format = "json"
         assert_eq!(
             config.auth.platform_jwks_url.as_deref(),
             Some("https://auth.zeroship.ai/.well-known/jwks.json")
-        );
-        assert_eq!(
-            config.auth.control_url.as_deref(),
-            Some("https://control.zeroship.ai")
         );
         assert_eq!(
             config.auth.trusted_oauth_clients.as_deref(),
@@ -587,13 +663,13 @@ log_format = "json"
             "auth-only.toml",
             r#"
 [auth]
-auth_provider = "platform"
+provider = "native"
 "#,
         );
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert_eq!(config.auth.auth_provider.as_deref(), Some("platform"));
+        assert_eq!(config.auth.provider.as_deref(), Some("native"));
         assert!(config.observability.log_filter.is_none());
         assert!(config.observability.log_format.is_none());
     }
@@ -610,12 +686,11 @@ log_filter = "debug"
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.provider.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
         assert!(config.auth.platform_issuer.is_none());
         assert!(config.auth.platform_jwks_url.is_none());
-        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert_eq!(config.observability.log_filter.as_deref(), Some("debug"));
     }
@@ -682,7 +757,7 @@ platform_issur = "https://typo.example"
             "tcl-absent.toml",
             r#"
 [auth]
-auth_provider = "platform"
+provider = "native"
 "#,
         );
 
