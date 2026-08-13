@@ -327,7 +327,7 @@ impl<'ast> Visit<'ast> for Reads<'_> {
             for argument in &arguments {
                 self.visit_expr(argument);
             }
-        } else if let Some(spelling) = raw_spelling_in_tokens(&mac.tokens.to_string()) {
+        } else if let Some(spelling) = raw_spelling_in_tokens(&mac.tokens) {
             self.violations.push(RawEnvViolation::Read(format!(
                 "in {} macro body: {spelling}",
                 name.unwrap_or_else(|| "unnamed".to_owned())
@@ -348,12 +348,19 @@ impl<'ast> Visit<'ast> for Reads<'_> {
 
 /// Find a raw-read spelling in a token stream that would not parse as Rust.
 ///
-/// Token streams print with spaces around `::`, so the patterns are written
-/// that way. This sees only the literal `std::env::<method>` and `libc::getenv`
+/// STRING LITERALS ARE EXCLUDED, and that is not a nicety: this scanner's own
+/// test asserts on `path.ends_with("std::env::var")` inside a `matches!` guard,
+/// which does not parse as an expression list. A text test over the printed
+/// tokens flagged that literal and made the gate fail on the file that proves
+/// the gate works. Dropping `Literal` tokens is the difference between "the
+/// code performs a read" and "the code mentions one".
+///
+/// This still sees only the literal `std::env::<method>` and `libc::getenv`
 /// spellings: an alias imported elsewhere in the file is beyond a text test,
 /// which is why it is the FALLBACK and not the mechanism.
-fn raw_spelling_in_tokens(tokens: &str) -> Option<String> {
-    let flat = tokens.replace(' ', "");
+fn raw_spelling_in_tokens(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let mut flat = String::new();
+    flatten_non_literal_tokens(tokens, &mut flat);
     for method in RAW_METHODS {
         let spelling = format!("std::env::{method}");
         if flat.contains(&spelling) {
@@ -362,6 +369,19 @@ fn raw_spelling_in_tokens(tokens: &str) -> Option<String> {
     }
     flat.contains("libc::getenv")
         .then(|| "libc::getenv".to_owned())
+}
+
+fn flatten_non_literal_tokens(tokens: &proc_macro2::TokenStream, out: &mut String) {
+    for tree in tokens.clone() {
+        match tree {
+            proc_macro2::TokenTree::Group(group) => {
+                flatten_non_literal_tokens(&group.stream(), out);
+            }
+            proc_macro2::TokenTree::Ident(ident) => out.push_str(&ident.to_string()),
+            proc_macro2::TokenTree::Punct(punct) => out.push(punct.as_char()),
+            proc_macro2::TokenTree::Literal(_) => out.push(' '),
+        }
+    }
 }
 
 fn path_segments(path: &ExprPath) -> Vec<String> {
