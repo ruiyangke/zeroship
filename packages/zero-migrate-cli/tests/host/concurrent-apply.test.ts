@@ -7,9 +7,10 @@
 // journaled twice, and the schema ends up exactly as one run would have left it.
 // The project lock does its job, and the first test asserts that.
 //
-// THE ROBUSTNESS PROPERTY DOES NOT. The journal bootstrap runs BEFORE the project
-// lock serialises anything, so two fresh processes race to create the journal
-// namespace and its types. The loser surfaces PostgreSQL's own catalog error:
+// THE ROBUSTNESS PROPERTY DOES NOT, ON A FIRST DEPLOY. The journal bootstrap runs
+// BEFORE the project lock serialises anything, so two fresh processes race to
+// CREATE the journal namespace and its types. The loser surfaces PostgreSQL's own
+// catalog error:
 //
 //   duplicate key value violates unique constraint "pg_namespace_nspname_index"
 //   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
@@ -20,6 +21,14 @@
 // output or the docs says otherwise. PostgreSQL's own `CREATE ... IF NOT EXISTS`
 // is racy in exactly this way, so tolerating these codes is the standard fix
 // rather than a novel one.
+//
+// FIRST DEPLOY IS NOW THE WHOLE OF IT. This file originally recorded the same
+// errors against a project whose journal ALREADY existed, which made them
+// unavoidable rather than a warm-up problem. That half had a separate cause - an
+// unguarded `CREATE OR REPLACE FUNCTION` rewriting its catalog row on every
+// invocation - and is fixed and pinned in `journal-rebootstrap-noop.test.ts`.
+// What remains here is only the window before the objects exist at all, which is
+// why the second test below deliberately starts from a fresh project.
 //
 // The second test records that as TODAY's behaviour and is written to fail when
 // it improves. Deciding which catalog error codes are benign enough to swallow is

@@ -424,9 +424,20 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 /// Bootstrap (idempotently) the meta schema + journal table + inflight
 /// side-table + immutability trigger.
 ///
-/// Safe to call on every apply: `CREATE SCHEMA/TABLE IF NOT EXISTS`, `CREATE OR
-/// REPLACE FUNCTION`, and a `pg_trigger`-guarded `CREATE TRIGGER` make a
-/// re-bootstrap a no-op.
+/// Safe to call on every apply: `CREATE SCHEMA/TABLE IF NOT EXISTS`, a
+/// `pg_proc`-guarded `CREATE OR REPLACE FUNCTION`, and a `pg_trigger`-guarded
+/// `CREATE TRIGGER` make a re-bootstrap a no-op — it issues no catalog writes
+/// once every object is in place.
+///
+/// That no-op property is what makes re-bootstrap safe under CONCURRENCY, and
+/// each guard is load-bearing for it. An unguarded `CREATE OR REPLACE FUNCTION`
+/// rewrites its catalog row even when the body is unchanged, and two bootstraps
+/// racing that rewrite make the loser fail with `tuple concurrently updated`.
+///
+/// Bootstrapping a project for the FIRST time is still racy: two processes that
+/// both find the schema absent will both try to create it, and one loses on a
+/// `pg_namespace`/`pg_type` unique index. That window closes as soon as the
+/// objects exist and is not addressed here.
 ///
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
@@ -700,12 +711,45 @@ pub async fn ensure_journal<D: SqlSession>(
     // 0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
     // append-only tables (the consolidated schema_migrations events table +
     // …_supersedes).
+    //
+    // GUARDED ON `pg_proc.prosrc` rather than issued unconditionally. A bare
+    // `CREATE OR REPLACE FUNCTION` rewrites the catalog row even when the body
+    // is already byte-identical, so two concurrent bootstraps collide and the
+    // loser dies with PostgreSQL's `tuple concurrently updated` — an error that
+    // reads like corruption but is only contention. That made it the one step
+    // here that races FOREVER: the `IF NOT EXISTS` forms above and the
+    // `pg_trigger` guard below touch nothing once their object exists, so they
+    // can only collide on a first deploy, whereas this one collided on every
+    // invocation of every verb for the life of the project.
+    //
+    // Matching on the BODY, not on mere existence, is what keeps a future edit
+    // to `FN_BODY` installable — a differing body fails the guard and the
+    // replace runs — while the steady state writes nothing at all. `FN_BODY` is
+    // therefore the single source for both the guard literal and the statement,
+    // so the two cannot drift apart; its exact bytes must keep matching what
+    // was already installed, or an upgrade would rewrite every existing journal
+    // once. `pg_proc` is not joined to `pg_namespace` on purpose: the function
+    // is created unqualified, into whatever the search_path resolves to, and
+    // its name already embeds the meta schema.
+    const FN_BODY: &str = concat!(
+        "\n         BEGIN",
+        "\n             RAISE EXCEPTION 'migration journal is append-only (no UPDATE/DELETE)';",
+        "\n         END;",
+        "\n         ",
+    );
+    let trg_fn_lit =
+        format!("{}_schema_migrations_immutable", cfg.pg.meta_schema).replace('\'', "''");
+    let body_lit = FN_BODY.replace('\'', "''");
     conn.batch(&format!(
-        "CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger AS $fn$
-         BEGIN
-             RAISE EXCEPTION 'migration journal is append-only (no UPDATE/DELETE)';
-         END;
-         $fn$ LANGUAGE plpgsql"
+        "DO $do$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_proc p
+                WHERE p.proname = '{trg_fn_lit}' AND p.prosrc = '{body_lit}'
+            ) THEN
+                EXECUTE $ex$CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger \
+                 AS $fn${FN_BODY}$fn$ LANGUAGE plpgsql$ex$;
+            END IF;
+         END $do$"
     ))
     .await?;
 
