@@ -200,7 +200,7 @@ Check the merge rather than the intent, since a missed spot fails as a 404 and
 not as an error:
 
 ```bash
-docker compose config | grep -E 'AUTH_PUBLIC_URL|app-base-domain|ZEROSHIP_(DOMAIN|ORIGIN_SCHEME):'
+docker compose config | grep -E 'ZEROSHIP_AUTH_PUBLIC_URL|app-base-domain|ZEROSHIP_(DOMAIN|ORIGIN_SCHEME):'
 ```
 
 ### .env

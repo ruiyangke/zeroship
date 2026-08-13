@@ -4,7 +4,7 @@
 //!
 //! Postmark posts JSON for delivery events. Authentication is HTTP Basic
 //! (configured per-server in the Postmark dashboard; the user/password
-//! pair is matched against `AUTH_POSTMARK_WEBHOOK_USER` /
+//! pair is matched against `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` /
 //! `AUTH_POSTMARK_WEBHOOK_PASSWORD`). On every request we:
 //!
 //! 1. Reject 401 if credentials aren't configured or the supplied

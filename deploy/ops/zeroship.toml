@@ -8,7 +8,7 @@
 # must accept an additional exact origin; an absent list means no additions.
 
 [auth]
-# The native OP public origin is supplied to auth through AUTH_PUBLIC_URL, and
+# The native OP public origin is supplied to auth through ZEROSHIP_AUTH_PUBLIC_URL, and
 # control receives the matching token issuer through ZEROSHIP_AUTH_PLATFORM_ISSUER in
 # deploy/compose/docker-compose.yml. This shared overlay defines neither key.
 #

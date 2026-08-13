@@ -609,7 +609,7 @@ services:
     # Secret (--db-url) and the console `frame-ancestors` allowlist come from
     # deploy/ops/zeroship.toml ([secrets].auth_db_url env ref +
     # [auth].frame_ancestor_origins), mounted at the well-known path below.
-    # AUTH_PUBLIC_URL is set here because the auth issuer is an auth-service
+    # ZEROSHIP_AUTH_PUBLIC_URL is set here because the auth issuer is an auth-service
     # runtime setting, not part of the shared TOML overlay.
     command: >
       zeroship-auth
@@ -621,12 +621,12 @@ services:
       # flag is --db-url, a separate slot from the control/gateway/worker --db).
       AUTH_DB_URL: ${AUTH_DB_URL:-postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship}
       # Native OP issuer base; discovery/JWKS and token `iss` use
-      # `${AUTH_PUBLIC_URL}/oauth2`.
-      AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
+      # `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
+      ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
       # auth loads the SAME ../ops/zeroship.toml overlay as control and gateway,
       # and that overlay declares control_key = urn:zeroship:env:ZEROSHIP_CONTROL_KEY.
       # Every binary reading the overlay must therefore supply the var; auth set only
-      # AUTH_DB_URL + AUTH_PUBLIC_URL and crash-looped on the unresolved reference.
+      # AUTH_DB_URL + ZEROSHIP_AUTH_PUBLIC_URL and crash-looped on the unresolved reference.
       # Auth uses this ONLY to gate control -> auth internal OP mint calls.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       # Auth has independent stash-cookie and TOTP-at-rest keys. Both are

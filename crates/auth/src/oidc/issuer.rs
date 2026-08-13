@@ -255,7 +255,7 @@ impl Issuer {
 
         let issuer = issuer.trim_end_matches('/').to_string();
         if issuer.is_empty() {
-            return Err(AuthError::Config("AUTH_PUBLIC_URL / issuer is empty".into()));
+            return Err(AuthError::Config("ZEROSHIP_AUTH_PUBLIC_URL / issuer is empty".into()));
         }
         let private_der = signing_key
             .to_pkcs8_der()

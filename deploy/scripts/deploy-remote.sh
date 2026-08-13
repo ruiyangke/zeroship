@@ -65,7 +65,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 #   - `$${VAR}` is an ESCAPED reference: compose emits a literal `$VAR` for the
 #     container's own shell. `WORKERS` is one, built inside the gateway's
 #     command block.
-#   - a reference inside a comment. `AUTH_PUBLIC_URL` appears only in prose.
+#   - a reference inside a comment. `ZEROSHIP_AUTH_PUBLIC_URL` appears only in prose.
 # Counting either turns this guard into a false alarm that blocks a good
 # deploy, which is how a safety check gets switched off.
 #

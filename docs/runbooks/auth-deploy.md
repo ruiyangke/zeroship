@@ -29,9 +29,9 @@ var.
 
 | Env var | Default | Required? | Notes |
 |---|---|---|---|
-| `AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Keep loopback unless a reverse proxy or orchestrator needs a pod/network bind. |
+| `ZEROSHIP_AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Keep loopback unless a reverse proxy or orchestrator needs a pod/network bind. |
 | `AUTH_DB_URL` | unset | yes | DSN for the `zeroship_auth` role against the migrated platform database. |
-| `AUTH_PUBLIC_URL` | `http://localhost:9092` | yes in prod | Public auth origin. The issuer is `${AUTH_PUBLIC_URL}/oauth2`. |
+| `ZEROSHIP_AUTH_PUBLIC_URL` | `http://localhost:9092` | yes in prod | Public auth origin. The issuer is `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`. |
 | `AUTH_SIGNING_KEY_FILE` | unset | yes in prod | Ed25519 private key, PEM/PKCS#8 or DER. Public JWK metadata is published to Postgres at boot. |
 | `AUTH_PAIRWISE_SALT_FILE` | unset | yes in prod | Permanent pairwise-subject salt. Do not rotate without a migration. |
 | `AUTH_BROKER_SECRET_FILE` | unset | yes in prod | Master secret used to derive per-client broker secrets. |
@@ -40,23 +40,23 @@ var.
 | `REFRESH_IDEM_KEY_FILE` | unset | yes in prod | AEAD key for refresh idempotency cache rows. |
 | `AUTH_STASH_SIGNING_KEY` | unset | yes | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
 | `AUTH_TOTP_ENC_KEY` | unset | yes | TOTP secret encryption key. |
-| `AUTH_REFRESH_POOL_SIZE` | `4` | no | Dedicated refresh-family DB session pool size per process. |
+| `ZEROSHIP_AUTH_REFRESH_POOL_SIZE` | `4` | no | Dedicated refresh-family DB session pool size per process. |
 | `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path for non-secret auth config and secret references. |
 
 ### Mailer
 
 | Env var | Default | Required? | Notes |
 |---|---|---|---|
-| `AUTH_MAILER` | `stdout` | yes in prod | Use `smtp` or `resend` for real users. |
-| `AUTH_MAIL_FROM_EMAIL` | `auth@zeroship.ai` | yes | Sender address. |
-| `AUTH_MAIL_FROM_NAME` | `zeroship` | yes | Sender display name. |
-| `AUTH_SMTP_HOST` | unset | when SMTP | SMTP relay host. |
-| `AUTH_SMTP_PORT` | `587` | no | 587 STARTTLS or 465 implicit TLS. |
-| `AUTH_SMTP_USERNAME` | unset | optional | SMTP username. |
+| `ZEROSHIP_AUTH_MAILER` | `stdout` | yes in prod | Use `smtp` or `resend` for real users. |
+| `ZEROSHIP_AUTH_MAIL_FROM_EMAIL` | `auth@zeroship.ai` | yes | Sender address. |
+| `ZEROSHIP_AUTH_MAIL_FROM_NAME` | `zeroship` | yes | Sender display name. |
+| `ZEROSHIP_AUTH_SMTP_HOST` | unset | when SMTP | SMTP relay host. |
+| `ZEROSHIP_AUTH_SMTP_PORT` | `587` | no | 587 STARTTLS or 465 implicit TLS. |
+| `ZEROSHIP_AUTH_SMTP_USERNAME` | unset | optional | SMTP username. |
 | `AUTH_SMTP_PASSWORD` | unset | paired | SMTP password. |
-| `AUTH_SMTP_TLS` | `starttls` | no | `starttls`, `implicit`, or dev/test `plaintext`. |
+| `ZEROSHIP_AUTH_SMTP_TLS` | `starttls` | no | `starttls`, `implicit`, or dev/test `plaintext`. |
 | `AUTH_RESEND_API_KEY` | unset | when Resend | Resend API key. |
-| `AUTH_POSTMARK_WEBHOOK_USER` | unset | when Postmark | Basic-auth user for `/webhooks/postmark`. |
+| `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` | unset | when Postmark | Basic-auth user for `/webhooks/postmark`. |
 | `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Basic-auth password. |
 
 The SES-SNS webhook verifies AWS-published SNS signatures and has no shared
@@ -68,12 +68,12 @@ Routes are registered only when provider client IDs are present.
 
 | Env var | Required? | Notes |
 |---|---|---|
-| `AUTH_GOOGLE_CLIENT_ID` | optional | Enables `/oauth/google/*`. |
+| `ZEROSHIP_AUTH_GOOGLE_CLIENT_ID` | optional | Enables `/oauth/google/*`. |
 | `AUTH_GOOGLE_CLIENT_SECRET` | with Google ID | Google client secret. |
-| `AUTH_GOOGLE_REDIRECT_URI` | with Google ID | Defaults to `https://auth.zeroship.ai/oauth/google/callback`. |
-| `AUTH_GITHUB_CLIENT_ID` | optional | Enables `/oauth/github/*`. |
+| `ZEROSHIP_AUTH_GOOGLE_REDIRECT_URI` | with Google ID | Defaults to `https://auth.zeroship.ai/oauth/google/callback`. |
+| `ZEROSHIP_AUTH_GITHUB_CLIENT_ID` | optional | Enables `/oauth/github/*`. |
 | `AUTH_GITHUB_CLIENT_SECRET` | with GitHub ID | GitHub client secret. |
-| `AUTH_GITHUB_REDIRECT_URI` | with GitHub ID | Defaults to `https://auth.zeroship.ai/oauth/github/callback`. |
+| `ZEROSHIP_AUTH_GITHUB_REDIRECT_URI` | with GitHub ID | Defaults to `https://auth.zeroship.ai/oauth/github/callback`. |
 
 Provider URL override variables exist for e2e tests with mock providers.
 Production should normally use the defaults.
@@ -168,7 +168,7 @@ or base64url encoded.
 
    ```bash
    AUTH_DB_URL=postgres://zeroship_auth:...@db:5432/zeroship \
-   AUTH_PUBLIC_URL=https://auth.zeroship.ai \
+   ZEROSHIP_AUTH_PUBLIC_URL=https://auth.zeroship.ai \
    AUTH_SIGNING_KEY_FILE=/run/secrets/auth-signing.pem \
    AUTH_PAIRWISE_SALT_FILE=/run/secrets/pairwise-salt \
    AUTH_BROKER_SECRET_FILE=/run/secrets/broker-secret \
@@ -176,13 +176,13 @@ or base64url encoded.
    REFRESH_IDEM_KEY_FILE=/run/secrets/refresh-idem-key \
    AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \
    AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
-   AUTH_MAILER=smtp AUTH_SMTP_HOST=smtp.example.com \
+   ZEROSHIP_AUTH_MAILER=smtp ZEROSHIP_AUTH_SMTP_HOST=smtp.example.com \
    zeroship-auth --addr 0.0.0.0:9092
    ```
 
 On boot, the service loads the signing key, publishes the matching public JWK
 metadata, initializes the refresh-token key material, and serves discovery at
-`${AUTH_PUBLIC_URL}/oauth2/.well-known/openid-configuration`.
+`${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2/.well-known/openid-configuration`.
 
 ## Healthchecks
 
@@ -220,8 +220,8 @@ Persisted audit events live in `zeroship.audit_events`.
 | `/oauth2/token` returns `invalid_client` | Client row missing or broker secret mismatch | Check `zeroship.oauth_clients`, app client provisioning, and broker secret rollout. |
 | `/oauth2/token` returns `invalid_grant` | Code expired/consumed, PKCE mismatch, consent revoked, or refresh family revoked | Retry the auth flow; inspect audit logs for revocation or reuse detection. |
 | JWKS is empty | Signing key failed to load or publish | Check `AUTH_SIGNING_KEY_FILE` permissions and boot logs. |
-| New users cannot sign up | Mailer still set to `stdout` or provider credentials invalid | Set `AUTH_MAILER=smtp` or `resend`; verify provider logs. |
-| `/webhooks/postmark` returns 401 | Basic-auth mismatch | Verify `AUTH_POSTMARK_WEBHOOK_USER` and `AUTH_POSTMARK_WEBHOOK_PASSWORD`. |
+| New users cannot sign up | Mailer still set to `stdout` or provider credentials invalid | Set `ZEROSHIP_AUTH_MAILER=smtp` or `resend`; verify provider logs. |
+| `/webhooks/postmark` returns 401 | Basic-auth mismatch | Verify `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` and `AUTH_POSTMARK_WEBHOOK_PASSWORD`. |
 | Login p99 jumps | Argon2id CPU pressure or slow DB | Check CPU saturation, DB latency, and rate-limit table health. |
 | Magic-link or verification email missing | Recipient suppressed after prior bounce/complaint | Review `zeroship.email_suppressions` and audit before deleting. |
 
@@ -262,7 +262,7 @@ and consent state live in PostgreSQL.
 Rough sizing guidance:
 
 - Start with 4 vCPU / 8 GB RAM per auth replica.
-- Keep `AUTH_REFRESH_POOL_SIZE` small unless refresh traffic is demonstrably
+- Keep `ZEROSHIP_AUTH_REFRESH_POOL_SIZE` small unless refresh traffic is demonstrably
   waiting on the dedicated pool.
 - Scale replicas before weakening Argon2id parameters.
 

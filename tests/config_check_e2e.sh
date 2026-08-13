@@ -143,9 +143,12 @@ expect_stderr_contains() {
 }
 
 cat >"$TMPDIR/shared.toml" <<'TOML'
+# `control_url` is a SHARED identity (auth, gateway, worker), so it sits at the
+# overlay root rather than inside any one binary's table.
+control_url = "http://control-from-file:9090"
+
 [auth]
 platform_issuer = "http://platform-from-file.test/oauth2"
-control_url = "http://control-from-file:9090"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]

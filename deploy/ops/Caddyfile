@@ -22,7 +22,7 @@
 #
 # CONSEQUENCE WORTH KNOWING: because the proxy terminates TLS, the origin sees
 # http:// and any code that derives an absolute URL from the request scheme will
-# derive http, not https. AUTH_PUBLIC_URL is set explicitly in compose for
+# derive http, not https. ZEROSHIP_AUTH_PUBLIC_URL is set explicitly in compose for
 # exactly that reason - it is not inferred from the request.
 #
 # Caddy routes to the MOST SPECIFIC matching site block, so the explicit hosts

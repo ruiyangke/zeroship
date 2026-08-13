@@ -40,9 +40,9 @@ gateway callback
 worker runtime
 ```
 
-`AUTH_PUBLIC_URL` is the externally visible auth origin, for example
+`ZEROSHIP_AUTH_PUBLIC_URL` is the externally visible auth origin, for example
 `https://auth.zeroship.ai`. The issuer stamped into tokens and discovery is
-`${AUTH_PUBLIC_URL}/oauth2`.
+`${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
 
 ## Endpoints
 
@@ -215,7 +215,7 @@ Local compose runs the native OP as the `auth` service. In production, configure
 at minimum:
 
 - `AUTH_DB_URL`
-- `AUTH_PUBLIC_URL`
+- `ZEROSHIP_AUTH_PUBLIC_URL`
 - `AUTH_SIGNING_KEY_FILE`
 - `AUTH_PAIRWISE_SALT_FILE`
 - `AUTH_BROKER_SECRET_FILE`
@@ -237,7 +237,7 @@ cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin 
 
 Then start `zeroship-auth` with the variables above. On boot it publishes the
 active public JWK metadata from `AUTH_SIGNING_KEY_FILE` into Postgres and serves
-discovery from `${AUTH_PUBLIC_URL}/oauth2`.
+discovery from `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
 
 ## DPoP and Bearer Access
 

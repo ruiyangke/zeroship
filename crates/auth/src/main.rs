@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --check-config is a read-only DRY-RUN: resolve + report the config and
     // exit BEFORE any runtime-only validation (mailer/SMTP construction), exactly
     // like control / gateway / worker. Building the mailers enforces the
-    // `AUTH_SMTP_HOST` / `AUTH_RELAY_SMTP_HOST` requirements, which are real-boot
+    // `ZEROSHIP_AUTH_SMTP_HOST` / `ZEROSHIP_AUTH_RELAY_SMTP_HOST` requirements, which are real-boot
     // concerns — they must NOT gate a config dry-run (ISS-62). The report below
     // references only `cfg.*` (e.g. `cfg.mailer`, a plain string), never the
     // constructed drivers, so it stands alone ahead of mailer construction.
@@ -196,12 +196,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
     if cfg.google_client_id().is_none() {
         tracing::warn!(
-            "Google OAuth disabled — set AUTH_GOOGLE_CLIENT_ID + AUTH_GOOGLE_CLIENT_SECRET to enable"
+            "Google OAuth disabled — set ZEROSHIP_AUTH_GOOGLE_CLIENT_ID + AUTH_GOOGLE_CLIENT_SECRET to enable"
         );
     }
     if cfg.github_client_id().is_none() {
         tracing::warn!(
-            "GitHub OAuth disabled — set AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
+            "GitHub OAuth disabled — set ZEROSHIP_AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
         );
     }
 
@@ -442,7 +442,7 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
         "smtp" => {
             let host = cfg.smtp_host().map(str::to_owned).ok_or_else(|| {
                 AuthError::Config(
-                    "AUTH_SMTP_HOST is required when --mailer=smtp".into(),
+                    "ZEROSHIP_AUTH_SMTP_HOST is required when --mailer=smtp".into(),
                 )
             })?;
             let driver = SmtpMailer::new(&SmtpConfig {
@@ -480,7 +480,7 @@ fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, Au
         "smtp" => {
             let host = cfg.relay_smtp_host().map(str::to_owned).ok_or_else(|| {
                 AuthError::Config(
-                    "AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp".into(),
+                    "ZEROSHIP_AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp".into(),
                 )
             })?;
             let driver = SmtpMailer::new(&SmtpConfig {
@@ -497,7 +497,7 @@ fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, Au
         // rendered envelope, but stdout is valid for eyeballing the surgery).
         "stdout" => Ok(RelayForwardMailer(Arc::new(StdoutMailer))),
         other => Err(AuthError::Config(format!(
-            "AUTH_RELAY_FORWARD_MAILER={other:?} unsupported; relay forward needs \
+            "ZEROSHIP_AUTH_RELAY_FORWARD_MAILER={other:?} unsupported; relay forward needs \
              envelope-from control — use smtp (or stdout in dev). resend cannot pin \
              envelope-from (sub-spec §3.2)."
         ))),
