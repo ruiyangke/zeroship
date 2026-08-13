@@ -29,3 +29,6 @@ toml = { workspace = true }
 [[bin]]
 name = "zeroship-workflow-scheduler"
 path = "src/main.rs"
+
+[lints]
+workspace = true

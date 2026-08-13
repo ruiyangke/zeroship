@@ -101,3 +101,6 @@ serde = { workspace = true }
 # surface (Stage 1's SqlSession adapter) stays V8-free.
 zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
+
+[lints]
+workspace = true

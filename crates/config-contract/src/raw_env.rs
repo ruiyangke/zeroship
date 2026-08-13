@@ -128,6 +128,9 @@ pub enum RawEnvViolation {
     /// The disallowed-method lint was locally silenced outside the exempt paths.
     #[error("illicit allow of the raw-environment lint: {0}")]
     IllicitAllow(String),
+    /// A sealed library test module did not have the shape that seals it.
+    #[error("sealed library test accessor is not sealed: {0}")]
+    SealedShape(String),
     /// A declared key named something that is not an environment spelling.
     #[error("declared environment key has an invalid name: {0}")]
     InvalidKeyName(String),
@@ -230,6 +233,11 @@ struct Reads<'a> {
     violations: Vec<RawEnvViolation>,
     declared_keys: Vec<(String, String)>,
     permitted_raw: Vec<String>,
+    /// Raw accesses seen, counted whatever the role. The sealed-library shape
+    /// check needs the count even when the role suppresses the violation.
+    raw_reads: usize,
+    /// Environment names passed to a raw access as a string literal.
+    raw_literal_arguments: Vec<String>,
 }
 
 impl<'ast> Visit<'ast> for Reads<'_> {
@@ -254,6 +262,10 @@ impl<'ast> Visit<'ast> for Reads<'_> {
         };
         if let Some(joined) = raw_callee {
             let literal = first_string_literal(call);
+            self.raw_reads += 1;
+            if let Some(name) = literal.clone() {
+                self.raw_literal_arguments.push(name);
+            }
             if self.role == FileRole::BuildScript
                 && literal
                     .as_deref()
@@ -458,6 +470,59 @@ fn is_raw_path(segments: &[String], imports: &Imports) -> bool {
     matches!(segments, [function] if imports.function_aliases.contains(function))
 }
 
+/// Require a sealed library test module to actually be sealed.
+///
+/// The path exemption alone would let any file under
+/// `libs/<crate>/tests/common/env.rs` do anything at all, which turns Section
+/// 4.5's carve-out into "raw reads are fine if you put them in a file with this
+/// name". Three properties are what make the carve-out equivalent in kind to
+/// the typed keys the rest of the workspace uses:
+///
+///   * ONE raw access. Two means the accessor is not the only door.
+///   * A key ENUM with unit variants, so the permitted names are a closed,
+///     scannable set rather than whatever a caller passes.
+///   * No string literal reaching the raw call. A literal there means a caller
+///     could name a variable the enum does not, which is the closed set gone.
+///
+/// What this does NOT check: that the enum's `name` arms are literals rather
+/// than computed. A computed arm would still have to be a `const fn` returning
+/// `&'static str`, so the set stays finite, but its contents would no longer be
+/// greppable. That is a gap, and it is smaller than the one being closed.
+fn check_sealed_shape(
+    file: &syn::File,
+    raw_reads: usize,
+    raw_literal_arguments: &[String],
+) -> Vec<RawEnvViolation> {
+    let mut violations = Vec::new();
+    if raw_reads > 1 {
+        violations.push(RawEnvViolation::SealedShape(format!(
+            "{raw_reads} raw accesses; a sealed accessor has exactly one"
+        )));
+    }
+    if !raw_literal_arguments.is_empty() {
+        violations.push(RawEnvViolation::SealedShape(format!(
+            "raw access takes a string literal ({}); it must take the sealed key",
+            raw_literal_arguments.join(", ")
+        )));
+    }
+    let has_unit_variant_enum = file.items.iter().any(|item| match item {
+        syn::Item::Enum(declaration) => {
+            !declaration.variants.is_empty()
+                && declaration
+                    .variants
+                    .iter()
+                    .all(|variant| matches!(variant.fields, syn::Fields::Unit))
+        }
+        _ => false,
+    });
+    if !has_unit_variant_enum {
+        violations.push(RawEnvViolation::SealedShape(
+            "no unit-variant key enum; the permitted names are not a closed set".to_owned(),
+        ));
+    }
+    violations
+}
+
 /// Reject direct, imported, aliased, cfg-disabled, or helper-hidden raw reads.
 ///
 /// The argument to `std::env::var` is deliberately irrelevant outside a build
@@ -492,11 +557,19 @@ pub fn check_rust_source_with_role(
             violations: Vec::new(),
             declared_keys: Vec::new(),
             permitted_raw: Vec::new(),
+            raw_reads: 0,
+            raw_literal_arguments: Vec::new(),
         };
         reads.visit_file(&file);
-        (reads.violations, reads.declared_keys, reads.permitted_raw)
+        (
+            reads.violations,
+            reads.declared_keys,
+            reads.permitted_raw,
+            reads.raw_reads,
+            reads.raw_literal_arguments,
+        )
     };
-    let (read_violations, declared_keys, permitted_raw) = reads;
+    let (read_violations, declared_keys, permitted_raw, raw_reads, raw_literal_arguments) = reads;
 
     let mut violations = imports.violations;
     violations.extend(read_violations);
@@ -516,6 +589,9 @@ pub fn check_rust_source_with_role(
                     | RawEnvViolation::IllicitAllow(_)
             )
         });
+    }
+    if role == FileRole::SealedLibraryTest {
+        violations.extend(check_sealed_shape(&file, raw_reads, &raw_literal_arguments));
     }
 
     let mut report = RawEnvReport {
@@ -636,6 +712,9 @@ fn prefix(name: &str, violation: RawEnvViolation) -> RawEnvViolation {
         }
         RawEnvViolation::IllicitAllow(detail) => {
             RawEnvViolation::IllicitAllow(format!("{name}: {detail}"))
+        }
+        RawEnvViolation::SealedShape(detail) => {
+            RawEnvViolation::SealedShape(format!("{name}: {detail}"))
         }
         RawEnvViolation::InvalidKeyName(detail) => {
             RawEnvViolation::InvalidKeyName(format!("{name}: {detail}"))

@@ -105,6 +105,7 @@ fn raw_env(args: &[String]) {
                     RawEnvViolation::CompileTime(_) => "compile-time",
                     RawEnvViolation::UnregisteredRead(_) => "unregistered",
                     RawEnvViolation::IllicitAllow(_) => "illicit-allow",
+                    RawEnvViolation::SealedShape(_) => "sealed-shape",
                     RawEnvViolation::InvalidKeyName(_) => "invalid-key-name",
                     RawEnvViolation::MisclassifiedKey(_) => "misclassified-key",
                     RawEnvViolation::Parse(_) => "parse",

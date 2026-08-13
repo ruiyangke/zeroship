@@ -4,7 +4,8 @@
 //! a fresh connection (via the `connect` helper), spawns the connection
 //! driver onto compio's runtime, and exercises one slice of the API.
 //!
-//! Every test works inside a private schema of its own (see `require_pg`), so
+//! Every test works inside a private schema of its own (see `require    common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())pg`), so
 //! the suite runs at full parallelism against one database.
 //!
 //! Run with:
@@ -20,8 +21,8 @@ use std::hash::{Hash, Hasher};
 mod common;
 
 fn test_url() -> String {
-    std::env::var("PG_TEST_URL")
-        .unwrap_or_else(|_| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 /// Longest identifier PostgreSQL stores (NAMEDATALEN - 1). It truncates
