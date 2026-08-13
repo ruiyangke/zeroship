@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use zeroship_config_contract::raw_env::{check_rust_source, check_sources, RawEnvViolation};
+use zeroship_config_contract::raw_env::{
+    check_rust_source, check_rust_source_with_role, check_sources, FileRole, RawEnvViolation,
+};
 
 #[test]
 fn cfg_disabled_aliased_raw_read_is_rejected() {
@@ -90,4 +92,208 @@ fn a_scan_that_examined_nothing_is_a_failure() {
     let scanned = check_sources(&[("clean.rs".to_owned(), "fn main() {}".to_owned())])
         .expect("a non-empty clean scan passes");
     assert_eq!(scanned, 1);
+}
+
+#[test]
+fn a_production_library_read_fails_even_in_libs() {
+    // Section 4.5 permits a sealed test-key accessor in `libs/*`, and nothing
+    // else there. A published, zeroship-independent driver takes resolved
+    // options from its caller; if the carve-out leaked into `src/`, the rule
+    // "platform processes declare and read external credentials before
+    // injecting them into a library" would have no teeth.
+    // Does not cover: whether the library's public API actually accepts the
+    // resolved option. That is a design property, not a scannable one.
+    let source = r#"
+pub fn credentials() -> Option<String> {
+    std::env::var("AWS_SECRET_ACCESS_KEY").ok()
+}
+"#;
+    let role = FileRole::for_path("libs/compio-s3/src/lib.rs");
+    assert_eq!(role, FileRole::Ordinary, "libs/src is not a carve-out path");
+
+    let errors = check_rust_source_with_role(source, role)
+        .expect_err("a production library read must fail");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::Read(_))));
+}
+
+#[test]
+fn a_library_test_read_outside_the_sealed_module_fails() {
+    // The other half: the carve-out is one FILE, not the `tests/` tree. A test
+    // that reads raw beside the sealed module would make the sealed module
+    // decorative.
+    // Does not cover: a test that calls the sealed accessor with a key the enum
+    // does not have; that does not compile, so there is nothing to scan.
+    let source = r#"
+fn url() -> Option<String> {
+    std::env::var("PG_TEST_URL").ok()
+}
+"#;
+    let role = FileRole::for_path("libs/compio-postgres/tests/integration.rs");
+    assert_eq!(role, FileRole::Ordinary, "only tests/common/env.rs is sealed");
+
+    let errors = check_rust_source_with_role(source, role)
+        .expect_err("a raw read outside the sealed module must fail");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::Read(_))));
+
+    // The one-variable partner: byte-identical body, sealed path, plus the
+    // shape the carve-out requires. If the path check were ignored, these two
+    // would agree.
+    let sealed = r#"
+pub enum TestEnvKey {
+    PgTestUrl,
+}
+
+impl TestEnvKey {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::PgTestUrl => "PG_TEST_URL",
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+pub fn get(key: TestEnvKey) -> Option<String> {
+    std::env::var(key.name()).ok()
+}
+"#;
+    let sealed_role = FileRole::for_path("libs/compio-postgres/tests/common/env.rs");
+    assert_eq!(sealed_role, FileRole::SealedLibraryTest);
+    check_rust_source_with_role(sealed, sealed_role).expect("the sealed shape passes");
+}
+
+#[test]
+fn the_sealed_path_alone_does_not_seal_anything() {
+    // Mutation: keep the blessed PATH and drop each shape property in turn. A
+    // path-only exemption would mean "raw reads are fine if you name the file
+    // env.rs", which is a rename away from no gate at all.
+    // Does not cover: an enum whose `name` arms compute their strings. The set
+    // stays finite but stops being greppable; that gap is stated in
+    // check_sealed_shape's own documentation.
+    let path = "libs/compio-redis/tests/common/env.rs";
+    let role = FileRole::for_path(path);
+
+    let two_doors = r#"
+pub enum TestEnvKey {
+    A,
+}
+
+impl TestEnvKey {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::A => "REDIS_TEST_URL",
+        }
+    }
+}
+
+pub fn get(key: TestEnvKey) -> Option<String> {
+    std::env::var(key.name()).ok()
+}
+
+pub fn other(key: TestEnvKey) -> Option<std::ffi::OsString> {
+    std::env::var_os(key.name())
+}
+"#;
+    let errors = check_rust_source_with_role(two_doors, role)
+        .expect_err("two raw accesses are not a sealed accessor");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::SealedShape(detail)
+            if detail.contains("raw accesses"))));
+
+    let literal_argument = r#"
+pub enum TestEnvKey {
+    A,
+}
+
+pub fn get(_key: TestEnvKey) -> Option<String> {
+    std::env::var("REDIS_TEST_URL").ok()
+}
+"#;
+    let errors = check_rust_source_with_role(literal_argument, role)
+        .expect_err("a literal argument bypasses the key");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::SealedShape(detail)
+            if detail.contains("string literal"))));
+
+    let no_enum = r#"
+pub fn get(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+"#;
+    let errors = check_rust_source_with_role(no_enum, role)
+        .expect_err("no key enum means no closed set");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::SealedShape(detail)
+            if detail.contains("closed set"))));
+}
+
+#[test]
+fn a_build_script_may_read_only_the_named_build_inputs() {
+    // Section 4.5 exempts compiler and Cargo inputs explicitly: they exist only
+    // while the crate compiles, no operator sets them, and there is no process
+    // for a consumer marker to name.
+    // Does not cover: a build script that reads a build input through a helper
+    // taking `&str`. The literal is what the exemption is keyed on, so that
+    // shape fails - correctly, but with a message about the read rather than
+    // about the missing literal.
+    let allowed = r#"
+fn main() {
+    let out = std::env::var("OUT_DIR").unwrap();
+    println!("cargo:rerun-if-changed={out}");
+}
+"#;
+    let role = FileRole::for_path("crates/authz/build.rs");
+    assert_eq!(role, FileRole::BuildScript);
+    let report = check_rust_source_with_role(allowed, role).expect("OUT_DIR is a build input");
+    assert_eq!(report.permitted_raw.len(), 1);
+
+    // The one-variable partner: same file, same role, a name that is process
+    // configuration rather than a build input.
+    let denied = r#"
+fn main() {
+    let _ = std::env::var("ZEROSHIP_CONTROL_KEY");
+}
+"#;
+    let errors = check_rust_source_with_role(denied, role)
+        .expect_err("a build script may not read process configuration");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::Read(_))));
+}
+
+#[test]
+fn a_raw_read_inside_a_macro_body_is_found() {
+    // Regression for a REAL blind spot found on 2026-08-12: syn's default walk
+    // stops at a macro's token stream, so
+    // `assert!(std::env::var(NAME).is_err())` in
+    // crates/plugin-storage/src/limits.rs:198 was invisible, and the file's
+    // other read made the omission look like a correct count.
+    // Does not cover: an ALIASED read inside a macro body that does not parse
+    // as an expression list. The text fallback matches literal spellings only.
+    let source = r#"
+fn check() {
+    assert!(std::env::var("SOMETHING").is_err());
+}
+"#;
+    let errors = check_rust_source(source).expect_err("a read inside assert! must fail");
+    assert!(errors
+        .iter()
+        .any(|error| matches!(error, RawEnvViolation::Read(path)
+            if path.ends_with("std::env::var"))));
+
+    // The one-variable partner: a macro body that MENTIONS the spelling in a
+    // string literal without performing a read. Flagging this made the scanner
+    // fail on its own test file, so the distinction is load-bearing.
+    let mention = r#"
+fn describe(path: &str) -> bool {
+    matches!(path, p if p.ends_with("std::env::var"))
+}
+"#;
+    check_rust_source(mention).expect("mentioning the spelling is not reading");
 }

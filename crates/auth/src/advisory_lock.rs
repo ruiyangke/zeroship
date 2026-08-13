@@ -175,7 +175,7 @@ mod tests {
 
     #[compio::test]
     async fn advisory_lock_serializes_same_key_across_sessions() {
-        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
             eprintln!("skip: AUTH_DB_URL unset");
             return;
         };

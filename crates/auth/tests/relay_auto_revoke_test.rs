@@ -24,7 +24,7 @@ use uuid::Uuid;
 use zeroship_auth::store::relay;
 
 async fn pg_or_skip() -> Option<Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {

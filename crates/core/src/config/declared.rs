@@ -22,8 +22,13 @@
 //! TOML slot, a CLI flag, a default, or any place in the operator-facing
 //! contract. They are reads, classified and located. A name that deserves to be
 //! operator-visible platform configuration belongs in a `#[zeroship_config]`
-//! declaration instead, and the class list has no variant that would let one
-//! hide here.
+//! declaration instead.
+//!
+//! One class, [`EnvClass::Platform`], names exactly the settings that have not
+//! made that trip yet. It is the honest record of an incomplete conversion
+//! rather than a place to hide: read its documentation before using it, and
+//! `crates/config-contract/tests/declared_env.rs` holds its census to a ceiling
+//! that only comes down.
 
 use std::ffi::OsString;
 use std::marker::PhantomData;
@@ -59,6 +64,27 @@ pub enum EnvClass {
     /// A value that belongs to the deployed creator app rather than to the
     /// platform, and is passed THROUGH by a platform process.
     Creator,
+    /// A zeroship-owned tunable that has NOT yet been given a generated
+    /// `#[zeroship_config]` declaration.
+    ///
+    /// This is the transitional class, and it is the only one that may carry
+    /// the `ZEROSHIP_` prefix without being either dev, test, CLI or creator
+    /// scoped. Every member is a conversion candidate: the setting deserves a
+    /// canonical identity, a flag, a TOML path and a `--check-config` row, and
+    /// until it has them an operator cannot discover it and `--check-config`
+    /// cannot report it.
+    ///
+    /// It exists because the alternative was worse. Step 4 converts READS; a
+    /// generated declaration also needs a consuming binary's config struct, a
+    /// resolver and a deployment rewrite, which is Step 3 and Step 6 work. Left
+    /// as raw reads these names would have been invisible; classified `external`
+    /// they would have been a lie about who owns them. Recorded here they are
+    /// counted, located, and impossible to confuse with a converted setting.
+    ///
+    /// `crates/config-contract/tests/declared_env.rs` asserts the count only
+    /// shrinks. Do not add to it without saying why the generated declaration
+    /// is not possible in the same change.
+    Platform,
 }
 
 impl EnvClass {
@@ -73,6 +99,7 @@ impl EnvClass {
             Self::Cli => "cli",
             Self::Build => "build",
             Self::Creator => "creator",
+            Self::Platform => "platform",
         }
     }
 }
@@ -146,6 +173,11 @@ impl<T, C: ConfigConsumer> DeclaredEnvKey<T, C> {
         creator,
         Creator,
         "Declare a value owned by the deployed creator app, not by the platform."
+    );
+    declared_constructor!(
+        platform,
+        Platform,
+        "Declare a zeroship-owned tunable that has no generated declaration YET."
     );
 
     /// The literal environment spelling.
@@ -546,6 +578,7 @@ mod tests {
             EnvClass::Cli,
             EnvClass::Build,
             EnvClass::Creator,
+            EnvClass::Platform,
         ]
         .map(EnvClass::as_str);
         let mut sorted = spellings.to_vec();

@@ -11,7 +11,7 @@ use zeroship_auth::store::{identities};
 
 #[compio::test]
 async fn identities_link_find_list_unlink_roundtrip() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skipping identities_test (no AUTH_DB_URL)");
         return;
     };
@@ -105,7 +105,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
 
 #[compio::test]
 async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skipping identities_test (no AUTH_DB_URL)");
         return;
     };

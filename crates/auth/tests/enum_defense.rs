@@ -94,7 +94,7 @@ const N_PAIRS: usize = 4;
 #[ntex::test]
 async fn login_failure_responses_are_indistinguishable() {
     // 0. Env-skip check.
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("[enum_defense] skip (need AUTH_DB_URL)");
         return;
     };

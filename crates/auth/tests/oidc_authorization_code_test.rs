@@ -454,9 +454,8 @@ async fn expired_authorization_code_is_rejected() {
 }
 
 fn db_url() -> Option<String> {
-    std::env::var("AUTH_DB_URL")
-        .or_else(|_| std::env::var("CONTROL_TEST_DB"))
-        .ok()
+    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
 }
 
 fn test_issuer() -> Issuer {

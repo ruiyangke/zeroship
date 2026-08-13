@@ -34,9 +34,8 @@ const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 /// state this repo just finished getting out of, and this target has no
 /// `required-features` gate to keep it out of that run.
 async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
-    let db_url = std::env::var("AUTH_DB_URL")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .ok()?;
+    let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
 
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {

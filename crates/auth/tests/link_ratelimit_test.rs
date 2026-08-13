@@ -41,9 +41,9 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn link_wrong_password_is_limited_by_fifth_attempt() {
-    let db_url = match std::env::var("AUTH_DB_URL") {
-        Ok(db_url) => db_url,
-        Err(_) => {
+    let db_url = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(db_url) => db_url,
+        None => {
             zeroship_test_support::skip("skipping link_ratelimit_test (no AUTH_DB_URL)");
             return;
         }

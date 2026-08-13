@@ -24,7 +24,7 @@ use common::test_auth_config;
 
 #[ntex::test]
 async fn logout_route_is_registered_returns_not_404() {
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
@@ -115,7 +115,7 @@ async fn logout_route_is_registered_returns_not_404() {
 /// 405 (route exists, method missing). Cover that.
 #[ntex::test]
 async fn logout_post_is_registered_returns_not_404_or_405() {
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
@@ -193,9 +193,9 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn logout_post_revokes_local_session_cookie() {
-    let db_url = match std::env::var("AUTH_DB_URL") {
-        Ok(db_url) => db_url,
-        Err(_) => {
+    let db_url = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(db_url) => db_url,
+        None => {
             zeroship_test_support::skip("[logout_test] skip (need AUTH_DB_URL)");
             return;
         }

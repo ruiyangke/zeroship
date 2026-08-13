@@ -14,7 +14,7 @@ use zeroship_auth::store::{users};
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -82,9 +82,9 @@ async fn drop_verifications_insert_delay(client: &Client) {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_verification_token() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
             return;
         }

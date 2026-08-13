@@ -40,7 +40,7 @@ use common::{
 #[ntex::test]
 async fn google_federation_creates_new_user() {
     // 0. Env-skip check.
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("[e2e_google] skip (need AUTH_DB_URL)");
         return;
     };
@@ -294,7 +294,7 @@ async fn google_federation_creates_new_user() {
 
 #[ntex::test]
 async fn google_federation_rejects_untrusted_domain_without_hd() {
-    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("[e2e_google untrusted] skip (need AUTH_DB_URL)");
         return;
     };

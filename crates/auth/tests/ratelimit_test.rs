@@ -7,7 +7,7 @@ use zeroship_auth::ratelimit::{consume, Bucket, RateLimitDecision};
 // handle). All async helpers that touch it inherit that.
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<compio_postgres::Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     let client = pg_connect(&dsn).await;
     Some(client)
 }
@@ -62,7 +62,8 @@ async fn concurrent_consumes_are_atomic() {
         zeroship_test_support::skip("skip (no AUTH_DB_URL)");
         return;
     };
-    let dsn = std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL present after pg_or_skip");
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .expect("AUTH_DB_URL present after pg_or_skip");
 
     let key = format!("test:atomic:{}", uuid::Uuid::new_v4().simple());
     seed_client

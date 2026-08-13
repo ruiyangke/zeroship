@@ -22,8 +22,12 @@ fn auth_bin() -> &'static str {
 /// Run the binary with a wiped environment (only PATH/HOME survive, mirroring the
 /// `env -i` discipline in `tests/config_check_e2e.sh`), capturing status+stdout.
 fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let path = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
+    let path =
+        zeroship_core::declared_env!(external, "PATH", zeroship_core::config::TestHarness)
+            .unwrap_or_default();
+    let home =
+        zeroship_core::declared_env!(external, "HOME", zeroship_core::config::TestHarness)
+            .unwrap_or_default();
     let out = Command::new(auth_bin())
         .args([
             "--stash-signing-key",

@@ -17,9 +17,8 @@ use zeroship_auth::store::sessions as session_store;
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
 fn db_url() -> Option<String> {
-    std::env::var("AUTH_DB_URL")
-        .or_else(|_| std::env::var("CONTROL_TEST_DB"))
-        .ok()
+    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
 }
 
 async fn open_conn() -> Option<Client> {

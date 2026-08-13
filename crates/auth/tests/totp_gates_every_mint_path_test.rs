@@ -90,7 +90,7 @@ struct Fixture {
 impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot() -> Option<Self> {
-        let db_url = std::env::var("AUTH_DB_URL").ok()?;
+        let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {

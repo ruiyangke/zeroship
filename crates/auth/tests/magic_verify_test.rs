@@ -22,7 +22,7 @@ fn test_cfg(db_url: &str) -> AuthConfig {
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -36,9 +36,9 @@ async fn pg() -> Option<compio_postgres::Client> {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn verify_get_without_magic_cookie_does_not_consume_token() {
-    let dsn = match std::env::var("AUTH_DB_URL") {
-        Ok(dsn) => dsn,
-        Err(_) => {
+    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+        Some(dsn) => dsn,
+        None => {
             zeroship_test_support::skip("skipping magic_verify_test (no AUTH_DB_URL)");
             return;
         }

@@ -75,7 +75,8 @@ async fn pg_connect(dsn: &str) -> Client {
 }
 
 fn db_url() -> String {
-    std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL is required for reset_hash_gate_test")
+    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
+        .expect("AUTH_DB_URL is required for reset_hash_gate_test")
 }
 
 /// Build the `/reset` service and harvest a CSRF pair from the GET render.

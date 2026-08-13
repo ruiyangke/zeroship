@@ -11,7 +11,7 @@ use zeroship_auth::cron::audit_retention;
 
 #[compio::test]
 async fn retention_deletes_old_security_events() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skip: AUTH_DB_URL unset");
         return;
     };
@@ -70,7 +70,7 @@ async fn retention_deletes_old_security_events() {
 
 #[compio::test]
 async fn retention_keeps_refresh_reuse_detected_forever() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skip: AUTH_DB_URL unset");
         return;
     };
@@ -138,7 +138,7 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
 ///      trigger — i.e. the trigger is ARMED for everything but the sweep.
 #[compio::test]
 async fn sweep_guc_does_not_leak_past_its_transaction() {
-    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
         zeroship_test_support::skip("skip: AUTH_DB_URL unset");
         return;
     };

@@ -791,7 +791,7 @@ mod tests {
 
     #[ntex::test]
     async fn suppressed_recipient_returns_200_and_does_not_transport() {
-        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
             eprintln!("skip suppressed_recipient_returns_200_and_does_not_transport (no AUTH_DB_URL)");
             return;
         };
