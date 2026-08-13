@@ -1235,6 +1235,7 @@ function enumType(name) {
       return handle;
     },
     comment(text, commentArgs = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
     }
@@ -1255,6 +1256,7 @@ function __pgDomain(name) {
       return handle;
     },
     comment(text, commentArgs = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
     }
@@ -1352,6 +1354,7 @@ function __pgSequence(name) {
       return handle;
     },
     comment(text, commentArgs = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
       recordComment({ kind: "sequence", name, schema: commentArgs.schema }, text);
       return handle;
     }
@@ -2514,6 +2517,11 @@ var RENAME_TABLE_KEYS = ["to", "ifExists", "schema"];
 var ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"];
 var DROP_COLUMN_KEYS = ["ifExists", "schema"];
 var RENAME_COLUMN_KEYS = ["to", "type", "schema"];
+var SCHEMA_ONLY_KEYS = ["schema"];
+var SET_TYPE_KEYS = ["to", "using", "schema"];
+var PK_ADD_KEYS = ["columns"];
+var PK_REPLACE_KEYS = ["expectedColumns", "columns", "dropIdentityFrom"];
+var PK_DROP_KEYS = ["expectedColumns", "dropIdentityFrom"];
 var SET_TABLE_OPTIONS_KEYS = ["softDelete", "versioning", "strictness"];
 var CREATE_PARTITION_KEYS = ["schema", "ifNotExists"];
 var ATTACH_PARTITION_KEYS = ["schema"];
@@ -3596,6 +3604,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       return handle;
     },
     comment(text, args = {}) {
+      rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").comment(...)`);
       recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
       return handle;
     },
@@ -3645,12 +3654,14 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       return {
         add(args) {
           requirePlainObject(args, ".primaryKey().add(args)");
+          rejectUnknownKeys(args, PK_ADD_KEYS, `table("${name}").primaryKey().add(...)`);
           requireOrderedColumns(args.columns, ".primaryKey().add({ columns })");
           recordAlterPrimaryKey(name, { kind: "add", columns: args.columns }, dflt);
           return handle;
         },
         replace(args) {
           requirePlainObject(args, ".primaryKey().replace(args)");
+          rejectUnknownKeys(args, PK_REPLACE_KEYS, `table("${name}").primaryKey().replace(...)`);
           requireOrderedColumns(
             args.expectedColumns,
             ".primaryKey().replace({ expectedColumns })"
@@ -3687,6 +3698,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
         },
         drop(args) {
           requirePlainObject(args, ".primaryKey().drop(args)");
+          rejectUnknownKeys(args, PK_DROP_KEYS, `table("${name}").primaryKey().drop(...)`);
           requireOrderedColumns(
             args.expectedColumns,
             ".primaryKey().drop({ expectedColumns })"
@@ -3745,26 +3757,31 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           return handle;
         },
         setType(args) {
+          rejectUnknownKeys(args, SET_TYPE_KEYS, `table("${name}").column("${col}").setType(...)`);
           terminateSelector(id);
           recordSetColumnType(name, col, { ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
         setNotNull(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").setNotNull(...)`);
           terminateSelector(id);
           recordSetColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
           return handle;
         },
         dropNotNull(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").dropNotNull(...)`);
           terminateSelector(id);
           recordDropColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
           return handle;
         },
         setDefault(value, args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").setDefault(...)`);
           terminateSelector(id);
           recordSetColumnDefault(name, col, value, { schema: pickSchema(args, dflt) });
           return handle;
         },
         dropDefault(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").dropDefault(...)`);
           terminateSelector(id);
           recordDropColumnDefault(name, col, { schema: pickSchema(args, dflt) });
           return handle;
