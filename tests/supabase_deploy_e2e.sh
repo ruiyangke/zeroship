@@ -745,14 +745,36 @@ sleep "${INTERVAL:-5}"
 DEVICE_TOKEN="$(post_json "$CONTROL_URL/api/device/token" \
   "$(jq -nc --arg device_code "$DEVICE_CODE" \
     '{device_code:$device_code,grant_type:"urn:ietf:params:oauth:grant-type:device_code"}')")"
-BOUND_REFRESH="$(json_get '.refresh_token' <<<"$DEVICE_TOKEN")"
+# The poll returns a PLATFORM access token control minted from the approved
+# principal, not the GoTrue session that approved it. This block used to assert
+# `provider == "supabase"` plus a `refresh_token` and a `token_endpoint`;
+# `DeviceTokenResponse` (crates/control/src/device_handlers.rs) has carried
+# neither field for as long as it has hardcoded `provider: "platform"`, so the
+# three assertions below it could only ever have failed. GoTrue is the vehicle
+# that identifies the creator here; it is not what the CLI ends up holding.
 BOUND_PROVIDER="$(json_get '.provider' <<<"$DEVICE_TOKEN")"
-BOUND_ENDPOINT="$(json_get '.token_endpoint' <<<"$DEVICE_TOKEN")"
-[ "$BOUND_PROVIDER" = "supabase" ] || fail "device token provider mismatch: $DEVICE_TOKEN"
-[ "$BOUND_REFRESH" = "$REFRESH_TOKEN" ] || fail "device token did not return the approved GoTrue refresh token"
-[ "$BOUND_ENDPOINT" = "$GOTRUE_URL/token?grant_type=refresh_token" ] || fail "device token endpoint mismatch: $BOUND_ENDPOINT"
-echo "  device poll returned provider=$BOUND_PROVIDER token_endpoint=$BOUND_ENDPOINT"
-pass "device token poll returned the one-time GoTrue refresh session"
+BOUND_ACCESS="$(json_get '.access_token' <<<"$DEVICE_TOKEN")"
+BOUND_SCOPE="$(json_get '.scope' <<<"$DEVICE_TOKEN")"
+BOUND_PRINCIPAL="$(json_get '.principal_id' <<<"$DEVICE_TOKEN")"
+[ "$BOUND_PROVIDER" = "platform" ] || fail "device token provider mismatch: $DEVICE_TOKEN"
+[ -n "$BOUND_ACCESS" ] || fail "device token returned no access_token: $DEVICE_TOKEN"
+[ "$BOUND_SCOPE" = "apps:deploy apps:read apps:write" ] \
+  || fail "device token scope mismatch: $BOUND_SCOPE"
+LINKED_PRINCIPAL="$(query_control_db "SELECT principal_id FROM zeroship.identity_links WHERE provider = 'supabase' AND provider_subject = '$GOTRUE_SUB'")"
+[ "$BOUND_PRINCIPAL" = "$LINKED_PRINCIPAL" ] \
+  || fail "device token principal_id $BOUND_PRINCIPAL is not the linked principal $LINKED_PRINCIPAL"
+BOUND_ISS="$(decode_jwt_payload "$BOUND_ACCESS" | jq -r '.iss')"
+[ "$BOUND_ISS" = "http://localhost:$AUTH_PORT/oauth2" ] \
+  || fail "device token was not minted by the platform OP: iss=$BOUND_ISS"
+echo "  device poll returned provider=$BOUND_PROVIDER scope='$BOUND_SCOPE' principal=$BOUND_PRINCIPAL"
+pass "device token poll returned a one-time platform deploy token for the linked principal"
+
+DEPLOY_OUT="$("$BIN/zeroship" deploy "$ZSHIP" \
+  --app="$APP_NAME" \
+  --control="$CONTROL_URL" \
+  --token="$BOUND_ACCESS" 2>&1)" || fail "deploy with the device-flow token failed: $DEPLOY_OUT"
+grep -q 'deploy_hash:' <<<"$DEPLOY_OUT" || fail "device-token deploy printed no deploy_hash: $DEPLOY_OUT"
+pass "the device-flow token can actually deploy"
 
 SECOND_CODE="$(curl -sS -o "$WORK/device-second.json" -w '%{http_code}' -X POST "$CONTROL_URL/api/device/token" \
   -H 'Content-Type: application/json' \
@@ -762,7 +784,7 @@ SECOND_CODE="$(curl -sS -o "$WORK/device-second.json" -w '%{http_code}' -X POST 
 pass "device grant is one-time after redemption"
 
 step "Refresh GoTrue session and deploy with GoTrue bearer"
-REFRESHED="$(refresh_gotrue_session "$BOUND_REFRESH")"
+REFRESHED="$(refresh_gotrue_session "$REFRESH_TOKEN")"
 DEPLOY_ACCESS_TOKEN="$(json_get '.access_token' <<<"$REFRESHED")"
 [ -n "$DEPLOY_ACCESS_TOKEN" ] || fail "GoTrue refresh returned no access_token: $REFRESHED"
 assert_jwt_mode_header "$DEPLOY_ACCESS_TOKEN" "refreshed GoTrue access token"
