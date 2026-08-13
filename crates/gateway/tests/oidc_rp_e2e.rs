@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser as _;
 use compio_postgres::{Client, NoTls};
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
@@ -322,8 +321,8 @@ async fn start_platform_op(
         b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
-    cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
+    cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_key_file);
+    cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_key_file);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.to_string(), 4);
 
@@ -439,7 +438,7 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
 }
 
 fn test_auth_config(db_url: &str) -> AuthConfig {
-    let mut cfg = AuthConfig::parse_from([
+    AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
@@ -455,8 +454,7 @@ fn test_auth_config(db_url: &str) -> AuthConfig {
         "Test",
         "--public-url",
         "http://localhost:0",
-    ]);
-    cfg
+    ])
 }
 
 async fn seed_user_client(
@@ -732,8 +730,8 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.secrets.refresh_hash_key_file = Some(hash_key_file);
-    cfg.secrets.refresh_idem_key_file = Some(idem_key_file);
+    cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_key_file);
+    cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_key_file);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = {

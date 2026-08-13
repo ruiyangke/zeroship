@@ -3,16 +3,16 @@
 //! In the library rather than `main.rs` so the compiled configuration checker
 //! can link the declaration and invoke clap's `CommandFactory` against it.
 //!
-//! What is NOT here is every credential-bearing field - `control_key`,
-//! `worker_key`, `db`, `kv_url`. Those stay hand-spelled on `WorkerCli` in
-//! `main.rs` until the `Secret<T>` conversion, which changes their clap carrier
-//! to a `-file` path and their resolution order at the same time.
+//! Every input the worker takes is declared here, credentials included. A
+//! `Secret<T>` field generates only a `--<name>-file PATH` flag, so no worker
+//! credential can reach argv; the value tiers are the canonical `ZEROSHIP_*`
+//! environment name and the canonical TOML path.
 
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector,
+    Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -50,6 +50,40 @@ pub struct WorkerSettings {
     /// Output format for `--check-config`.
     #[config(shared = CHECK_CONFIG_FORMAT, default = CheckFormat::Text)]
     pub check_config_format: CommandControl<CheckFormat>,
+
+    /// Admin/control API shared secret.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
+    /// Shared secret for the gateway dispatch endpoints.
+    ///
+    /// It authenticates the dispatch bearer AND keys the per-request
+    /// `ZeroShip-User` HMAC, so it carries a 32-byte strength floor rather than
+    /// a presence check.
+    #[config(shared = WORKER_KEY)]
+    pub worker_key: Secret<String>,
+
+    /// `PostgreSQL` DSN for runtime env/db state. A DSN grammar admits userinfo,
+    /// so it is secret-classed whether or not a given value carries a password.
+    #[config(name = "worker.database_url")]
+    pub database_url: Secret<String>,
+
+    /// Redis connection URL for the app `env.kv` namespace.
+    ///
+    /// Multi-node KV MUST be a SHARED store so a `set` on one worker node is
+    /// visible on another - Redis is that store (the bespoke compio-redis
+    /// driver; zero tokio). The URL selects single-node
+    /// (`redis://host:port`) or cluster (`redis://seed/?cluster=true&seeds=...`)
+    /// mode. When unset the `env.kv` namespace is absent (apps using
+    /// `@zeroship/kv` then fail loudly rather than silently diverging on a
+    /// per-process embedded store). The single-tenant CLI's per-process `redb`
+    /// backend is deliberately NOT used here - it cannot stay consistent across
+    /// a worker fleet.
+    ///
+    /// It may embed `redis://user:pass@host`, which is why it is secret-classed
+    /// rather than operational.
+    #[config(name = "worker.kv_url")]
+    pub kv_url: Secret<String>,
 
     /// `EnvFilter` directive for the tracing subscriber.
     #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]

@@ -10,7 +10,8 @@ use clap::Parser;
 use ntex::web;
 use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
 use zeroship_core::config::{
-    bootstrap_or_exit, CheckConfigReport, CheckValue,
+    bootstrap_or_exit, require_nonempty, validate_secret_material, validate_worker_key,
+    CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -23,64 +24,42 @@ use crate::sync::{SharedEnvs, SharedVersions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// zeroship worker startup configuration.
+/// Operator-facing spelling of the control key, for a diagnostic that has to
+/// name something the operator can actually set.
+const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+
+/// Every secret-strength guard the worker applies, returning the log context and
+/// the validator's own message rather than exiting - so a test can drive the
+/// exact set `main` runs instead of a re-spelling of it.
 ///
-/// Only the credential-bearing fields are left here; every operational value
-/// is generated in `zeroship_worker::config`. No `#[derive(Debug)]`: what
-/// remains IS the raw-secret set, and a `{:?}` would print it in plaintext (S2).
-#[derive(Parser)]
-#[command(name = "zeroship-worker")]
-struct WorkerCli {
-    /// Admin/control API shared secret.
-    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
-    control_key: String,
+/// Both go through [`validate_secret_material`], the single bridge from a
+/// resolved [`zeroship_core::config::Secret`] to the `&str` validators. That
+/// bridge - not a `check_config` conditional at each site - is what keeps a
+/// `--check-config` run from judging a secret it deliberately did not read,
+/// while still running each validator on real material at boot.
+///
+/// # Errors
+///
+/// Returns `(log context, validator message)` for the first guard that fails.
+fn validate_worker_secrets(
+    settings: &zeroship_worker::config::WorkerSettings,
+) -> Result<(), (&'static str, String)> {
+    validate_secret_material(&settings.control_key, |value| {
+        require_nonempty(CONTROL_KEY_LABEL, value)
+    })
+    .map_err(|message| {
+        (
+            "worker: refusing to start without control key",
+            message,
+        )
+    })?;
 
-    // No --trust-proxy: the worker has no client-facing IP logic.
+    // WORKER_KEY authenticates dispatch and the ZeroShip-User HMAC, so every
+    // worker requires the same 32-byte floor regardless of bind address.
+    validate_secret_material(&settings.worker_key, validate_worker_key)
+        .map_err(|message| ("worker: refusing to start with unsafe WORKER_KEY", message))?;
 
-    /// PostgreSQL DSN for runtime env/db state.
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
-    db: String,
-
-    /// Shared secret for gateway dispatch endpoints.
-    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
-    worker_key: String,
-
-    /// Redis connection URL for the app `env.kv` namespace.
-    ///
-    /// Multi-node KV MUST be a SHARED store so a `set` on one worker node
-    /// is visible on another — Redis is that store (the bespoke
-    /// compio-redis driver; zero tokio). The URL selects single-node
-    /// (`redis://host:port`) or cluster (`redis://seed/?cluster=true&seeds=...`)
-    /// mode. When empty the `env.kv` namespace is absent (apps using
-    /// `@zeroship/kv` then fail loudly rather than silently diverging on a
-    /// per-process embedded store). The single-tenant CLI's per-process
-    /// `redb` backend is deliberately NOT used here — it can't stay
-    /// consistent across a worker fleet.
-    ///
-    /// It may embed `redis://user:pass@host`, which is why it sits with the
-    /// secrets rather than with the operational settings.
-    #[arg(long = "kv-url", env = "ZEROSHIP_KV_URL", default_value = "", hide_env_values = true)]
-    kv_url: String,
-
-    /// Every operational value, generated from one declaration in
-    /// `zeroship_worker::config`.
-    #[command(flatten)]
-    settings: WorkerSettingsSources,
-}
-
-// Hand-written Debug that redacts every remaining field. All four are raw
-// secrets, so a `{:?}` never leaks credentials (S2). The derived Debug is
-// intentionally NOT used.
-impl std::fmt::Debug for WorkerCli {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerCli")
-            .field("control_key", &"<redacted>")
-            .field("db", &"<redacted>")
-            .field("worker_key", &"<redacted>")
-            .field("kv_url", &"<redacted>")
-            .field("settings", &self.settings)
-            .finish()
-    }
+    Ok(())
 }
 
 /// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
@@ -131,11 +110,11 @@ pub struct WorkerConfig {
     pub control_key: String,
     pub db_url: Option<String>,
     /// Redis URL for the app `env.kv` namespace. `None` ⇒ namespace absent.
-    /// Shared across worker nodes — see `WorkerCli::kv_url`.
+    /// Shared across worker nodes - see `WorkerSettings::kv_url`.
     pub kv_url: Option<String>,
     /// Object-store backend for the app `env.storage` namespace. `None` ⇒
     /// namespace absent. `LocalFs` (a shared volume across nodes) or `S3`
-    /// (inherently shared) — see `WorkerCli::storage_url`.
+    /// (inherently shared) - see `WorkerSettings::storage_url`.
     pub storage_backend: Option<StorageBackendConfig>,
     pub max_isolates: usize,
     pub max_pinned_isolates_per_app: usize,
@@ -167,34 +146,23 @@ pub struct WorkerConfig {
 }
 
 fn main() -> std::io::Result<()> {
-    let cli = WorkerCli::parse();
     let (settings, boot) = bootstrap_or_exit::<WorkerSettings>(
-        cli.settings,
+        WorkerSettingsSources::parse(),
         "info,zeroship_worker=debug,zeroship_runtime=info",
         "worker",
     );
     let check_config = *settings.check_config.get();
     let workflow_advance_unsigned = *settings.workflow_advance_unsigned.get();
 
-    // `[secrets]` overlay tier: reference-only values that back-fill any secret
-    // the CLI/env leaves empty (CLI/env still wins). Clone the section once,
-    // early, so later partial moves of the overlay config can't invalidate it.
-    let file_secrets = boot.overlay.config.secrets.clone();
-
     let port = *settings.port.get();
     let workers_count = *settings.threads.get();
     let control_url = settings.control_url.get().clone();
-    // Secret-reference resolution (env:/file:/vault:/awssm: indirection) with a
-    // `[secrets]` overlay tier: CLI/env > `[secrets]` file (reference-only) > unset.
-    // On the real boot path we resolve to the live value (side effects: env/file
-    // read); under --check-config we only validate the reference FORMAT, leaving the
-    // raw ref string in place so no env/file/network read happens during a dry run.
-    let control_key = zeroship_core::config::obtain_secret(
-        "CONTROL_KEY / --control-key",
-        &cli.control_key,
-        file_secrets.control_key.as_deref(),
-        check_config,
-    );
+    // Secret material, already resolved by the generated resolver from the
+    // `-file` flag, the canonical environment name, or the canonical TOML path -
+    // in that order. Under `--check-config` a source needing I/O yields no
+    // material at all, and these locals are then empty by construction; the
+    // report below asks `is_configured()` and the boot path is not reached.
+    let control_key = settings.control_key.expose_str().to_owned();
     let max_isolates = *settings.max_isolates.get();
     let max_pinned_isolates_per_app = *settings.max_pinned_isolates_per_app.get();
     let poll_interval = match crate::sync::validate_poll_interval_secs(*settings.poll_interval.get()) {
@@ -204,18 +172,8 @@ fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
-    let db_url = zeroship_core::config::obtain_secret(
-        "DATABASE_URL / --db",
-        &cli.db,
-        file_secrets.database_url.as_deref(),
-        check_config,
-    );
-    let worker_key = zeroship_core::config::obtain_secret(
-        "WORKER_KEY / --worker-key",
-        &cli.worker_key,
-        file_secrets.worker_key.as_deref(),
-        check_config,
-    );
+    let db_url = settings.database_url.expose_str().to_owned();
+    let worker_key = settings.worker_key.expose_str().to_owned();
     let shutdown_timeout = *settings.shutdown_timeout.get();
     let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store, bare path → local disk (dev default).
@@ -228,16 +186,9 @@ fn main() -> std::io::Result<()> {
         }
     };
     let blob_store_is_remote = store_url.is_remote();
-    // KV URL may embed credentials (`redis://user:pass@host`), so resolve it
-    // through the secret indirection like the DSNs (env:/file:/vault: refs +
-    // `[secrets]` overlay tier). The overlay's `kv_url` slot back-fills an
-    // empty CLI/env value; CLI/env still wins.
-    let kv_url = zeroship_core::config::obtain_secret(
-        "ZEROSHIP_KV_URL / --kv-url",
-        &cli.kv_url,
-        file_secrets.kv_url.as_deref(),
-        check_config,
-    );
+    // KV URL may embed credentials (`redis://user:pass@host`), so it is
+    // secret-classed like the DSNs and reaches the process the same way.
+    let kv_url = settings.kv_url.expose_str().to_owned();
     // `env.storage` backend. Empty ⇒ namespace absent. A bare path/`file://`
     // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
     // S3 credentials are resolved when the plugin is built per worker thread)
@@ -260,10 +211,11 @@ fn main() -> std::io::Result<()> {
     let bind_host = settings.bind.get().clone();
     let socket_path = settings.socket.get().clone();
 
-    if control_key.is_empty() {
-        tracing::error!(
-            "worker: CONTROL_KEY / --control-key is required; refusing to start without control key"
-        );
+    // Both secret guards, before the bind guard below. The worker_key strength
+    // check used to sit AFTER it; the two are independent refusals and only the
+    // order in which a doubly-misconfigured launch reports changes.
+    if let Err((context, message)) = validate_worker_secrets(&settings) {
+        tracing::error!(error = %message, "{context}");
         std::process::exit(1);
     }
 
@@ -284,18 +236,6 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if !check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
-        // WORKER_KEY authenticates dispatch and the ZeroShip-User HMAC, so every
-        // worker requires the same 32-byte floor regardless of bind address.
-        // Skipped only for an unresolved secret REFERENCE
-        // under --check-config (the raw ref text would wrongly fail the length
-        // check); it runs on the resolved value at real boot.
-        if let Err(message) = zeroship_core::config::validate_worker_key(&worker_key) {
-            tracing::error!(error = %message, "worker: refusing to start with unsafe WORKER_KEY");
-            std::process::exit(1);
-        }
-    }
-
     // SQLite is the DEV TIER ONLY — refuse it on the worker (SQLite-engine
     // wiring design R3.4 fix 2 / the re-keyed C1 guard). The worker is
     // multi-replica BY IDENTITY: N replicas fed a `sqlite:`/`file:` DSN would
@@ -306,9 +246,9 @@ fn main() -> std::io::Result<()> {
     // the worker's IDENTITY, not an env flag — this refuses SQLite even if
     // someone exported `ZEROSHIP_DEV=1` into a prod worker. We classify through
     // the shared `zeroship_core::db_url::is_sqlite_url` (the same grammar
-    // plugin-db's `backend_for_url` opens with). Under `--check-config` an
-    // unresolved secret-reference DSN (e.g. `env:DATABASE_URL`) classifies as a
-    // non-SQLite unknown scheme, so a dry-run never false-positives.
+    // plugin-db's `backend_for_url` opens with). Under `--check-config` a DSN
+    // supplied by a file the dry run deliberately did not read classifies as the
+    // empty string, which is not SQLite, so a dry run never false-positives.
     if worker_rejects_db_url(&db_url) {
         tracing::error!(
             "worker: refusing to start with a SQLite DATABASE_URL — SQLite is the dev tier only \
@@ -350,10 +290,20 @@ fn main() -> std::io::Result<()> {
             CheckValue::Count(usize::try_from(*settings.max_step_blob_bytes.get()).unwrap_or(usize::MAX)),
         );
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
-        report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
+        // Both are reported by PRESENCE, which is all a resolved `Secret<T>`
+        // will answer. `!value.is_empty()` used to stand in for that and could
+        // not: under `--check-config` a file-sourced secret has no material, so
+        // the old test read "unset" for a correctly configured deployment.
+        report.field(
+            "db_configured",
+            CheckValue::Secret(settings.database_url.is_configured()),
+        );
         // Surface the kernel-namespace wiring without leaking the KV URL
-        // (it may carry credentials) — booleans only, like `db_configured`.
-        report.field("kv_configured", CheckValue::Flag(!kv_url.is_empty()));
+        // (it may carry credentials) - presence only, like `db_configured`.
+        report.field(
+            "kv_configured",
+            CheckValue::Secret(settings.kv_url.is_configured()),
+        );
         report.field(
             "storage_configured",
             CheckValue::Flag(storage_backend.is_some()),
@@ -654,17 +604,53 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::config::{GeneratedConfig, SourceKind};
+
+    /// A temp file that removes itself even when an assertion panics.
+    struct SecretFile(std::path::PathBuf);
+
+    impl SecretFile {
+        fn new(tag: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "zeroship_worker_secret_{tag}_{}_{:?}.txt",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::write(&path, contents).expect("write fixture secret");
+            Self(path)
+        }
+
+        fn arg(&self) -> &str {
+            self.0.to_str().expect("utf8 fixture path")
+        }
+    }
+
+    impl Drop for SecretFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn resolve(args: &[&str]) -> WorkerSettings {
+        let mut argv = vec!["zeroship-worker"];
+        argv.extend_from_slice(args);
+        WorkerSettings::resolve_config(
+            WorkerSettingsSources::try_parse_from(argv).expect("worker sources parse"),
+            None,
+        )
+        .expect("worker settings resolve")
+    }
 
     #[test]
     fn worker_cli_has_no_security_relaxation_flag() {
-        let error = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure"])
+        let error = WorkerSettingsSources::try_parse_from(["zeroship-worker", "--dev-insecure"])
             .expect_err("deleted --dev-insecure flag must be rejected");
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
     fn worker_env_has_no_security_relaxation_binding() {
-        assert!(WorkerCli::try_parse_from(["zeroship-worker"]).is_ok());
+        assert!(WorkerSettingsSources::try_parse_from(["zeroship-worker"]).is_ok());
     }
 
     /// `--workflow-advance-unsigned` must not be combined with a routable bind.
@@ -675,9 +661,8 @@ mod tests {
     /// registered unconditionally, so the flag is the only thing between an
     /// unauthenticated caller and workflow replay.
     ///
-    /// This mirrors the guard three checks up for an empty `WORKER_KEY`: loopback
-    /// warns, non-loopback exits. Same hazard class - unauthenticated mutation
-    /// reachable over the network - so the same posture.
+    /// This mirrors the `WORKER_KEY` guard above: same hazard class -
+    /// unauthenticated mutation reachable over the network - so the same posture.
     ///
     /// Cost of the guard measured, not assumed: nothing under `deploy/` passes the
     /// flag, and the one caller that does (`tests/e2e_durable_workflows.sh`) passes
@@ -717,9 +702,9 @@ mod tests {
         // resolver's job, and the compiled default is the "one per core" call.
         assert!(zeroship_worker::config::default_worker_threads() > 0);
 
-        let flagged = WorkerCli::try_parse_from(["zeroship-worker", "--threads", "3"])
+        let flagged = WorkerSettingsSources::try_parse_from(["zeroship-worker", "--threads", "3"])
             .expect("--threads parses");
-        assert_eq!(flagged.settings.threads, Some(3));
+        assert_eq!(flagged.threads, Some(3));
     }
 
     #[test]
@@ -738,14 +723,14 @@ mod tests {
         // The only valid prod backend.
         assert!(!worker_rejects_db_url("postgres://localhost/dev"));
         assert!(!worker_rejects_db_url("postgresql://u:p@host:5432/db"));
-        // An empty / unresolved DSN is NOT rejected here (db_configured is a
+        // An empty / unread DSN is NOT rejected here (db_configured is a
         // separate, softer concern — the worker can boot with auth-only).
         assert!(!worker_rejects_db_url(""));
     }
 
     #[test]
     fn worker_thread_flag_uses_unambiguous_name() {
-        let cli = WorkerCli::try_parse_from([
+        let sources = WorkerSettingsSources::try_parse_from([
             "zeroship-worker",
             "--threads",
             "3",
@@ -757,14 +742,15 @@ mod tests {
             "30",
         ])
         .expect("--threads should parse");
-        assert_eq!(cli.settings.threads, Some(3));
+        assert_eq!(sources.threads, Some(3));
 
         // The point of the original assertion survives the rename: the worker's
         // thread count must never share a flag with the control plane's list of
         // worker URLs. `--workers` belongs to control and gateway.
-        let old_flag = WorkerCli::try_parse_from(["zeroship-worker", "--workers", "3"]);
+        let old_flag = WorkerSettingsSources::try_parse_from(["zeroship-worker", "--workers", "3"]);
         assert!(old_flag.is_err(), "--workers must not parse for worker threads");
-        let renamed = WorkerCli::try_parse_from(["zeroship-worker", "--worker-threads", "3"]);
+        let renamed =
+            WorkerSettingsSources::try_parse_from(["zeroship-worker", "--worker-threads", "3"]);
         assert!(
             renamed.is_err(),
             "the pre-conversion flag must be gone, not aliased"
@@ -773,103 +759,185 @@ mod tests {
 
     #[test]
     fn worker_numeric_fields_reject_bad_input() {
-        let err = WorkerCli::try_parse_from(["zeroship-worker", "--max-isolates", "abc"])
+        let err = WorkerSettingsSources::try_parse_from(["zeroship-worker", "--max-isolates", "abc"])
             .expect_err("bad max-isolates should be a clap error");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
-    // --- secret-reference resolver wiring (control_key / worker_key / db) ---
+    // --- Secret<T> conversion: the guards still run on the resolved material ---
 
-    /// A literal secret resolves to itself byte-for-byte: the resolver is a
-    /// pass-through for any value that is not a `urn:`/`arn:` reference. This is
-    /// the contract the real boot path relies on — literal secrets must behave
-    /// exactly as they did before the resolver was wired in.
+    /// The `WORKER_KEY` strength guard, driven end to end through the REAL
+    /// declaration: a `--worker-key-file` path is resolved by the generated
+    /// resolver and `validate_worker_secrets` hands the material it produced to
+    /// `validate_worker_key`.
+    ///
+    /// Three cases plus a one-variable partner, because "the guard rejects
+    /// everything" and "the guard rejects nothing" both satisfy a single case.
     #[test]
-    fn worker_literal_secret_resolves_to_itself() {
-        let literal = "super-secret-control-key-value";
-        let resolved =
-            zeroship_core::config::resolve_secret(literal).expect("literal must resolve");
-        assert_eq!(resolved, literal);
+    fn a_weak_or_absent_worker_key_still_fails_the_boot_guard() {
+        let strong = "0123456789abcdef0123456789abcdef";
+        let control = SecretFile::new("control", "control-key-material");
+        let good = SecretFile::new("worker_ok", strong);
+        let weak = SecretFile::new("worker_weak", "short");
+
+        // 1. WEAK material, read from the file the flag named: rejected.
+        let settings = resolve(&[
+            "--control-key-file",
+            control.arg(),
+            "--worker-key-file",
+            weak.arg(),
+        ]);
+        assert_eq!(settings.worker_key.source(), Some(SourceKind::CliFile));
+        let (context, message) =
+            validate_worker_secrets(&settings).expect_err("a short worker key must be rejected");
+        assert_eq!(context, "worker: refusing to start with unsafe WORKER_KEY");
+        assert!(message.contains("too short"), "{message}");
+
+        // 1b. The one-variable partner: same flags, a strong key at the path.
+        validate_worker_secrets(&resolve(&[
+            "--control-key-file",
+            control.arg(),
+            "--worker-key-file",
+            good.arg(),
+        ]))
+        .expect("a strong worker key passes every guard");
+
+        // 2. ABSENT: nothing supplies the worker key. The bridge runs the
+        // validator on "", which is how it produces its own "is required".
+        let settings = resolve(&["--control-key-file", control.arg()]);
+        assert!(!settings.worker_key.is_configured());
+        let (context, message) =
+            validate_worker_secrets(&settings).expect_err("an unset worker key must be rejected");
+        assert_eq!(context, "worker: refusing to start with unsafe WORKER_KEY");
+        assert!(message.contains("required"), "{message}");
+
+        // 3. The CONTROL key guard is a separate refusal with its own context,
+        // so a test that only ever saw the worker-key message could not tell the
+        // two apart.
+        let settings = resolve(&["--worker-key-file", good.arg()]);
+        let (context, message) =
+            validate_worker_secrets(&settings).expect_err("an unset control key must be rejected");
+        assert_eq!(context, "worker: refusing to start without control key");
+        assert!(message.contains("ZEROSHIP_CONTROL_KEY"), "{message}");
+
+        // Does NOT cover the environment or TOML tiers of these secrets: the env
+        // tier is process-global and would race sibling tests, and the overlay
+        // tier is `resolve_secret_sources`'s, asserted in core. It also does not
+        // prove `main` calls `validate_worker_secrets` - only that the function
+        // main calls behaves this way.
     }
 
-    /// `is_secret_ref` distinguishes a reference from a literal. The
-    /// check-config guard-skip in other binaries keys off this; here we lock the
-    /// boolean so a literal is never mistaken for a reference (which would
-    /// wrongly skip a strength guard) and a reference is always recognised
-    /// (so a raw `env:`/`file:` string is never fed to a strength check during
-    /// `--check-config`).
+    /// The `--check-config` half: a dry run must not open the file, and an
+    /// unread secret must not be judged. Paired with the boot run over the SAME
+    /// missing path, which does fail - so "no error" above is a property of the
+    /// mode, not of the guard having been removed.
     #[test]
-    fn worker_is_secret_ref_gates_literal_vs_reference() {
-        // Literal: NOT a reference — a strength guard `!check || !is_ref` would
-        // still RUN for a literal under check-config.
-        assert!(!zeroship_core::config::is_secret_ref(
-            "super-secret-control-key-value"
-        ));
-        // References: urn:zeroship:{env,file}: forms are recognised, so the
-        // `!is_ref` half of the guard skip is true (guard skipped under check).
-        assert!(zeroship_core::config::is_secret_ref(
-            "urn:zeroship:env:CONTROL_KEY"
-        ));
-        assert!(zeroship_core::config::is_secret_ref(
-            "urn:zeroship:file:/etc/zeroship/key"
-        ));
-    }
+    fn a_check_config_run_neither_reads_nor_judges_a_secret_file() {
+        let missing = std::env::temp_dir().join("zeroship_worker_absent_worker_key");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!missing.exists(), "the fixture path must really be absent");
+        let missing = missing.to_str().expect("utf8 path").to_owned();
 
-    /// A malformed reference is rejected by the format validator used on the
-    /// `--check-config` path (`validate_secret_ref_or_exit` calls this and
-    /// exits non-zero). A reserved `urn:`/`arn:` prefix that does not name a
-    /// recognised scheme is malformed.
-    #[test]
-    fn worker_malformed_secret_ref_is_rejected() {
-        assert!(zeroship_core::config::validate_secret_ref("urn:bogus:nope").is_err());
-        // A well-formed reference and a plain literal both validate cleanly.
-        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:WORKER_KEY").is_ok());
-        assert!(zeroship_core::config::validate_secret_ref("a-plain-literal").is_ok());
-    }
-
-    // Serialise env-touching `[secrets]` tier tests; they set/remove a process
-    // env var that `obtain_secret` resolves a `urn:zeroship:env:` reference from.
-    static SECRETS_TIER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// `[secrets]` file tier regression: when the CLI/env secret is empty, the
-    /// `[secrets]` overlay reference (e.g. `control_key`/`worker_key`/`database_url`)
-    /// is resolved and used. Pre-fix the worker called `resolve_secret_or_exit`
-    /// with only the CLI value, so a `[secrets]` entry could never back-fill an
-    /// empty CLI/env secret. Mirrors `file_secrets.<NAME>` wiring on the boot path.
-    #[test]
-    fn worker_secrets_file_tier_backfills_empty_cli() {
-        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
-        std::env::set_var("WORKER_TEST_SECRETS_TIER_VAR", "from-secrets-file");
-
-        // Empty CLI/env + a `[secrets]` reference → resolves to the referenced value.
-        let resolved = zeroship_core::config::obtain_secret(
-            "WORKER_KEY / --worker-key",
-            "",
-            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
-            false,
+        let dry = resolve(&["--check-config", "--worker-key-file", &missing]);
+        assert!(dry.worker_key.is_configured());
+        assert_eq!(
+            dry.worker_key.expose_secret(),
+            None,
+            "--check-config must not have read the file"
         );
-        assert_eq!(resolved, "from-secrets-file");
-
-        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
-    }
-
-    /// `[secrets]` file tier precedence: a CLI/env secret WINS over a `[secrets]`
-    /// overlay entry. The file reference must not even be consulted (so its env
-    /// var being unset is irrelevant). This locks `CLI/env > [secrets]`.
-    #[test]
-    fn worker_cli_secret_wins_over_secrets_file() {
-        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
-        // Deliberately do NOT set the env the file ref points at: if precedence
-        // were wrong and the file tier were consulted, resolution would exit(1).
-        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
-
-        let resolved = zeroship_core::config::obtain_secret(
-            "WORKER_KEY / --worker-key",
-            "literal-cli-worker-key",
-            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
-            false,
+        assert!(
+            validate_secret_material(&dry.worker_key, validate_worker_key).is_ok(),
+            "an unread secret must not be judged"
         );
-        assert_eq!(resolved, "literal-cli-worker-key");
+
+        // The one-variable partner: only `--check-config` differs, and the boot
+        // run does try to open the same path.
+        let boot =
+            WorkerSettingsSources::try_parse_from(["zeroship-worker", "--worker-key-file", &missing])
+                .expect("worker sources parse");
+        assert!(WorkerSettings::resolve_config(boot, None).is_err());
+
+        // Does NOT cover whether `main` routes `--check-config` to the report
+        // rather than to the server; that is `tests/config_check_e2e.sh`.
     }
 
+    /// A secret is reported by PRESENCE. The resolved declaration derives
+    /// `Debug`, which is what replaced the hand-written `impl Debug for
+    /// WorkerCli` redaction list: that list named four fields and had to be
+    /// edited whenever a fifth arrived, and nothing failed if it was not.
+    #[test]
+    fn a_resolved_secret_never_formats_its_material_or_its_length() {
+        // Deliberately unlike any other text in the struct, so a prefix match
+        // below can only be the secret leaking and never an unrelated field.
+        const SENTINEL: &str = "k9x2m7q4v8b3n6z1p5t0w4y7r2j8h5d3";
+        let file = SecretFile::new("debug", SENTINEL);
+        let settings = resolve(&["--kv-url-file", file.arg()]);
+
+        assert!(settings.kv_url.is_configured());
+        assert_eq!(
+            settings.kv_url.expose_str(),
+            SENTINEL,
+            "the boot path must still get the real material"
+        );
+
+        // The secret's OWN formatter: no value, no prefix of it, no length.
+        let field = format!("{:?}", settings.kv_url);
+        for length in 4..=SENTINEL.len() {
+            assert!(
+                !field.contains(&SENTINEL[..length]),
+                "Debug leaked a {length}-char prefix of the secret: {field}"
+            );
+        }
+        assert!(
+            !field.contains(&SENTINEL.len().to_string()),
+            "Debug leaked the secret's length: {field}"
+        );
+        // The one-variable control: the tier IS published, so this is not
+        // passing because Debug prints nothing at all.
+        assert_eq!(field, "Secret(configured from CliFile)");
+
+        // And the whole resolved declaration, which is what a `{:?}` on the
+        // settings reaches.
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains(SENTINEL), "{rendered}");
+        assert!(rendered.contains("Secret(configured from CliFile)"), "{rendered}");
+
+        // Does NOT cover a caller that calls `expose_str` and prints the result
+        // itself. No type can stop deliberate disclosure; what it removes is the
+        // accidental `{:?}` - and the maintenance of a hand-written redaction
+        // list that could silently fall behind the field set.
+    }
+
+    /// A secret's clap carrier is a PATH flag, and there is no value flag for
+    /// any of them - a secret must never travel through argv, where it is
+    /// visible in `ps` to every user on the host.
+    #[test]
+    fn no_worker_secret_has_a_value_flag() {
+        use clap::CommandFactory;
+
+        let command = WorkerSettingsSources::command();
+        let longs = command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_owned))
+            .collect::<Vec<_>>();
+        for secret in ["control-key", "worker-key", "database-url", "kv-url"] {
+            assert!(
+                longs.iter().any(|long| long == &format!("{secret}-file")),
+                "{secret} must offer a -file path flag: {longs:?}"
+            );
+            assert!(
+                !longs.iter().any(|long| long == secret),
+                "{secret} must NOT offer a value flag: {longs:?}"
+            );
+        }
+        // The deleted pre-conversion spelling of the DSN, which put it in argv.
+        assert!(!longs.iter().any(|long| long == "db"), "{longs:?}");
+        // The one-variable control: an operational setting still has a value
+        // flag, so this is not asserting that no value flag exists at all.
+        assert!(longs.iter().any(|long| long == "storage-url"), "{longs:?}");
+
+        // Does NOT cover clap's env bindings; a secret carries none by
+        // construction (the macro emits no `env = ...` for a Secret field) and
+        // its canonical environment name is read by the resolver instead.
+    }
 }
