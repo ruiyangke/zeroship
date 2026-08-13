@@ -1,15 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use zeroship_config_contract::audit::{compare, from_inventory, from_specs};
+use zeroship_config_contract::contract::validate_contract;
+use zeroship_config_contract::docs;
 use zeroship_config_contract::inventory::{
-    collect_rust_sources, collect_tracked_rust_sources, format_tsv, scan_sources, OverlayLeaves,
+    collect_rust_sources, collect_tracked_rust_sources, format_tsv, scan_sources, InventoryRow,
+    OverlayLeaves,
 };
 use zeroship_config_contract::metadata::check_workspace;
 use zeroship_config_contract::raw_env::{collect_declared_keys, scan_sources_by_role, RawEnvViolation};
+use zeroship_config_contract::registry::{platform_read_sites, platform_specs, DECLARING_BINARIES};
 
 const USAGE: &str = "usage: zeroship-config-contract \
 [check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR] \
-| raw-env [--root DIR]]";
+| raw-env [--root DIR] | audit [--root DIR] | env-vars-doc [--root DIR] [--check]]";
+
+/// The generated half of the environment reference.
+const ENV_VARS_DOC: &str = "docs/reference/env-vars.md";
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -17,9 +25,191 @@ fn main() {
         None | Some("check-metadata") => check_metadata(args.get(1).map(PathBuf::from)),
         Some("inventory") => inventory(&args[1..]),
         Some("raw-env") => raw_env(&args[1..]),
+        Some("audit") => audit(&args[1..]),
+        Some("env-vars-doc") => env_vars_doc(&args[1..]),
         Some(other) => {
             eprintln!("{USAGE}; got {other:?}");
             std::process::exit(2);
+        }
+    }
+}
+
+/// Parse the `--root DIR` and `--check` options shared by the new subcommands.
+fn parse_root_and_check(args: &[String], allow_check: bool) -> (PathBuf, bool) {
+    let mut root = PathBuf::from(".");
+    let mut check = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--root" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("{USAGE}");
+                    std::process::exit(2);
+                };
+                root = PathBuf::from(value);
+                index += 2;
+            }
+            "--check" if allow_check => {
+                check = true;
+                index += 1;
+            }
+            other => {
+                eprintln!("{USAGE}; got {other:?}");
+                std::process::exit(2);
+            }
+        }
+    }
+    (root, check)
+}
+
+/// Run the source extraction and return only its rows.
+///
+/// Findings are reported and are fatal: an extraction that could not parse part
+/// of the tree would produce a SHORTER row set, and a shorter set on one side of
+/// an equality check is exactly the failure mode that reads as agreement.
+fn extract_rows(root: &Path) -> Vec<InventoryRow> {
+    let overlay_path = root.join("crates/core/src/config/file.rs");
+    let overlay = match std::fs::read_to_string(&overlay_path) {
+        Ok(source) => match OverlayLeaves::from_source(&overlay_path.display().to_string(), &source)
+        {
+            Ok(leaves) => leaves,
+            Err(error) => {
+                eprintln!("config audit: {error}");
+                std::process::exit(1);
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "config audit: cannot read {}: {error}",
+                overlay_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let sources = match collect_rust_sources(root, &["crates"]) {
+        Ok(sources) => sources,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("config audit: {error}");
+            }
+            std::process::exit(1);
+        }
+    };
+    match scan_sources(&sources, &overlay) {
+        Ok(report) => {
+            if !report.findings.is_empty() {
+                for finding in &report.findings {
+                    eprintln!("config audit: extraction finding: {finding}");
+                }
+                std::process::exit(1);
+            }
+            report.rows
+        }
+        Err(errors) => {
+            for error in errors {
+                eprintln!("config audit: {error}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Require the compiled contract and the source extraction to agree exactly.
+///
+/// This is the proposal's "keep the extraction command as an audit that must
+/// equal the generated set". The two sides do not share a projection or a
+/// parser; see the header of `crates/config-contract/src/audit.rs`.
+fn audit(args: &[String]) {
+    let (root, _) = parse_root_and_check(args, false);
+    let specs = platform_specs();
+    let sites = platform_read_sites();
+
+    // Validate the compiled side BEFORE comparing. A registry with a collision
+    // or an unread declaration would still compare equal to an extraction that
+    // reproduced the same mistake, so equality alone is not enough.
+    if let Err(errors) = validate_contract(&specs, &sites) {
+        for error in errors {
+            eprintln!("config audit: compiled contract: {error}");
+        }
+        std::process::exit(1);
+    }
+
+    let compiled = from_specs(&specs);
+    let extracted = from_inventory(&extract_rows(&root), &DECLARING_BINARIES);
+    match compare(&compiled, &extracted) {
+        Ok(count) => {
+            eprintln!(
+                "config audit: {count} projections agree across {} binaries \
+                 ({} compiled declarations, {} linked read sites)",
+                DECLARING_BINARIES.len(),
+                specs.len(),
+                sites.len(),
+            );
+        }
+        Err(errors) => {
+            for error in &errors {
+                eprintln!("config audit: {error}");
+            }
+            eprintln!(
+                "config audit: {} disagreement(s) between the compiled contract and \
+                 the source extraction",
+                errors.len()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Render, or verify, the generated region of `docs/reference/env-vars.md`.
+fn env_vars_doc(args: &[String]) {
+    let (root, check) = parse_root_and_check(args, true);
+    let specs = platform_specs();
+    let settings = docs::collect(&specs);
+    let generated = docs::render(&settings);
+    let path = root.join(ENV_VARS_DOC);
+    let display = path.display().to_string();
+    let document = match std::fs::read_to_string(&path) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("config env-vars-doc: cannot read {display}: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    if check {
+        match docs::check(ENV_VARS_DOC, &document, &generated) {
+            Ok(()) => eprintln!(
+                "config env-vars-doc: {display} matches the compiled contract \
+                 ({} canonical settings)",
+                settings.len()
+            ),
+            Err(error) => {
+                eprintln!("config env-vars-doc: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    match docs::splice(ENV_VARS_DOC, &document, &generated) {
+        Ok(updated) => {
+            if updated == document {
+                eprintln!("config env-vars-doc: {display} already current");
+                return;
+            }
+            if let Err(error) = std::fs::write(&path, updated) {
+                eprintln!("config env-vars-doc: cannot write {display}: {error}");
+                std::process::exit(1);
+            }
+            eprintln!(
+                "config env-vars-doc: rewrote the generated region of {display} \
+                 ({} canonical settings)",
+                settings.len()
+            );
+        }
+        Err(error) => {
+            eprintln!("config env-vars-doc: {error}");
+            std::process::exit(1);
         }
     }
 }
@@ -74,6 +264,7 @@ fn report_declared_keys(sources: &[(String, String)]) {
 /// Rows go to stdout, counts to stderr, so a redirected run keeps a clean list.
 fn raw_env(args: &[String]) {
     let mut root = PathBuf::from(".");
+    let mut gate = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -84,6 +275,10 @@ fn raw_env(args: &[String]) {
                 };
                 root = PathBuf::from(value);
                 index += 2;
+            }
+            "--gate" => {
+                gate = true;
+                index += 1;
             }
             other => {
                 eprintln!("{USAGE}; got {other:?}");
@@ -115,6 +310,19 @@ fn raw_env(args: &[String]) {
                 report.declared_keys.len(),
                 report.permitted_raw.len()
             );
+            if gate {
+                // A CLEAN scan is the FAILING case for the gate. The planted
+                // fixtures under crates/config-contract/tests/fixtures/ break
+                // the rule on purpose, so zero violations means the scanner
+                // stopped seeing them - the exact false green this mode exists
+                // to make impossible.
+                eprintln!(
+                    "config raw-env: gate: zero violations, but {PLANTED_VIOLATIONS} are \
+                     planted under {PLANTED_VIOLATION_DIR}. A scan that misses a deliberate \
+                     violation cannot be trusted to catch an accidental one."
+                );
+                std::process::exit(1);
+            }
         }
         Err(violations) => {
             // Print the census ANYWAY. A report that withholds the class counts
@@ -147,9 +355,66 @@ fn raw_env(args: &[String]) {
             for (kind, count) in kinds {
                 eprintln!("config raw-env: {kind}: {count}");
             }
+            if gate {
+                std::process::exit(gate_verdict(&violations));
+            }
             std::process::exit(1);
         }
     }
+}
+
+/// Files whose raw reads are PLANTED, and whose absence is itself a failure.
+///
+/// The scanner is proved to discriminate by fixtures that break the rule on
+/// purpose. Those fixtures are tracked Rust, so a scan of the tracked tree
+/// finds them and a bare `raw-env` correctly exits 1 with two violations. That
+/// makes the subcommand unusable as a CI gate as written, which is why this
+/// mode exists.
+const PLANTED_VIOLATION_DIR: &str = "crates/config-contract/tests/fixtures/";
+
+/// The expected number of planted violations.
+///
+/// A FLOOR, not a ceiling, is the wrong shape here: fewer means the scanner
+/// stopped seeing a rule it is supposed to enforce, and more means someone
+/// added a fixture without saying so. Both are worth a failure.
+const PLANTED_VIOLATIONS: usize = 2;
+
+/// Decide the gate exit status from a violation set.
+///
+/// Splitting this out of `raw_env` keeps the rule readable: every violation
+/// must come from the planted-fixture directory, and the planted ones must all
+/// still be found. A gate that only checked the first half would pass on a
+/// scanner that had gone blind.
+fn gate_verdict(violations: &[RawEnvViolation]) -> i32 {
+    let mut unexpected = 0usize;
+    let mut planted = 0usize;
+    for violation in violations {
+        if violation.to_string().contains(PLANTED_VIOLATION_DIR) {
+            planted += 1;
+        } else {
+            unexpected += 1;
+            eprintln!("config raw-env: gate: unexpected violation: {violation}");
+        }
+    }
+    if unexpected > 0 {
+        eprintln!(
+            "config raw-env: gate: {unexpected} violation(s) outside {PLANTED_VIOLATION_DIR}"
+        );
+        return 1;
+    }
+    if planted != PLANTED_VIOLATIONS {
+        eprintln!(
+            "config raw-env: gate: expected exactly {PLANTED_VIOLATIONS} planted violations \
+             under {PLANTED_VIOLATION_DIR}, found {planted}. Fewer means the scanner stopped \
+             recognising a rule it enforces; more means an unannounced fixture."
+        );
+        return 1;
+    }
+    eprintln!(
+        "config raw-env: gate: clean; the {planted} planted fixture violations are still \
+         detected, so the scanner is not silently passing everything"
+    );
+    0
 }
 
 /// Emit every configuration name declared in the tracked crate tree.

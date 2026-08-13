@@ -16,6 +16,17 @@ reason = "Non-shipped configuration contract checker."
 
 [dependencies]
 zeroship-core = { workspace = true }
+# The six generated registries this tool checks and documents. Linking them is
+# the point: `ConfigSpec` and `CONFIG_READ_SITES` are what the COMPILER produced
+# from the declarations, so a check against them cannot be satisfied by editing
+# a manifest, and the syn-based `inventory` scan stays an independent second
+# derivation to compare against.
+zeroship-auth = { workspace = true }
+zeroship-control = { workspace = true }
+zeroship-gateway = { workspace = true }
+zeroship-migrated = { workspace = true }
+zeroship-worker = { workspace = true }
+zeroship-workflow-scheduler = { workspace = true }
 clap = { workspace = true }
 cargo_metadata = { workspace = true }
 # `span-locations` is what gives the inventory a file:LINE column. Resolver 3
