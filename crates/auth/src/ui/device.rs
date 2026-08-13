@@ -1,5 +1,24 @@
 //! `/device` GET + POST handlers for OAuth 2.0 Device Authorization Grant
 //! user-code entry (RFC 8628).
+//!
+//! This page is the human end of BOTH device flows that share
+//! `zeroship.device_grants`, and it dispatches on the pending row's `provider`
+//! rather than on how the process is configured:
+//!
+//! * an `op` row is the auth service's own grant, redeemed at `/oauth2/token`;
+//! * a `platform` row is control's deploy grant, the one `zeroship login`
+//!   drives, redeemed at control's `/api/device/token`.
+//!
+//! Approval is the same write for both - bind the signed-in user to the row -
+//! because `principal_id` is a `zeroship.users` id in both. That is what lets
+//! this page approve a control-plane grant while holding no control credential.
+//!
+//! It did not used to. The page rendered the control-approving form only under
+//! `AuthProviderKind::Supabase` and otherwise drove the OP grant, which filtered
+//! `provider = 'op'`; control writes `provider = 'platform'`. On the shipped
+//! platform-only default the code `zeroship login` printed was invisible to the
+//! page `zeroship login` told the human to open, and every attempt read
+//! "invalid or expired code".
 
 use std::sync::Arc;
 
@@ -65,7 +84,7 @@ pub async fn get(
             None,
         );
     }
-    match device_token::native_user_code_details(db.as_ref(), user_code).await {
+    match device_token::pending_user_code_details(db.as_ref(), user_code).await {
         Ok(Some(details)) => {
             render_form(user_code, None, StatusCode::OK, Some(&details))
         }
@@ -83,7 +102,7 @@ pub async fn get(
             )
         }
         Err(e) => {
-            tracing::error!(error = %e, "native device user-code detail lookup failed");
+            tracing::error!(error = %e, "pending device user-code detail lookup failed");
             if let Some(resp) =
                 rate_limit_failed_get_user_code_attempt(db.as_ref(), &req, cfg.as_ref()).await
             {
@@ -108,9 +127,9 @@ async fn rate_limit_failed_get_user_code_attempt(
     rate_limit_failed_user_code_attempt(db, req, session.as_ref()).await
 }
 
-/// `/device` POST — approve a native OP device grant. Anonymous browsers are
-/// sent into the normal sign-in route; already-signed-in browsers complete the
-/// matching grant.
+/// `/device` POST — approve a pending device grant, of either flow. Anonymous
+/// browsers are sent into the normal sign-in route; already-signed-in browsers
+/// complete the matching grant.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -158,7 +177,7 @@ pub async fn post(
 
     let session = current_session(&req, cfg.as_ref(), db.as_ref()).await;
 
-    let pending = match device_token::native_user_code_details(db.as_ref(), user_code).await {
+    let pending = match device_token::pending_user_code_details(db.as_ref(), user_code).await {
         Ok(details) => details,
         Err(e) => {
             tracing::error!(error = %e, "native device user-code detail lookup failed");
@@ -219,6 +238,7 @@ pub async fn post(
     match device_token::approve_user_code(
         db.as_ref(),
         user_code,
+        &pending.provider,
         session.user_id,
         session.id,
         session.credential_version,
@@ -360,11 +380,27 @@ fn redirect(to: &str) -> HttpResponse {
     resp.finish()
 }
 
+/// Name shown on the confirmation page for a grant that names no OAuth client.
+///
+/// Control's rows carry a NULL `client_id`: `zeroship.device_grants.client_id`
+/// has a foreign key into `zeroship.oauth_clients`, and the CLI is not a
+/// registered OP client, so there is no id to store and none to display. The
+/// page still has to tell the human what they are authorizing.
+const PLATFORM_DEVICE_CLIENT_NAME: &str = "the zeroship CLI";
+
+/// What the confirmation page calls the thing asking for authorization.
+fn confirmation_client_name(details: &device_token::PendingDeviceGrant) -> &str {
+    match details.client_name.as_str() {
+        "" if details.is_platform() => PLATFORM_DEVICE_CLIENT_NAME,
+        name => name,
+    }
+}
+
 fn render_form(
     user_code: &str,
     error: Option<&str>,
     status: StatusCode,
-    details: Option<&device_token::NativeDeviceGrantDetails>,
+    details: Option<&device_token::PendingDeviceGrant>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let scopes = details
@@ -376,9 +412,7 @@ fn render_form(
         csrf: &csrf_token,
         confirm: details.is_some(),
         client_id: details.map(|details| details.client_id.as_str()).unwrap_or(""),
-        client_name: details
-            .map(|details| details.client_name.as_str())
-            .unwrap_or(""),
+        client_name: details.map(confirmation_client_name).unwrap_or(""),
         scopes: &scopes,
     };
     let body = page
@@ -602,6 +636,74 @@ mod tests {
         assert!(!body.contains("supabaseAuthUrl"), "{body}");
         assert!(!body.contains("/api/device/approve"), "{body}");
         assert!(!body.contains(r#"name="email""#), "{body}");
+    }
+
+    /// A control-plane grant reaches the confirmation page with no OAuth client
+    /// to name, and the human still has to be told what they are approving.
+    ///
+    /// What this does NOT catch: whether the page ever RECEIVES such a grant.
+    /// That is `pending_user_code_details` dropping its `provider = 'op'` filter
+    /// and its inner join, which needs a database, and end to end it is
+    /// `tests/e2e_device_login.sh`. This pins only the rendering.
+    #[test]
+    fn a_platform_grant_names_the_cli_and_discloses_its_deploy_scopes() {
+        let pending = device_token::PendingDeviceGrant {
+            client_id: String::new(),
+            client_name: String::new(),
+            scopes: vec![
+                "apps:deploy".to_string(),
+                "apps:read".to_string(),
+                "apps:write".to_string(),
+            ],
+            provider: "platform".to_string(),
+        };
+        assert!(pending.is_platform());
+
+        let body = render_body(&pending);
+        assert!(body.contains("Authorize the zeroship CLI"), "{body}");
+        for scope in ["apps:deploy", "apps:read", "apps:write"] {
+            assert!(body.contains(scope), "scope {scope} missing from {body}");
+        }
+        assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
+        assert!(body.contains(r#"name="csrf""#), "{body}");
+    }
+
+    /// The one-variable control for the case above: same page, same render
+    /// path, one thing changed - the grant names an OAuth client. The client id
+    /// line appears only when there is one, so the platform case is not simply
+    /// rendering an empty paragraph.
+    #[test]
+    fn an_op_grant_still_names_its_registered_client() {
+        let pending = device_token::PendingDeviceGrant {
+            client_id: "oac_test".to_string(),
+            client_name: "Test Device App".to_string(),
+            scopes: vec!["openid".to_string()],
+            provider: "op".to_string(),
+        };
+        assert!(!pending.is_platform());
+
+        let body = render_body(&pending);
+        assert!(body.contains("Authorize Test Device App"), "{body}");
+        assert!(body.contains("oac_test"), "{body}");
+        assert!(!body.contains("the zeroship CLI"), "{body}");
+    }
+
+    /// Render the confirmation page the way `render_form` does, through the
+    /// same two decisions the handler delegates to it: the displayed client
+    /// name and the scope list.
+    fn render_body(pending: &device_token::PendingDeviceGrant) -> String {
+        let scopes = device_scope_views(&pending.scopes);
+        DevicePage {
+            user_code: "BCDF-GHJK-LMNP",
+            error: None,
+            csrf: "csrf-token",
+            confirm: true,
+            client_id: &pending.client_id,
+            client_name: confirmation_client_name(pending),
+            scopes: &scopes,
+        }
+        .render()
+        .expect("render device confirmation")
     }
 
     #[test]
