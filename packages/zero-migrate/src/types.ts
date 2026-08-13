@@ -91,8 +91,10 @@ export type {
 // Existence guards (`ifNotExists` / `ifExists`) are inline boolean options on the
 // relevant op specs. The PostgreSQL and SQLite executors honor them via catalog
 // probes under lock. The MySQL executor evaluates NO probe, so a guard is dropped
-// there and the statement runs unconditionally; the sole MySQL exception is
-// `dropView`, which lowers to a native `DROP VIEW IF EXISTS`. Does NOT cover
+// there and the statement runs unconditionally. `dropView` alone lowers to a
+// native `DROP VIEW IF EXISTS`, but that does not make it a working MySQL guard:
+// the pending-schema fold is guard-blind, so a drop of a view the history never
+// created is refused during projection and never reaches the statement. Does NOT cover
 // `dropTrigger`'s separate `ifExists` option, which is a native clause on all
 // three targets. See `docs/writing-migrations.md` (existence-guard section).
 
