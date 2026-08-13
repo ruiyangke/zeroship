@@ -1,53 +1,96 @@
-import { Button, Cluster } from "@zeroship/ui";
+import { Button, Cluster, Input } from "@zeroship/ui";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useEffect } from "react";
+import { Markdown } from "@tiptap/markdown";
+import { useEffect, useState } from "react";
 
 /**
  * Rich text for bug descriptions and comments, on tiptap.
  *
  * WHY RENDERING GOES THROUGH TIPTAP TOO, rather than dangerouslySetInnerHTML.
  *
- * The stored value is HTML, and it is user input: `comments.add` takes a
- * string over RPC, so a caller can send whatever they like without ever
- * touching this editor. Rendering that with `dangerouslySetInnerHTML` is
- * stored XSS -- one crafted comment and every reader of the bug runs it.
+ * The stored value is user input: `comments.add` takes a body string over
+ * RPC, so a caller can send whatever they like -- markdown, embedded HTML,
+ * anything -- without ever touching this editor. Rendering that with
+ * `dangerouslySetInnerHTML` is stored XSS: one crafted comment and every
+ * reader of the bug runs it.
  *
- * A read-only editor parses the HTML through the SAME schema that produced it.
- * A node or attribute the schema does not define is dropped rather than
- * rendered, so `<script>`, `onerror=` and `javascript:` hrefs cannot survive
- * the trip. The sanitiser and the writer are the same object, which is the
- * only version of this that cannot drift apart.
+ * A read-only editor parses the HTML through the SAME schema that produced it,
+ * so the sanitiser and the writer are the same object -- the only version of
+ * this that cannot drift apart.
  *
- * The starter kit's node set is the whole vocabulary: paragraphs, headings,
- * lists, code, blockquote, emphasis. Adding a node means widening what is
- * rendered, so it is a security decision, not a formatting one.
+ * It takes TWO mechanisms, not one. This comment used to credit everything to
+ * the schema and omit the node that actually carries a URL:
+ *
+ *   1. Unknown tags and attributes. `<script>`, `<iframe>`, `<img>` and every
+ *      `on*` handler are absent from the schema, so ProseMirror's DOM parser
+ *      drops them. Nothing about hrefs here.
+ *   2. Link hrefs. StarterKit 3.30 DOES register Link (along with Heading and
+ *      UndoRedo), so `<a href>` is part of the vocabulary. What makes it safe
+ *      is the extension's own protocol allowlist -- http, https, ftp, ftps,
+ *      mailto, tel, callto, sms, cid, xmpp -- enforced in `parseHTML`, where
+ *      a failing href returns false and the mark never parses at all, and
+ *      again in `renderHTML`. `javascript:` is not on the list, and unicode
+ *      whitespace is stripped before matching, so `java\tscript:` does not
+ *      slip past. Verified in the installed extension, not assumed.
+ *
+ * Both arms are driven by e2e/comment-xss.spec.ts, which stores hostile markup
+ * through the real `comments.add` RPC and asserts nothing executes. Swap this
+ * component back to dangerouslySetInnerHTML and that spec goes red on a payload
+ * that really fires -- checked, so the defence is known to be load-bearing
+ * rather than merely present.
+ *
+ * Widening EXTENSIONS widens what renders, so adding a node is a security
+ * decision, not a formatting one -- and the spec pins payloads, not the
+ * schema, so it will not notice on your behalf.
  */
 
-const EXTENSIONS = [StarterKit];
+/**
+ * Bodies are stored as MARKDOWN, not HTML.
+ *
+ * A bug tracker's comments end up in more places than the page that wrote
+ * them: notification emails, the database when someone greps it, a CLI or an
+ * agent filing a bug over `comments.add`. Markdown is legible in all of those;
+ * a wall of serialised HTML is legible in none.
+ *
+ * This does NOT make the XSS story go away, and it is worth being explicit
+ * because the opposite is the natural assumption. Markdown permits embedded
+ * raw HTML by spec, and the Markdown extension deliberately parses it through
+ * the same `parseHTML` rules as everything else. The schema is still the only
+ * thing standing between a stored payload and every reader -- storing markdown
+ * narrows what we persist, it does not sanitise anything.
+ *
+ * Stored HTML from before this change still renders, because embedded HTML is
+ * exactly what the markdown parser handles.
+ */
+const EXTENSIONS = [StarterKit, Markdown];
 
 /**
  * Does this document contain anything?
  *
- * An empty tiptap document serialises to "<p></p>", so the usual
- * `value.trim()` guard sees a non-empty string and lets a blank comment
- * through. Strip the tags and ask about the text.
+ * An empty document does not serialise to "": as HTML it was "<p></p>", and
+ * as markdown it can still be whitespace or a stray newline. A bare
+ * `value.trim()` guard let a blank comment through on the HTML form and the
+ * submit button disagreed with the submit handler about it. Strip any markup
+ * and ask about the remaining text, so the answer does not depend on which
+ * format the body is in.
  */
-export function hasText(html: string): boolean {
-  return html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length > 0;
+export function hasText(body: string): boolean {
+  return body.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length > 0;
 }
 
-export function RichText({ html }: { html: string }) {
+export function RichText({ markdown }: { markdown: string }) {
   const editor = useEditor(
     {
       extensions: EXTENSIONS,
-      content: html,
+      content: markdown,
+      contentType: "markdown",
       editable: false,
       // Tiptap warns without this when the same content renders on a server
       // and then hydrates; the app is client-only but the flag is free.
       immediatelyRender: false,
     },
-    [html],
+    [markdown],
   );
   if (!editor) return null;
   return <EditorContent editor={editor} className="rich-text" />;
@@ -56,12 +99,17 @@ export function RichText({ html }: { html: string }) {
 function ToolbarButton({
   editor,
   label,
+  title,
   isActive,
+  disabled,
   onClick,
 }: {
   editor: Editor;
   label: string;
+  /** Accessible name when the visible label is a glyph like "B" or "1.". */
+  title?: string;
   isActive: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -69,14 +117,92 @@ function ToolbarButton({
       variant={isActive ? "tinted" : "plain"}
       size="small"
       aria-pressed={isActive}
+      aria-label={title}
+      title={title}
       // The editor keeps focus, so a click on the toolbar formats the
       // selection instead of clearing it.
       onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
-      disabled={!editor.isEditable}
+      disabled={!editor.isEditable || disabled}
     >
       {label}
     </Button>
+  );
+}
+
+/**
+ * The link control.
+ *
+ * Separate from the plain toggles because a link needs a value, and because
+ * that value can be REFUSED: `setLink` runs the same protocol allowlist that
+ * guards rendering, so `javascript:...` silently fails to apply. Silently is
+ * the problem -- a toolbar that accepts your input, closes, and produces no
+ * link reads as a broken button rather than a rejected URL. So the refusal is
+ * detected (the mark is absent afterwards) and stated.
+ */
+function LinkControl({ editor }: { editor: Editor }) {
+  const [open, setOpen] = useState(false);
+  const [href, setHref] = useState("");
+  const [refused, setRefused] = useState(false);
+  const active = editor.isActive("link");
+
+  const apply = () => {
+    const url = href.trim();
+    if (!url) return;
+    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+    // Ask the document, not the return value: the command reports whether it
+    // dispatched, not whether the href passed validation.
+    if (editor.isActive("link")) {
+      setOpen(false);
+      setHref("");
+      setRefused(false);
+    } else {
+      setRefused(true);
+    }
+  };
+
+  return (
+    <>
+      <ToolbarButton
+        editor={editor}
+        label="Link"
+        isActive={active}
+        onClick={() => {
+          if (active) {
+            editor.chain().focus().extendMarkRange("link").unsetLink().run();
+            return;
+          }
+          setRefused(false);
+          setHref("");
+          setOpen((v) => !v);
+        }}
+      />
+      {open ? (
+        <Cluster gap={1} align="center" className="rich-text-link-row">
+          <Input
+            aria-label="Link URL"
+            placeholder="https://example.com"
+            value={href}
+            onChange={(event) => setHref(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                apply();
+              }
+              if (event.key === "Escape") setOpen(false);
+            }}
+          />
+          <Button variant="filled" size="small" onMouseDown={(e) => e.preventDefault()} onClick={apply}>
+            Apply
+          </Button>
+          {refused ? (
+            <span role="alert" className="field-error">
+              That link was refused. Use http, https or mailto.
+            </span>
+          ) : null}
+        </Cluster>
+      ) : null}
+    </>
   );
 }
 
@@ -102,7 +228,7 @@ export function RichTextEditor({
         ...(placeholder ? { "data-placeholder": placeholder } : {}),
       },
     },
-    onUpdate: ({ editor: next }) => onChange(next.getHTML()),
+    onUpdate: ({ editor: next }) => onChange(next.getMarkdown()),
   });
 
   // Reset when the caller clears the field -- posting a comment empties the
@@ -120,44 +246,85 @@ export function RichTextEditor({
         <ToolbarButton
           editor={editor}
           label="B"
+          title="Bold"
           isActive={editor.isActive("bold")}
           onClick={() => editor.chain().focus().toggleBold().run()}
         />
         <ToolbarButton
           editor={editor}
           label="I"
+          title="Italic"
           isActive={editor.isActive("italic")}
           onClick={() => editor.chain().focus().toggleItalic().run()}
         />
         <ToolbarButton
           editor={editor}
           label="Code"
+          title="Inline code"
           isActive={editor.isActive("code")}
           onClick={() => editor.chain().focus().toggleCode().run()}
         />
         <ToolbarButton
           editor={editor}
           label="List"
+          title="Bullet list"
           isActive={editor.isActive("bulletList")}
           onClick={() => editor.chain().focus().toggleBulletList().run()}
         />
         <ToolbarButton
           editor={editor}
           label="1."
+          title="Numbered list"
           isActive={editor.isActive("orderedList")}
           onClick={() => editor.chain().focus().toggleOrderedList().run()}
         />
         <ToolbarButton
           editor={editor}
           label="Quote"
+          title="Blockquote"
           isActive={editor.isActive("blockquote")}
           onClick={() => editor.chain().focus().toggleBlockquote().run()}
         />
         <ToolbarButton
           editor={editor}
           label="{ }"
+          title="Code block"
           isActive={editor.isActive("codeBlock")}
           onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+        />
+        {/* Headings and undo/redo were missing from the toolbar while being
+            registered in the schema all along -- StarterKit 3.30 ships Heading
+            and UndoRedo, so the editor already accepted both by keyboard and
+            by paste. These buttons expose what was reachable, they do not
+            widen what the document can hold. */}
+        <ToolbarButton
+          editor={editor}
+          label="H2"
+          title="Heading"
+          isActive={editor.isActive("heading", { level: 2 })}
+          onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+        />
+        <ToolbarButton
+          editor={editor}
+          label="H3"
+          title="Subheading"
+          isActive={editor.isActive("heading", { level: 3 })}
+          onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+        />
+        <LinkControl editor={editor} />
+        <ToolbarButton
+          editor={editor}
+          label="Undo"
+          isActive={false}
+          disabled={!editor.can().undo()}
+          onClick={() => editor.chain().focus().undo().run()}
+        />
+        <ToolbarButton
+          editor={editor}
+          label="Redo"
+          isActive={false}
+          disabled={!editor.can().redo()}
+          onClick={() => editor.chain().focus().redo().run()}
         />
       </Cluster>
       <EditorContent editor={editor} />

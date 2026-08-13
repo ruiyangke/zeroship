@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Checkbox, Field, NumberField } from "@zeroship/ui";
+import { Button, Checkbox, Cluster, Field, NumberField, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
@@ -47,7 +47,17 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
   return (
     <li className={`comment ${comment.isPrivate ? "private" : ""}`} id={`comment-${comment.commentNumber}`}>
       <div className="comment-head">
-        <span className="comment-number">#{comment.commentNumber}</span>
+        {/* Comment 0 IS the description -- `bugs.create` writes the description
+            as the first comment, the way Bugzilla does, so there is no separate
+            description row to render. Presenting it as an anonymous "#0" bubble
+            hid that: the one piece of text stating what the bug IS looked like
+            the first reply to it. Named rather than restyled, so it reads
+            correctly to a screen reader too. */}
+        {comment.commentNumber === 0 ? (
+          <Tag size="sm">Description</Tag>
+        ) : (
+          <span className="comment-number">#{comment.commentNumber}</span>
+        )}
         <span className="comment-author">{comment.author?.name || comment.author?.handle || comment.authorId}</span>
         <span className="comment-when">{formatDate(comment.created_at)}</span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
@@ -74,7 +84,7 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
               body is arbitrary text over RPC, so parsing it back through the
               schema that writes it is what keeps a crafted comment from
               running in every reader's browser. */}
-          <RichText html={comment.body} />
+          <RichText markdown={comment.body} />
         </div>
       )}
       {error ? <p className="field-error">{error}</p> : null}
@@ -116,7 +126,10 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
         placeholder="Add a comment..."
         ariaLabel="Add a comment"
       />
-      <div className="new-comment-row">
+      {/* A Cluster, not a bare flex row. Checkbox renders its own label
+          BELOW its box in this row and it landed on top of the next field's
+          label -- two labels overlapping reads as a rendering fault. */}
+      <Cluster gap={3} align="center" className="new-comment-row">
         {/* Checkbox owns its own label, so the wrapping <label> that used to
             associate a bare input is gone rather than nested inside it. */}
         <Checkbox
@@ -132,10 +145,19 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
             onValueChange={(next) => setWorkTimeMinutes(next ?? 0)}
           />
         </Field>
-        <Button variant="filled" size="small" disabled={busy || !body.trim()} onClick={() => void submit()}>
+        {/* hasText, not body.trim(). The body is HTML: clearing the editor
+            leaves "<p></p>", which trims to a NON-empty string, so the button
+            enabled itself while submit() -- which already guarded on hasText --
+            refused the post. A live control that does nothing when clicked. */}
+        <Button
+          variant="filled"
+          size="small"
+          disabled={busy || !hasText(body)}
+          onClick={() => void submit()}
+        >
           Comment
         </Button>
-      </div>
+      </Cluster>
       {error ? <p className="field-error">{error}</p> : null}
     </div>
   );
