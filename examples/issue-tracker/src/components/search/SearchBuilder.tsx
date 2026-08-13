@@ -215,7 +215,12 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
         onRetry={reload}
         loadingLabel="Loading saved searches..."
         isEmpty={(data) => data.length === 0}
+        // Inline: a block empty state renders its title as an h2, which
+        // inside this h3 section put an h2 under an h3 and inverted the
+        // document outline. A short list in a dialog does not need a heading
+        // to say it is empty.
         emptyTitle="No saved searches yet."
+        emptyTone="inline"
       >
         {(rows) => (
           <ul>

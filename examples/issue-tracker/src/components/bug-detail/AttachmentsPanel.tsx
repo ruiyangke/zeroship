@@ -1,33 +1,10 @@
-import { useRef, useState } from "react";
-import { Button, Checkbox, Input } from "@zeroship/ui";
-import { deleteAttachment, getAttachment, listAttachments, setAttachmentObsolete, uploadAttachment } from "../../api";
+import { useState } from "react";
+import { formatBytes } from "./attachments";
+import { Button } from "@zeroship/ui";
+import { deleteAttachment, getAttachment, listAttachments, setAttachmentObsolete } from "../../api";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, useAsync } from "../rpc";
+import { errorMessage, type AsyncState } from "../rpc";
 import type { Attachment } from "../types";
-
-// Mirrors the server's MAX_ATTACHMENT_BYTES so oversized files fail fast in
-// the browser instead of round-tripping to a 413. The server remains the
-// enforced limit; this is a UX shortcut, not a security boundary.
-const MAX_ATTACHMENT_BYTES = 512 * 1024;
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const comma = result.indexOf(",");
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("failed to read file"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -103,82 +80,42 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
   );
 }
 
-function UploadForm({ bugId, onUploaded }: { bugId: string; onUploaded: () => void }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [description, setDescription] = useState("");
-  const [isPatch, setIsPatch] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async () => {
-    const file = fileRef.current?.files?.[0];
-    if (!file) return;
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      setError(`File is ${formatBytes(file.size)}; the server caps attachments at ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const contentBase64 = await fileToBase64(file);
-      await uploadAttachment({
-        bugId,
-        filename: file.name,
-        contentBase64,
-        contentType: file.type || "application/octet-stream",
-        description: description || undefined,
-        isPatch,
-      });
-      setDescription("");
-      setIsPatch(false);
-      if (fileRef.current) fileRef.current.value = "";
-      onUploaded();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="upload-form">
-      <input ref={fileRef} type="file" disabled={busy} aria-label="Attachment file" />
-      <Input
-        aria-label="Attachment description"
-        placeholder="Description (optional)"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-      />
-      {/* No wrapping <label>: Checkbox renders its own, and nesting one
-          inside another associates the control twice. */}
-      <Checkbox
-        checked={isPatch}
-        onCheckedChange={(next: boolean | "indeterminate") => setIsPatch(next === true)}
-        label="Patch"
-      />
-      <Button variant="filled" size="small" disabled={busy} onClick={() => void submit()}>
-        Upload
-      </Button>
-      {error ? <p className="field-error">{error}</p> : null}
-    </div>
-  );
-}
-
-export function AttachmentsPanel({ bugId }: { bugId: string }) {
-  const { state, reload } = useAsync(() => listAttachments({ bugId }), [bugId]);
+/**
+ * Every file on the bug, in one place.
+ *
+ * Uploading happens in the comment box now -- a file almost always needs a
+ * sentence saying what it is, and this panel had you do the two things at
+ * opposite ends of the page. What it keeps is the ROLL-UP: comments scatter
+ * files down a long thread, and "what has been attached to this bug" is still
+ * a question worth answering in one glance. Files that predate a comment, or
+ * arrived without one, appear here and nowhere else.
+ */
+export function AttachmentsPanel({
+  state,
+  reload,
+}: {
+  // Handed in rather than fetched. This panel and the comment thread both
+  // list the same files, and each owning its own query meant posting a
+  // comment with an attachment refreshed the thread and left this panel
+  // saying "No files yet" beside the file it was denying. One fetch, one
+  // owner, both views current -- the same fix the unread badge needed when
+  // two components derived a count from different sources.
+  state: AsyncState<Attachment[]>;
+  reload: () => void;
+}) {
 
   return (
     <section className="attachments-panel">
-      <h3>Attachments</h3>
+      <h3>Files</h3>
       <AsyncSection
         state={state}
         onRetry={reload}
         loadingLabel="Loading attachments..."
         isEmpty={(data) => data.length === 0}
-        emptyTitle="No attachments yet."
+        emptyTitle="No files yet. Attach one by adding a comment."
         emptyTone="inline"
       >
-        {(attachments) => (
+        {(attachments: Attachment[]) => (
           <ul className="attachment-list">
             {attachments.map((attachment) => (
               <AttachmentRow key={attachment.id} attachment={attachment} onChanged={reload} />
@@ -186,7 +123,9 @@ export function AttachmentsPanel({ bugId }: { bugId: string }) {
           </ul>
         )}
       </AsyncSection>
-      {state.status !== "error" ? <UploadForm bugId={bugId} onUploaded={reload} /> : null}
+      {state.status === "ready" && state.data.length > 0 ? (
+        <p className="state-hint small">Attach files by adding a comment.</p>
+      ) : null}
     </section>
   );
 }

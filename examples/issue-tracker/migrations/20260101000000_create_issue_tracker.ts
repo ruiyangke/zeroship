@@ -279,6 +279,14 @@ export default {
     table("attachments").create({
       columns: {
         bugId: t.text().notNull().references("bugs", "id"),
+        // The comment a file arrived with, when it arrived with one.
+        // Files are attached BY commenting, the way anyone who has used a
+        // tracker this decade expects, so an attachment usually has a
+        // sentence next to it explaining why it is there. Nullable because
+        // the bug can still hold files with no comment of their own, and
+        // because bugId stays the thing visibility is decided by -- a file
+        // is reachable exactly when its bug is.
+        commentId: t.text().references("comments", "id"),
         uploaderId: t.text().notNull().references("users", "id"),
         filename: t.text().notNull(),
         contentType: t.text().notNull().default("application/octet-stream"),
@@ -289,7 +297,10 @@ export default {
         isPatch: t.boolean().notNull().default(false),
         isObsolete: t.boolean().notNull().default(false),
       },
-      indexes: [{ name: "attachments_bug_idx", on: ["bugId"] }],
+      indexes: [
+        { name: "attachments_bug_idx", on: ["bugId"] },
+        { name: "attachments_comment_idx", on: ["commentId"] },
+      ],
     });
 
     table("keywords").create({

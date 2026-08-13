@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import { otherUser, signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
+import { openMorePanels } from "./more";
 
 /**
  * The access-control model, driven in two real browsers.
@@ -101,6 +102,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   await expect(groups.locator("ul.group-list").getByText(`vis-${RUN}`)).toBeVisible();
 
   await page.goto(`/#/bugs/${bug.id}`);
+  await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
   await chooseOption(page, security, "Group", `vis-${RUN}`);

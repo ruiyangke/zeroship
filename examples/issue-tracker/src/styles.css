@@ -966,3 +966,38 @@ tbody tr:hover { background: var(--surface-2); }
 /* The extras wrapper IS the grid, so it must not be display:contents -- that
    would hand the grid back to the page and break the two-across pairing. */
 fieldset.bug-detail-extras { display: grid; }
+
+/* Files that arrived with a comment, listed under it. */
+.comment-attachments { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.comment-attachments > li { font-size: 0.82rem; }
+.comment-attachment { font-family: var(--mono); font-size: 0.8rem; }
+/* The picker sits in the composer row, quiet until wanted. */
+.comment-attach { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--ink-faint); }
+.comment-attach input[type="file"] { inline-size: 11rem; font-size: 0.75rem; }
+.comment-attach-queue { margin: 0.35rem 0 0; color: var(--ink-2); }
+
+/* The folded tail of the bug page. */
+.bug-detail-more { margin-block-start: 0.75rem; }
+.bug-detail-more > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  padding-block: 0.35rem;
+}
+.bug-detail-more > summary:hover { color: var(--accent); }
+.bug-detail-more[open] > summary { margin-block-end: 0.5rem; }
+
+/* Present to assistive tech and to a file picker, absent from the layout.
+   Not display:none: that would make the input inoperable, and the button
+   beside it exists precisely to operate it. */
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
+import { openMorePanels } from "./more";
 
 /**
  * Setting a flag on a bug, through the UI, end to end.
@@ -57,6 +58,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // reporting that no types are defined.
   const typeName = `review-${RUN}`.slice(0, 30);
   await page.goto(`/#/bugs/${bug.id}`);
+  await openMorePanels(page);
   const flags = page.locator("section.flags-panel");
   await expect(flags).toBeVisible();
   // About THIS type, not "no types at all". A flag type with no product is
@@ -81,6 +83,10 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // flag types, so nothing there needed changing -- the table was simply
   // always empty.
   await page.goto(`/#/bugs/${bug.id}`);
+  // The fold resets on navigation, as it should -- it is view state, not a
+  // preference. Re-opened here rather than made sticky, because a page that
+  // silently remembers a disclosure across bugs is its own surprise.
+  await openMorePanels(page);
   await expect(flags).toBeVisible();
   await expect(flags, "the new type should be offered on the bug").toContainText(typeName);
   await expect(flags).not.toContainText(/defines no bug-level flag types/i);

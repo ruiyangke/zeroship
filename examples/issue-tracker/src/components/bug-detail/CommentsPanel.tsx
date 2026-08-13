@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Avatar, Button, Checkbox, Cluster, Field, NumberField, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
-import { addComment, editComment, listComments, setCommentPrivate } from "../../api";
+import { addComment, editComment, listAttachments, listComments, setCommentPrivate, uploadAttachment } from "../../api";
+import { MAX_ATTACHMENT_BYTES, fileToBase64, formatBytes } from "./attachments";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, useAsync } from "../rpc";
-import type { Comment } from "../types";
+import { errorMessage, useAsync, type AsyncState } from "../rpc";
+import type { Attachment, Comment } from "../types";
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleString();
@@ -47,10 +48,13 @@ function CommentRow({
   comment,
   onChanged,
   readOnly = false,
+  attachments = [],
 }: {
   comment: Comment;
   onChanged: () => void;
   readOnly?: boolean;
+  /** The files that arrived with THIS comment. */
+  attachments?: Attachment[];
 }) {
   const author = comment.author?.name || comment.author?.handle || comment.authorId;
   const [editing, setEditing] = useState(false);
@@ -171,6 +175,18 @@ function CommentRow({
           <RichText markdown={comment.body} />
         </div>
       )}
+      {attachments.length > 0 ? (
+        <ul className="comment-attachments">
+          {attachments.map((file) => (
+            <li key={file.id}>
+              <a href={"#/bugs/" + comment.bugId + "?attachment=" + file.id} className="comment-attachment">
+                {file.filename}
+              </a>
+              <span className="dim small"> {formatBytes(file.sizeBytes)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {error ? <p className="field-error">{error}</p> : null}
       </div>
     </li>
@@ -181,20 +197,47 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
   const [body, setBody] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const [workTimeMinutes, setWorkTimeMinutes] = useState(0);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  // Named separately from the input so the chosen files can be listed back.
+  // A bare file input shows one filename and silently hides the rest.
+  const [fileNames, setFileNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
     // An empty tiptap document is "<p></p>", not "". Guarding on the markup
     // would let an empty comment through and post a blank bubble.
-    if (!hasText(body)) return;
+    const files = Array.from(fileRef.current?.files ?? []);
+    if (!hasText(body) && files.length === 0) return;
+    const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
+    if (tooBig) {
+      setError(
+        `${tooBig.name} is ${formatBytes(tooBig.size)}; the server caps attachments at ${formatBytes(MAX_ATTACHMENT_BYTES)}.`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await addComment({ bugId, body, isPrivate, workTimeMinutes });
+      const comment = await addComment({ bugId, body, isPrivate, workTimeMinutes });
+      // The comment first, then its files -- an attachment names the comment
+      // it arrived with, so the comment has to exist to be named. If a file
+      // fails here the comment still stands, which is the right way round:
+      // the sentence explaining the file is worth more than the file.
+      for (const file of files) {
+        await uploadAttachment({
+          bugId,
+          commentId: comment.id,
+          filename: file.name,
+          contentBase64: await fileToBase64(file),
+          contentType: file.type || "application/octet-stream",
+        });
+      }
       setBody("");
       setIsPrivate(false);
       setWorkTimeMinutes(0);
+      if (fileRef.current) fileRef.current.value = "";
+      setFileNames([]);
       onAdded();
     } catch (err) {
       setError(errorMessage(err));
@@ -235,15 +278,50 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
             leaves "<p></p>", which trims to a NON-empty string, so the button
             enabled itself while submit() -- which already guarded on hasText --
             refused the post. A live control that does nothing when clicked. */}
+        {/* Attaching is part of commenting, not a separate errand on the
+            other side of the page. A file almost always needs a sentence
+            saying what it is; putting the picker here means the sentence and
+            the file arrive together and stay together. */}
+        {/* A real button, driving a hidden input.
+            The native control rendered "Choose Files | No fi...osen" -- browser
+            chrome, truncated, in the middle of a row of design-system
+            controls. The input keeps its label and stays in the DOM (that is
+            what makes it operable at all, and what a file picker must be), it
+            simply stops being the thing on screen. */}
+        <Button
+          variant="gray"
+          size="small"
+          onClick={() => fileRef.current?.click()}
+        >
+          Attach files
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          className="visually-hidden"
+          aria-label="Attach files to this comment"
+          onChange={(event) =>
+            setFileNames(Array.from(event.target.files ?? []).map((file) => file.name))
+          }
+        />
         <Button
           variant="filled"
           size="small"
-          disabled={busy || !hasText(body)}
+          // A file with no words is still worth posting, so the guard is
+          // "nothing at all" rather than "no text".
+          disabled={busy || (!hasText(body) && fileNames.length === 0)}
           onClick={() => void submit()}
         >
           Comment
         </Button>
       </Cluster>
+      {fileNames.length > 0 ? (
+        <p className="comment-attach-queue small">
+          {fileNames.length === 1 ? "Attaching" : "Attaching " + fileNames.length + " files:"}{" "}
+          {fileNames.join(", ")}
+        </p>
+      ) : null}
       {error ? <p className="field-error">{error}</p> : null}
     </div>
   );
@@ -252,12 +330,30 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
 export function CommentsPanel({
   bugId,
   readOnly = false,
+  attachments,
+  onAttachmentsChanged,
 }: {
   bugId: string;
   /** No identity: the thread is readable, the controls are not offered. */
   readOnly?: boolean;
+  /** Owned by the page, because the files panel lists the same rows. */
+  attachments: AsyncState<Attachment[]>;
+  onAttachmentsChanged: () => void;
 }) {
   const { state, reload } = useAsync(() => listComments({ bugId }), [bugId]);
+  // Fetched once for the thread and handed out per comment, rather than each
+  // row asking for its own -- one request either way, and the grouping is a
+  // property of the thread, not of any single comment.
+  const filesByComment = new Map<string, Attachment[]>();
+  if (attachments.status === "ready") {
+    for (const file of attachments.data) {
+      const key = file.commentId ?? "";
+      if (!key) continue;
+      const list = filesByComment.get(key) ?? [];
+      list.push(file);
+      filesByComment.set(key, list);
+    }
+  }
 
   return (
     <section className="comments-panel">
@@ -275,14 +371,26 @@ export function CommentsPanel({
               <CommentRow
                 key={comment.id}
                 comment={comment}
-                onChanged={reload}
+                onChanged={() => {
+                  reload();
+                  onAttachmentsChanged();
+                }}
                 readOnly={readOnly}
+                attachments={filesByComment.get(comment.id) ?? []}
               />
             ))}
           </ul>
         )}
       </AsyncSection>
-      {readOnly ? null : <NewCommentForm bugId={bugId} onAdded={reload} />}
+      {readOnly ? null : (
+        <NewCommentForm
+          bugId={bugId}
+          onAdded={() => {
+            reload();
+            onAttachmentsChanged();
+          }}
+        />
+      )}
     </section>
   );
 }

@@ -145,6 +145,7 @@ type CommentRow = SystemRow & {
 
 type AttachmentRow = SystemRow & {
   bugId: string;
+  commentId?: string | null;
   uploaderId: string;
   filename: string;
   contentType: string;
@@ -1977,6 +1978,7 @@ export const setCommentPrivate = mutation(
 export const uploadAttachment = mutation(
   async ({
     bugId,
+    commentId,
     filename,
     contentBase64,
     contentType = "application/octet-stream",
@@ -1984,6 +1986,8 @@ export const uploadAttachment = mutation(
     isPatch = false,
   }: {
     bugId: string;
+    /** The comment this file arrived with, if it arrived with one. */
+    commentId?: string | null;
     filename: string;
     contentBase64: string;
     contentType?: string;
@@ -2005,6 +2009,18 @@ export const uploadAttachment = mutation(
       );
     }
 
+    // A file may name the comment it arrived with, but only a comment ON THIS
+    // BUG. Without the check, a caller could hang a file off someone else's
+    // comment and it would render under their name, on a bug they may not be
+    // able to read -- the id is caller-supplied, so it is checked rather than
+    // trusted.
+    let attachedComment: string | null = null;
+    if (commentId) {
+      const comment = await getRequired(db.comments, requireId(commentId, "commentId"), "Comment");
+      if (comment.bugId !== bug.id) invalid("that comment belongs to a different bug");
+      attachedComment = comment.id;
+    }
+
     const storageKey = attachmentStorageKey(bugId, cleanFilename);
     const put = parseNativeJson<{ bucket: string; key: string; size: number }>(
       await storage().put(ATTACHMENT_BUCKET, storageKey, cleanBase64, cleanType),
@@ -2012,6 +2028,7 @@ export const uploadAttachment = mutation(
     const result = await db.transaction(async (tx) => {
       const attachment = await tx.attachments.insert({
         bugId,
+        ...(attachedComment ? { commentId: attachedComment } : {}),
         uploaderId: actor.id,
         filename: cleanFilename,
         contentType: cleanType,

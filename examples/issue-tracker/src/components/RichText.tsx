@@ -2,6 +2,7 @@ import { Button, Cluster, Input } from "@zeroship/ui";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
+import { Placeholder } from "@tiptap/extensions";
 import { useEffect, useState } from "react";
 
 /**
@@ -64,6 +65,25 @@ import { useEffect, useState } from "react";
  * exactly what the markdown parser handles.
  */
 const EXTENSIONS = [StarterKit, Markdown];
+
+/**
+ * Writing extensions: the vocabulary above, plus a placeholder.
+ *
+ * The placeholder was styled but never rendered. The CSS read
+ * `content: attr(data-placeholder)` from the empty paragraph while the
+ * attribute sat on the editor root, so attr() resolved to nothing -- and the
+ * `is-editor-empty` class it hangs on comes from an extension that was never
+ * registered. It went unnoticed while the toolbar was always visible: twelve
+ * buttons say "this is an editor" loudly enough that nobody missed the hint.
+ * Collapsing the toolbar left a bare rounded box with no clue what it was.
+ *
+ * Read-only rendering deliberately does NOT get this. A comment with no text
+ * is not an invitation to write one.
+ */
+const WRITING_EXTENSIONS = [
+  ...EXTENSIONS,
+  Placeholder.configure({ placeholder: "Add a comment..." }),
+];
 
 /**
  * Does this document contain anything?

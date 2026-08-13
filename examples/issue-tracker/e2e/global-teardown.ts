@@ -31,7 +31,11 @@ import { signDevSession } from "./session";
 const FIXTURE_GROUP = /^(sec|vis|security|mem|unused|in-use|grp)-/;
 
 export default async function globalTeardown(): Promise<void> {
-  const webPort = Number(process.env.ISSUE_TRACKER_WEB_PORT ?? 5179);
+  // Must track playwright.config.ts. It said 5179 while the config said 5183,
+  // so every sweep failed with ECONNREFUSED and reported nothing -- a cleanup
+  // that quietly stops cleaning is worse than none, because the group count
+  // keeps rising and the teardown line keeps looking fine.
+  const webPort = Number(process.env.ISSUE_TRACKER_WEB_PORT ?? 5183);
   const runtimePort = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
   const baseURL = `http://localhost:${webPort}`;
 

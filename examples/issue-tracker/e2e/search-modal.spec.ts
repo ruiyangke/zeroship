@@ -70,7 +70,13 @@ test("the builder runs a search into the bug list and hands it back", async ({
   // Saved searches belongs to the builder, which binds it to the CURRENT
   // query. A second copy could only ever save an empty one.
   await expect(
-    dialog.getByText("Saved searches"),
+    // The HEADING, not any text containing those words. getByText matches
+    // case-insensitive substrings, so this also matched the empty state -- "No
+    // saved searches yet." -- and counted two. It only ever passed because the
+    // dev database always had a saved search left over from an earlier run;
+    // the moment that database was rebuilt, the loose locator showed up as an
+    // app defect it was not.
+    dialog.getByRole("heading", { name: "Saved searches", exact: true }),
     "the saved-search section appears once",
   ).toHaveCount(1);
 

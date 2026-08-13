@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Banner, Card, Cluster, Stack } from "@zeroship/ui";
+import { Banner, Button, Card, Cluster, Stack } from "@zeroship/ui";
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { currentUser, getBug, getProduct, listProducts } from "../api";
+import { currentUser, getBug, getProduct, listAttachments, listProducts } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
 import { isUnauthenticated } from "../components/rpc";
 import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
@@ -23,11 +23,21 @@ type Tab = "details" | "history";
 export function BugDetailPage({ id }: { id: string }) {
   const { state, reload } = useAsync(() => getBug({ id }), [id]);
   const [tab, setTab] = useState<Tab>("details");
+  // CONTROLLED, because <details open> is not. Anything inside the fold that
+  // reloads the bug -- voting, setting a flag, restricting it -- re-renders
+  // this subtree, and an uncontrolled element comes back closed. The fold
+  // would snap shut under someone in the middle of using it, which is both a
+  // real defect and why the specs saw the panel become "not stable, then not
+  // visible" while clicking.
+  const [moreOpen, setMoreOpen] = useState(false);
   const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
   const productsQ = useAsync(() => listProducts({}), []);
   // Bugs are public, so unlike the dashboard this page stays READABLE without
   // an identity -- what it must not do is offer controls that cannot work.
   const { state: userState } = useAsync(() => currentUser({}), []);
+  // The page owns the file list because two children render it: the thread
+  // shows each comment's files, and the roll-up shows every file on the bug.
+  const attachmentsQ = useAsync(() => listAttachments({ bugId: id }), [id]);
   const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
 
   const productId = state.status === "ready" ? state.data.product?.id ?? null : null;
@@ -142,7 +152,12 @@ export function BugDetailPage({ id }: { id: string }) {
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
           <div className="bug-detail-main">
-            <CommentsPanel bugId={id} readOnly={signedOut} />
+            <CommentsPanel
+              bugId={id}
+              readOnly={signedOut}
+              attachments={attachmentsQ.state}
+              onAttachmentsChanged={attachmentsQ.reload}
+            />
             {/* Everything below is about the bug WITHOUT being metadata about
                 it: files, links to other bugs, who is watching, what is
                 pending review. They lived in the rail, where measurement put
@@ -157,9 +172,37 @@ export function BugDetailPage({ id }: { id: string }) {
                 Their CONTENT still renders -- attachments, watchers and
                 linked bugs are readable facts about a public bug. */}
             <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
-              <AttachmentsPanel bugId={id} />
+              <AttachmentsPanel state={attachmentsQ.state} reload={attachmentsQ.reload} />
               <CcPanel bugId={id} />
               <DependenciesPanel bugId={id} />
+            </fieldset>
+
+            {/* The long tail, folded.
+                Six of these nine panels report ABSENCE on a typical bug -- no
+                duplicates, no linked reports, no keywords, no flags, no votes,
+                no group -- and each one drew a full card to say so. That is
+                four hundred pixels of grid carrying no information, directly
+                under the conversation. Files, CC and dependencies stay out
+                because they are the ones that usually have something in them;
+                the rest are one click away, and the summary says so rather
+                than making you open it to find out. */}
+            {/* A button and a conditional, NOT <details>.
+                React manages the open attribute while the browser also owns
+                it, and the two disagreed: any re-render inside the fold reset
+                the element, so a panel would go "not stable, then not
+                visible" under a click. One owner of the state removes the
+                argument entirely. */}
+            <div className="bug-detail-more">
+              <Button
+                variant="plain"
+                size="small"
+                aria-expanded={moreOpen}
+                onClick={() => setMoreOpen((open) => !open)}
+              >
+                {moreOpen ? "Hide" : "Show"} keywords, flags, votes, duplicates, links and security
+              </Button>
+              {moreOpen ? (
+              <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
               <DuplicatesPanel bugId={id} duplicateOfId={detail.bug.duplicateOfId ?? null} />
               <SeeAlsoPanel bugId={id} />
               <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
@@ -174,7 +217,9 @@ export function BugDetailPage({ id }: { id: string }) {
                 onChanged={reload}
               />
               <SecurityPanel bugId={id} onChanged={reload} />
-            </fieldset>
+              </fieldset>
+              ) : null}
+            </div>
           </div>
           <Stack className="bug-detail-side" gap={3}>
             <FieldsPanel

@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
+import { openMorePanels } from "./more";
 
 /**
  * The Bugzilla flow a real user walks, driven in a real browser: file a bug
@@ -216,6 +217,7 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
   // Voting off by default: the panel must say so rather than show a control
   // that always fails.
   await page.goto(`/#/bugs/${bug.id}`);
+  await openMorePanels(page);
   const votes = page.locator("section.votes-panel");
   await expect(votes).toBeVisible();
   await expect(votes.getByText(/not enabled/i)).toBeVisible();
@@ -226,6 +228,9 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
   });
 
   await page.reload();
+  // Same as after any navigation: the fold is view state and comes back
+  // closed, so the panel has to be asked for again.
+  await openMorePanels(page);
   await expect(votes.getByText(/not enabled/i)).toHaveCount(0);
   // Typed, not filled. NumberField is a FORMATTED text input (Base UI parses
   // input events and re-renders from its own state), so Playwright .fill(),
@@ -334,6 +339,7 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
 
   // Then restrict the bug from its detail page.
   await page.goto(`/#/bugs/${bug.id}`);
+  await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
   // One helper call. The native select rendered its options with the JSX
@@ -380,6 +386,7 @@ test("see also links are added, listed and removed from the bug page", async ({ 
   });
 
   await page.goto(`/#/bugs/${bug.id}`);
+  await openMorePanels(page);
   const panel = page.locator("section.see-also-panel");
   await expect(panel).toBeVisible();
   await expect(panel.getByText("No linked reports.")).toBeVisible();

@@ -136,6 +136,11 @@
           "refColumn": "id",
           "required": true
         },
+        "commentId": {
+          "type": "string",
+          "refTarget": "comments",
+          "refColumn": "id"
+        },
         "uploaderId": {
           "type": "string",
           "refTarget": "users",
@@ -184,6 +189,12 @@
           "name": "attachments_bug_idx",
           "fields": [
             "bugId"
+          ]
+        },
+        {
+          "name": "attachments_comment_idx",
+          "fields": [
+            "commentId"
           ]
         },
         {

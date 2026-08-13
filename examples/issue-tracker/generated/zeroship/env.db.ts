@@ -32,6 +32,7 @@ const schema = {
   }).index("activities_bug_idx", ["bugId"]).index("activities_bug_field_idx", ["bugId","fieldName"]).index("activities_deleted_at_idx", ["deleted_at"]).index("activities_updated_at_idx", ["updated_at"]).index("activities_created_by_idx", ["created_by"]),
   attachments: defineSchema({
     bugId: t.string().required(),
+    commentId: t.string(),
     uploaderId: t.string().required(),
     filename: t.string().required(),
     contentType: t.string().required().default("application/octet-stream"),
@@ -40,7 +41,7 @@ const schema = {
     description: t.string(),
     isPatch: t.boolean().required().default(false),
     isObsolete: t.boolean().required().default(false),
-  }).index("attachments_bug_idx", ["bugId"]).index("attachments_deleted_at_idx", ["deleted_at"]).index("attachments_updated_at_idx", ["updated_at"]).index("attachments_created_by_idx", ["created_by"]),
+  }).index("attachments_bug_idx", ["bugId"]).index("attachments_comment_idx", ["commentId"]).index("attachments_deleted_at_idx", ["deleted_at"]).index("attachments_updated_at_idx", ["updated_at"]).index("attachments_created_by_idx", ["created_by"]),
   bugCc: defineSchema({
     bugId: t.string().required(),
     userId: t.string().required(),
