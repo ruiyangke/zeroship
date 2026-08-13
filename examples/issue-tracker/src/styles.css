@@ -1027,3 +1027,36 @@ fieldset.bug-detail-extras { display: grid; }
 .bug-title-row:focus-within .bug-title-edit { opacity: 1; }
 @media (hover: none) { .bug-title-edit { opacity: 1; } }
 .bug-title-editor { display: flex; flex-direction: column; gap: 0.5rem; max-inline-size: 46ch; margin-block-end: 0.5rem; }
+
+/* Field changes, inline with the conversation.
+   GitHub and Linear both do this and they are right: "Alice raised this to P1"
+   is often the most consequential thing on a bug, and it was behind a tab
+   while a reply saying "on it" sat in plain view. Quieter than a comment,
+   because it is a fact rather than something somebody said. */
+.timeline-event {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  position: relative;
+}
+.timeline-dot {
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 999px;
+  background: var(--line-2);
+  margin-inline-start: 0.72rem;
+  margin-block-start: 0.4rem;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 0 0 3px var(--bg);
+}
+.timeline-event-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.timeline-actor { color: var(--ink-2); font-weight: 600; }
+.timeline-field { color: var(--ink-2); }
+.timeline-value { color: var(--ink); font-weight: 500; }

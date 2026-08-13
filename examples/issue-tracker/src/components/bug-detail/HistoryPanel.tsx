@@ -8,6 +8,7 @@ import { Avatar } from "@zeroship/ui";
 import { EmptyState } from "../StateViews";
 import type { Activity } from "../types";
 import { personName, type PeopleMap } from "./people";
+import { fieldLabel } from "./activity";
 
 function name(value: string | null | undefined, labels: Record<string, string>) {
   if (value === null || value === undefined || value === "") {
@@ -41,35 +42,6 @@ function initials(who: string): string {
   const parts = who.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
-}
-
-/** Field names as the log stores them, in the words the UI uses elsewhere. */
-const FIELD_LABELS: Record<string, string> = {
-  bug_group: "Group restriction",
-  assigneeId: "Assignee",
-  qaContactId: "QA contact",
-  // The one the generic splitter got visibly wrong: "reporterId" came out as
-  // "Reporter Id", which is a property name wearing a label's clothes.
-  reporterId: "Reporter",
-  productId: "Product",
-  componentId: "Component",
-  versionId: "Version",
-  milestoneId: "Milestone",
-  duplicateOfId: "Duplicate of",
-  opSys: "OS",
-  whiteboard: "Whiteboard",
-  isConfirmed: "Confirmed",
-  voteCount: "Votes",
-  commentCount: "Comments",
-  workTimeMinutes: "Work time",
-};
-
-function fieldLabel(field: string): string {
-  if (FIELD_LABELS[field]) return FIELD_LABELS[field];
-  // camelCase and snake_case both become words: "workTimeMinutes" reads as
-  // "Work time minutes" rather than being printed as a property name.
-  const spaced = field.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 /**

@@ -241,6 +241,8 @@ export function BugDetailPage({ id }: { id: string }) {
             <CommentsPanel
               bugId={id}
               readOnly={signedOut}
+              activities={detail.activities}
+              people={detail.people}
               attachments={attachmentsQ.state}
               onAttachmentsChanged={attachmentsQ.reload}
             />

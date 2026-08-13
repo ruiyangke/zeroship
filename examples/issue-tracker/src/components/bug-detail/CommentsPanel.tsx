@@ -6,7 +6,10 @@ import { addComment, editComment, listAttachments, listComments, setCommentPriva
 import { MAX_ATTACHMENT_BYTES, fileToBase64, formatBytes } from "./attachments";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync, type AsyncState } from "../rpc";
-import type { Attachment, Comment } from "../types";
+import type { Activity, Attachment, Comment } from "../types";
+import { buildTimeline } from "./timeline";
+import { fieldLabel, personLabel } from "./activity";
+import type { PeopleMap } from "./people";
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleString();
@@ -357,8 +360,13 @@ export function CommentsPanel({
   readOnly = false,
   attachments,
   onAttachmentsChanged,
+  activities = [],
+  people = {},
 }: {
   bugId: string;
+  /** Field changes, shown inline the way GitHub and Linear do. */
+  activities?: readonly Activity[];
+  people?: PeopleMap;
   /** No identity: the thread is readable, the controls are not offered. */
   readOnly?: boolean;
   /** Owned by the page, because the files panel lists the same rows. */
@@ -392,18 +400,38 @@ export function CommentsPanel({
       >
         {(comments) => (
           <ul className="comment-list">
-            {comments.map((comment) => (
-              <CommentRow
-                key={comment.id}
-                comment={comment}
-                onChanged={() => {
-                  reload();
-                  onAttachmentsChanged();
-                }}
-                readOnly={readOnly}
-                attachments={filesByComment.get(comment.id) ?? []}
-              />
-            ))}
+            {buildTimeline(comments, activities).map((item, index) =>
+              item.kind === "comment" ? (
+                <CommentRow
+                  key={item.comment.id}
+                  comment={item.comment}
+                  onChanged={() => {
+                    reload();
+                    onAttachmentsChanged();
+                  }}
+                  readOnly={readOnly}
+                  attachments={filesByComment.get(item.comment.id) ?? []}
+                />
+              ) : (
+                <li key={"event-" + index} className="timeline-event">
+                  <span className="timeline-dot" aria-hidden="true" />
+                  <p className="timeline-event-text">
+                    <span className="timeline-actor">{personLabel(item.actorId, people)}</span>{" "}
+                    {item.changes.map((change, i) => (
+                      <span key={i}>
+                        {i > 0 ? ", " : ""}
+                        set <span className="timeline-field">{fieldLabel(change.fieldName)}</span> to{" "}
+                        <span className="timeline-value">{change.newValue || "nothing"}</span>
+                      </span>
+                    ))}
+                    <span className="timeline-when" title={formatDate(item.at)}>
+                      {" "}
+                      {timeAgo(item.at)}
+                    </span>
+                  </p>
+                </li>
+              ),
+            )}
           </ul>
         )}
       </AsyncSection>
