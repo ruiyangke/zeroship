@@ -33,6 +33,7 @@ use zeroship_core::auth_provider::{
     ProviderAuthz, SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::OriginScheme;
+use zeroship_core::device_grant;
 use zeroship_authz::{Action, Resource};
 
 mod common;
@@ -86,6 +87,21 @@ fn gotrue_token(issuer: &str, subject: &str, email: &str, role: &str) -> String 
 
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
+}
+
+/// A well-formed random user code.
+///
+/// Production now validates every incoming `user_code` against
+/// `device_grant::valid_user_code` before it ever reaches the database (see
+/// `device_approve`), so the old hand-built fixture codes like
+/// `format!("PLAT-{}", ...)` (two groups, and characters like `1`/`A` outside
+/// `USER_CODE_ALPHABET`) are rejected on sight. This reuses the exact
+/// generator the real `/api/device/auth` handler calls, so a code minted here
+/// is guaranteed to pass the validator; it does NOT guarantee the code is
+/// absent from the table (a caller who wants an "unknown code" negative case
+/// must not insert this code anywhere).
+fn random_user_code() -> String {
+    device_grant::generate_user_code(&mut rand::thread_rng())
 }
 
 struct MockSupabase {
@@ -156,8 +172,20 @@ impl MockPlatformAuth {
             .expect("set platform auth mock nonblocking");
         let base = format!("http://{}", listener.local_addr().expect("platform auth addr"));
         let signing = SigningKey::from_bytes(&[41u8; 32]);
+        // The configured `platform_issuer` must end in `device_grant::OP_PATH_PREFIX`
+        // ("/oauth2"), because `mint_platform_deploy_token` and `verification_uri`
+        // both derive their target from `device_grant::op_public_url(platform_issuer)`,
+        // which returns `None` for an issuer with no such suffix. The real auth
+        // service issuer already carries this suffix (its doc comment: "The auth
+        // service builds its issuer as `{public_url}{OP_PATH_PREFIX}`"); this mock
+        // must match that shape or `/api/device/auth` fails closed with a 500
+        // before this suite ever reaches the parts it means to test. The mint
+        // itself is still served at `{base}/internal/platform-token` (root, no
+        // `/oauth2`), matching how `handle_platform_auth_request` below routes it -
+        // `op_public_url` strips the suffix back off before the mint call.
+        let issuer_url = format!("{base}{}", device_grant::OP_PATH_PREFIX);
         let issuer = Arc::new(
-            Issuer::from_signing_key(&signing, [13u8; 32], base.clone())
+            Issuer::from_signing_key(&signing, [13u8; 32], issuer_url)
                 .expect("platform issuer"),
         );
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
@@ -188,17 +216,44 @@ impl MockPlatformAuth {
         format!("{}/.well-known/jwks.json", self.base)
     }
 
+    /// The configured `platform_issuer` string, `{base}/oauth2`. What
+    /// `device_grant::op_public_url` strips back down to `base`.
+    fn issuer(&self) -> &str {
+        self.issuer.issuer()
+    }
+
     fn issue_access_token(&self, principal_id: Uuid, scopes: &[String]) -> String {
+        self.issue_access_token_for_audience(principal_id, scopes, "control.zeroship.ai")
+    }
+
+    /// Mint an otherwise valid platform access token for an arbitrary audience.
+    ///
+    /// Everything else is identical to [`Self::issue_access_token`]: same
+    /// issuer, same signing key, same subject, same client. The audience is the
+    /// single variable, which is what makes the refusal attributable to the
+    /// audience check rather than to the token being malformed.
+    fn issue_access_token_for_audience(
+        &self,
+        principal_id: Uuid,
+        scopes: &[String],
+        audience: &str,
+    ) -> String {
         let principal_id = principal_id.to_string();
         self.issuer
             .issue_principal_access_token(&PrincipalAccessTokenMint {
                 principal_id: &principal_id,
-                audience: "control.zeroship.ai",
+                audience,
                 client_id: "zeroship-console",
                 scopes,
                 ttl_secs: None,
             })
             .expect("platform approval token")
+    }
+
+    /// The `client_id` this mock stamps into every token it issues. The
+    /// revocation marker is keyed on it.
+    fn token_client_id(&self) -> &'static str {
+        "zeroship-console"
     }
 }
 
@@ -433,7 +488,7 @@ impl Fixture {
             .expect("valid test Supabase config"),
         ));
         let platform = PlatformProvider::new(
-            PlatformConfig::new(mock_platform.base.clone(), Some(mock_platform.jwks_url()))
+            PlatformConfig::new(mock_platform.issuer().to_string(), Some(mock_platform.jwks_url()))
                 .expect("valid platform config"),
         );
         let auth_provider = Arc::new(match provider {
@@ -521,6 +576,27 @@ impl Fixture {
         hash
     }
 
+    /// Insert a pending `provider = 'platform'` grant directly.
+    ///
+    /// For tests whose subject is the APPROVAL rule, so the row is a fixture
+    /// rather than something `/api/device/auth` has to be driven to produce.
+    async fn insert_pending_platform_grant(&mut self, device_code_hash: &str, user_code: &str) {
+        if !self.device_hashes.iter().any(|seen| seen == device_code_hash) {
+            self.device_hashes.push(device_code_hash.to_string());
+        }
+        self.state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.device_grants \
+                    (device_code_hash, user_code, provider, scope, expires_at) \
+                 VALUES ($1, $2, 'platform', 'apps:deploy apps:read apps:write', \
+                         NOW() + INTERVAL '10 minutes')",
+                &[&device_code_hash, &user_code],
+            )
+            .await
+            .expect("insert pending platform device grant");
+    }
+
     async fn track_principal_for_subject(&mut self, subject: &str) -> Uuid {
         if !self.subjects.iter().any(|seen| seen == subject) {
             self.subjects.push(subject.to_string());
@@ -559,6 +635,17 @@ impl Fixture {
         app.id
     }
 
+    /// Insert a bare `zeroship.users` row for a platform principal, with NO
+    /// grants and no `identity_links` marker.
+    ///
+    /// Used to pre-insert principal_grants rows here: a platform principal
+    /// genuinely has zero grants until `identity_bridge::ensure_platform_creator_grants`
+    /// JIT-provisions them on the first approved poll, and a fixture that
+    /// pre-granted all three masked exactly that: `deploy_scopes_for_principal`
+    /// was never exercised against an empty grant set, so a deploy token
+    /// minted with `scope: ""` for a real first-time creator went unnoticed.
+    /// Tests that need pre-existing grants call [`Self::grant_scopes`]
+    /// explicitly instead.
     async fn create_platform_principal(&mut self) -> Uuid {
         let principal_id = Uuid::new_v4();
         let email = format!(
@@ -574,27 +661,72 @@ impl Fixture {
             )
             .await
             .expect("insert platform device user");
-        for grant in ["apps:deploy", "apps:read", "apps:write"] {
-            self.state
-                .control_pg
-                .execute(
-                    "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
-                     VALUES ($1, $2)",
-                    &[&principal_id, &grant],
-                )
-                .await
-                .expect("insert platform device grant");
-        }
         self.users.push(principal_id);
         principal_id
     }
 
+    /// Grant specific scopes directly, bypassing JIT provisioning.
+    ///
+    /// For tests that need pre-existing grants visible at the call site -
+    /// asserting scope capping, or that a revoked grant is not resurrected -
+    /// rather than hidden inside a fixture constructor.
+    async fn grant_scopes(&mut self, principal_id: Uuid, scopes: &[&str]) {
+        if !self.users.contains(&principal_id) {
+            self.users.push(principal_id);
+        }
+        for scope in scopes {
+            self.state
+                .control_pg
+                .execute(
+                    "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
+                     VALUES ($1, $2) \
+                     ON CONFLICT (principal_id, grant_name) DO NOTHING",
+                    &[&principal_id, scope],
+                )
+                .await
+                .expect("insert granted scope");
+        }
+    }
+
+    /// Mark a principal as already having gone through creator-grant JIT
+    /// provisioning, without granting anything.
+    ///
+    /// Inserts the same `identity_links(provider='platform', provider_subject
+    /// = principal_id::text)` once-only row `ensure_platform_creator_grants`
+    /// writes on a principal's first approved poll. Combined with
+    /// [`Self::grant_scopes`] for a reduced set, this simulates "an operator
+    /// revoked a previously-seeded grant" so a test can assert the next
+    /// device-flow poll does not resurrect it.
+    async fn mark_creator_grants_seeded(&mut self, principal_id: Uuid) {
+        if !self.users.contains(&principal_id) {
+            self.users.push(principal_id);
+        }
+        self.state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.identity_links \
+                    (principal_id, provider, provider_subject, email) \
+                 SELECT $1, 'platform', $1::text, u.email::text \
+                 FROM zeroship.users u WHERE u.id = $1 \
+                 ON CONFLICT (provider, provider_subject) DO NOTHING",
+                &[&principal_id],
+            )
+            .await
+            .expect("insert platform identity link marker");
+    }
+
+    /// Pins that a rejected/unauthorized approval attempt left the row
+    /// untouched. Does NOT pin anything about `platform_access_token_enc`:
+    /// that column is dead (no production code reads or writes it anymore -
+    /// minting moved to the poll, and it never wrote a token before this
+    /// point in the flow either way), so asserting it here would not
+    /// discriminate old behavior from new.
     async fn assert_device_grant_pending(&self, device_code_hash: &str) {
         let row = self
             .state
             .control_pg
             .query_one(
-                "SELECT status, principal_id, platform_access_token_enc \
+                "SELECT status, principal_id \
                  FROM zeroship.device_grants \
                  WHERE device_code_hash = $1",
                 &[&device_code_hash],
@@ -603,10 +735,6 @@ impl Fixture {
             .expect("pending device grant row");
         assert_eq!(row.get::<_, String>("status"), "pending");
         assert_eq!(row.get::<_, Option<Uuid>>("principal_id"), None);
-        assert_eq!(
-            row.get::<_, Option<Vec<u8>>>("platform_access_token_enc"),
-            None
-        );
     }
 
     async fn cleanup(&self) {
@@ -644,6 +772,23 @@ impl Fixture {
                 .await;
         }
         for user_id in &self.users {
+            // Any principal that reached the "approved" arm of `device_token`
+            // - regardless of which provider originally authenticated it -
+            // gets an ADDITIONAL `identity_links(provider='platform')` row
+            // from `ensure_platform_creator_grants`'s once-only marker. That
+            // FK has no `onDelete`, so leaving this row behind makes the
+            // `DELETE FROM zeroship.users` below fail silently (swallowed by
+            // `let _ =`) and leak a row into every later test run.
+            let subject = user_id.to_string();
+            let _ = self
+                .state
+                .control_pg
+                .execute(
+                    "DELETE FROM zeroship.identity_links \
+                     WHERE provider = 'platform' AND provider_subject = $1",
+                    &[&subject],
+                )
+                .await;
             let _ = self
                 .state
                 .control_pg
@@ -702,8 +847,7 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
     let principal_id = fx.create_platform_principal().await;
     let device_code = format!("platform-device-{}", Uuid::new_v4().simple());
     let device_code_hash = fx.track_hash(&device_code);
-    let user_code_suffix = Uuid::new_v4().simple().to_string();
-    let user_code = format!("PLAT-{}", &user_code_suffix[..4]).to_ascii_uppercase();
+    let user_code = random_user_code();
     fx.state
         .control_pg
         .execute(
@@ -794,7 +938,7 @@ async fn platform_token_approves_device_grant_under_platform_provider() {
 }
 
 #[compio::test]
-async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one_time_use() {
+async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use() {
     let mut fx = Fixture::new().await;
     let app = test::init_service(
         web::App::new()
@@ -823,15 +967,17 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
     assert_eq!(decoded.len(), 32, "device_code must carry 256 bits");
     assert_eq!(auth_body["interval"], 5);
     assert_eq!(auth_body["expires_in"], 600);
+    // Derived from the configured platform issuer via `device_grant::op_public_url`,
+    // not from `app_base_domain` - the fixture's mock platform issuer is
+    // `{mock_platform.base}/oauth2`, so the `/device` page's origin is
+    // `mock_platform.base` with that suffix stripped back off.
     assert_eq!(
         auth_body["verification_uri"].as_str(),
-        Some("https://auth.zeroship.localhost/device")
+        Some(format!("{}/device", fx._mock_platform.base).as_str())
     );
     assert_eq!(
         auth_body["verification_uri_complete"].as_str(),
-        Some(
-            format!("https://auth.zeroship.localhost/device?user_code={user_code}").as_str()
-        )
+        Some(format!("{}/device?user_code={user_code}", fx._mock_platform.base).as_str())
     );
 
     let device_code_hash = fx.track_hash(device_code);
@@ -839,8 +985,7 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
         .state
         .control_pg
         .query_one(
-            "SELECT device_code_hash, user_code, status, provider, scope, \
-                    platform_access_token_enc IS NULL AS token_missing \
+            "SELECT device_code_hash, user_code, status, provider, scope \
              FROM zeroship.device_grants \
              WHERE user_code = $1",
             &[&user_code],
@@ -856,7 +1001,6 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
         row.get::<_, Option<String>>("scope").as_deref(),
         Some("openid offline_access apps:deploy apps:read apps:write")
     );
-    assert!(row.get::<_, bool>("token_missing"));
 
     let pending_req = test::TestRequest::post()
         .uri("/api/device/token")
@@ -923,11 +1067,33 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
 
     let bearer_token = gotrue_token(fx.issuer(), &subject, &email, "authenticated");
 
-    let unknown_approve_req = test::TestRequest::post()
+    // Malformed shape ("ZZZZ-ZZZZ" - two groups, and the old 8-char format
+    // control used to mint): `device_grant::valid_user_code` rejects this
+    // before the handler ever runs the lookup UPDATE. This test cannot prove
+    // the DB was never queried (the response is identical to a well-formed
+    // miss below), only that the response is a 400 `invalid_user_code`.
+    let malformed_approve_req = test::TestRequest::post()
         .uri("/api/device/approve")
         .header("authorization", bearer(&bearer_token))
         .set_json(&json!({
             "user_code": "ZZZZ-ZZZZ"
+        }))
+        .to_request();
+    let malformed_approve_resp = test::call_service(&app, malformed_approve_req).await;
+    assert_eq!(malformed_approve_resp.status(), StatusCode::BAD_REQUEST);
+    let malformed_body: Value =
+        serde_json::from_slice(&test::read_body(malformed_approve_resp).await)
+            .expect("malformed approve body json");
+    assert_eq!(malformed_body["error"], "invalid_user_code");
+
+    // Well-formed but never inserted: this is the lookup-miss path
+    // specifically, distinct from the format-rejection case above - the code
+    // passes `valid_user_code` and the handler's UPDATE affects zero rows.
+    let unknown_approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&bearer_token))
+        .set_json(&json!({
+            "user_code": random_user_code()
         }))
         .to_request();
     let unknown_approve_resp = test::call_service(&app, unknown_approve_req).await;
@@ -948,11 +1114,14 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
     assert_eq!(approve_status, StatusCode::NO_CONTENT);
     let principal_id = fx.track_principal_for_subject(&subject).await;
 
+    // Approval binds a principal and nothing more now: no token is minted or
+    // stored here (that moved to the poll below), so there is nothing left
+    // to assert about `platform_access_token_enc` at this point in the flow.
     let row = fx
         .state
         .control_pg
         .query_one(
-            "SELECT status, principal_id, platform_access_token_enc \
+            "SELECT status, principal_id \
              FROM zeroship.device_grants \
              WHERE device_code_hash = $1",
             &[&device_code_hash],
@@ -961,25 +1130,6 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
         .expect("approved row");
     assert_eq!(row.get::<_, String>("status"), "approved");
     assert_eq!(row.get::<_, Uuid>("principal_id"), principal_id);
-    let ciphertext: Vec<u8> = row.get("platform_access_token_enc");
-    let key = zeroship_core::crypto::derive_key(TEST_MASTER_KEY);
-    let decrypted = zeroship_core::crypto::decrypt(
-        &key,
-        &device_handlers::device_access_token_aad(&device_code_hash),
-        &ciphertext,
-    )
-    .expect("decrypt stored platform access token");
-    let stored_access_token =
-        String::from_utf8(decrypted).expect("stored platform access token utf8");
-    assert_eq!(
-        stored_access_token.split('.').count(),
-        3,
-        "stored token must be a compact JWS"
-    );
-    assert!(
-        !String::from_utf8_lossy(&ciphertext).contains(&stored_access_token),
-        "platform access token must not be stored in plaintext"
-    );
 
     fx.state
         .control_pg
@@ -1017,8 +1167,9 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
         .expect("access_token")
         .to_string();
     assert_eq!(
-        deploy_token, stored_access_token,
-        "poll must return the exact OP-issued token bound at approval"
+        deploy_token.split('.').count(),
+        3,
+        "minted token must be a compact JWS"
     );
     let verified = fx
         .state
@@ -1156,93 +1307,6 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_encryption_and_one
             .expect("denied body json");
     assert_eq!(token_error(denied_body), "access_denied");
 
-    let limited_subject = Uuid::new_v4().to_string();
-    let limited_email = format!(
-        "device-limited-{}@zeroship.test",
-        Uuid::new_v4().simple()
-    );
-    let limited_user_id = Uuid::new_v4();
-    fx.users.push(limited_user_id);
-    fx.subjects.push(limited_subject.clone());
-    fx.state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
-             VALUES ($1, $2::citext, NOW(), 'Limited Device User')",
-            &[&limited_user_id, &limited_email],
-        )
-        .await
-        .expect("insert limited user");
-    for grant in ["apps:deploy", "apps:read"] {
-        fx.state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
-                 VALUES ($1, $2)",
-                &[&limited_user_id, &grant],
-            )
-            .await
-            .expect("insert limited grant");
-    }
-
-    let limited_auth_req = test::TestRequest::post()
-        .uri("/api/device/auth")
-        .set_json(&json!({
-            "client_id": "zeroship-cli",
-            "scope": "openid offline_access apps:deploy apps:read apps:write"
-        }))
-        .to_request();
-    let limited_auth_resp = test::call_service(&app, limited_auth_req).await;
-    assert_eq!(limited_auth_resp.status(), StatusCode::OK);
-    let limited_auth_body: Value =
-        serde_json::from_slice(&test::read_body(limited_auth_resp).await)
-            .expect("limited auth body json");
-    let limited_device_code = limited_auth_body["device_code"]
-        .as_str()
-        .expect("limited device_code");
-    let limited_user_code = limited_auth_body["user_code"]
-        .as_str()
-        .expect("limited user_code");
-    fx.track_hash(limited_device_code);
-    let limited_bearer =
-        gotrue_token(fx.issuer(), &limited_subject, &limited_email, "authenticated");
-    let limited_approve_req = test::TestRequest::post()
-        .uri("/api/device/approve")
-        .header("authorization", bearer(&limited_bearer))
-        .set_json(&json!({
-            "user_code": limited_user_code
-        }))
-        .to_request();
-    let limited_approve_status = test::call_service(&app, limited_approve_req).await.status();
-    assert_eq!(limited_approve_status, StatusCode::NO_CONTENT);
-    let limited_token_req = test::TestRequest::post()
-        .uri("/api/device/token")
-        .set_json(&json!({
-            "device_code": limited_device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-        }))
-        .to_request();
-    let limited_token_resp = test::call_service(&app, limited_token_req).await;
-    assert_eq!(limited_token_resp.status(), StatusCode::OK);
-    let limited_token_body: Value =
-        serde_json::from_slice(&test::read_body(limited_token_resp).await)
-            .expect("limited token body json");
-    assert_eq!(limited_token_body["principal_id"], limited_user_id.to_string());
-    assert_eq!(limited_token_body["scope"], "apps:deploy apps:read");
-    let limited_token = limited_token_body["access_token"]
-        .as_str()
-        .expect("limited access_token");
-    let limited_verified = fx
-        .state
-        .auth_provider
-        .verify_token(limited_token)
-        .await
-        .expect("limited platform token verifies");
-    assert_eq!(
-        limited_verified.provider_authz,
-        ProviderAuthz::OAuthScope("apps:deploy apps:read".to_string())
-    );
-
     fx.cleanup().await;
 
     drop(app);
@@ -1332,6 +1396,13 @@ async fn device_auth_is_rate_limited() {
 /// This walks the whole CONTROL side under the platform-only provider: start
 /// -> approve with a platform OAuth bearer -> redeem the one-time token.
 ///
+/// `create_platform_principal` no longer pre-inserts `principal_grants`, so
+/// this test's `scope == "apps:deploy apps:read apps:write"` assertion below
+/// is also, incidentally, proof that `identity_bridge::ensure_platform_creator_grants`
+/// JIT-provisions the full deploy scope for a principal with zero grants.
+/// `device_token_jit_provisions_full_deploy_scope_for_a_new_platform_principal`
+/// exists as a standalone, narrower test of that same claim.
+///
 /// What it does NOT cover: the browser leg. Nothing the auth service renders
 /// under `AuthProviderKind::Native` posts to `/api/device/approve` - its
 /// `/device` page drives the native OP grant, which reads
@@ -1412,6 +1483,158 @@ async fn platform_only_provider_completes_the_control_device_flow() {
     common::drain_pg().await;
 }
 
+/// A bearer minted for a DIFFERENT audience must not approve a device grant.
+///
+/// `zeroship_authn`'s `oauth_guard_from_bearer` has always gated the same token
+/// type on `aud`; this handler accepted `ProviderAuthz::OAuthScope(_)`
+/// unconditionally, so any platform-issued token verified here regardless of
+/// which resource server it was minted for.
+///
+/// Fails on the pre-fix code: the approval returned 204 and the grant went to
+/// `approved`.
+///
+/// What it does NOT catch: whether the audience the handler compares against is
+/// the RIGHT one for this deployment. It asserts agreement with
+/// `state.expected_oauth_audience`, which is the same value `authn` compares
+/// against, and nothing here would notice if that value were misconfigured.
+#[compio::test]
+async fn a_bearer_for_another_audience_cannot_approve_a_device_grant() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let user_code = random_user_code();
+    let device_code_hash = format!("{:064x}", rand::random::<u128>());
+    fx.insert_pending_platform_grant(&device_code_hash, &user_code)
+        .await;
+
+    let foreign_token = fx._mock_platform.issue_access_token_for_audience(
+        principal_id,
+        &[],
+        "some-other-resource.zeroship.ai",
+    );
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&foreign_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let approve_status = test::call_service(&app, approve_req).await.status();
+    assert_eq!(
+        approve_status,
+        StatusCode::UNAUTHORIZED,
+        "a token minted for another audience must not approve a deploy grant"
+    );
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    // The one-variable control: the SAME principal, the SAME mock issuer, the
+    // SAME grant row, only the audience corrected. Without this the test could
+    // not tell "the audience check fired" from "this fixture cannot approve
+    // anything".
+    let good_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&good_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::NO_CONTENT,
+        "the correct audience must still approve"
+    );
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A bearer whose token family has been revoked must not approve a grant.
+///
+/// Without this check a stolen bearer could start a device flow
+/// (`/api/device/auth` is unauthenticated), approve it with itself, and poll
+/// out a fresh deploy token whose `iat` is later than the revocation marker -
+/// so revoking the family, and the deploy token's own TTL, bounded nothing.
+///
+/// Fails on the pre-fix code: the approval returned 204.
+///
+/// WHAT THIS TEST DOES NOT PROVE, and it matters: that any production code path
+/// ever writes the marker this test inserts by hand. It does not. The only
+/// writer of `zeroship.token_revocations` is
+/// `crates/control/src/oauth_grants_handlers.rs`, which keys the row on a
+/// PAIRWISE subject derived for a per-app RP client, while the token reaching
+/// this handler carries a raw principal UUID as its `sub`. So the check is
+/// correct and it agrees with `authn`, but on today's tree no operator action
+/// can arm it for this family. Fixing that is a separate change; this test is
+/// written so it exercises the check rather than passing because the check is
+/// unreachable.
+#[compio::test]
+async fn a_revoked_bearer_cannot_approve_a_device_grant() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let user_code = random_user_code();
+    let device_code_hash = format!("{:064x}", rand::random::<u128>());
+    fx.insert_pending_platform_grant(&device_code_hash, &user_code)
+        .await;
+
+    let token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    // `revoked_after` is set in the FUTURE relative to the token's `iat` so the
+    // marker unambiguously covers it; `family_revoked_at` compares the two, and
+    // a marker stamped at the same whole second as `iat` would make the outcome
+    // depend on clock granularity rather than on the rule.
+    let client_id = fx._mock_platform.token_client_id();
+    let subject = principal_id.to_string();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+             VALUES ($1, $2, NOW() + INTERVAL '1 hour') \
+             ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+            &[&client_id, &subject],
+        )
+        .await
+        .expect("insert revocation marker");
+
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::UNAUTHORIZED,
+        "a revoked token family must not approve a deploy grant"
+    );
+    fx.assert_device_grant_pending(&device_code_hash).await;
+
+    fx.state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &subject],
+        )
+        .await
+        .expect("delete revocation marker");
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
 /// A GoTrue bearer must still be refused when the provider has no Supabase.
 ///
 /// One-variable partner of the test above: same platform-only provider, same
@@ -1429,20 +1652,22 @@ async fn platform_only_provider_completes_the_control_device_flow() {
 /// run, and seen to pass, on its own.
 ///
 /// What it does NOT cover: the `supabase_url().is_none()` arm inside
-/// `device_approval_principal`. That arm is unreachable through `AuthProvider`
-/// - the only `ProviderAuthz::GoTrueRole` producer is `SupabaseProvider`, the
-/// only `LegacyAuthProvider` variant is `Supabase`, and `SupabaseProvider::url`
-/// returns `&str` rather than `Option`, so `GoTrueRole` and
-/// `supabase_url() == None` cannot co-occur. Here the GoTrue bearer never
-/// verifies at all, so approval fails one step earlier, in
-/// `verified_device_approval_bearer`.
+/// `device_approval_principal`. That arm is unreachable, and the argument had
+/// to be re-derived when `LegacyAuthProvider` was replaced by
+/// `AuthProvider::new(Vec<ConfiguredProvider>)` - the old form named a type
+/// that no longer exists. Under the set model: the only producer of
+/// `ProviderAuthz::GoTrueRole` is `ConfiguredProvider::Supabase`, and
+/// `AuthProvider::supabase_url()` answers `Some` for exactly the sets holding
+/// such an element, so a bearer that verified as `GoTrueRole` proves the
+/// element is present. Set SIZE is irrelevant; a set holding both backends
+/// still answers `Some`. Here the GoTrue bearer never verifies at all, so
+/// approval fails one step earlier, in `verified_device_approval_bearer`.
 #[compio::test]
 async fn platform_only_provider_refuses_a_gotrue_bearer() {
     let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
     let device_code = format!("platform-gotrue-{}", Uuid::new_v4().simple());
     let device_code_hash = fx.track_hash(&device_code);
-    let user_code_suffix = Uuid::new_v4().simple().to_string();
-    let user_code = format!("GOTR-{}", &user_code_suffix[..4]).to_ascii_uppercase();
+    let user_code = random_user_code();
     fx.state
         .control_pg
         .execute(
@@ -1522,6 +1747,216 @@ async fn supabase_only_provider_cannot_start_a_device_flow() {
     let auth_body: Value =
         serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
     assert_eq!(token_error(auth_body), "unsupported_provider");
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A principal with NO grants at all gets the full deploy scope on its first
+/// approved poll.
+///
+/// `create_platform_principal` inserts only a bare `zeroship.users` row now -
+/// no `principal_grants`, no `identity_links` marker - so
+/// `identity_bridge::ensure_platform_creator_grants` runs its once-only seed
+/// path for the first time inside `device_token`'s "approved" arm, before
+/// `deploy_scopes_for_principal` computes the token's scope. This asserts
+/// both ends of that: the `principal_grants` table ends up holding all three
+/// `DEFAULT_CREATOR_GRANTS`, and the minted token's scope reflects them.
+///
+/// What it does NOT cover: idempotency of a SECOND login (that a revoked
+/// grant stays revoked on a later poll) - that is
+/// `device_token_keeps_reduced_grants_when_identity_link_already_seeded`.
+#[compio::test]
+async fn device_token_jit_provisions_full_deploy_scope_for_a_new_platform_principal() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+
+    let no_grants = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT COUNT(*)::INT8 AS n FROM zeroship.principal_grants WHERE principal_id = $1",
+            &[&principal_id],
+        )
+        .await
+        .expect("count principal_grants before approval")
+        .get::<_, i64>("n");
+    assert_eq!(no_grants, 0, "fixture must start this principal with zero grants");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "apps:deploy apps:read apps:write"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    let device_code = auth_body["device_code"].as_str().expect("device_code");
+    let user_code = auth_body["user_code"].as_str().expect("user_code");
+    fx.track_hash(device_code);
+
+    let approval_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let token_req = test::TestRequest::post()
+        .uri("/api/device/token")
+        .set_json(&json!({
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .to_request();
+    let token_resp = test::call_service(&app, token_req).await;
+    assert_eq!(token_resp.status(), StatusCode::OK);
+    let token_body: Value =
+        serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
+    assert_eq!(token_body["scope"], "apps:deploy apps:read apps:write");
+
+    let granted: Vec<String> = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT grant_name FROM zeroship.principal_grants \
+             WHERE principal_id = $1 ORDER BY grant_name",
+            &[&principal_id],
+        )
+        .await
+        .expect("query principal_grants after approval")
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect();
+    assert_eq!(granted, vec!["apps:deploy", "apps:read", "apps:write"]);
+
+    fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A principal whose `identity_links` seeding marker already exists, but
+/// whose grants an operator later reduced, keeps the reduced set - a second
+/// device-flow login must not resurrect a revoked grant.
+///
+/// `mark_creator_grants_seeded` inserts exactly the marker row
+/// `ensure_platform_creator_grants` writes on first seed, WITHOUT granting
+/// anything through it; `grant_scopes` then grants only `apps:read`
+/// explicitly, standing in for "the operator revoked apps:write and
+/// apps:deploy after the original seed". If `ensure_platform_creator_grants`
+/// keyed off `principal_grants` being empty instead of the identity_links
+/// marker, this principal (zero matching grants at the time of the check,
+/// same as a brand-new principal) would get all three re-granted here.
+///
+/// What it does NOT cover: the ordinary first-seed path (see
+/// `device_token_jit_provisions_full_deploy_scope_for_a_new_platform_principal`),
+/// or an operator revoking a grant mid-session (there is no session to
+/// revoke mid-flight; grants are read fresh on every poll).
+#[compio::test]
+async fn device_token_keeps_reduced_grants_when_identity_link_already_seeded() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+    fx.mark_creator_grants_seeded(principal_id).await;
+    fx.grant_scopes(principal_id, &["apps:read"]).await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "apps:deploy apps:read apps:write"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    let device_code = auth_body["device_code"].as_str().expect("device_code");
+    let user_code = auth_body["user_code"].as_str().expect("user_code");
+    fx.track_hash(device_code);
+
+    let approval_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let token_req = test::TestRequest::post()
+        .uri("/api/device/token")
+        .set_json(&json!({
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .to_request();
+    let token_resp = test::call_service(&app, token_req).await;
+    assert_eq!(token_resp.status(), StatusCode::OK);
+    let token_body: Value =
+        serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
+    assert_eq!(
+        token_body["scope"], "apps:read",
+        "a previously-seeded principal must not have a revoked grant resurrected"
+    );
+    let access_token = token_body["access_token"].as_str().expect("access_token");
+    let verified = fx
+        .state
+        .auth_provider
+        .verify_token(access_token)
+        .await
+        .expect("minted platform token verifies");
+    assert_eq!(
+        verified.provider_authz,
+        ProviderAuthz::OAuthScope("apps:read".to_string())
+    );
+
+    let granted: Vec<String> = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT grant_name FROM zeroship.principal_grants \
+             WHERE principal_id = $1 ORDER BY grant_name",
+            &[&principal_id],
+        )
+        .await
+        .expect("query principal_grants after second approval")
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect();
+    assert_eq!(
+        granted,
+        vec!["apps:read"],
+        "ensure_platform_creator_grants must not re-insert apps:deploy/apps:write \
+         once the identity_links marker already exists"
+    );
+
+    fx.cleanup().await;
 
     drop(app);
     drop(fx);
