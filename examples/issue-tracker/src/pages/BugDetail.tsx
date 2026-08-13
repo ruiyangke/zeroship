@@ -56,6 +56,21 @@ export function BugDetailPage({ id }: { id: string }) {
   const product = detail.product;
   const component = detail.component;
 
+  // Everything the log might name by id. Built from what the page already
+  // has, so the history tab costs no extra request: the bug's own product and
+  // component, the people bugs.get resolved, and the product structure the
+  // fields panel loaded.
+  const historyLabels: Record<string, string> = {
+    [product.id]: product.name,
+    [component.id]: component.name,
+    ...Object.fromEntries(
+      Object.values(detail.people ?? {}).map((person) => [person.id, person.name ?? person.handle]),
+    ),
+    ...Object.fromEntries((productDetail?.versions ?? []).map((v) => [v.id, v.name])),
+    ...Object.fromEntries((productDetail?.milestones ?? []).map((m) => [m.id, m.name])),
+    ...Object.fromEntries((productDetail?.components ?? []).map((c) => [c.id, c.name])),
+  };
+
   return (
     <div className="page bug-detail-page">
       <div className="page-head">
@@ -87,7 +102,7 @@ export function BugDetailPage({ id }: { id: string }) {
       </div>
 
       {tab === "history" ? (
-        <HistoryPanel activities={detail.activities} />
+        <HistoryPanel activities={detail.activities} labels={historyLabels} />
       ) : (
         <div className="bug-detail-grid">
           <div className="bug-detail-main">
