@@ -704,10 +704,14 @@ impl Fixture {
         self.state
             .control_pg
             .execute(
+                // Every use of $1 is cast to uuid explicitly. Without this the
+                // `$1::text` below is enough for Postgres to infer the whole
+                // parameter as text, and `u.id = $1` then fails to plan with
+                // "operator does not exist: uuid = text".
                 "INSERT INTO zeroship.identity_links \
                     (principal_id, provider, provider_subject, email) \
-                 SELECT $1, 'platform', $1::text, u.email::text \
-                 FROM zeroship.users u WHERE u.id = $1 \
+                 SELECT $1::uuid, 'platform', $1::uuid::text, u.email::text \
+                 FROM zeroship.users u WHERE u.id = $1::uuid \
                  ON CONFLICT (provider, provider_subject) DO NOTHING",
                 &[&principal_id],
             )
