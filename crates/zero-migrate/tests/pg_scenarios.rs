@@ -6419,3 +6419,161 @@ async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// A per-row generator must not regenerate values for rows an interrupted run
+// already filled.
+//
+// `per_row_backfill_generates_fresh_exact_values_on_live_postgres` proves the
+// generators produce well-formed values, and six tests above prove a backfill
+// resumes from its durable boundary. Neither combination is tested: every
+// interruption test uses `per_row: BTreeMap::new()`, and the per-row test never
+// crashes.
+//
+// The combination matters because of how the failure would present. A resume
+// that re-processed an already-done batch is VISIBLE for an ordinary set clause
+// - `value = value + 1` applied twice is plainly wrong. For a generator it is
+// invisible: the row simply holds a different UUID than it held a moment ago,
+// every value is still well-formed, and no assertion in this suite would notice.
+// Meanwhile anything that captured the first value - a foreign key, an export, a
+// log line - now points at an id that no longer exists.
+//
+// The backfill here has no `where` clause, so nothing excludes an already-filled
+// row from the cohort. Only the stored cursor keeps the resume off them, which
+// is precisely the thing under test.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    let authored: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"pg_per_row_resume","ops":[
+          {"op":"createTable","name":"samples","columns":[
+            {"name":"id","type":"bigInt","nullable":false},
+            {"name":"uuid4","type":"uuid"}
+          ],"primaryKey":["id"]},
+          {"op":"insert","table":"samples","columns":["id"],
+           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
+          {"op":"backfill","table":"samples","name":"fill_ids",
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
+             "uuid4":{"perRow":"uuidV4"}
+           }}
+        ]}"#,
+    )
+    .expect("parse the per-row resume fixture");
+    let resolved =
+        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
+            .expect("resolve no-inject table policy");
+    let ir = serde_json::to_string(&resolved).expect("serialize resolved IR");
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        "app_test",
+        SqlDialect::Postgres,
+        &support::no_inject("app"),
+    );
+    let artifact = author
+        .load_and_lower_guarded(
+            &ir,
+            "app_test",
+            &BTreeMap::new(),
+            &LiveSchema::default(),
+            &GuardConfig::from_policy(
+                support::no_inject(&cfg.project_schema),
+                SqlDialect::Postgres,
+            ),
+        )
+        .expect("the per-row plan lowers");
+
+    let engine = MigrationEngine::new();
+    let apply = || {
+        engine.apply_plan(
+            &artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "per-row-resume-test",
+            LockMode::Acquire,
+        )
+    };
+
+    // Every filled `uuid4`, keyed by id, exactly as the database holds it.
+    let filled = || async {
+        let rows = session
+            .query(
+                &format!(
+                    "SELECT id, uuid4::text AS uuid4 FROM \"{}\".samples \
+                      WHERE uuid4 IS NOT NULL ORDER BY id",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("read the generated ids");
+        rows.iter()
+            .map(|row| {
+                (
+                    row.try_get::<_, i64>("id").expect("id"),
+                    row.try_get::<_, String>("uuid4").expect("uuid4"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Phase 1 — crash after the first committed batch.
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let error = apply()
+        .await
+        .expect_err("the fault must abort the run after its first committed batch");
+    assert!(
+        error.to_string().contains("fault-injection"),
+        "unexpected pre-fault failure: {error}"
+    );
+
+    let before = filled().await;
+    // The premise. A crash that filled everything, or nothing, leaves the
+    // comparison below with nothing to compare - and it would pass either way.
+    assert!(
+        !before.is_empty() && before.len() < 8,
+        "the crash must land mid-cohort, got {} filled",
+        before.len()
+    );
+
+    // Phase 2 — resume.
+    apply().await.expect("the retry completes the cohort");
+
+    let after = filled().await;
+    assert_eq!(after.len(), 8, "every row must end up with a generated id");
+
+    // The claim: the ids written before the crash are byte-identical afterwards.
+    // Every value here is a well-formed UUID either way, so only comparing
+    // against what was actually stored can catch a regeneration.
+    for (id, value) in &before {
+        let now = after
+            .iter()
+            .find(|(other, _)| other == id)
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("row {id} lost its generated id on resume"));
+        assert_eq!(
+            now, value,
+            "row {id} was regenerated on resume: had {value}, now {now}"
+        );
+    }
+
+    // And no id was minted twice across the two runs.
+    let mut all: Vec<&String> = after.iter().map(|(_, value)| value).collect();
+    all.sort();
+    let unique = all.len();
+    all.dedup();
+    assert_eq!(all.len(), unique, "every generated id must be distinct");
+
+    drop_schemas(&session, &cfg).await;
+}
