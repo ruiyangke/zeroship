@@ -7139,3 +7139,200 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     drop_schemas(&session, &control_cfg).await;
     drop_schemas(&session, &cfg).await;
 }
+
+/// A rename whose source column has dependents is declined before it starts.
+///
+/// An online rename ENDS by dropping the old column. If the database would refuse
+/// that drop, the refusal lands at the LAST step of the chain - by which time the
+/// expand half has committed and opened a contract obligation that can never be
+/// discharged, because every retry hits the same refusal. `executor.rs` says so in
+/// the error itself: "The expand half is not started, because finishing it would
+/// leave a contract obligation that can never be discharged."
+///
+/// So the engine asks the database up front, under the lock, before anything runs.
+/// That guard had no test: `RenameSourceHasDependents` appears exactly twice in the
+/// tree, at its definition and at its single construction site.
+///
+/// THE LOAD-BEARING ASSERTION IS THAT NOTHING STARTED. An error alone is consistent
+/// with a guard that fires after the expand has already committed - which is the
+/// exact state this exists to prevent, and the one an operator cannot get out of.
+/// So the refusal is measured as the ABSENCE of the shadow column, the dual-write
+/// trigger, and any outstanding obligation.
+///
+/// The guard must also be COLUMN-scoped, not table-scoped. A second table carries
+/// the same kind of view and renames a column the view does not name; refusing
+/// that would make any table with a view unrenamable, which is a different bug with
+/// the same error message.
+///
+/// The control drops the view and repeats the rename, without which every arm here
+/// holds equally for a build where this rename never works.
+#[compio::test]
+async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    use zero_migrate::driver::SqlSession;
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+
+    let base = mig(
+        MigrationId::derive("dep_base", tok.as_bytes()),
+        "create_dep_tables",
+        &format!(
+            "CREATE TABLE \"{s}\".dep_users (id bigint PRIMARY KEY, email text, nickname text); \
+             CREATE TABLE \"{s}\".bystander_users (id bigint PRIMARY KEY, email text, nickname text)",
+            s = cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("create the tables");
+
+    // The dependent. A view naming the column the rename would eventually drop.
+    session
+        .batch(&format!(
+            "CREATE VIEW \"{s}\".dep_users_emails AS SELECT email FROM \"{s}\".dep_users; \
+             CREATE VIEW \"{s}\".bystander_emails AS SELECT email FROM \"{s}\".bystander_users",
+            s = cfg.project_schema
+        ))
+        .await
+        .expect("create the dependent views");
+
+    let rename_plan = |table: &str, from: &str, to: &str| {
+        ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+            .author(&OnlineIntent::RenameColumn {
+                table: table.to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                ty: "text".into(),
+            })
+            .expect("author the rename")
+    };
+
+    let refusal = engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                rename_plan("dep_users", "email", "email_address"),
+            ))],
+            &["dep_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("a rename whose source has dependents must be declined");
+    match &refusal {
+        DeclarativeApplyError::Plain(EngineError::Apply(
+            ApplyError::RenameSourceHasDependents {
+                table,
+                column,
+                blockers,
+            },
+        )) => {
+            assert_eq!(table, "dep_users");
+            assert_eq!(column, "email");
+            assert!(
+                blockers.iter().any(|b| b.contains("dep_users_emails")),
+                "the refusal must name the dependent the server would name: {blockers:?}"
+            );
+        }
+        other => panic!("expected RenameSourceHasDependents, got {other:?}"),
+    }
+
+    // Nothing started. This is the claim the error text makes, and the state an
+    // operator could not recover from if it were false.
+    assert!(
+        !column_exists(&session, &cfg.project_schema, "dep_users", "email_address").await,
+        "the expand must not have added the shadow column"
+    );
+    let trigger_count: i64 = session
+        .query_one(
+            "SELECT count(*)::bigint AS n FROM pg_trigger t
+               JOIN pg_class c ON c.oid = t.tgrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relname = 'dep_users' AND NOT t.tgisinternal",
+            &[(&cfg.project_schema).into()],
+        )
+        .await
+        .expect("probe triggers")
+        .try_get("n")
+        .expect("decode n");
+    assert_eq!(
+        trigger_count, 0,
+        "no dual-write trigger may have been installed"
+    );
+    assert!(
+        backend
+            .pending_contracts()
+            .expect("PostgreSQL pending-contract capability")
+            .outstanding_pending_contracts(&cfg)
+            .await
+            .expect("read outstanding")
+            .is_empty(),
+        "no contract obligation may have been opened"
+    );
+
+    // Column-scoped, not table-scoped. `bystander_users` carries the same kind of
+    // view, but on a column this rename does not touch.
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                rename_plan("bystander_users", "nickname", "handle"),
+            ))],
+            &["bystander_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("a view on a DIFFERENT column must not block this rename");
+    assert!(
+        column_exists(&session, &cfg.project_schema, "bystander_users", "handle").await,
+        "the unblocked rename really opened its window"
+    );
+
+    // The control. Remove the dependent and the same rename proceeds.
+    session
+        .batch(&format!(
+            "DROP VIEW \"{}\".dep_users_emails",
+            cfg.project_schema
+        ))
+        .await
+        .expect("drop the dependent view");
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                rename_plan("dep_users", "email", "email_address"),
+            ))],
+            &["dep_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("with the dependent gone the rename proceeds");
+    assert!(
+        column_exists(&session, &cfg.project_schema, "dep_users", "email_address").await,
+        "the refusal was about the dependent, not about a rename that never works"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
