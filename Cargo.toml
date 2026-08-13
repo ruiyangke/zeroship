@@ -231,6 +231,13 @@ zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-config-macros = { path = "crates/config-macros" }
 zeroship-config-contract = { path = "crates/config-contract" }
 zeroship-workflow-scheduler = { path = "crates/workflow-scheduler" }
+# The five server libraries, listed here so the non-shipped
+# `zeroship-config-contract` checker can LINK their generated registries rather
+# than re-parse their source. Nothing shipped depends on these entries.
+zeroship-control = { path = "crates/control" }
+zeroship-gateway = { path = "crates/gateway" }
+zeroship-worker = { path = "crates/worker" }
+zeroship-migrated = { path = "crates/migrated" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }

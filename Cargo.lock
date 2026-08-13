@@ -6956,7 +6956,13 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.8.23",
  "trybuild",
+ "zeroship-auth",
+ "zeroship-control",
  "zeroship-core",
+ "zeroship-gateway",
+ "zeroship-migrated",
+ "zeroship-worker",
+ "zeroship-workflow-scheduler",
 ]
 
 [[package]]
