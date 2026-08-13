@@ -223,7 +223,7 @@ mod tests {
             "resolve-explicit.toml",
             r#"
 [auth]
-auth_provider = "platform"
+provider = "native"
 "#,
         );
 
@@ -235,7 +235,7 @@ auth_provider = "platform"
             overlay.source,
             ConfigSource::Explicit(file.path.clone())
         );
-        assert_eq!(overlay.config.auth.auth_provider.as_deref(), Some("platform"));
+        assert_eq!(overlay.config.auth.provider.as_deref(), Some("native"));
     }
 
     #[test]
@@ -276,7 +276,7 @@ log_filter = "info,zeroship_=debug"
             FileConfig::resolve_with_well_known(None, true, &path).expect("missing well-known is ok");
 
         assert_eq!(overlay.source, ConfigSource::None);
-        assert!(overlay.config.auth.auth_provider.is_none());
+        assert!(overlay.config.auth.provider.is_none());
         assert!(overlay.config.observability.log_filter.is_none());
     }
 
