@@ -357,7 +357,17 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
             {/* A function child, which Base UI calls with the selected value.
                 Omitting it renders the raw value -- correct for enums, wrong
                 for anything id-valued. */}
-            {renderValue ? (value: unknown) => renderValue(value as never) : undefined}
+            {renderValue
+              ? (value: unknown) =>
+                  // Empty means nothing is selected, and Base UI still calls
+                  // the child in that state -- so a renderer that maps id to
+                  // name returned "" and the trigger went blank instead of
+                  // showing its placeholder. The doc above promised this
+                  // guard; without it the promise was just a comment.
+                  value === null || value === undefined || value === ""
+                    ? placeholder
+                    : renderValue(value as never)
+              : undefined}
           </BaseSelect.Value>
           <BaseSelect.Icon
             className="zs-select-trigger__icon"
