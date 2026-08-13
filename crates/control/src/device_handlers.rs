@@ -1,10 +1,23 @@
-//! Platform-mediated OAuth device flow for platform deploy tokens.
+//! Control-mediated OAuth device flow for platform deploy tokens.
 //!
-//! Control owns the RFC 8628 pending-grant rows and polling discipline because
-//! Supabase/GoTrue lacks a native device grant. The auth service owns issuance:
-//! once a browser-held upstream session approves a code, control resolves the
-//! platform principal, asks the OP to mint a platform access token, encrypts
-//! that one-time token on the grant row, and deletes the row when the CLI polls.
+//! Control owns the RFC 8628 pending-grant rows and the polling discipline; the
+//! auth service owns issuance. Once an approving bearer arrives, control
+//! resolves the platform principal, caps the requested scopes to that
+//! principal's `principal_grants`, asks the OP to mint a platform access token,
+//! encrypts that one-time token on the grant row, and deletes the row when the
+//! CLI polls. Rows written here carry `provider = 'platform'`.
+//!
+//! This is NOT the OP's own device grant. `crates/auth/src/oidc/device_token.rs`
+//! implements RFC 8628 natively over the same `zeroship.device_grants` table
+//! under `provider = 'op'`, and the auth service's `/device` page drives that
+//! one. The `provider` column is what keeps the two apart.
+//!
+//! Known gap: the `verification_uri` this module returns points at that same
+//! `/device` page, and only its `AuthProviderKind::Supabase` arm posts back to
+//! `/api/device/approve`. On a platform-only deployment - the shipped default -
+//! nothing renders a page that can approve a `provider = 'platform'` row, so
+//! `zeroship login` gets a user code the browser leg cannot redeem. The
+//! endpoints below work; the browser leg does not exist yet.
 
 use std::collections::HashSet;
 use std::sync::Arc;
