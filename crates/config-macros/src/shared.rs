@@ -171,6 +171,40 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "String",
     },
+    // Platform-global SECRETS. These are the shape the flat `[secrets]` table
+    // could not express: one value, set once, read by several binaries. The live
+    // `ZEROSHIP_CONTROL_KEY` split - a literal in four services and a `${VAR}`
+    // indirection in the fifth - is what a flat table with nothing marking
+    // sharing produces, so the sharing is declared here instead.
+    SharedIdentity {
+        symbol: "CONTROL_KEY",
+        canonical: "control_key",
+        wrapper: "Secret",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "WORKER_KEY",
+        canonical: "worker_key",
+        wrapper: "Secret",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "PAIRWISE_SALT",
+        canonical: "pairwise_salt",
+        wrapper: "Secret",
+        inner: "String",
+    },
+    // The Supabase anon key is one deployment fact read by two binaries: auth
+    // drives the browser-side GoTrue login with it and control verifies tokens
+    // from the same project. It stays OPERATIONAL, not secret: Supabase
+    // publishes it to browsers by design, so redacting it here would claim a
+    // protection the value does not have.
+    SharedIdentity {
+        symbol: "AUTH_SUPABASE_ANON_KEY",
+        canonical: "auth.supabase_anon_key",
+        wrapper: "Operational",
+        inner: "String",
+    },
 ];
 
 /// Look up a shared identity by the symbol a declaration wrote.

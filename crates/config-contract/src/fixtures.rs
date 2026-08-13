@@ -16,6 +16,10 @@ use zeroship_core::config::{
 };
 
 /// A per-component declaration: both settings live under `[control]`.
+///
+/// The check-config control is not decoration: a declaration carrying a secret
+/// is required to carry it, so the generated resolver can tell a dry run from a
+/// real boot rather than reading the secret either way.
 #[zeroship_config(binary = "zeroship-fixture-control", scope = "control")]
 #[derive(Debug)]
 pub struct FixtureControlConfig {
@@ -25,6 +29,9 @@ pub struct FixtureControlConfig {
     /// Secret sitting in its component's table, not a `secrets` section.
     #[config(name = "control.database_url")]
     pub database_url: Secret<String>,
+    /// The dry-run selector every secret-bearing declaration must carry.
+    #[config(shared = CHECK_CONFIG)]
+    pub check_config: CommandControl<bool>,
 }
 
 /// A second binary, including a platform-global secret at the TOML top level.
@@ -34,9 +41,14 @@ pub struct FixtureWorkerConfig {
     /// Scope-stripped operational flag.
     #[config(name = "worker.max_pinned_isolates_per_app", default = 4)]
     pub max_pinned_isolates_per_app: Operational<u32>,
-    /// Platform-global secret: no component prefix, so no scope is stripped.
-    #[config(name = "control_key")]
+    /// Platform-global secret: no component prefix, so no scope is stripped,
+    /// and its identity comes from the shared table because several binaries
+    /// read the one value.
+    #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
+    /// The dry-run selector every secret-bearing declaration must carry.
+    #[config(shared = CHECK_CONFIG)]
+    pub check_config: CommandControl<bool>,
 }
 
 /// The bootstrap/command controls every server binary carries.

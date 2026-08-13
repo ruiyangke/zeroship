@@ -57,12 +57,12 @@ impl SecretResolver for StaticSecretResolver {
         if raw.is_empty() {
             return Err(ProviderError::Config("empty secret handle".to_string()));
         }
-        if let Some(var) = raw.strip_prefix("env:") {
-            let value = std::env::var(var).map_err(|_| {
-                ProviderError::Config(format!("secret handle '{raw}' references an unset env var"))
-            })?;
-            return Ok(SecretString::new(value));
-        }
+        // NO `env:<NAME>` arm. It was the same env-to-env indirection as the
+        // deleted `urn:zeroship:env:` secret reference, in a second place: an
+        // operator-supplied provider-config STRING naming an environment
+        // variable, so the variable read had no declared identity and the
+        // billing provider could be pointed at any variable in the process. A
+        // handle now names a value the control plane already resolved.
         if let Some(value) = self.values.get(raw) {
             return Ok(SecretString::new(value.clone()));
         }

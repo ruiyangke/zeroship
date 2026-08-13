@@ -631,6 +631,38 @@ fn emit(
         })
         .collect();
 
+    // A secret must never be dereferenced by a dry run, so the resolver needs to
+    // know which run it is in. It reads that from the CHECK_CONFIG carrier on
+    // this same declaration - already merged by clap - rather than from a
+    // parameter a caller could forget to thread. That is why a declaration
+    // carrying a secret is REQUIRED to carry the command control too: a secret
+    // sitting in a struct with no check-config field would resolve for real
+    // during `--check-config`, and nothing at the call site would show it.
+    let secret_resolution = if configs.iter().any(|config| config.class == SupplyClass::Secret) {
+        let Some(check_config) = configs
+            .iter()
+            .find(|config| config.canonical.value() == "check_config")
+            .map(|config| &config.ident)
+        else {
+            return Err(syn::Error::new_spanned(
+                &resolved.ident,
+                "a declaration with a Secret<T> field must also declare \
+                 `#[config(shared = CHECK_CONFIG)]`; without it the generated \
+                 resolver cannot tell a dry run from a real boot and would read \
+                 secret files during --check-config",
+            ));
+        };
+        quote! {
+            let __zeroship_secret_resolution = if sources.#check_config {
+                ::zeroship_core::config::SecretResolution::CheckConfig
+            } else {
+                ::zeroship_core::config::SecretResolution::Boot
+            };
+        }
+    } else {
+        quote!()
+    };
+
     let resolved_fields = configs.iter().map(|config| {
         let ident = &config.ident;
         let canonical = &config.canonical;
@@ -689,6 +721,7 @@ fn emit(
                         #consumer_ident,
                     )?,
                     overlay,
+                    __zeroship_secret_resolution,
                 )?
             },
         }
@@ -732,6 +765,7 @@ fn emit(
                 sources: Self::Sources,
                 overlay: ::std::option::Option<&::zeroship_core::__private::toml::Value>,
             ) -> ::std::result::Result<Self, ::zeroship_core::config::ConfigResolveError> {
+                #secret_resolution
                 ::std::result::Result::Ok(Self {
                     #(#resolved_fields,)*
                 })
@@ -864,11 +898,52 @@ mod tests {
                     pub port: Operational<u16>,
                     #[config(name = "control.database_url")]
                     pub database_url: Secret<DatabaseUrl>,
+                    #[config(shared = CHECK_CONFIG)]
+                    pub check_config: CommandControl<bool>,
                 }
             },
         )
         .expect("sample config expands");
         formatted(expanded)
+    }
+
+    // A secret whose declaration has no check-config control would be resolved
+    // for real by `--check-config`: the resolver would have no way to know it
+    // was a dry run, and the file read would happen anyway.
+    #[test]
+    fn a_secret_cannot_be_declared_without_the_check_config_control() {
+        let error = expand(
+            quote!(binary = "control"),
+            quote! {
+                struct Orphan {
+                    #[config(name = "control.database_url")]
+                    database_url: Secret<String>,
+                }
+            },
+        )
+        .expect_err("a secret with no check-config control must not expand");
+        assert!(
+            error.to_string().contains("must also declare"),
+            "unexpected error: {error}"
+        );
+
+        // The positive control is `sample_expansion`, which differs only by
+        // carrying the CHECK_CONFIG field and does expand.
+    }
+
+    // The dry-run wiring, in the expansion: the mode is taken from the
+    // check-config CARRIER (already clap-merged) and handed to every secret.
+    #[test]
+    fn the_secret_resolver_is_told_which_run_it_is_in() {
+        let output = sample_expansion();
+        let compact = compact(&output);
+        assert!(compact.contains("ifsources.check_config"));
+        assert!(output.contains("SecretResolution::CheckConfig"));
+        assert!(output.contains("SecretResolution::Boot"));
+        assert!(compact.contains("__zeroship_secret_resolution,"));
+
+        // This reads tokens. That a CheckConfig run then opens no file is a
+        // property of `resolve_secret_sources` and is asserted in core.
     }
 
     #[test]

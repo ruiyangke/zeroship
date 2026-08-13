@@ -49,11 +49,21 @@ pub struct FileConfig {
     /// Observability configuration shared by platform binaries.
     #[serde(default)]
     pub observability: ObsSection,
-    /// Secret-reference overlay: optional `urn:`/`arn:` references for each
-    /// platform secret. Every field is reference-only (a literal is rejected at
-    /// resolve); absent fields fall back to CLI/env/default.
-    #[serde(default)]
-    pub secrets: SecretSection,
+    /// Platform-wide admin/control API shared secret.
+    ///
+    /// Secrets sit WITH their siblings now, not in a `[secrets]` table: location
+    /// encodes sharing, so a key at the overlay root is one every consumer
+    /// shares and a key under `[control]` is control's alone. The flat table
+    /// destroyed exactly that distinction. A literal is permitted here, because
+    /// the overlay may itself BE a mounted Kubernetes Secret; the prohibition on
+    /// a plaintext secret applies to a TRACKED file, not to this format.
+    pub control_key: Option<String>,
+    /// Platform-wide shared secret for worker admin endpoints.
+    pub worker_key: Option<String>,
+    /// Dedicated PERMANENT pairwise-salt secret (auth-sdk 6.2). The per-app
+    /// `pws_` identity anchor seed, identical on gateway and control, never
+    /// rotated without a migration.
+    pub pairwise_salt: Option<String>,
     /// Usage-metering stream (Redpanda) configuration shared by the usage
     /// producers (worker + gateway) and the control-plane consumers. Absent
     /// fields fall back to env/default.
@@ -104,6 +114,26 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSection {
+    /// `PostgreSQL` DSN for control-plane data. A DSN grammar admits userinfo,
+    /// so it is secret-classed regardless of whether a given value carries a
+    /// password.
+    pub database_url: Option<String>,
+    /// Master key used for control-plane encrypted env/secrets.
+    pub master_key: Option<String>,
+    /// Comma-separated previous master keys accepted during a key rotation.
+    pub legacy_master_keys: Option<String>,
+    /// Stripe webhook signing secret.
+    pub stripe_webhook_secret: Option<String>,
+    /// Stripe secret API key (`sk_...`) for outbound calls.
+    pub stripe_secret_key: Option<String>,
+    /// Billing-notification SMTP password.
+    pub smtp_password: Option<String>,
+    /// Billing-notification Resend API key.
+    pub resend_api_key: Option<String>,
+    /// PEM/PKCS#8 signing key FILE for PAT issuance. A path, not key material:
+    /// the loader owns the format sniff and the permission check, so making the
+    /// contents an in-memory secret would drop both.
+    pub signing_key_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -156,6 +186,17 @@ pub struct ControlSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GatewaySection {
+    /// `PostgreSQL` DSN for gateway session validation.
+    pub database_url: Option<String>,
+    /// HMAC key for short-lived OIDC stash cookies.
+    pub stash_signing_key: Option<String>,
+    /// Shared platform broker master secret. Must be byte-identical to auth's.
+    pub broker_secret: Option<String>,
+    /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
+    /// See `ControlSection::signing_key_file` for why this stays a path.
+    pub signing_key_file: Option<std::path::PathBuf>,
+    /// PEM/PKCS#8 PREVIOUS signing key FILE for the rotation overlap.
+    pub prev_signing_key_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -181,6 +222,10 @@ pub struct GatewaySection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerSection {
+    /// `PostgreSQL` DSN for worker-side lookups.
+    pub database_url: Option<String>,
+    /// App-runtime KV (Redis) connection URL. May carry credentials.
+    pub kv_url: Option<String>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -206,6 +251,14 @@ pub struct WorkerSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MigratedSection {
+    /// `PostgreSQL` DSN for the migration service.
+    pub database_url: Option<String>,
+    /// Privileged provisioning DSN (CREATEROLE + CREATE on the database).
+    pub provision_database_url: Option<String>,
+    /// Key sealing the managed migration policy profile.
+    pub policy_seal_key: Option<String>,
+    /// PEM/PKCS#8 signing key FILE. See `ControlSection::signing_key_file`.
+    pub signing_key_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -226,6 +279,8 @@ pub struct MigratedSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerSection {
+    /// `PostgreSQL` DSN for the scheduler timer and inflight tables.
+    pub database_url: Option<String>,
     /// Schema holding the scheduler timer and inflight tables.
     pub schema: Option<String>,
     /// Gateway internal base URL the dispatch seam posts to.
@@ -282,6 +337,45 @@ pub struct MeteringSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
+    /// `PostgreSQL` DSN for the auth service.
+    pub database_url: Option<String>,
+    /// HMAC key for short-lived stash cookies.
+    pub stash_signing_key: Option<String>,
+    /// Dedicated pairwise-salt secret for auth-issued subject identifiers.
+    pub pairwise_salt: Option<String>,
+    /// TOTP at-rest encryption key (AES-256-GCM, >=32 decoded bytes).
+    pub totp_enc_key: Option<String>,
+    /// Shared platform broker master secret. Must be byte-identical to the
+    /// gateway's.
+    pub broker_secret: Option<String>,
+    /// PREVIOUS broker master secret, accepted during a broker-secret roll.
+    pub broker_secret_previous: Option<String>,
+    /// Key hashing stored refresh tokens.
+    pub refresh_hash_key: Option<String>,
+    /// Key deriving refresh-rotation idempotency identifiers.
+    pub refresh_idem_key: Option<String>,
+    /// Supabase service-role key used for admin lookups.
+    pub supabase_service_role_key: Option<String>,
+    /// HS256 GoTrue JWT secret. Mutually exclusive with the JWKS URL.
+    pub supabase_jwt_secret: Option<String>,
+    /// GoTrue send-email hook shared secret.
+    pub gotrue_email_hook_secret: Option<String>,
+    /// Google OAuth client secret.
+    pub google_client_secret: Option<String>,
+    /// GitHub OAuth client secret.
+    pub github_client_secret: Option<String>,
+    /// Transactional Resend API key.
+    pub resend_api_key: Option<String>,
+    /// Transactional SMTP password.
+    pub smtp_password: Option<String>,
+    /// Postmark inbound webhook Basic-auth password.
+    pub postmark_webhook_password: Option<String>,
+    /// Relay inbound webhook Basic-auth password.
+    pub relay_inbound_password: Option<String>,
+    /// Relay-forward SMTP password.
+    pub relay_smtp_password: Option<String>,
+    /// PEM/PKCS#8 signing key FILE. See `ControlSection::signing_key_file`.
+    pub signing_key_file: Option<std::path::PathBuf>,
     /// Platform auth provider backend (`native` or `supabase`).
     ///
     /// `provider`, not `auth_provider`: the canonical identity is
@@ -376,68 +470,6 @@ pub struct AuthSection {
     pub cron_tick_secs: Option<u64>,
     /// Audit-retention sweeper tick interval in seconds.
     pub audit_retention_check_secs: Option<u64>,
-}
-
-/// Secret references that can be supplied by the shared file overlay.
-///
-/// Every field is an OPTIONAL secret REFERENCE (`urn:`/`arn:`). Absent => the
-/// secret comes from CLI/env/default. A literal value here is rejected at resolve
-/// by [`crate::config::secrets::obtain_secret`]: the config file must never carry
-/// a plaintext secret.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct SecretSection {
-    /// Bundle/master encryption key reference.
-    pub master_key: Option<String>,
-    /// Control-plane shared secret reference.
-    pub control_key: Option<String>,
-    /// Worker shared secret reference.
-    pub worker_key: Option<String>,
-    /// Stash signing key reference.
-    pub stash_signing_key: Option<String>,
-    /// Dedicated pairwise-salt secret reference (auth-sdk §6.2). The PERMANENT
-    /// per-app `pws_` identity anchor seed — independent of the stash key,
-    /// never rotated without a migration. Must be identical on gateway+control.
-    pub pairwise_salt: Option<String>,
-    /// Gateway OIDC relying-party client secret reference.
-    pub gateway_oidc_secret: Option<String>,
-    /// Stripe webhook signing secret reference.
-    pub stripe_webhook_secret: Option<String>,
-    /// Stripe secret API key (`sk_…`) reference — for OUTBOUND calls (the
-    /// billing reconciler + `billing/setup`).
-    pub stripe_secret_key: Option<String>,
-    /// Primary database URL reference.
-    pub database_url: Option<String>,
-    /// Privileged provisioning database URL reference (control only). The
-    /// CREATEROLE + CREATE-on-db admin role deploy-time migrations use to
-    /// create the per-app schema + `migrator_<app_id>` role — SEPARATE from
-    /// the least-privilege `database_url` (`zeroship_control`), which has
-    /// neither privilege. Resolved into control's `--provision-db`.
-    pub provision_db_url: Option<String>,
-    /// Auth database URL reference.
-    pub auth_db_url: Option<String>,
-    /// App-runtime KV (Redis) connection URL reference. Back-fills the
-    /// worker's `--kv-url` / `ZEROSHIP_KV_URL` when those are empty; powers
-    /// the deployed app `env.kv` namespace. May carry credentials, so it is
-    /// a reference here (never a plaintext URL).
-    pub kv_url: Option<String>,
-    /// Legacy master keys (for key rotation) reference.
-    pub legacy_master_keys: Option<String>,
-    /// Google OAuth client secret reference.
-    pub google_client_secret: Option<String>,
-    /// GitHub OAuth client secret reference.
-    pub github_client_secret: Option<String>,
-    /// SMTP password reference.
-    pub smtp_password: Option<String>,
-    /// Resend API key reference.
-    pub resend_api_key: Option<String>,
-    /// Postmark inbound webhook basic-auth password reference.
-    pub postmark_webhook_password: Option<String>,
-    /// TOTP at-rest encryption key reference (ISS-11). AES-256-GCM key material
-    /// for the auth service's `zeroship.totp_credentials.encrypted_secret`;
-    /// must decode (hex or base64url) to ≥32 bytes. Dedicated key, independent
-    /// of the stash/pairwise secrets.
-    pub totp_enc_key: Option<String>,
 }
 
 /// Observability values that can be supplied by the shared file overlay.
@@ -798,80 +830,68 @@ trusted_oauth_clients = ["a", "b"]
         );
     }
 
-    // [secrets] absent => all-None section (defaults).
+    // The `[secrets]` table itself is GONE, not merely emptied. Secrets now sit
+    // with their siblings, so location encodes sharing; an overlay that still
+    // carries the flat table must be told so at load rather than have its
+    // credentials silently ignored. `deny_unknown_fields` at the ROOT is what
+    // makes that a parse error.
     #[test]
-    fn secrets_section_absent_is_all_none() {
-        let config = FileConfig::load(None).expect("load default config");
-        assert!(config.secrets.master_key.is_none());
-        assert!(config.secrets.database_url.is_none());
-        assert!(config.secrets.resend_api_key.is_none());
+    fn the_deleted_secrets_table_is_rejected_rather_than_ignored() {
+        let file = TempFile::write(
+            "legacy-secrets-table.toml",
+            "[secrets]\nmaster_key = \"literal\"\n",
+        );
+
+        let err = FileConfig::load(Some(&file.path))
+            .expect_err("a [secrets] table must be rejected, not ignored");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+
+        // Does NOT cover a deployment file that still WRITES the table. That is
+        // a tracked-tree search, and Step 6 owns it.
     }
 
-    // [secrets] parses a reference value into the matching field.
+    // A secret at its canonical path, as a LITERAL. Permitted on purpose: the
+    // overlay may itself be a mounted Kubernetes Secret, and forbidding a
+    // literal by file while permitting one by environment had no principled
+    // basis. What is forbidden is a plaintext secret in a TRACKED file.
     #[test]
-    fn secrets_section_parses_reference() {
+    fn a_secret_parses_at_its_canonical_path_beside_its_siblings() {
         let file = TempFile::write(
-            "secrets.toml",
+            "canonical-secrets.toml",
             r#"
-[secrets]
-master_key = "urn:zeroship:vault:secret/x"
-database_url = "urn:zeroship:env:DATABASE_URL"
-stripe_webhook_secret = "arn:aws:secretsmanager:us-east-1:123:secret:whsec"
+control_key = "shared-literal"
+
+[control]
+port = 9090
+database_url = "urn:zeroship:file:/run/secrets/control-dsn"
+master_key = "literal-master"
 "#,
         );
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
+        assert_eq!(config.control_key.as_deref(), Some("shared-literal"));
+        assert_eq!(config.control.port, Some(9090));
         assert_eq!(
-            config.secrets.master_key.as_deref(),
-            Some("urn:zeroship:vault:secret/x")
+            config.control.database_url.as_deref(),
+            Some("urn:zeroship:file:/run/secrets/control-dsn")
         );
-        assert_eq!(
-            config.secrets.database_url.as_deref(),
-            Some("urn:zeroship:env:DATABASE_URL")
-        );
-        assert_eq!(
-            config.secrets.stripe_webhook_secret.as_deref(),
-            Some("arn:aws:secretsmanager:us-east-1:123:secret:whsec")
-        );
-        // Unmentioned fields stay None.
-        assert!(config.secrets.control_key.is_none());
+        assert_eq!(config.control.master_key.as_deref(), Some("literal-master"));
+
+        // Does NOT cover RESOLUTION of either value; this is the parse layer.
+        // Whether the file reference is followed is decided by the mode the
+        // generated resolver runs in.
     }
 
-    // deny_unknown_fields on [secrets]: an unknown key is a parse error, not a
-    // silent ignore.
+    // A typo inside a component table is still a parse error now that secrets
+    // live there: adding leaves must not have widened the schema.
     #[test]
-    fn deny_unknown_fields_in_secrets_section_is_parse_error() {
+    fn a_mistyped_secret_key_inside_a_component_table_is_a_parse_error() {
         let file = TempFile::write(
-            "unknown-secret-key.toml",
-            r#"
-[secrets]
-maser_key = "urn:zeroship:vault:secret/x"
-"#,
+            "mistyped-secret.toml",
+            "[control]\nmaser_key = \"x\"\n",
         );
 
         let err = FileConfig::load(Some(&file.path)).expect_err("unknown key rejected");
-        assert!(matches!(err, ConfigError::Parse { .. }));
-    }
-
-    // Immersive-login pivot guardrail (design §4.5/§9, no-back-compat): the
-    // deleted `auth_internal_key` shared secret. A deployment TOML still
-    // carrying `[secrets].auth_internal_key` must now FAIL to parse via
-    // `deny_unknown_fields` — there is no silent-ignore arm, exactly so a stale
-    // overlay surfaces loudly rather than the operator believing the (gone)
-    // credential oracle is still gated. This test would PASS before the field
-    // removal (the key parsed) and FAILs to compile/parse-reject only after.
-    #[test]
-    fn deny_removed_auth_internal_key_in_secrets_section_is_parse_error() {
-        let file = TempFile::write(
-            "removed-auth-internal-key.toml",
-            r#"
-[secrets]
-auth_internal_key = "urn:zeroship:env:AUTH_INTERNAL_KEY"
-"#,
-        );
-
-        let err = FileConfig::load(Some(&file.path))
-            .expect_err("[secrets].auth_internal_key must be rejected (field deleted)");
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 

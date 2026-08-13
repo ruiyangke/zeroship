@@ -152,16 +152,18 @@ usage_events_topic = "$USAGE_TOPIC"
 TOML
 
 # control with the LAGO provider (forwarder-fed) + the redpanda stream. api_key
-# resolves from LAGO_API_KEY via the env: secret handle. Short recompute interval.
+# carries the api key as a literal in the provider config. The `env:<NAME>`
+# secret handle it used to use is deleted: an operator-supplied config string
+# naming an environment variable is env-to-env indirection with no declared
+# identity. Short recompute interval.
 SIGNING_KEY_FILE="$WORK/sk.pem"
 GATEWAY_SIGNING_KEY_FILE="$SIGNING_KEY_FILE"
 GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
-LAGO_API_KEY="$LAGO_KEY" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
-  --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"env:LAGO_API_KEY\",\"billable_metric_code\":\"requests\"}}" \
+  --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"$LAGO_KEY\",\"billable_metric_code\":\"requests\"}}" \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
