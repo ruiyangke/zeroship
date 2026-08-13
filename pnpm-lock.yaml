@@ -662,6 +662,9 @@ importers:
 
   examples/issue-tracker:
     dependencies:
+      '@tiptap/extensions':
+        specifier: 3.30.0
+        version: 3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)
       '@tiptap/markdown':
         specifier: 3.30.0
         version: 3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)
