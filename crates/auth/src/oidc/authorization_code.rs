@@ -1227,7 +1227,7 @@ pub(crate) fn return_to_after_prompt_interaction(return_to: &str, satisfied: &[&
 
 fn login_redirect(req: &HttpRequest, auth_request: &AuthRequest, cfg: &AuthConfig) -> HttpResponse {
     let location = auth_request
-        .provider_start_location(cfg.google_client_id.is_some(), cfg.github_client_id.is_some())
+        .provider_start_location(cfg.google_client_id().is_some(), cfg.github_client_id().is_some())
         .unwrap_or_else(|| return_to::login_location(&return_to::request_target(req)));
     see_other(&location)
         .header("cache-control", "no-store")

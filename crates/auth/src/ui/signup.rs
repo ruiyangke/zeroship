@@ -245,8 +245,8 @@ pub async fn post(
                         name: Some(user.name.clone()),
                     },
                     Address {
-                        email: cfg.mail_from_email.clone(),
-                        name: Some(cfg.mail_from_name.clone()),
+                        email: cfg.settings.mail_from_email.get().clone(),
+                        name: Some(cfg.settings.mail_from_name.get().clone()),
                     },
                     "Verify your zeroship email".into(),
                     text,

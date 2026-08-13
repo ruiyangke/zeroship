@@ -50,7 +50,7 @@ pub async fn send_email(
     mailer: State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     let Some(secret) = cfg
-        .gotrue_email_hook_secret
+        .secrets.gotrue_email_hook_secret
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -268,8 +268,8 @@ fn build_gotrue_email(
     let action = payload.email_data.email_action_type.trim();
     let name = name_hint(&payload.user);
     let from = Address {
-        email: cfg.mail_from_email.clone(),
-        name: Some(cfg.mail_from_name.clone()),
+        email: cfg.settings.mail_from_email.get().clone(),
+        name: Some(cfg.settings.mail_from_name.get().clone()),
     };
 
     match action {

@@ -83,7 +83,7 @@ pub async fn get(
     query: ntex::web::types::Query<LinkQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let Some(pending) = PendingLink::decode(&query.token, cfg.stash_signing_key.as_bytes()) else {
+    let Some(pending) = PendingLink::decode(&query.token, cfg.secrets.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
     if email_validation::validate_email(&pending.email).is_err() {
@@ -158,7 +158,7 @@ pub async fn post(
     }
 
     // 2. Decode + verify the pending token.
-    let Some(pending) = PendingLink::decode(&form.token, cfg.stash_signing_key.as_bytes()) else {
+    let Some(pending) = PendingLink::decode(&form.token, cfg.secrets.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
     if email_validation::validate_email(&pending.email).is_err() {

@@ -315,8 +315,8 @@ pub async fn start(
                 name: None,
             },
             Address {
-                email: cfg.mail_from_email.clone(),
-                name: Some(cfg.mail_from_name.clone()),
+                email: cfg.settings.mail_from_email.get().clone(),
+                name: Some(cfg.settings.mail_from_name.get().clone()),
             },
             "Sign in to zeroship".into(),
             text,

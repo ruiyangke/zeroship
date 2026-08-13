@@ -76,10 +76,10 @@ const DEBUG: &[&str] = &[
 // the lint is structural, not actionable.
 #[allow(clippy::future_not_send)]
 pub async fn run(cfg: Arc<AuthConfig>) {
-    let interval_secs = cfg.audit_retention_check_secs;
+    let interval_secs = *cfg.settings.audit_retention_check_secs.get();
     tracing::info!(interval_secs, "audit_retention cron starting");
     loop {
-        if let Err(e) = tick(&cfg.db_url).await {
+        if let Err(e) = tick(&cfg.secrets.db_url).await {
             tracing::error!(error = %e, "audit_retention tick failed");
         }
         compio::time::sleep(Duration::from_secs(interval_secs)).await;

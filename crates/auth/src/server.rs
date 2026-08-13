@@ -330,13 +330,13 @@ pub async fn run(
     op_issuer: Arc<oidc::Issuer>,
     refresh_pool: oidc::refresh::RefreshSessionPool,
 ) -> std::io::Result<()> {
-    let addr = cfg.addr.clone();
+    let addr = cfg.settings.addr.get().clone();
     let google_enabled = google_jwks.is_some();
-    let github_enabled = cfg.github_client_id.is_some();
+    let github_enabled = cfg.github_client_id().is_some();
     // Console origin(s) the framed login routes admit via `frame-ancestors`
     // (immersive iframe login, §4.3). Cloned out of the config so the
     // route-aware `SecurityHeaders` middleware can be rebuilt per worker thread.
-    let frame_ancestor_origins = cfg.frame_ancestor_origins.clone();
+    let frame_ancestor_origins = cfg.frame_ancestor_origins().to_vec();
 
     web::server(async move || {
         let mut app = web::App::new()
