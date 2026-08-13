@@ -6,8 +6,9 @@
 //!
 //! Grammar:
 //!
-//! - `s3://bucket/prefix?region=…` → [`S3BlobStore`], credentials resolved
-//!   from the standard AWS environment variables.
+//! - `s3://bucket/prefix?region=…` → [`S3BlobStore`], built from an
+//!   [`S3Runtime`] the CALLING process resolved. This crate reads no
+//!   environment of its own; see [`S3Runtime`] for why.
 //! - any other value → a bare local filesystem path → [`LocalDiskBlobStore`]
 //!   (the dev default, unchanged).
 
@@ -68,37 +69,71 @@ impl StoreUrl {
     }
 }
 
-/// Resolve static S3 credentials from the conventional AWS environment
-/// variables. There is no provider chain and no metadata-service lookup (the
-/// `compio-s3` client is static-credential only).
+/// Everything an S3-backed blob store needs that a process resolves for it.
 ///
-/// # Errors
-/// Returns [`BlobStoreConfigError::Credentials`] if either the access key id
-/// or secret access key is absent/empty.
-pub fn s3_credentials_from_env() -> Result<S3Credentials, BlobStoreConfigError> {
-    let access = std::env::var("AWS_ACCESS_KEY_ID")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            BlobStoreConfigError::Credentials("AWS_ACCESS_KEY_ID is unset".into())
-        })?;
-    let secret = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            BlobStoreConfigError::Credentials("AWS_SECRET_ACCESS_KEY is unset".into())
-        })?;
-    let session = std::env::var("AWS_SESSION_TOKEN").ok().filter(|v| !v.is_empty());
-    Ok(S3Credentials::new(access, secret, session))
+/// This crate used to read `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+/// `AWS_SESSION_TOKEN` and `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` itself. It cannot
+/// any more, and for a STRUCTURAL reason rather than a stylistic one:
+/// `zeroship-core` depends on `zeroship-bundle`, so bundle cannot use the typed
+/// environment keys that make a read enumerable, and a raw read here would be
+/// exactly the invisible read Step 4 of
+/// `docs/proposals/2026-08-11-config-name-alignment.md` removes.
+///
+/// The rule that resolves it is the one Section 4.5 states for publishable
+/// libraries: production library APIs accept resolved options, and platform
+/// processes declare and read any external credentials before injecting them.
+/// Bundle is not in `libs/`, but the dependency direction puts it in the same
+/// position, so it gets the same shape.
+#[derive(Debug, Clone)]
+pub struct S3Runtime {
+    /// Static credentials. There is no provider chain and no metadata-service
+    /// lookup; the `compio-s3` client is static-credential only.
+    pub credentials: S3Credentials,
+    /// In-flight multipart part uploads, already clamped by
+    /// [`crate::limits::resolve_upload_concurrency`].
+    pub upload_concurrency: usize,
 }
 
-/// Build an `Arc<dyn BlobStore>` from a parsed [`StoreUrl`]. S3 stores pull
-/// credentials from the environment via [`s3_credentials_from_env`].
+impl S3Runtime {
+    /// Assemble from values a caller has already read.
+    ///
+    /// # Errors
+    /// Returns [`BlobStoreConfigError::Credentials`] if either the access key
+    /// id or the secret access key is absent or empty. An empty value is
+    /// treated as absent because that is how a Compose file spells "unset".
+    pub fn from_resolved(
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        session_token: Option<String>,
+        upload_concurrency: usize,
+    ) -> Result<Self, BlobStoreConfigError> {
+        let access = access_key_id.filter(|v| !v.is_empty()).ok_or_else(|| {
+            BlobStoreConfigError::Credentials("AWS_ACCESS_KEY_ID is unset".into())
+        })?;
+        let secret = secret_access_key.filter(|v| !v.is_empty()).ok_or_else(|| {
+            BlobStoreConfigError::Credentials("AWS_SECRET_ACCESS_KEY is unset".into())
+        })?;
+        let session = session_token.filter(|v| !v.is_empty());
+        Ok(Self {
+            credentials: S3Credentials::new(access, secret, session),
+            upload_concurrency,
+        })
+    }
+}
+
+/// Build an `Arc<dyn BlobStore>` from a parsed [`StoreUrl`].
+///
+/// `s3` is required for an `s3://` location and ignored for a local one. It is
+/// an `Option` rather than a second function so a caller that does not yet know
+/// which kind of location it has still has one call site.
 ///
 /// # Errors
-/// Propagates credential-resolution and local-store construction failures.
+/// Returns [`BlobStoreConfigError::Credentials`] when an `s3://` location is
+/// built without resolved runtime values, and propagates local-store
+/// construction failures.
 pub fn build_blob_store(
     url: &StoreUrl,
+    s3: Option<&S3Runtime>,
 ) -> Result<Arc<dyn BlobStore>, BlobStoreConfigError> {
     match url {
         StoreUrl::Local(root) => {
@@ -106,16 +141,28 @@ pub fn build_blob_store(
             Ok(Arc::new(store))
         }
         StoreUrl::S3(cfg) => {
-            let creds = s3_credentials_from_env()?;
-            Ok(Arc::new(S3BlobStore::new(cfg.clone(), creds)))
+            let runtime = s3.ok_or_else(|| {
+                BlobStoreConfigError::Credentials(
+                    "an s3:// blob store needs resolved credentials from its caller".into(),
+                )
+            })?;
+            Ok(Arc::new(S3BlobStore::new(
+                cfg.clone(),
+                runtime.credentials.clone(),
+                runtime.upload_concurrency,
+            )))
         }
     }
 }
 
 /// Build the workflow-output blob store from the same parsed location as the
 /// deploy blob store. The store owns a separate `wfblob/` namespace.
+///
+/// # Errors
+/// As [`build_blob_store`].
 pub fn build_workflow_blob_store(
     url: &StoreUrl,
+    s3: Option<&S3Runtime>,
 ) -> Result<Arc<dyn WorkflowBlobStore>, BlobStoreConfigError> {
     match url {
         StoreUrl::Local(root) => {
@@ -123,8 +170,16 @@ pub fn build_workflow_blob_store(
             Ok(Arc::new(store))
         }
         StoreUrl::S3(cfg) => {
-            let creds = s3_credentials_from_env()?;
-            Ok(Arc::new(RemoteWorkflowBlobStore::new(cfg.clone(), creds)))
+            let runtime = s3.ok_or_else(|| {
+                BlobStoreConfigError::Credentials(
+                    "an s3:// workflow blob store needs resolved credentials from its caller"
+                        .into(),
+                )
+            })?;
+            Ok(Arc::new(RemoteWorkflowBlobStore::new(
+                cfg.clone(),
+                runtime.credentials.clone(),
+            )))
         }
     }
 }
@@ -170,7 +225,7 @@ mod tests {
         let mut root = std::env::temp_dir();
         root.push(format!("zsblobcfg-{}", uuid::Uuid::new_v4().simple()));
         let u = StoreUrl::Local(root.clone());
-        let store = build_blob_store(&u).expect("local build");
+        let store = build_blob_store(&u, None).expect("local build");
         assert!(store.local_path(&"a".repeat(64)).is_some());
         assert!(root.join("blobs").exists());
         std::fs::remove_dir_all(&root).ok();
@@ -181,7 +236,7 @@ mod tests {
         let mut root = std::env::temp_dir();
         root.push(format!("zswfblobcfg-{}", uuid::Uuid::new_v4().simple()));
         let u = StoreUrl::Local(root.clone());
-        let _store = build_workflow_blob_store(&u).expect("local workflow build");
+        let _store = build_workflow_blob_store(&u, None).expect("local workflow build");
         assert!(root.join("wfblob").exists());
         assert!(!root.join("blobs").exists());
         std::fs::remove_dir_all(&root).ok();

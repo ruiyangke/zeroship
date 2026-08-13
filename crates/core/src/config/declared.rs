@@ -203,11 +203,131 @@ impl<T, C: ConfigConsumer> DeclaredEnvKey<T, C> {
     }
 }
 
+/// A FAMILY of environment names sharing one literal prefix.
+///
+/// Some names are keyed by data rather than fixed:
+/// `ZEROSHIP_COLUMN_KEY_<KEYID>` names one root key per creator-chosen column
+/// key id, so the set is open and no finite list of literals describes it. The
+/// alternative was a raw read on an assembled string, which is exactly the
+/// invisibility Step 4 removes - and it is worse than it looks, because the
+/// name that never appears as a literal is also the name that never appears in
+/// `docs/reference/env-vars.md`.
+///
+/// A family declares the PREFIX, which is the part an operator reads in a
+/// runbook and an auditor greps for. The suffix is data and is deliberately not
+/// recorded: it is a creator's key id, and putting it in a linked static would
+/// be both impossible (it is not known at compile time) and wrong.
+///
+/// This is the concept the proposal spells `ExternalEnvFamily` in its
+/// source-policy vocabulary.
+#[derive(Debug, Clone, Copy)]
+pub struct DeclaredEnvFamily<T, C> {
+    prefix: &'static str,
+    class: EnvClass,
+    marker: PhantomData<fn() -> (T, C)>,
+}
+
+impl<T, C: ConfigConsumer> DeclaredEnvFamily<T, C> {
+    /// Declare a zeroship-owned family whose members have no declaration yet.
+    #[must_use]
+    pub const fn platform(prefix: &'static str) -> Self {
+        Self {
+            prefix,
+            class: EnvClass::Platform,
+            marker: PhantomData,
+        }
+    }
+
+    /// Declare a family owned by a third party or the surrounding deployment.
+    #[must_use]
+    pub const fn external(prefix: &'static str) -> Self {
+        Self {
+            prefix,
+            class: EnvClass::External,
+            marker: PhantomData,
+        }
+    }
+
+    /// The literal prefix every member shares.
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        self.prefix
+    }
+
+    /// Whose contract this family belongs to.
+    #[must_use]
+    pub const fn class(self) -> EnvClass {
+        self.class
+    }
+
+    /// Consumer metadata carried by the family's marker type.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn consumer(self) -> Consumer {
+        Consumer::new(C::BINARY, C::SCOPE)
+    }
+}
+
+/// Read one member of a declared family.
+///
+/// # Errors
+///
+/// Returns a name-only diagnostic for non-Unicode or unparsable values. The
+/// error names the FULL member, because that is what an operator has to fix.
+#[doc(hidden)]
+pub fn read_declared_env_family_value<T, C>(
+    family: DeclaredEnvFamily<T, C>,
+    suffix: &str,
+    _consumer: super::names::ConsumerToken<C>,
+) -> Result<Option<T>, EnvReadError>
+where
+    T: FromStr,
+    C: ConfigConsumer,
+{
+    let name = format!("{}{suffix}", family.prefix);
+    let Some(value) = super::env::raw_var(&name).map_err(|()| EnvReadError::NotUnicode {
+        name: name.clone(),
+    })?
+    else {
+        return Ok(None);
+    };
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| EnvReadError::InvalidValue { name })
+}
+
+/// Read one member of a declared family and register the family's read site.
+#[macro_export]
+macro_rules! read_declared_env_family {
+    ($family:expr, $suffix:expr, $consumer:expr $(,)?) => {{
+        #[::zeroship_core::__private::linkme::distributed_slice(
+            ::zeroship_core::config::DECLARED_ENV_READS
+        )]
+        #[linkme(crate = ::zeroship_core::__private::linkme)]
+        static __ZEROSHIP_DECLARED_ENV_FAMILY_READ: ::zeroship_core::config::DeclaredEnvRead =
+            ::zeroship_core::config::DeclaredEnvRead::family(
+                ($family).prefix(),
+                ($family).class(),
+                ($family).consumer(),
+                ::core::file!(),
+                ::core::line!(),
+                ::core::column!(),
+            );
+        ::zeroship_core::config::read_declared_env_family_value(
+            $family,
+            $suffix,
+            ::zeroship_core::config::ConsumerToken::new_for(&$consumer),
+        )
+    }};
+}
+
 /// One independently linked read of a declared non-config environment name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclaredEnvRead {
     name: &'static str,
     class: EnvClass,
+    family: bool,
     consumer: Consumer,
     file: &'static str,
     line: u32,
@@ -229,6 +349,7 @@ impl DeclaredEnvRead {
         Self {
             name,
             class,
+            family: false,
             consumer,
             file,
             line,
@@ -236,10 +357,42 @@ impl DeclaredEnvRead {
         }
     }
 
-    /// The literal environment spelling read.
+    /// Construct linked metadata for a family read. Called only by its macro.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn family(
+        prefix: &'static str,
+        class: EnvClass,
+        consumer: Consumer,
+        file: &'static str,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        Self {
+            name: prefix,
+            class,
+            family: true,
+            consumer,
+            file,
+            line,
+            column,
+        }
+    }
+
+    /// The literal environment spelling read, or a family's shared prefix.
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.name
+    }
+
+    /// Whether [`DeclaredEnvRead::name`] is a whole name or a family prefix.
+    ///
+    /// Without this a report cannot tell `ZEROSHIP_COLUMN_KEY_` the variable
+    /// from `ZEROSHIP_COLUMN_KEY_` the prefix, and would document a name no
+    /// operator ever sets.
+    #[must_use]
+    pub const fn is_family(self) -> bool {
+        self.family
     }
 
     /// Stated classification.
@@ -505,6 +658,39 @@ macro_rules! test_env {
 macro_rules! test_env_os {
     ($name:literal $(,)?) => {
         $crate::declared_env_os!(test, $name, $crate::config::TestHarness)
+    };
+}
+
+/// Resolve the S3 blob-store inputs `zeroship-bundle` can no longer read.
+///
+/// `zeroship-core` depends on `zeroship-bundle`, so bundle cannot use the typed
+/// keys in this module; it takes a resolved
+/// [`zeroship_bundle::blob_config::S3Runtime`] instead. That moves four reads
+/// up into whichever server binary builds the store, and this macro is what
+/// stops the same four reads being written out four times. Every one of them
+/// registers against the CALLING binary's consumer, which is the point: the
+/// record now says which process reads `AWS_SECRET_ACCESS_KEY`, where before it
+/// said only that a shared library did.
+///
+/// Expands to `Result<S3Runtime, BlobStoreConfigError>`. Call it only when the
+/// location is actually `s3://`; on a local store the credentials are absent by
+/// design and the error is correct but useless.
+#[macro_export]
+macro_rules! resolve_s3_runtime {
+    ($consumer:path $(,)?) => {
+        ::zeroship_bundle::blob_config::S3Runtime::from_resolved(
+            $crate::declared_env!(external, "AWS_ACCESS_KEY_ID", $consumer),
+            $crate::declared_env!(external, "AWS_SECRET_ACCESS_KEY", $consumer),
+            $crate::declared_env!(external, "AWS_SESSION_TOKEN", $consumer),
+            ::zeroship_bundle::limits::resolve_upload_concurrency(
+                $crate::declared_env!(
+                    platform,
+                    "ZEROSHIP_BLOB_UPLOAD_CONCURRENCY",
+                    $consumer
+                )
+                .as_deref(),
+            ),
+        )
     };
 }
 

@@ -103,7 +103,11 @@ fn s3_url() -> String {
 
 fn s3_store() -> S3BlobStore {
     let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
-    S3BlobStore::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
+    S3BlobStore::new(
+        cfg,
+        S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
+        zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY,
+    )
 }
 
 /// A raw `S3Client` over the same MinIO bucket, for asserting low-level state

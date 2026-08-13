@@ -45,21 +45,28 @@ const PURGE_RETRY_ATTEMPTS: u32 = 4;
 #[derive(Debug, Clone)]
 pub struct S3BlobStore {
     client: S3Client,
+    /// In-flight multipart part uploads. Resolved by the caller; see
+    /// `crate::limits::resolve_upload_concurrency`.
+    upload_concurrency: usize,
 }
 
 impl S3BlobStore {
     /// Build a store from a parsed `S3Config` plus resolved credentials.
     #[must_use]
-    pub fn new(config: S3Config, credentials: S3Credentials) -> Self {
+    pub fn new(config: S3Config, credentials: S3Credentials, upload_concurrency: usize) -> Self {
         Self {
             client: S3Client::new(config, credentials),
+            upload_concurrency,
         }
     }
 
     /// Build from an already-constructed client (tests / shared client).
     #[must_use]
-    pub const fn from_client(client: S3Client) -> Self {
-        Self { client }
+    pub const fn from_client(client: S3Client, upload_concurrency: usize) -> Self {
+        Self {
+            client,
+            upload_concurrency,
+        }
     }
 
     /// Logical key for a content-addressed blob.
@@ -111,7 +118,7 @@ impl S3BlobStore {
         use futures::stream::FuturesUnordered;
         use futures::StreamExt;
 
-        let concurrency = crate::limits::upload_concurrency();
+        let concurrency = self.upload_concurrency;
 
         let mut hasher = sha2::Sha256::new();
         let mut total: u64 = 0;

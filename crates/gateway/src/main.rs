@@ -455,8 +455,14 @@ fn main() -> std::io::Result<()> {
         .block_on(async move {
     let blob_cache_bytes: usize = blob_cache_mem_mb.saturating_mul(1024 * 1024);
     let disk_cache_bytes: u64 = blob_cache_disk_gb.saturating_mul(1024 * 1024 * 1024);
-    let blob_store: Arc<dyn BlobStore> =
-        build_blob_store(&store_url).expect("failed to initialise blob store");
+    // Read here rather than inside `zeroship-bundle`, so the record names the
+    // gateway as the reader. Only a remote store needs credentials.
+    let s3_runtime = store_url.is_remote().then(|| {
+        zeroship_core::resolve_s3_runtime!(zeroship_gateway::config::GateSettingsConsumer)
+            .expect("failed to resolve S3 credentials for the blob store")
+    });
+    let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
+        .expect("failed to initialise blob store");
     let disk_cache = blob_cache::DiskBlobCache::new(
         PathBuf::from(&blob_cache_disk_root),
         disk_cache_bytes,

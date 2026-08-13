@@ -32,18 +32,25 @@ pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
 /// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
 /// `1..=64` (1 reproduces the old strictly-sequential behaviour).
+///
+/// The name is stated here and READ by the platform process that builds the
+/// store; see [`crate::blob_config::S3Runtime`] for why this crate no longer
+/// reads its own configuration.
 pub const UPLOAD_CONCURRENCY_ENV: &str = "ZEROSHIP_BLOB_UPLOAD_CONCURRENCY";
 
-/// Resolve the in-flight multipart part-upload concurrency for the S3 blob
-/// store.
+/// Clamp an already-read override into the in-flight part-upload concurrency.
 ///
-/// Reads the `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` env var (clamped to `1..=64`)
-/// if a valid positive integer, else [`DEFAULT_UPLOAD_CONCURRENCY`].
+/// PURE: it takes the value rather than the name. That is what lets the read
+/// itself live in a process that can register it as a typed key, while the
+/// clamping rule - the part with the measurement behind it - stays here beside
+/// the default it falls back to.
+///
+/// A value that is absent, unparsable, or zero yields
+/// [`DEFAULT_UPLOAD_CONCURRENCY`], exactly as the environment read it replaced
+/// did.
 #[must_use]
-pub fn upload_concurrency() -> usize {
-    std::env::var(UPLOAD_CONCURRENCY_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
+pub fn resolve_upload_concurrency(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .map_or(DEFAULT_UPLOAD_CONCURRENCY, |n| n.clamp(1, 64))
 }

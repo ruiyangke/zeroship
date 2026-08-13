@@ -320,6 +320,18 @@ pub fn resolve_secret(raw: &str) -> Result<String, SecretError> {
     match parse_secret_ref(raw)? {
         SecretRef::Literal(s) => Ok(s.to_owned()),
         SecretRef::Env(name) => {
+            // THE STEP 5 BLOCKER. `name` arrives at RUN TIME inside a
+            // `urn:zeroship:env:<NAME>` reference, so there is no literal for a
+            // declared key to carry and this read stays raw. Step 4 of
+            // `docs/proposals/2026-08-11-config-name-alignment.md` says so
+            // explicitly: "The current dynamic env-reference read in
+            // crates/core/src/config/secrets.rs ... remains a tracked blocker
+            // until Step 5 deletes env-to-env secret references; it is not
+            // allowlisted in the final gate." It is carried instead as the one
+            // entry in `TRACKED_BLOCKERS` in
+            // `crates/core/tests/config_env_access_gate.rs`, whose companion
+            // case fails if this read ever stops existing - so the exemption
+            // cannot outlive the arm it exempts. Do NOT silence the lint here.
             std::env::var(name).map_err(|_| SecretError::EnvUnset(name.to_owned()))
         }
         SecretRef::File(path) => match std::fs::read_to_string(path) {

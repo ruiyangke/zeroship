@@ -7,7 +7,7 @@ mod logs;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
-use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources};
+use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
 use zeroship_core::config::{
     bootstrap_or_exit, CheckConfigReport, CheckValue,
 };
@@ -373,16 +373,22 @@ fn main() -> std::io::Result<()> {
         report.field(
             "usage_stream_configured",
             CheckValue::Flag(
-                std::env::var("REDPANDA_BROKERS")
-                    .ok()
-                    .is_some_and(|s| !s.trim().is_empty()),
+                zeroship_core::declared_env!(
+                    external,
+                    "REDPANDA_BROKERS",
+                    WorkerSettingsConsumer
+                )
+                .is_some_and(|s| !s.trim().is_empty()),
             ),
         );
         report.field(
             "usage_events_topic",
             CheckValue::Plain(
-                std::env::var("USAGE_EVENTS_TOPIC")
-                    .ok()
+                zeroship_core::declared_env!(
+                    external,
+                    "USAGE_EVENTS_TOPIC",
+                    WorkerSettingsConsumer
+                )
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_string()),
             ),
@@ -398,10 +404,17 @@ fn main() -> std::io::Result<()> {
         .block_on(async move {
     init_v8();
 
-    let blob_store: Arc<dyn BlobStore> =
-        build_blob_store(&store_url).expect("failed to initialise blob store");
-    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
-        .expect("failed to initialise workflow blob store");
+    // Read here rather than inside `zeroship-bundle`, so the record names the
+    // worker as the reader. Only a remote store needs credentials.
+    let s3_runtime = store_url.is_remote().then(|| {
+        zeroship_core::resolve_s3_runtime!(zeroship_worker::config::WorkerSettingsConsumer)
+            .expect("failed to resolve S3 credentials for the blob store")
+    });
+    let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
+        .expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
+        build_workflow_blob_store(&store_url, s3_runtime.as_ref())
+            .expect("failed to initialise workflow blob store");
     tracing::info!(
         blob_store_root = %blob_store_root,
         blob_store_remote = blob_store_is_remote,
@@ -491,8 +504,9 @@ fn main() -> std::io::Result<()> {
     // (`record_request`) and the db/kv/storage primitives emit raw usage
     // metrics at their op boundary. The outbox drains the meter every ~10s
     // into `UsageEvent`s and publishes them to the durable stream keyed by app.
-    let worker_base = std::env::var("HOSTNAME")
-        .ok()
+    // Class `external`: `HOSTNAME` is the container runtime's / shell's, and
+    // in a pod it is the pod name. Nothing zeroship sets it.
+    let worker_base = zeroship_core::declared_env!(external, "HOSTNAME", WorkerSettingsConsumer)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());

@@ -19,8 +19,7 @@ pub use blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
 pub use blob_config::{
-    build_blob_store, build_workflow_blob_store, s3_credentials_from_env, BlobStoreConfigError,
-    StoreUrl,
+    build_blob_store, build_workflow_blob_store, BlobStoreConfigError, S3Runtime, StoreUrl,
 };
 pub use s3_blob::{S3BlobStore, PART_SIZE};
 pub use limits::{
