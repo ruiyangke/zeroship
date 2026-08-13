@@ -34,7 +34,7 @@ pub fn load_from_path(path: &Path) -> Result<SigningKey> {
     let bytes = std::fs::read(path).map_err(|e| {
         GatewayError::Config(format!("read signing key {}: {e}", path.display()))
     })?;
-    reject_insecure_permissions(path)?;
+    reject_insecure_permissions(path, "signing key")?;
 
     // PEM is ASCII; DER is binary. The `-----BEGIN PRIVATE KEY-----`
     // armor is unambiguous, so a successful UTF-8 decode + that header
@@ -50,13 +50,40 @@ pub fn load_from_path(path: &Path) -> Result<SigningKey> {
     parse_pkcs8_der(&bytes)
 }
 
+/// Load the platform broker master secret as RAW BYTES.
+///
+/// Deliberately `std::fs::read`, not `read_to_string`, and deliberately no
+/// trailing-newline strip: auth's `load_broker_master_secret` reads the same
+/// file the same way, and the two services derive per-client `oac_` secrets
+/// from the bytes they got. Any transformation applied on one side and not the
+/// other makes brokered login fail at request time with two correct-looking
+/// configurations.
+///
+/// # Errors
+///
+/// [`GatewayError::Config`] when the file cannot be read or is empty, and
+/// [`GatewayError::InsecurePermissions`] when it is group/world readable.
+pub fn load_broker_master_secret(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        GatewayError::Config(format!("read broker master secret {}: {e}", path.display()))
+    })?;
+    reject_insecure_permissions(path, "broker master secret")?;
+    if bytes.is_empty() {
+        return Err(GatewayError::Config(format!(
+            "broker master secret {} is empty",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 #[cfg(unix)]
-fn reject_insecure_permissions(path: &Path) -> Result<()> {
+fn reject_insecure_permissions(path: &Path, label: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let mode = path
         .metadata()
-        .map_err(|e| GatewayError::Config(format!("stat signing key {}: {e}", path.display())))?
+        .map_err(|e| GatewayError::Config(format!("stat {label} {}: {e}", path.display())))?
         .permissions()
         .mode();
     if mode & 0o077 != 0 {
@@ -69,7 +96,7 @@ fn reject_insecure_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn reject_insecure_permissions(_path: &Path) -> Result<()> {
+fn reject_insecure_permissions(_path: &Path, _label: &str) -> Result<()> {
     Ok(())
 }
 
@@ -248,5 +275,75 @@ mod tests {
 
         let loaded = load_from_path(&path).expect("secure permissions should load");
         assert_eq!(loaded.to_bytes(), key.to_bytes());
+    }
+
+    // --- broker master secret: the gateway and the OP must see the SAME BYTES -
+    //
+    // auth's `load_broker_master_secret` is `std::fs::read`, and both services
+    // derive per-client `oac_` secrets from what they read. These two cases are
+    // the shapes the operator-facing recipes actually produce, and BOTH of them
+    // came out different on the two sides while this setting was resolved as a
+    // `Secret<String>` (`read_to_string` + one trailing-newline strip):
+    // `openssl rand -base64 48 > f` lost its newline here and kept it there,
+    // and `head -c 32 /dev/urandom > f` is not UTF-8 and failed here outright.
+    // A wrong-but-strong secret produces a boot that succeeds and a brokered
+    // login that 401s, which is why this is asserted on the bytes rather than
+    // on the boot.
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_secret_keeps_a_trailing_newline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broker-newline");
+        let material = b"gateway-broker-secret-test-master-32-bytes\n";
+        std::fs::write(&path, material).expect("write");
+        set_mode(&path, 0o600);
+
+        let loaded = load_broker_master_secret(&path).expect("owner-only file loads");
+        assert_eq!(loaded, material.to_vec(), "raw bytes, nothing stripped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_secret_accepts_non_utf8_material() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broker-random");
+        // 32 bytes that are deliberately not valid UTF-8: a lone continuation
+        // byte cannot start a sequence. This is what `head -c 32 /dev/urandom`
+        // produces roughly every time.
+        let mut material = vec![0x80u8; 32];
+        material[7] = 0xff;
+        std::fs::write(&path, &material).expect("write");
+        set_mode(&path, 0o600);
+
+        let loaded = load_broker_master_secret(&path).expect("binary material loads");
+        assert_eq!(loaded, material);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_secret_rejects_group_readable_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broker-insecure");
+        std::fs::write(&path, b"gateway-broker-secret-test-master-32-bytes").expect("write");
+        set_mode(&path, 0o644);
+
+        let err = load_broker_master_secret(&path).expect_err("group-readable must be refused");
+        assert!(
+            matches!(err, GatewayError::InsecurePermissions { mode, .. } if mode & 0o077 != 0),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_secret_rejects_empty_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broker-empty");
+        std::fs::write(&path, b"").expect("write");
+        set_mode(&path, 0o600);
+
+        let err = load_broker_master_secret(&path).expect_err("an empty file is not a secret");
+        assert!(matches!(err, GatewayError::Config(ref m) if m.contains("empty")), "got: {err:?}");
     }
 }

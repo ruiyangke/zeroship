@@ -28,9 +28,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// Operator-facing spelling of the worker dispatch key.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
-/// Operator-facing spelling of the platform broker master secret. Substituted
-/// into the shared validator's message, which names auth's spelling.
-const BROKER_SECRET_LABEL: &str = "ZEROSHIP_GATEWAY_BROKER_SECRET / --broker-secret-file";
+/// Operator-facing spelling of the platform broker master secret file.
+/// Substituted into the shared validator's message, which names auth's.
+const BROKER_SECRET_LABEL: &str =
+    "ZEROSHIP_GATEWAY_BROKER_SECRET_FILE / --broker-secret-file";
 
 /// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
 /// vector, trimming whitespace and dropping empty entries. Parsed ONCE so
@@ -64,20 +65,6 @@ fn validate_gateway_secrets(settings: &GateSettings) -> Result<(), (&'static str
         require_nonempty(CONTROL_KEY_LABEL, value)
     })
     .map_err(|message| ("gateway: refusing to start without control key", message))?;
-
-    // The broker master secret. Validated through the same constructor the boot
-    // path builds with, so "it passed the guard" and "it can be constructed"
-    // cannot come apart. The shared validator names auth's spelling of the
-    // setting, which is the wrong half of the pair to hand a gateway operator.
-    validate_secret_material(&settings.broker_secret, |material| {
-        oidc_rp::BrokerSecret::from_bytes(material.as_bytes().to_vec()).map(|_| ())
-    })
-    .map_err(|message| {
-        (
-            "gateway: refusing to start with unsafe broker master secret",
-            message.replace("AUTH_BROKER_SECRET_FILE", BROKER_SECRET_LABEL),
-        )
-    })?;
 
     validate_secret_material(&settings.stash_signing_key, validate_stash_key).map_err(|message| {
         (
@@ -160,9 +147,10 @@ fn main() -> std::io::Result<()> {
     let pg_dsn = settings.database_url.expose_str().to_owned();
     let stash_signing_key = settings.stash_signing_key.expose_str().to_owned();
     let pairwise_salt_secret = settings.pairwise_salt.expose_str().to_owned();
-    let broker_secret_material = settings.broker_secret.expose_str().to_owned();
     // File-PATH settings (they name a file to read), NOT secret values: the
-    // loader below owns the PEM-versus-DER sniff and the permission check.
+    // loaders below own the PEM-versus-DER sniff, the raw-byte read and the
+    // permission check.
+    let broker_secret_path = settings.broker_secret_file.get().clone();
     let signing_key_path = settings.signing_key_file.get().clone();
     let prev_signing_key_path = settings.prev_signing_key_file.get().clone();
     let public_url = settings.public_url.get().clone();
@@ -300,7 +288,7 @@ fn main() -> std::io::Result<()> {
         );
         report.field(
             "gateway_broker_secret_configured",
-            CheckValue::Secret(settings.broker_secret.is_configured()),
+            CheckValue::Secret(!broker_secret_path.as_os_str().is_empty()),
         );
         report.field(
             "pairwise_salt_configured",
@@ -411,13 +399,24 @@ fn main() -> std::io::Result<()> {
     // Domain-separated from `anchor_enc_key` by the helper's distinct prefix.
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
 
-    // Built HERE, not before the `--check-config` return, because a dry run
-    // deliberately leaves a file-sourced secret unread and would have nothing to
-    // construct from. `validate_gateway_secrets` already ran this exact
-    // constructor over the same material, so the only way to reach the panic is
-    // for the two to disagree - which is what naming one authority prevents.
-    let broker_secret = oidc_rp::BrokerSecret::from_bytes(broker_secret_material.into_bytes())
-        .expect("gateway: broker master secret passed its boot guard");
+    // Read HERE, not before the `--check-config` return, because a dry run must
+    // not open the file. RAW BYTES, and auth's `load_broker_master_secret`
+    // reads the same file the same way: the per-client `oac_` derivation on the
+    // two sides has to see identical input.
+    let broker_bytes = signing::load_broker_master_secret(&broker_secret_path).unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            "gateway: refusing to start without a readable {BROKER_SECRET_LABEL}"
+        );
+        std::process::exit(1);
+    });
+    let broker_secret = oidc_rp::BrokerSecret::from_bytes(broker_bytes).unwrap_or_else(|message| {
+        tracing::error!(
+            error = %message.replace("AUTH_BROKER_SECRET_FILE", BROKER_SECRET_LABEL),
+            "gateway: refusing to start with unsafe broker master secret"
+        );
+        std::process::exit(1);
+    });
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
@@ -1031,7 +1030,6 @@ mod tests {
             "database-url",
             "stash-signing-key",
             "pairwise-salt",
-            "broker-secret",
         ] {
             assert!(
                 longs.iter().any(|long| long == &format!("{secret}-file")),
@@ -1050,10 +1048,37 @@ mod tests {
                 "--{deleted} must be gone, not aliased: {longs:?}"
             );
         }
-        // The one-variable control: the two key-FILE settings stay operational
-        // path flags, because their loader owns the permission check.
-        assert!(longs.iter().any(|long| long == "signing-key-file"));
-        assert!(longs.iter().any(|long| long == "prev-signing-key-file"));
+        // The one-variable control: the key-FILE settings stay operational path
+        // flags, because their loader owns the permission check and the raw
+        // byte read. They are spelled the same way a secret's path flag is, so
+        // the assertion that distinguishes them is the ENV binding below, not
+        // the flag name.
+        for path_setting in [
+            "signing-key-file",
+            "prev-signing-key-file",
+            "broker-secret-file",
+        ] {
+            assert!(
+                longs.iter().any(|long| long == path_setting),
+                "--{path_setting} must exist: {longs:?}"
+            );
+        }
+        // ...and an operational path DOES carry a canonical env binding, which
+        // is exactly what a secret's carrier never has. This is what would have
+        // caught `gateway.broker_secret` being declared `Secret<String>` while
+        // auth's twin stayed a path: the pair then had two shapes, two supply
+        // sets, and a silent newline/UTF-8 disagreement about the same bytes.
+        let broker_env = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("broker-secret-file"))
+            .and_then(clap::Arg::get_env)
+            .map(std::ffi::OsStr::to_string_lossy)
+            .map(std::borrow::Cow::into_owned);
+        assert_eq!(
+            broker_env.as_deref(),
+            Some("ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"),
+            "the broker master secret is a PATH setting and must bind its canonical env name"
+        );
 
         // Does NOT cover clap's env bindings; those are asserted for the
         // operational settings in the worker's config tests and, for secrets,
