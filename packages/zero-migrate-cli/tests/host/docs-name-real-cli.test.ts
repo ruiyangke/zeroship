@@ -41,12 +41,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
+const REPO_ROOT = resolve(HERE, "../../../..");
 const DOCS = resolve(HERE, "../../../../docs");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
@@ -79,14 +80,30 @@ const FOREIGN_FLAGS: Readonly<Record<string, string>> = {
  * flags (`--workspace`, `--all-targets`, `--no-default-features` …) and no
  * zero-migrate ones, so adding it would mean eight `FOREIGN_FLAGS` entries for
  * another tool's build invocations — noise that dilutes the allowlist without
- * checking a single claim about this CLI. */
+ * checking a single claim about this CLI.
+ *
+ * `crates/zero-migrate-node/README.md` was missing from this list until it was
+ * checked directly. It carries no flags today, so nothing was wrong — but it is a
+ * shipped README, and its absence was an accident of which paths someone happened
+ * to type, not a decision like the CONTRIBUTING one above. */
 const EXTRA_DOCS = [
   resolve(HERE, "../../../../README.md"),
   resolve(HERE, "../../README.md"),
   resolve(HERE, "../../../zero-migrate/README.md"),
+  resolve(HERE, "../../../../crates/zero-migrate-node/README.md"),
 ];
 
-/** `review-log.md` is a historical record, not instructions to follow. */
+/**
+ * `review-log.md` is a historical record, not instructions to follow.
+ *
+ * `docs/proposals/` is EXCLUDED ON PURPOSE, and the exclusion must stay. This
+ * scan asserts that every flag a document names exists in the real CLI; a
+ * proposal's whole job is to describe an interface that does NOT exist yet, so
+ * scanning it would turn "we are considering `--sql`" into a test failure. That
+ * directory is currently out of scope only because `readdirSync` does not recurse
+ * - which is the right outcome reached by accident, so it is written down here.
+ * If this is ever made recursive, skip `proposals/` explicitly.
+ */
 function docFiles(): string[] {
   return readdirSync(DOCS)
     .filter((name) => name.endsWith(".md") && name !== "review-log.md")
@@ -119,7 +136,9 @@ test("every flag the docs name is a real flag, or is another tool's", () => {
   for (const [flag, file] of named) {
     if (flag in FOREIGN_FLAGS) continue;
     const known = VERBS.some((verb) => !/unknown flag/.test(run([verb, flag, "x"])));
-    if (!known) missing.push(`${flag} (named in ${file.split("/").pop()})`);
+    // Repo-relative, not the basename: four different `README.md` files are in
+    // scope now, so a bare basename cannot tell you which one to open.
+    if (!known) missing.push(`${flag} (named in ${relative(REPO_ROOT, file)})`);
   }
   assert.deepEqual(
     missing,
