@@ -545,3 +545,194 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         .expect("drop the test schemas");
     work.expect("drop owned by against live PostgreSQL");
 }
+
+/// `dropRole` against a live server: the ordinary case, the refusal, and the
+/// `ifExists` no-op.
+///
+/// Like `dropOwnedBy`, this op existed only in the offline envelope,
+/// support-matrix and faithfulness tests. Nothing applied it.
+///
+/// The refusal arm is the one worth having. PostgreSQL will not drop a role that
+/// still owns objects, and F470 already established that a raw catalog error
+/// reaching an operator is a filed defect when the message says nothing useful
+/// (`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`).
+/// So this measures WHAT the operator is told, not merely that the drop failed:
+/// the message has to name the role, or an on-call engineer has a failing deploy
+/// and no subject.
+///
+/// It also asserts the role and its table BOTH survive the refusal. A drop that
+/// failed partway - role gone, objects orphaned to a missing owner - would be far
+/// worse than the refusal, and asserting only the error would not notice.
+///
+/// The `ifExists` arm is the liveness half: re-running a settled migration must
+/// not fail because the role it dropped is already gone.
+#[compio::test]
+async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token("schema");
+    let plain_role = token("plain").to_lowercase();
+    let owning_role = token("owning").to_lowercase();
+    let policy = charter(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
+    let _guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!(
+            "CREATE SCHEMA {}",
+            quote_ident(&cfg.project_schema)
+        ))
+        .await
+        .expect("create the project schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure journal: {error}"))?;
+
+        let project = quote_ident(&cfg.project_schema);
+        session
+            .batch(&format!(
+                "CREATE ROLE {plain} NOLOGIN; \
+                 CREATE ROLE {owning} NOLOGIN; \
+                 CREATE TABLE {project}.owning_rows (id bigint PRIMARY KEY); \
+                 ALTER TABLE {project}.owning_rows OWNER TO {owning}",
+                plain = quote_ident(&plain_role),
+                owning = quote_ident(&owning_role),
+            ))
+            .await
+            .map_err(|error| format!("seed the roles: {error}"))?;
+
+        let apply_ops = |case: &str, ops: serde_json::Value| {
+            let case = case.to_string();
+            let policy = policy.clone();
+            let cfg = cfg.clone();
+            let backend = &backend;
+            async move {
+                let doc = serde_json::json!({
+                    "ir_version": 1,
+                    "name": case,
+                    "owner_app": OWNER,
+                    "ops": ops
+                })
+                .to_string();
+                let author =
+                    IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+                let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
+                    .map_err(|error| format!("fold base: {error}"))?;
+                let live = LiveSchema::from_catalog_snapshot(base, OWNER);
+                let artifact = author
+                    .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
+                    .map_err(|error| format!("lower: {error}"))?;
+                MigrationEngine::new()
+                    .apply_plan(
+                        &artifact.plan.steps,
+                        Approval::Approved,
+                        backend,
+                        &cfg,
+                        OWNER,
+                        LockMode::Acquire,
+                    )
+                    .await
+                    .map_err(|error| format!("{error}"))
+            }
+        };
+
+        let role_exists = |name: String| {
+            let session = &session;
+            async move {
+                let row = session
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1) AS present",
+                        &[name.as_str().into()],
+                    )
+                    .await
+                    .expect("probe pg_roles");
+                row.try_get::<_, bool>("present").expect("decode present")
+            }
+        };
+
+        // 1. The ordinary case: a role owning nothing drops.
+        apply_ops(
+            "drop_plain",
+            serde_json::json!([{ "op": "dropRole", "name": plain_role }]),
+        )
+        .await
+        .map_err(|error| format!("dropping an unowned role must succeed: {error}"))?;
+        if role_exists(plain_role.clone()).await {
+            return Err("the unowned role must be gone".to_string());
+        }
+
+        // 2. The refusal: PostgreSQL will not drop a role that still owns objects.
+        //    What matters is that the operator is told WHICH role.
+        let refusal = apply_ops(
+            "drop_owning",
+            serde_json::json!([{ "op": "dropRole", "name": owning_role }]),
+        )
+        .await
+        .expect_err("dropping a role that owns objects must fail");
+        if !refusal.contains(&owning_role) {
+            return Err(format!(
+                "the failure must name the role an operator has to act on, got: {refusal}"
+            ));
+        }
+        // Nothing half-done: the role and the table it owns both survive.
+        if !role_exists(owning_role.clone()).await {
+            return Err("the refused drop must leave the role in place".to_string());
+        }
+        let table_there: bool = session
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = $1 AND c.relname = 'owning_rows'
+                 ) AS present",
+                &[(&cfg.project_schema).into()],
+            )
+            .await
+            .map_err(|error| format!("probe the owned table: {error}"))?
+            .try_get::<_, bool>("present")
+            .map_err(|error| format!("decode present: {error}"))?;
+        if !table_there {
+            return Err("the refused drop must leave the owned table in place".to_string());
+        }
+
+        // 3. Liveness: a settled migration re-supplied must not fail because the
+        //    role it dropped is already gone.
+        apply_ops(
+            "drop_absent",
+            serde_json::json!([{ "op": "dropRole", "name": plain_role, "ifExists": true }]),
+        )
+        .await
+        .map_err(|error| format!("ifExists on an absent role must be a no-op: {error}"))?;
+        Ok(())
+    }
+    .await;
+
+    let _ = session
+        .batch(&format!(
+            "DROP OWNED BY {} CASCADE",
+            quote_ident(&owning_role)
+        ))
+        .await;
+    let _ = session
+        .batch(&format!(
+            "DROP ROLE IF EXISTS {}; DROP ROLE IF EXISTS {}",
+            quote_ident(&plain_role),
+            quote_ident(&owning_role)
+        ))
+        .await;
+    session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&cfg.project_schema),
+            quote_ident(&cfg.pg.meta_schema)
+        ))
+        .await
+        .expect("drop the test schemas");
+    work.expect("drop role against live PostgreSQL");
+}
