@@ -132,7 +132,7 @@ impl Fixture {
             zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
                 .expect("workflow blob store"),
         );
-        let auth_provider = Arc::new(AuthProvider::Supabase(SupabaseProvider::new(
+        let auth_provider = Arc::new(AuthProvider::supabase(SupabaseProvider::new(
             SupabaseConfig::new(
                 SUPABASE_URL,
                 SUPABASE_ANON_KEY,

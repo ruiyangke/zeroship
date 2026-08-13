@@ -6,8 +6,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::auth_provider::{
-    AuthProvider, DualIssuerProvider, LegacyAuthProvider, PlatformConfig, PlatformProvider,
-    SupabaseConfig, SupabaseProvider,
+    AuthProvider, ConfiguredProvider, PlatformConfig, PlatformProvider, SupabaseConfig,
+    SupabaseProvider,
 };
 use zeroship_core::config::{
     bootstrap_or_exit, validate_master_key_material, AuthProviderKind, CheckConfigReport,
@@ -247,7 +247,7 @@ fn build_control_auth_provider(
     match auth_provider {
         AuthProviderKind::Native => {
             let platform_config = platform_config_required(platform)?;
-            Ok(Arc::new(AuthProvider::Platform(PlatformProvider::new(
+            Ok(Arc::new(AuthProvider::platform(PlatformProvider::new(
                 platform_config,
             ))))
         }
@@ -265,14 +265,19 @@ fn build_control_auth_provider(
                 supabase.jwt_issuer,
             )
             .map_err(|err| format!("supabase auth provider config: {err}"))?;
-            let legacy = LegacyAuthProvider::Supabase(SupabaseProvider::new(config));
-            let Some(platform_config) = platform_config(platform)? else {
-                return Ok(Arc::new(AuthProvider::from(legacy)));
-            };
-            Ok(Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
-                PlatformProvider::new(platform_config),
-                legacy,
-            ))))
+            // The trusted SET is DERIVED, not configured: the platform OP joins
+            // it whenever an issuer for it exists. That is one setting deciding
+            // what auth SERVES and a second deciding whether the platform OP is
+            // also reachable - never a third provider value meaning "both".
+            let mut providers = vec![ConfiguredProvider::Supabase(SupabaseProvider::new(config))];
+            if let Some(platform_config) = platform_config(platform)? {
+                providers.push(ConfiguredProvider::Platform(PlatformProvider::new(
+                    platform_config,
+                )));
+            }
+            AuthProvider::new(providers)
+                .map(Arc::new)
+                .map_err(|err| format!("auth provider set: {err}"))
         }
     }
 }
@@ -1573,7 +1578,12 @@ mod tests {
             },
         )
         .expect("valid HS256 supabase provider");
-        assert_eq!(provider.issuer(), "https://project.supabase.co/auth/v1");
+        assert_eq!(
+            provider.issuers().collect::<Vec<_>>(),
+            vec!["https://project.supabase.co/auth/v1"],
+            "with no platform issuer configured the trusted set is Supabase alone"
+        );
+        assert_eq!(provider.platform_issuer(), None);
 
         let provider = build_control_auth_provider(
             AuthProviderKind::Supabase,
@@ -1590,11 +1600,23 @@ mod tests {
                 jwks_url: "",
             },
         )
-        .expect("valid dual-issuer provider");
+        .expect("valid two-provider set");
         assert_eq!(
-            provider.issuer(),
-            "https://project.supabase.co/auth/v1",
-            "dual issuer reports the legacy issuer for Supabase device-flow helpers"
+            provider.issuers().collect::<Vec<_>>(),
+            vec![
+                "https://project.supabase.co/auth/v1",
+                "https://auth.zeroship.test"
+            ],
+            "a configured platform issuer JOINS the trusted set; it is not a third provider value"
+        );
+        assert_eq!(
+            provider.supabase_issuer(),
+            Some("https://project.supabase.co/auth/v1"),
+            "the Supabase device-flow helpers still find their issuer by name"
+        );
+        assert_eq!(
+            provider.platform_issuer(),
+            Some("https://auth.zeroship.test")
         );
     }
 
@@ -1758,7 +1780,11 @@ mod tests {
             },
         )
         .expect("valid platform provider");
-        assert_eq!(provider.issuer(), "https://auth.zeroship.test/oauth2");
+        assert_eq!(
+            provider.issuers().collect::<Vec<_>>(),
+            vec!["https://auth.zeroship.test/oauth2"]
+        );
+        assert_eq!(provider.supabase_issuer(), None);
     }
 
     #[test]

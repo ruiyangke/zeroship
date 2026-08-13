@@ -506,7 +506,7 @@ async fn issue_pat_for_policy(
 }
 
 fn real_authenticator(conn: Client, issuer: Arc<PatIssuer>) -> ControlPlaneAuthenticator {
-    let auth_provider = Arc::new(zeroship_core::auth_provider::AuthProvider::Platform(
+    let auth_provider = Arc::new(zeroship_core::auth_provider::AuthProvider::platform(
         zeroship_core::auth_provider::PlatformProvider::new(
             zeroship_core::auth_provider::PlatformConfig::new(
                 "http://127.0.0.1:1/oauth2",

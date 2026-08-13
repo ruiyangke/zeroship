@@ -77,7 +77,7 @@ pub fn platform_auth_provider(
 ) -> Arc<zeroship_core::auth_provider::AuthProvider> {
     let config = zeroship_core::auth_provider::PlatformConfig::new(issuer, jwks_url)
         .expect("valid platform auth provider config");
-    Arc::new(zeroship_core::auth_provider::AuthProvider::Platform(
+    Arc::new(zeroship_core::auth_provider::AuthProvider::platform(
         zeroship_core::auth_provider::PlatformProvider::new(config),
     ))
 }

@@ -223,7 +223,7 @@ fn build_auth_provider(
     };
     let config = PlatformConfig::new(platform_issuer.to_string(), jwks_url)
         .map_err(|err| format!("invalid platform auth provider config: {err}"))?;
-    Ok(AuthProvider::Platform(PlatformProvider::new(config)))
+    Ok(AuthProvider::platform(PlatformProvider::new(config)))
 }
 
 fn build_pat_issuer(signing_key_file: &str) -> Result<zeroship_authn::PatIssuer, String> {
