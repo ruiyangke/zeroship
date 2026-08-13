@@ -6,6 +6,7 @@ use zeroship_bundle::{BlobStore, Manifest};
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
+use crate::health::WorkerReadiness;
 use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -104,9 +105,10 @@ pub fn start_version_poller(
     config: Arc<WorkerConfig>,
     shared: SharedVersions,
     envs: SharedEnvs,
+    readiness: Arc<WorkerReadiness>,
 ) {
     compio::runtime::spawn(async move {
-        version_poll_loop(config, shared, envs).await;
+        version_poll_loop(config, shared, envs, readiness).await;
     })
     .detach();
 }
@@ -127,6 +129,7 @@ async fn version_poll_loop(
     config: Arc<WorkerConfig>,
     shared: SharedVersions,
     envs: SharedEnvs,
+    readiness: Arc<WorkerReadiness>,
 ) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let mut pending_cdc_deprovision = std::collections::HashSet::new();
@@ -188,6 +191,11 @@ async fn version_poll_loop(
                 if let Ok(mut guard) = shared.write() {
                     *guard = Some(versions);
                 }
+                // Stamped ONLY here: the control plane answered and its body
+                // parsed. The `Err` arm below leaves the stamp alone, so a
+                // control-plane outage ages this worker out of `/readyz`
+                // within the staleness budget.
+                readiness.control.mark_success();
             }
             Err(e) => tracing::error!(error = %e, "worker-sync: poll error"),
         }

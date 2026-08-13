@@ -1,4 +1,5 @@
 mod handler;
+mod health;
 mod sync;
 mod cache;
 mod metrics;
@@ -494,7 +495,16 @@ fn main() -> std::io::Result<()> {
     // threads so the shared map is already being populated when they come up.
     // Poller also GCs SharedEnvs against the current known-app set, so
     // env entries for deleted apps don't leak forever.
-    sync::start_version_poller(config.clone(), shared_versions.clone(), shared_envs.clone());
+    // ONE readiness state for the whole process: the poller below stamps it on
+    // every successful control poll, and every ntex worker thread's `/readyz`
+    // reads that same stamp plus the same blob-store gate.
+    let readiness = Arc::new(health::WorkerReadiness::new());
+    sync::start_version_poller(
+        config.clone(),
+        shared_versions.clone(),
+        shared_envs.clone(),
+        readiness.clone(),
+    );
 
     // ── Metering infrastructure ──────────────────────────────────────────
     // ONE process-wide meter, shared with every ntex worker thread's
@@ -607,12 +617,11 @@ fn main() -> std::io::Result<()> {
             .state(config)
             .state(envs)
             .state(logs)
+            .state(readiness.clone())
             .configure(handler::configure)
+            .configure(health::configure)
             .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
-            .service(web::resource("/health").route(web::get().to(|| async {
-                web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
-            })))
-            // Prometheus-text metrics. No auth — same policy as `/health`,
+            // Prometheus-text metrics. No auth — same policy as `/healthz`,
             // intended for intra-cluster scrapers. Expose behind a side-car
             // or ingress filter if the worker port is ever reachable from
             // outside the cluster.
