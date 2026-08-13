@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use zeroship_core::config::ConfigSpec;
+
 use zeroship_config_contract::audit::{compare, from_inventory, from_specs};
 use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::docs;
@@ -14,7 +16,7 @@ use zeroship_config_contract::registry::{platform_read_sites, platform_specs, DE
 
 const USAGE: &str = "usage: zeroship-config-contract \
 [check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR] \
-| raw-env [--root DIR] | audit [--root DIR] | env-vars-doc [--root DIR] [--check]]";
+| raw-env [--root DIR] | audit [--root DIR] | contract | env-vars-doc [--root DIR] [--check]]";
 
 /// The generated half of the environment reference.
 const ENV_VARS_DOC: &str = "docs/reference/env-vars.md";
@@ -26,6 +28,7 @@ fn main() {
         Some("inventory") => inventory(&args[1..]),
         Some("raw-env") => raw_env(&args[1..]),
         Some("audit") => audit(&args[1..]),
+        Some("contract") => contract(&args[1..]),
         Some("env-vars-doc") => env_vars_doc(&args[1..]),
         Some(other) => {
             eprintln!("{USAGE}; got {other:?}");
@@ -60,6 +63,61 @@ fn parse_root_and_check(args: &[String], allow_check: bool) -> (PathBuf, bool) {
         }
     }
     (root, check)
+}
+
+/// Require every declared overlay path to be a leaf the TOML schema accepts.
+///
+/// `FileConfig` is `deny_unknown_fields`, so a canonical overlay path with no
+/// matching field is not merely undocumented - the whole file fails to load and
+/// the tier the contract advertises cannot be used at all. Nothing compared the
+/// two until 2026-08-13, when this found `gateway.broker_secret_file`: the
+/// gateway declared it, the schema instead carried a `broker_secret` string
+/// nothing read, and the shipped example overlay could not be written to use
+/// either one.
+fn check_overlay_schema(specs: &[ConfigSpec], overlay: &OverlayLeaves) -> usize {
+    let known = overlay.paths().iter().map(String::as_str).collect::<BTreeSet<&str>>();
+    let mut missing = 0usize;
+    let mut checked = 0usize;
+    for spec in specs {
+        let Some(path) = spec.toml_path() else {
+            continue;
+        };
+        checked += 1;
+        if !known.contains(path) {
+            eprintln!(
+                "config audit: {path} is a declared overlay path with no field in \
+                 FileConfig; deny_unknown_fields rejects any overlay that uses it"
+            );
+            missing += 1;
+        }
+    }
+    if checked == 0 {
+        eprintln!("config audit: no declaration has an overlay path; nothing was compared");
+        std::process::exit(1);
+    }
+    missing
+}
+
+/// Read and parse the overlay schema, or exit.
+fn overlay_leaves(root: &Path) -> OverlayLeaves {
+    let overlay_path = root.join("crates/core/src/config/file.rs");
+    match std::fs::read_to_string(&overlay_path) {
+        Ok(source) => match OverlayLeaves::from_source(&overlay_path.display().to_string(), &source)
+        {
+            Ok(leaves) => leaves,
+            Err(error) => {
+                eprintln!("config audit: {error}");
+                std::process::exit(1);
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "config audit: cannot read {}: {error}",
+                overlay_path.display()
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Run the source extraction and return only its rows.
@@ -134,6 +192,14 @@ fn audit(args: &[String]) {
         std::process::exit(1);
     }
 
+    let missing = check_overlay_schema(&specs, &overlay_leaves(&root));
+    if missing > 0 {
+        eprintln!(
+            "config audit: {missing} declared overlay path(s) the TOML schema does not accept"
+        );
+        std::process::exit(1);
+    }
+
     let compiled = from_specs(&specs);
     let extracted = from_inventory(&extract_rows(&root), &DECLARING_BINARIES);
     match compare(&compiled, &extracted) {
@@ -158,6 +224,31 @@ fn audit(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// Emit the compiled contract as TSV, for the text gates to join against.
+///
+/// Exists so the Compose and ops-TOML checks can stay text-only shell scripts
+/// beside their siblings in `tests/` while still deriving their expected set
+/// from the COMPILED registry rather than from a list in the script. A shell
+/// gate that carries its own copy of the names is satisfiable by editing the
+/// copy, which is the shape this repository has been burned by before.
+fn contract(args: &[String]) {
+    let (_, _) = parse_root_and_check(args, false);
+    let specs = platform_specs();
+    if specs.is_empty() {
+        eprintln!("config contract: zero declarations linked; nothing to emit");
+        std::process::exit(1);
+    }
+    println!("consumer\tcanonical\tclass\tflag\tenv\ttoml");
+    let rows = from_specs(&specs);
+    for row in &rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            row.consumer, row.canonical, row.class, row.flag, row.env, row.toml
+        );
+    }
+    eprintln!("config contract: {} projections", rows.len());
 }
 
 /// Render, or verify, the generated region of `docs/reference/env-vars.md`.
