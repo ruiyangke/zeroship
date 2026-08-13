@@ -23,7 +23,7 @@ declare_env_consumer!(
 );
 
 const SHARED_NAME: DeclaredEnvKey<String, FixtureLibraryConsumer> =
-    DeclaredEnvKey::external("ZEROSHIP_CONFIG_CONTRACT_FIXTURE_SHARED");
+    DeclaredEnvKey::external("CONFIG_CONTRACT_FIXTURE_SHARED");
 
 #[test]
 fn every_shape_of_declared_read_registers_a_site() {
@@ -32,7 +32,7 @@ fn every_shape_of_declared_read_registers_a_site() {
     // Does not cover: reads in code this binary does not link. A distributed
     // slice can only report what the linker saw, which is exactly why the
     // SOURCE gate exists alongside it.
-    let _ = declared_env!(external, "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_PLAIN", TestHarness);
+    let _ = declared_env!(external, "CONFIG_CONTRACT_FIXTURE_PLAIN", TestHarness);
     let _ = declared_env_os!(test, "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_OS", TestHarness);
     let _ = read_declared_env!(SHARED_NAME, FixtureLibraryConsumer);
     let _ = zeroship_core::test_env!("ZEROSHIP_CONFIG_CONTRACT_FIXTURE_TEST");
@@ -42,9 +42,9 @@ fn every_shape_of_declared_read_registers_a_site() {
         .map(|read| read.name())
         .collect::<BTreeSet<_>>();
     for expected in [
-        "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_PLAIN",
+        "CONFIG_CONTRACT_FIXTURE_PLAIN",
         "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_OS",
-        "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_SHARED",
+        "CONFIG_CONTRACT_FIXTURE_SHARED",
         "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_TEST",
     ] {
         assert!(names.contains(expected), "{expected} was not registered");
@@ -55,7 +55,7 @@ fn every_shape_of_declared_read_registers_a_site() {
 fn a_read_site_carries_its_class_and_its_consumer() {
     let shared = DECLARED_ENV_READS
         .iter()
-        .find(|read| read.name() == "ZEROSHIP_CONFIG_CONTRACT_FIXTURE_SHARED")
+        .find(|read| read.name() == "CONFIG_CONTRACT_FIXTURE_SHARED")
         .expect("the explicit-key read is registered");
 
     assert_eq!(shared.class(), EnvClass::External);
