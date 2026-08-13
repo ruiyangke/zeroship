@@ -21,8 +21,12 @@
 // is per-call and monotonic while concurrency noise is a transient handful. A leak
 // of one connection per call would land at +12; the assertion trips well below it.
 //
-// The reading is taken twice, with a settle between, so a socket still closing at
-// the first read is not mistaken for a leak.
+// The "after" reading is the MINIMUM of several samples rather than a single one,
+// so a socket still closing - or a neighbouring file mid-deploy - is not mistaken
+// for a leak. A leaked backend is idle and persistent and survives every sample;
+// concurrency noise does not. A single reading measured this file's leak plus
+// whatever the suite had open at that instant, which are different quantities, and
+// it failed that way once the suite grew.
 //
 // GATE: `connectLivePg` (see `live-db.ts`).
 
@@ -121,11 +125,26 @@ test("repeated apply and status calls leave no database connections behind", asy
       });
     }
 
-    // Two readings with a settle between: a socket mid-close is not a leak.
+    // The "after" reading is the MINIMUM of several samples, not a single one.
+    //
+    // A single reading measures this test's leak PLUS whatever the rest of the
+    // suite happened to have open at that instant, and those are not comparable:
+    // `before` is one instant and `after` is another. Observed failing at
+    // before=5 after=17 delta=12 on a run where the engine provably did not leak
+    // (the identical twelve calls pass in isolation) - the baseline had simply
+    // moved under it.
+    //
+    // The minimum separates them on the property the file already names: a leaked
+    // backend is idle and PERSISTENT, so it appears in every sample, while a
+    // neighbouring file's connection is transient and drops out of at least one.
+    // Taking the floor keeps a real per-call leak at +12 and erodes the noise.
     let after = await backends();
     if (after > before) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      after = await backends();
+      for (let sample = 0; sample < 4; sample += 1) {
+        await new Promise((settle) => setTimeout(settle, 500));
+        after = Math.min(after, await backends());
+        if (after <= before) break;
+      }
     }
 
     const calls = APPLIES + STATUSES;
