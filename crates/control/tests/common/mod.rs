@@ -129,7 +129,7 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
 }
 
 pub fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
-    Arc::new(AuthProvider::Platform(PlatformProvider::new(
+    Arc::new(AuthProvider::platform(PlatformProvider::new(
         PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
     )))
 }

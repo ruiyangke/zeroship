@@ -345,7 +345,7 @@ fn bearer_for_subject(subject: impl ToString, scope: &str) -> String {
 }
 
 fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
-    Arc::new(AuthProvider::Platform(PlatformProvider::new(
+    Arc::new(AuthProvider::platform(PlatformProvider::new(
         PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
     )))
 }

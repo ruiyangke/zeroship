@@ -20,10 +20,13 @@
 //! behind one shared canonical name (`auth.provider`) makes the disagreement
 //! unrepresentable.
 //!
-//! DUAL-ISSUER TRUST IS NOT A THIRD VALUE. Control still builds a
-//! `DualIssuerProvider` when the value is `Supabase` AND a platform issuer is
-//! configured; that stays DERIVED from two settings exactly as it was, so the
-//! vocabulary keeps two states.
+//! NOTE THE ASYMMETRY. Auth SERVES exactly one provider, which is a genuinely
+//! exclusive choice and so is a single value here. Verifiers TRUST a SET of
+//! issuers, which is DERIVED from what is configured: a `Supabase` deployment
+//! that also has `auth.platform_issuer` set trusts both. "Both" is therefore
+//! never a value of this enum - it is a two-element
+//! [`crate::auth_provider::AuthProvider`], and a third backend would make it a
+//! three-element one without touching this vocabulary.
 
 use std::fmt;
 

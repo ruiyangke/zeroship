@@ -29,7 +29,7 @@ use zeroship_control::{
     RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::auth_provider::{
-    AuthProvider, DualIssuerProvider, LegacyAuthProvider, PlatformConfig, PlatformProvider,
+    AuthProvider, ConfiguredProvider, PlatformConfig, PlatformProvider,
     ProviderAuthz, SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::OriginScheme;
@@ -421,7 +421,7 @@ impl Fixture {
             zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
                 .expect("workflow blob store"),
         );
-        let legacy = LegacyAuthProvider::Supabase(SupabaseProvider::new(
+        let supabase = ConfiguredProvider::Supabase(SupabaseProvider::new(
             SupabaseConfig::new(
                 mock_supabase.base.clone(),
                 SUPABASE_ANON_KEY,
@@ -437,11 +437,12 @@ impl Fixture {
                 .expect("valid platform config"),
         );
         let auth_provider = Arc::new(match provider {
-            FixtureProvider::Platform => AuthProvider::Platform(platform),
-            FixtureProvider::DualIssuer => {
-                AuthProvider::DualIssuer(DualIssuerProvider::new(platform, legacy))
-            }
-            FixtureProvider::SupabaseOnly => AuthProvider::from(legacy),
+            FixtureProvider::Platform => AuthProvider::platform(platform),
+            FixtureProvider::DualIssuer => AuthProvider::new(vec![
+                ConfiguredProvider::Platform(platform),
+                supabase,
+            ])
+            .expect("distinct fixture issuers"),
         });
 
         let state = Arc::new(AppState {
@@ -499,8 +500,17 @@ impl Fixture {
         }
     }
 
+    /// The GoTrue issuer these fixtures mint test tokens with.
+    ///
+    /// Was `auth_provider.issuer()`, which returned "the legacy issuer" for the
+    /// dual arm and "the only issuer" otherwise - a rule that had no meaning
+    /// once the verifier became a set. Asking for the Supabase issuer by name
+    /// says what the caller actually wants.
     fn issuer(&self) -> &str {
-        self.state.auth_provider.issuer()
+        self.state
+            .auth_provider
+            .supabase_issuer()
+            .expect("fixture trusts Supabase")
     }
 
     fn track_hash(&mut self, device_code: &str) -> String {

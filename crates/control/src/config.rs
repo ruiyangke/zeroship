@@ -183,9 +183,10 @@ pub struct ControlSettings {
     /// `native` here means the platform's own OP is the trusted issuer - the
     /// state control used to spell `platform`.
     ///
-    /// Dual-issuer trust is NOT a third value: `supabase` PLUS a configured
-    /// `auth.platform_issuer` still derives a `DualIssuerProvider`, exactly as
-    /// before.
+    /// This value names which backend auth SERVES, which is exclusive. What
+    /// control TRUSTS is a derived SET: `supabase` PLUS a configured
+    /// `auth.platform_issuer` trusts both issuers. "Both" is therefore not a
+    /// value here, and a third backend would not add one either.
     #[arg(value_enum)]
     #[config(shared = AUTH_PROVIDER, default = AuthProviderKind::Native)]
     pub auth_provider: Operational<AuthProviderKind>,
