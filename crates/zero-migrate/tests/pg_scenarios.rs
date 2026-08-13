@@ -8114,3 +8114,219 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// Re-supplying work that is already settled must be a no-op, not a refusal.
+///
+/// F503-F511 all measured gates in their SAFETY direction: does the dangerous
+/// thing get through. Every one of those gates also has a liveness face, and it is
+/// the one a production deploy meets on every run, because a migrations directory
+/// is append-only — yesterday's rename is still a file today, and `apply` is handed
+/// the whole set each time.
+///
+/// The sharpest case is an EXPAND re-supplied while its own contract obligation is
+/// still outstanding, which is what a retried deploy N looks like. The obligation
+/// gates every op touching that table; the expand that OPENED it must be exempt, or
+/// a rename could never be retried and the operator is stuck between a deploy that
+/// failed after the expand and a deploy that will not run. `engine.rs` carries the
+/// exemption for exactly this ("the SAME rename re-running idempotently ... must
+/// NOT be refused by its OWN obligation") and nothing measured it.
+///
+/// Three re-supplies, each at a different point in the rename's life:
+///
+///   1. expand re-supplied while the obligation is OUTSTANDING — the retry case;
+///   2. expand re-supplied after the contract is COMMITTED — the settled case,
+///      where the old column no longer exists and a re-run would have to fail;
+///   3. the ordinary migration re-supplied throughout.
+///
+/// Each asserts the SCHEMA IS UNCHANGED, not just that the call returned Ok. A
+/// re-run that quietly re-created the shadow column or re-installed the trigger
+/// would return Ok too, and would reopen a window the operator already closed.
+#[compio::test]
+async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    use zero_migrate::driver::SqlSession;
+
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _guard = ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+
+    let base = mig(
+        MigrationId::derive("live_base", tok.as_bytes()),
+        "create_live_users",
+        &format!(
+            "CREATE TABLE \"{}\".live_users (id bigint PRIMARY KEY, email text)",
+            cfg.project_schema
+        ),
+    );
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("base applies");
+    session
+        .batch(&format!(
+            "INSERT INTO \"{}\".live_users (id, email) VALUES (1, 'keep@example.test')",
+            cfg.project_schema
+        ))
+        .await
+        .expect("seed");
+
+    async fn columns(session: &PgDevSession, schema: &str) -> Vec<String> {
+        let rows = session
+            .query(
+                "SELECT column_name FROM information_schema.columns
+                  WHERE table_schema = $1 AND table_name = 'live_users'
+                  ORDER BY column_name",
+                &[schema.into()],
+            )
+            .await
+            .expect("list columns");
+        rows.iter()
+            .map(|r| r.try_get::<_, String>("column_name").expect("decode"))
+            .collect()
+    }
+
+    let author = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test");
+    let intent = OnlineIntent::RenameColumn {
+        table: "live_users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+        ty: "text".into(),
+    };
+    let plan = author.author(&intent).expect("author the rename");
+    let pending_version = plan.trigger_version.as_str().to_string();
+    let expand_step = || {
+        [PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            plan.clone(),
+        ))]
+    };
+    engine
+        .apply_plan_with_touched_and_depends(
+            &expand_step(),
+            &["live_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the expand opens the window");
+    let during_window = columns(&session, &cfg.project_schema).await;
+    assert_eq!(
+        during_window,
+        vec![
+            "email".to_string(),
+            "email_address".to_string(),
+            "id".to_string()
+        ],
+        "the window is open"
+    );
+
+    // 1. THE RETRY. The same expand, re-supplied while its own obligation is
+    //    outstanding. The obligation gates this very table, so without the
+    //    self-expand exemption this is refused and the rename can never be retried.
+    engine
+        .apply_plan_with_touched_and_depends(
+            &expand_step(),
+            &["live_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("a rename must be retryable while its own obligation is outstanding");
+    assert_eq!(
+        columns(&session, &cfg.project_schema).await,
+        during_window,
+        "the retry must not have changed the window it re-presented"
+    );
+
+    // The ordinary migration, re-supplied in the same state. An append-only
+    // directory hands it to every deploy.
+    let out = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("a settled ordinary migration re-applies as a no-op");
+    assert!(
+        out.applied.is_empty(),
+        "and it must report nothing applied, got {:?}",
+        out.applied
+    );
+
+    // 2. THE SETTLED CASE. Commit the rename, then re-supply the expand once more.
+    //    The source column is gone now, so a re-run that actually executed would
+    //    fail — and one that "succeeded" by re-adding the column would reopen a
+    //    window the operator already closed.
+    engine
+        .resolve_pending_contract(
+            &pending_version,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("the contract commits");
+    let settled = columns(&session, &cfg.project_schema).await;
+    assert_eq!(
+        settled,
+        vec!["email_address".to_string(), "id".to_string()],
+        "the commit dropped the source column"
+    );
+
+    engine
+        .apply_plan_with_touched_and_depends(
+            &expand_step(),
+            &["live_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("a settled rename re-supplied must be a no-op");
+    assert_eq!(
+        columns(&session, &cfg.project_schema).await,
+        settled,
+        "re-supplying a settled rename must not reopen the window"
+    );
+
+    // The value never moved through any of it.
+    let kept: String = session
+        .query_one(
+            &format!(
+                "SELECT email_address FROM \"{}\".live_users WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read the value")
+        .try_get("email_address")
+        .expect("decode");
+    assert_eq!(kept, "keep@example.test");
+
+    drop_schemas(&session, &cfg).await;
+}
