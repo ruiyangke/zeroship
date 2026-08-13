@@ -58,6 +58,7 @@ describe("bug timeline", () => {
         // Creation: from nothing, at the moment of the description.
         activity(1000, "summary", "u1", ""),
         activity(1000, "status", "u1", ""),
+        activity(1000, "productId", "u1", ""),
         // A real edit, two fields, same second.
         activity(9000, "priority"),
         activity(9200, "severity"),
@@ -96,5 +97,29 @@ describe("logged values", () => {
   it("treats an absent value as empty rather than printing null", () => {
     expect(displayValue(null)).toBe("");
     expect(displayValue(undefined)).toBe("");
+  });
+});
+
+describe("creation filtering", () => {
+  it("keeps a real first-value change that merely happens early", () => {
+    // An attachment uploaded seconds after filing has no previous value and
+    // lands near the description, which is exactly the shape the creation
+    // filter looks for. Dropping it loses a real event from the story.
+    const items = buildTimeline(
+      [comment("c0", 1000, 0)],
+      [
+        activity(1000, "summary", "u1", ""),
+        activity(1000, "status", "u1", ""),
+        activity(1000, "severity", "u1", ""),
+        activity(1000, "priority", "u1", ""),
+        activity(1000, "productId", "u1", ""),
+        activity(1400, "attachment", "u1", ""),
+      ],
+    );
+    const events = items.filter((i) => i.kind === "event");
+    expect(
+      events.flatMap((e) => (e.kind === "event" ? e.changes.map((c) => c.fieldName) : [])),
+      "the attachment survives, the creation fields do not",
+    ).toEqual(["attachment"]);
   });
 });

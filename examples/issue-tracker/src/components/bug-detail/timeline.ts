@@ -1,3 +1,4 @@
+import { BUG_CREATION_FIELDS } from "../../lib/changes";
 import type { Activity, Comment } from "../types";
 
 /**
@@ -39,13 +40,36 @@ const NOT_WORTH_SAYING = new Set([
   "isConfirmed",
 ]);
 
+const CREATION_FIELDS: ReadonlySet<string> = new Set(BUG_CREATION_FIELDS);
+
+/**
+ * Is this activity part of filing the bug, rather than something someone did?
+ *
+ * All three clauses matter. The field is one the server writes at creation;
+ * it went from nothing; and it happened with the description. An assignee set
+ * a week later is a real event even though creation also writes `assigneeId`.
+ *
+ * The rule used to be the last two clauses only, which describes creation but
+ * does not ONLY describe creation: a file attached moments after filing has no
+ * previous value and lands next to the description, so it matched, and the
+ * upload silently vanished from the timeline. The missing clause was the one
+ * the server could answer outright -- it declares the fields it writes.
+ */
+function isCreationField(activity: Activity, firstCommentAt: number): boolean {
+  return (
+    CREATION_FIELDS.has(activity.fieldName) &&
+    !activity.oldValue &&
+    Math.abs(activity.changedAt - firstCommentAt) < 1000
+  );
+}
+
 /**
  * Merge comments and activity into one ordered list.
  *
  * Consecutive changes by the same person within a second are one edit -- the
- * log stores a row per field, so closing a bug writes three. The creation
- * event is dropped entirely: every field goes from unset at once, which as a
- * timeline entry reads as fourteen changes nobody made.
+ * log stores a row per field, so closing a bug writes three. Filing is dropped
+ * entirely (see isCreationField): it writes nineteen fields at once, which as a
+ * timeline entry reads as nineteen changes nobody made.
  */
 export function buildTimeline(
   comments: readonly Comment[],
@@ -56,10 +80,7 @@ export function buildTimeline(
   const events: TimelineEvent[] = [];
   for (const activity of activities) {
     if (NOT_WORTH_SAYING.has(activity.fieldName)) continue;
-    // Creation: everything arrives from nothing, at the moment of the first
-    // comment. Identified by having no previous value AND landing with the
-    // description, so a later field set from empty still shows.
-    if (!activity.oldValue && Math.abs(activity.changedAt - firstCommentAt) < 1000) continue;
+    if (isCreationField(activity, firstCommentAt)) continue;
 
     const last = events[events.length - 1];
     if (

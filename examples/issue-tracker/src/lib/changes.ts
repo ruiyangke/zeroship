@@ -34,3 +34,35 @@ export function diffTrackedFields(
 
   return changes;
 }
+
+/**
+ * The fields filing a bug writes, in one insert, from nothing.
+ *
+ * Shared because two sides need the SAME answer: the server writes exactly
+ * these as the creation event, and the timeline drops exactly these so the
+ * story does not open with nineteen changes nobody made. When the two sides
+ * guessed separately -- the timeline used "no previous value, and near the
+ * description" -- an attachment uploaded moments after filing matched the
+ * guess and vanished from the page. The server already knew the answer.
+ */
+export const BUG_CREATION_FIELDS = [
+  "productId",
+  "componentId",
+  "versionId",
+  "milestoneId",
+  "summary",
+  "status",
+  "severity",
+  "priority",
+  "reporterId",
+  "assigneeId",
+  "qaContactId",
+  "whiteboard",
+  "opSys",
+  "platform",
+  "url",
+  "isConfirmed",
+  "voteCount",
+  "commentCount",
+  "deadline",
+] as const;

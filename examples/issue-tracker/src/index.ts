@@ -9,7 +9,11 @@
 
 import { env } from "zeroship";
 import { mutation, query } from "@zeroship/rpc/server";
-import { diffTrackedFields, type TrackedFieldChange } from "./lib/changes";
+import {
+  BUG_CREATION_FIELDS,
+  diffTrackedFields,
+  type TrackedFieldChange,
+} from "./lib/changes";
 import { assertFlagTarget } from "./lib/flags";
 import {
   weaklyConnectedComponent,
@@ -1091,28 +1095,6 @@ type CreateBugInput = {
   confirmed?: boolean;
   deadline?: number | null;
 };
-
-const BUG_CREATION_FIELDS = [
-  "productId",
-  "componentId",
-  "versionId",
-  "milestoneId",
-  "summary",
-  "status",
-  "severity",
-  "priority",
-  "reporterId",
-  "assigneeId",
-  "qaContactId",
-  "whiteboard",
-  "opSys",
-  "platform",
-  "url",
-  "isConfirmed",
-  "voteCount",
-  "commentCount",
-  "deadline",
-] as const;
 
 export const createBug = mutation(
   async ({
