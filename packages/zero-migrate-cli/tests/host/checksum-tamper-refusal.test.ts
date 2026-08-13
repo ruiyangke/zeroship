@@ -27,7 +27,19 @@
 // migration's new column is ABSENT afterwards. A refusal that had already applied
 // half the edit would exit 1 too, and would be far worse than no check at all.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// BOTH DIALECTS, because the checksum being dialect-neutral does not make the
+// REFUSAL dialect-neutral: the comparison runs through each backend's journal
+// read, and F596 is a standing reminder that MySQL's leaf can differ from
+// PostgreSQL's in ways the shared code does not reveal.
+//
+// The third test pins the neutrality itself. `e2e-pg` pins "the same artifact
+// folds the same anchor" WITHIN PostgreSQL; nothing pinned that PostgreSQL and
+// MySQL agree, which is what makes one checksum column meaningful across a fleet
+// running both. It compares the two servers' recorded checksums to EACH OTHER
+// rather than to a literal, so a legitimate IR change moves both and the test
+// keeps testing agreement instead of a frozen hash.
+//
+// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -36,7 +48,10 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
+
+// The host suite's addon is resolved and freshness-checked in one place.
+import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -46,6 +61,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
+const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_tamper";
 /** The identity. It is the FILENAME that fixes the version, so writing a different
  *  body to this same path is precisely "a reused identity with a different
@@ -96,6 +113,7 @@ scope = { include = [${JSON.stringify(schema)}] }
 function cli(
   work: string,
   schema: string,
+  databaseUrl: string,
   argv: string[],
 ): Promise<{ code: number | null; text: string }> {
   return new Promise((resolvePromise) => {
@@ -104,7 +122,7 @@ function cli(
       [
         "--import", "tsx", CLI_BIN, ...argv,
         "--dir", join(work, "migrations"),
-        "--database-url", pgUrl(),
+        "--database-url", databaseUrl,
         "--policy", join(work, "policy.toml"),
         "--registry", join(work, "registry.json"),
         "--schema", schema,
@@ -128,88 +146,212 @@ function cli(
   });
 }
 
-test("an edited migration that was already applied is refused, and lands nothing", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+/** The per-dialect plumbing the scenario needs: make the namespace, read the
+ *  table's columns back, tear down. Everything else about the scenario is
+ *  identical, which is the point — the same edit must be refused either way. */
+interface Dialect {
+  readonly name: string;
+  readonly prefix: string;
+  setUp(namespace: string): Promise<void>;
+  databaseUrl(namespace: string): string;
+  columns(namespace: string): Promise<string[]>;
+  tearDown(namespace: string): Promise<void>;
+  close(): Promise<void>;
+}
 
-  const schema = uniqueNamespace("tamper_pg");
-  const meta = `${schema}_migrations`;
-  const work = project(schema);
-
-  const columns = async (): Promise<string[]> => {
-    const { rows } = await client.query(
-      `SELECT column_name FROM information_schema.columns
-        WHERE table_schema = $1 AND table_name = 'things' ORDER BY column_name`,
-      [schema],
-    );
-    return rows.map((row) => row.column_name as string);
+async function postgres(): Promise<Dialect> {
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: pgUrl() });
+  await client.connect();
+  return {
+    name: "PostgreSQL",
+    prefix: "tamper_pg",
+    async setUp(namespace) {
+      await client.query(`CREATE SCHEMA "${namespace}"`);
+    },
+    databaseUrl: () => pgUrl(),
+    async columns(namespace) {
+      const { rows } = await client.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = 'things' ORDER BY column_name`,
+        [namespace],
+      );
+      return rows.map((row) => row.column_name as string);
+    },
+    async tearDown(namespace) {
+      await client
+        .query(
+          `DROP SCHEMA IF EXISTS "${namespace}" CASCADE;
+           DROP SCHEMA IF EXISTS "${namespace}_migrations" CASCADE`,
+        )
+        .catch(() => {});
+    },
+    async close() {
+      await client.end().catch(() => {});
+    },
   };
+}
 
+async function mysql(): Promise<Dialect> {
+  const driver = (await import("mysql2/promise")).default;
+  const connection = await driver.createConnection({ uri: String(MYSQL_URL) });
+  const base = String(MYSQL_URL).replace(/\/[^/]*$/, "");
+  return {
+    name: "MySQL",
+    prefix: "tamper_my",
+    async setUp(namespace) {
+      await connection.query(`CREATE DATABASE \`${namespace}\``);
+    },
+    databaseUrl: (namespace) => `${base}/${namespace}`,
+    async columns(namespace) {
+      const [rows] = await connection.query(
+        `SELECT COLUMN_NAME AS n FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'things' ORDER BY 1`,
+        [namespace],
+      );
+      return (rows as Array<{ n: string }>).map((row) => row.n);
+    },
+    async tearDown(namespace) {
+      await connection.query(`DROP DATABASE IF EXISTS \`${namespace}\``).catch(() => {});
+      await connection.query(`DROP DATABASE IF EXISTS \`${namespace}_migrations\``).catch(() => {});
+    },
+    async close() {
+      await connection.end().catch(() => {});
+    },
+  };
+}
+
+/** Runs the whole scenario and asserts it, returning the two checksums the
+ *  refusal quoted so a caller can compare them ACROSS dialects. */
+async function tamperScenario(dialect: Dialect): Promise<{ journal: string; set: string }> {
+  const namespace = uniqueNamespace(dialect.prefix);
+  const work = project(namespace);
+  const url = dialect.databaseUrl(namespace);
   try {
-    await client.query(`CREATE SCHEMA "${schema}"`);
+    await dialect.setUp(namespace);
 
-    const applied = await cli(work, schema, ["apply", "--approve"]);
-    assert.equal(applied.code, 0, `the original must apply; ${applied.text}`);
-    assert.deepEqual(await columns(), ["id"], "the original shape lands");
+    const applied = await cli(work, namespace, url, ["apply", "--approve"]);
+    assert.equal(applied.code, 0, `${dialect.name}: the original must apply; ${applied.text}`);
+    assert.deepEqual(await dialect.columns(namespace), ["id"], "the original shape lands");
 
     // ARM 1, the control — the same bytes re-applied are a no-op, so a refusal in
     // arm 2 cannot be "re-applying is refused" or a second run failing generally.
-    const unchanged = await cli(work, schema, ["apply", "--approve"]);
+    const unchanged = await cli(work, namespace, url, ["apply", "--approve"]);
     assert.equal(
       unchanged.code,
       0,
-      `re-applying the UNCHANGED migration must succeed, or arm 2 proves nothing; ${unchanged.text}`,
+      `${dialect.name}: re-applying the UNCHANGED migration must succeed, or arm 2 ` +
+        `proves nothing; ${unchanged.text}`,
     );
 
     // ARM 2 — the edit. Same filename, so the same version identity, different body.
     writeFileSync(join(work, "migrations", MIGRATION_FILE), body(", sneaky: t.text()"));
-    const tampered = await cli(work, schema, ["apply", "--approve"]);
+    const tampered = await cli(work, namespace, url, ["apply", "--approve"]);
 
-    assert.equal(tampered.code, 1, `the edited migration must be refused; ${tampered.text}`);
+    assert.equal(
+      tampered.code,
+      1,
+      `${dialect.name}: the edited migration must be refused; ${tampered.text}`,
+    );
     // By CONTENT: an unrelated failure would also exit 1.
     assert.match(
       tampered.text,
       /checksum drift/,
-      `the refusal must be the checksum gate: ${tampered.text}`,
+      `${dialect.name}: the refusal must be the checksum gate: ${tampered.text}`,
     );
     // Both sides, so an operator can see it is a disagreement rather than a
     // corrupted journal, and can tell which artifact is the odd one out.
-    assert.match(
-      tampered.text,
-      /journal has [0-9a-f]{16}/,
-      `the refusal must quote the journal's checksum: ${tampered.text}`,
-    );
-    assert.match(
-      tampered.text,
-      /set has [0-9a-f]{16}/,
-      `and the supplied set's checksum: ${tampered.text}`,
+    const journal = /journal has ([0-9a-f]{64})/.exec(tampered.text);
+    const supplied = /set has ([0-9a-f]{64})/.exec(tampered.text);
+    assert.ok(journal, `${dialect.name}: the refusal must quote the journal checksum: ${tampered.text}`);
+    assert.ok(supplied, `${dialect.name}: and the supplied set's checksum: ${tampered.text}`);
+    assert.notEqual(
+      journal[1],
+      supplied[1],
+      "the two checksums must actually differ, or the message is describing nothing",
     );
 
     // THE ASSERTION THAT MATTERS. Exit 1 with the edit half-applied would be worse
     // than no gate: the schema would carry a change no journal entry describes.
     assert.deepEqual(
-      await columns(),
+      await dialect.columns(namespace),
       ["id"],
-      "the edited migration must not have applied any part of itself",
+      `${dialect.name}: the edited migration must not have applied any part of itself`,
     );
 
     // ARM 3 — the CI gate reports it too. An operator who never runs `apply`
     // manually meets this through `status --strict`.
-    const strict = await cli(work, schema, ["status", "--strict"]);
-    assert.equal(strict.code, 1, `strict status must fail on a tampered set; ${strict.text}`);
+    const strict = await cli(work, namespace, url, ["status", "--strict"]);
+    assert.equal(
+      strict.code,
+      1,
+      `${dialect.name}: strict status must fail on a tampered set; ${strict.text}`,
+    );
     assert.match(
       strict.text,
       /checksum mismatch: create_things/,
-      `and must name the migration: ${strict.text}`,
+      `${dialect.name}: and must name the migration: ${strict.text}`,
+    );
+
+    return { journal: journal[1], set: supplied[1] };
+  } finally {
+    await dialect.tearDown(namespace);
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+test("PostgreSQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG tamper arm skipped");
+    return;
+  }
+  const dialect = await postgres();
+  try {
+    await tamperScenario(dialect);
+  } finally {
+    await dialect.close();
+  }
+});
+
+test("MySQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL tamper arm skipped");
+    return;
+  }
+  const dialect = await mysql();
+  try {
+    await tamperScenario(dialect);
+  } finally {
+    await dialect.close();
+  }
+});
+
+test("the recorded checksum is the same on both servers", async (ctx) => {
+  if (!PG_URL || !MYSQL_URL) {
+    ctx.skip("both database URLs required for the cross-dialect checksum arm");
+    return;
+  }
+  const pg = await postgres();
+  const my = await mysql();
+  try {
+    const fromPg = await tamperScenario(pg);
+    const fromMysql = await tamperScenario(my);
+
+    // Compared to EACH OTHER, never to a literal: a legitimate IR change moves
+    // both, and this keeps asserting agreement rather than a frozen hash.
+    assert.equal(
+      fromPg.journal,
+      fromMysql.journal,
+      "the same migration must record the same checksum on both servers, or one " +
+        "checksum column cannot describe a fleet running both",
+    );
+    assert.equal(
+      fromPg.set,
+      fromMysql.set,
+      "and the edited artifact must fold identically too",
     );
   } finally {
-    await client
-      .query(
-        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
-         DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
-      )
-      .catch(() => {});
-    await client.end().catch(() => {});
-    rmSync(work, { recursive: true, force: true });
+    await pg.close();
+    await my.close();
   }
 });
