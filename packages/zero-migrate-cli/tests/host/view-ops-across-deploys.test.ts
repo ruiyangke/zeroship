@@ -757,11 +757,15 @@ test("PostgreSQL: an applied prior moves the refusal from the database into the 
  *
  *  The asymmetry is not the fold disagreeing with itself. `render/fold.rs` is guard-blind
  *  for every drop by design ("an existence_guard governs only apply-time presence"), so
- *  the fold would refuse on both. PostgreSQL never reaches it: its executor resolves the
- *  guard against the live catalog under lock and the op is gone before projection. MySQL
- *  probes nothing, so the op survives into the fold and dies there — which is also why
- *  the native `DROP VIEW IF EXISTS` the docs credit MySQL with is unreachable for an
- *  absent view.
+ *  the fold would refuse on both if both reached it with the op intact. PostgreSQL
+ *  resolves the guard while LOWERING, against the snapshot, so the op is already gone by
+ *  the time the history is folded. MySQL carries it through, and it dies in the fold.
+ *
+ *  The split is at lowering, NOT at apply. Every dialect probes at apply
+ *  (`mysql/session.rs` calls `existence_probe::decide` exactly as PostgreSQL does), but
+ *  projection runs first, so on MySQL the probe is never consulted here at all — which
+ *  is also why the native `DROP VIEW IF EXISTS` the docs once credited MySQL with is
+ *  unreachable for an absent view.
  *
  *  Both arms drop a view NO migration in the history ever created, so a pass cannot come
  *  from the snapshot resolving a known view without consulting the guard. */
