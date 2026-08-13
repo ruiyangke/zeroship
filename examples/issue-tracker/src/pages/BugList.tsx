@@ -218,7 +218,14 @@ export function BugListPage() {
             </Select.Item>
           ))}
         </Select>
-        <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="Any product" className="filter-select">
+        <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="Any product"
+          className="filter-select"
+          renderValue={(id) =>
+            productsQ.state.status === "ready"
+              ? productsQ.state.data.find((p) => p.id === id)?.name ?? id
+              : id
+          }
+        >
           {productsQ.state.status === "ready" &&
             productsQ.state.data.map((p) => (
               <Select.Item key={p.id} value={p.id}>

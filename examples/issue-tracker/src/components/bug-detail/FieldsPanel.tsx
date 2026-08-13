@@ -181,6 +181,7 @@ function MoveControl({
               onValueChange={(next) => void pickProduct(next ?? "")}
               placeholder="Select a product"
               aria-label="Target product"
+              renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
             >
               {products.map((p) => (
                 <Select.Item key={p.id} value={p.id}>
@@ -197,6 +198,7 @@ function MoveControl({
               onValueChange={(next) => setTargetComponentId(next ?? "")}
               placeholder="Select a component"
               aria-label="Target component"
+              renderValue={(id) => components?.find((c) => c.id === id)?.name ?? id}
             >
               {components?.map((c) => (
                 <Select.Item key={c.id} value={c.id}>
@@ -341,6 +343,7 @@ export function FieldsPanel({
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
               placeholder="unspecified"
+              renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
             >
               {productDetail.versions.map((v) => (
                 <Select.Item key={v.id} value={v.id}>
@@ -361,6 +364,7 @@ export function FieldsPanel({
                   .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
               }}
               placeholder="unspecified"
+              renderValue={(id) => productDetail.milestones.find((m) => m.id === id)?.name ?? id}
             >
               {productDetail.milestones.map((m) => (
                 <Select.Item key={m.id} value={m.id}>

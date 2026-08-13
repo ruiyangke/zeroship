@@ -96,6 +96,7 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
               value={selected}
               onValueChange={(next) => setSelected(next ?? "")}
               placeholder="Select a group"
+              renderValue={(id) => groups.find((g) => g.id === id)?.name ?? id}
             >
               {groups.map((group) => (
                 <Select.Item key={group.id} value={group.id}>

@@ -140,6 +140,7 @@ export function GroupsAdmin() {
             onValueChange={(next) => setMemberGroup(next ?? "")}
             placeholder="Select a group"
             aria-label="Add member to"
+            renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
           >
             {(groups ?? []).map((group) => (
               <Select.Item key={group.id} value={group.id}>
@@ -245,6 +246,7 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
             onValueChange={(next) => setProductId(next ?? "")}
             placeholder="Select a product"
             aria-label="Product"
+            renderValue={(id) => (products ?? []).find((x) => x.id === id)?.name ?? id}
           >
             {(products ?? []).map((p) => (
               <Select.Item key={p.id} value={p.id}>
@@ -260,6 +262,7 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
             onValueChange={(next) => setGroupId(next ?? "")}
             placeholder="Select a group"
             aria-label="Group"
+            renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
           >
             {(groups ?? []).map((group) => (
               <Select.Item key={group.id} value={group.id}>

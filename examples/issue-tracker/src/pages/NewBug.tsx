@@ -99,6 +99,8 @@ export function NewBugPage() {
                 onValueChange={(next) => void pickProduct(next ?? "")}
                 placeholder="Select a product"
                 aria-label="1. Product"
+              
+                renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
               >
                 {products.map((p) => (
                   <Select.Item key={p.id} value={p.id}>
@@ -118,6 +120,8 @@ export function NewBugPage() {
                 onValueChange={(next) => setComponentId(next ?? "")}
                 placeholder="Select a component"
                 aria-label="2. Component"
+              
+                renderValue={(id) => productDetail.components.find((c) => c.id === id)?.name ?? id}
               >
                 {productDetail.components.map((c) => (
                   <Select.Item key={c.id} value={c.id}>
@@ -154,6 +158,8 @@ export function NewBugPage() {
                 onValueChange={(next) => setVersionId(next ?? "")}
                 placeholder="Select a version"
                 aria-label="Version"
+              
+                renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
               >
                         {productDetail.versions.map((v) => (
                           <Select.Item key={v.id} value={v.id}>
@@ -168,7 +174,10 @@ export function NewBugPage() {
                         value={milestoneId}
                         onValueChange={(next) => setMilestoneId(next ?? "")}
                         placeholder="unspecified"
-                aria-label="Milestone"
+                        aria-label="Milestone"
+                        renderValue={(id) =>
+                          productDetail.milestones.find((m) => m.id === id)?.name ?? id
+                        }
                       >
                         {productDetail.milestones.map((m) => (
                           <Select.Item key={m.id} value={m.id}>

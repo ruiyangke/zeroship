@@ -112,6 +112,20 @@ interface SelectBaseProps<Value> extends BaseRootShapeProps<Value, false> {
   variant?: SelectVariant;
   /** Placeholder shown when no value is selected. */
   placeholder?: string;
+  /**
+   * Maps the selected value to what the TRIGGER displays.
+   *
+   * Without this the trigger renders the raw value, which is right only when
+   * the value IS the label (an enum like "major"). For the common case of an
+   * id-valued select -- a product, a user, a version -- it renders the id:
+   * a consumer choosing "Payments" saw `prod_03462DM9KMgFwcl7KD7iQ8`.
+   * `Select.Item`'s `label` does not help; Base UI uses that for typeahead
+   * matching, not for the value display.
+   *
+   * Receives the current value and returns the node to show. Not called when
+   * nothing is selected -- the placeholder covers that.
+   */
+  renderValue?: (value: Value) => ReactNode;
   /** Align the popup to the trigger's `start` / `center` / `end`. */
   align?: SelectAlign;
   /**
@@ -174,6 +188,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     size: sizeProp,
     variant = "default",
     placeholder,
+    renderValue,
     align = "start",
     placement = "bottom",
     sideOffset = 6,
@@ -338,7 +353,12 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
           <BaseSelect.Value
             className="zs-select-trigger__value"
             placeholder={placeholder}
-          />
+          >
+            {/* A function child, which Base UI calls with the selected value.
+                Omitting it renders the raw value -- correct for enums, wrong
+                for anything id-valued. */}
+            {renderValue ? (value: unknown) => renderValue(value as never) : undefined}
+          </BaseSelect.Value>
           <BaseSelect.Icon
             className="zs-select-trigger__icon"
             aria-hidden="true"

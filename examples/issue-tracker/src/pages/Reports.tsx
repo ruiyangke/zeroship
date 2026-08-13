@@ -288,6 +288,11 @@ export function ReportsPage() {
           placeholder="All products"
           aria-label="Product"
           className="filter-select"
+          renderValue={(id) =>
+            productsQ.state.status === "ready"
+              ? productsQ.state.data.find((p) => p.id === id)?.name ?? id
+              : id
+          }
         >
           {productsQ.state.status === "ready" &&
             productsQ.state.data.map((p) => (

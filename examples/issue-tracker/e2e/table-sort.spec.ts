@@ -70,23 +70,23 @@ test("headers sort the server query, and only where the server can", async ({
     );
   await expect(page.locator("table tbody tr")).toHaveCount(3);
 
-  // Waits for the reload to settle between clicks. The table stays mounted
-  // and clickable while it refetches now -- which is the point -- so a second
-  // click can land before the first sort has come back and the assertion then
-  // reads a half-applied state. A person waits for the rows to stop being
-  // dimmed; so does this.
-  const settle = async () => {
-    await expect(page.locator("[aria-busy='true']")).toHaveCount(0, { timeout: 10_000 });
-  };
+  // POLLED, not sampled once after a wait.
+  //
+  // The table stays mounted and clickable while it refetches, so the rows on
+  // screen immediately after a click are still the old ones. Waiting for
+  // aria-busy to be absent does not help: it IS absent in the instant between
+  // the click and the request going out, so the wait returns immediately and
+  // the assertion reads the pre-sort order. Polling the thing under test is
+  // the only version that cannot pass or fail on timing.
   await page.getByRole("button", { name: /^Priority/ }).click();
-  await settle();
-  const ascending = await priorities();
-  expect(ascending, "clicking Priority orders by it").toEqual([...ascending].sort());
+  await expect
+    .poll(priorities, { message: "clicking Priority orders by it", timeout: 10_000 })
+    .toEqual(["P1", "P2", "P3"]);
 
   await page.getByRole("button", { name: /^Priority/ }).click();
-  await settle();
-  const descending = await priorities();
-  expect(descending, "clicking again reverses it").toEqual([...ascending].reverse());
+  await expect
+    .poll(priorities, { message: "clicking again reverses it", timeout: 10_000 })
+    .toEqual(["P3", "P2", "P1"]);
 
   // Summary has no server sort key, so its header must be plain text rather
   // than a button offering a sort the server cannot honour.
