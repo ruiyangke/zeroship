@@ -90,7 +90,14 @@ impl Header for RawHeader {
 /// `use_starttls: bool` had no plaintext arm, so a plaintext sink was
 /// undeliverable (STARTTLS → "STARTTLS is not supported"; implicit-TLS →
 /// "corrupt message of type InvalidContentType").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+/// `Deserialize` is present so the value can also arrive from the canonical
+/// TOML overlay. `rename_all = "snake_case"` yields `starttls` / `implicit` /
+/// `plaintext`, which is exactly what `clap::ValueEnum` accepts on the flag, so
+/// one spelling covers the flag, the environment and the overlay.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum SmtpTls {
     /// Open plaintext then upgrade with STARTTLS (typical port 587). The
     /// default — real submission MTAs require it.

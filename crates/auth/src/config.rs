@@ -1,24 +1,36 @@
 //! Auth server configuration.
+//!
+//! Three types, one job each:
+//!
+//! * [`AuthSettings`] is the generated declaration. Every operational value the
+//!   auth service resolves is spelled ONCE here, as a canonical name; its flag,
+//!   its `ZEROSHIP_AUTH_*` environment name and its overlay path are projected
+//!   from that name rather than written out again.
+//! * [`AuthCli`] is the command line: the generated carrier plus the secrets
+//!   that are still hand-spelled until the secret conversion converts them.
+//! * [`AuthConfig`] is the RESOLVED configuration the rest of the crate reads.
+//!   It exists because resolution is not purely mechanical here: the
+//!   frame-ancestor allowlist is filtered fail-closed against the issuer host
+//!   before anything can read it.
 
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, ValueEnum};
 use zeroship_core::config::{
-    resolve_overlay_string, zeroship_config, AuthSection, BootstrapControl, CheckFormat,
-    CommandControl, ObservabilityControls, Operational, OverlaySelector,
+    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ConfigResolveError,
+    GeneratedConfig, ObservabilityControls, Operational, OverlaySelector,
 };
 use zeroship_core::observability::LogFormat;
 use zeroship_mailer::SmtpTls;
 
-const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
-
 /// Tracing directive applied when nothing supplies `observability.log_filter`.
 pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_auth=debug";
 
-/// The controls every auth-service launch resolves before anything else.
+/// Every operational value an auth-service launch resolves, plus the bootstrap
+/// and command controls the shared boot dance needs.
 #[zeroship_config(binary = "zeroship-auth", scope = "auth")]
-#[derive(Debug)]
-pub struct AuthControls {
+#[derive(Debug, Clone)]
+pub struct AuthSettings {
     /// Optional shared config overlay path.
     #[config(shared = CONFIG)]
     pub config: BootstrapControl<Option<PathBuf>>,
@@ -43,9 +55,270 @@ pub struct AuthControls {
     /// Tracing output format; `auto` picks pretty on a TTY and json otherwise.
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
+
+    /// Listen address. Defaults to loopback; compose passes `0.0.0.0:9092`.
+    #[config(name = "auth.addr", default = "127.0.0.1:9092".to_owned())]
+    pub addr: Operational<String>,
+
+    /// Platform auth provider backend.
+    ///
+    /// The canonical name is `auth.provider`, NOT `auth.auth_provider`: the
+    /// scope already says `auth`, and the stuttering form would project to
+    /// `ZEROSHIP_AUTH_AUTH_PROVIDER`. Control has its own
+    /// `control.auth_provider` with a DIFFERENT value vocabulary
+    /// (`platform|supabase` there, `native|supabase` here), so the two are
+    /// deliberately separate identities rather than one name meaning two things.
+    #[arg(value_enum)]
+    #[config(name = "auth.provider", default = AuthProviderKind::Native)]
+    pub provider: Operational<AuthProviderKind>,
+
+    /// Supabase Auth / GoTrue base URL used when `--provider=supabase`.
+    /// Empty means unset.
+    #[config(shared = AUTH_SUPABASE_URL, default = String::new())]
+    pub supabase_url: Operational<String>,
+
+    /// Supabase anon API key used by the browser-side GoTrue login. Empty means
+    /// unset.
+    ///
+    /// OPERATIONAL, not `Secret<T>`, and that is a deliberate classification:
+    /// this key is served to every browser that loads the GoTrue login, so it is
+    /// published by design. The tracked ops overlay already carries it under
+    /// `[auth]` rather than `[secrets]`. The visible consequence is that
+    /// `--check-config` now prints whether it is set AND its value, like any
+    /// other operational value.
+    #[config(name = "auth.supabase_anon_key", default = String::new())]
+    pub supabase_anon_key: Operational<String>,
+
+    /// Control-plane base URL used by browser-mediated auth flows.
+    #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
+    pub control_url: Operational<String>,
+
+    /// Console origin(s) allowed to FRAME the login/signup/consent documents.
+    ///
+    /// RAW, as supplied. Read [`AuthConfig::frame_ancestor_origins`] instead:
+    /// that is the list after the fail-closed concrete + same-site filter, and
+    /// it is the only one safe to splice into a CSP header. See the filter's
+    /// documentation on [`is_concrete_frame_ancestor_origin`] and
+    /// [`is_same_site_with_issuer`].
+    #[arg(value_delimiter = ',')]
+    #[config(name = "auth.frame_ancestor_origins", default = Vec::new())]
+    pub frame_ancestor_origins: Operational<Vec<String>>,
+
+    /// Google OAuth 2.0 client ID. Empty means the `/oauth/google/*` routes are
+    /// not registered (auth still boots).
+    #[config(name = "auth.google_client_id", default = String::new())]
+    pub google_client_id: Operational<String>,
+
+    /// Redirect URI registered with Google. Must match the value configured in
+    /// the Google Cloud Console exactly.
+    #[config(
+        name = "auth.google_redirect_uri",
+        default = "https://auth.zeroship.ai/oauth/google/callback".to_owned()
+    )]
+    pub google_redirect_uri: Operational<String>,
+
+    /// Google's authorize endpoint. Overridable so the e2e tests can point
+    /// at an in-process `tests/common/mock_provider` instead of the real
+    /// Google. Production deployments should leave the default in place.
+    #[config(
+        name = "auth.google_auth_url",
+        default = "https://accounts.google.com/o/oauth2/v2/auth".to_owned()
+    )]
+    pub google_auth_url: Operational<String>,
+
+    /// Google's token endpoint. Overridable for tests; production leaves
+    /// the default.
+    #[config(
+        name = "auth.google_token_url",
+        default = "https://oauth2.googleapis.com/token".to_owned()
+    )]
+    pub google_token_url: Operational<String>,
+
+    /// Google's JWKS endpoint. Overridable for tests; production leaves
+    /// the default.
+    #[config(
+        name = "auth.google_jwks_url",
+        default = "https://www.googleapis.com/oauth2/v3/certs".to_owned()
+    )]
+    pub google_jwks_url: Operational<String>,
+
+    /// Expected `iss` claim on Google ID tokens. Overridable for tests
+    /// (mock provider uses its own loopback base URL); production leaves
+    /// the default - Google emits this exact string per its OIDC
+    /// discovery document.
+    #[config(
+        name = "auth.google_issuer",
+        default = "https://accounts.google.com".to_owned()
+    )]
+    pub google_issuer: Operational<String>,
+
+    /// GitHub OAuth App client ID. Empty means the `/oauth/github/*` routes are
+    /// not registered (auth still boots).
+    #[config(name = "auth.github_client_id", default = String::new())]
+    pub github_client_id: Operational<String>,
+
+    /// Callback URL registered on the GitHub OAuth App. Must match what's set
+    /// in the app's settings.
+    #[config(
+        name = "auth.github_redirect_uri",
+        default = "https://auth.zeroship.ai/oauth/github/callback".to_owned()
+    )]
+    pub github_redirect_uri: Operational<String>,
+
+    /// GitHub's authorize endpoint. Overridable for the federation e2e
+    /// tests; production deployments leave the default in place.
+    #[config(
+        name = "auth.github_authorize_url",
+        default = "https://github.com/login/oauth/authorize".to_owned()
+    )]
+    pub github_authorize_url: Operational<String>,
+
+    /// GitHub's token endpoint. Overridable for tests.
+    #[config(
+        name = "auth.github_token_url",
+        default = "https://github.com/login/oauth/access_token".to_owned()
+    )]
+    pub github_token_url: Operational<String>,
+
+    /// GitHub's `/user` endpoint. Overridable for tests.
+    #[config(
+        name = "auth.github_user_url",
+        default = "https://api.github.com/user".to_owned()
+    )]
+    pub github_user_url: Operational<String>,
+
+    /// GitHub's `/user/emails` endpoint. Overridable for tests.
+    #[config(
+        name = "auth.github_emails_url",
+        default = "https://api.github.com/user/emails".to_owned()
+    )]
+    pub github_emails_url: Operational<String>,
+
+    /// Mailer driver: `stdout` (dev default) | `smtp` | `resend`.
+    #[config(name = "auth.mailer", default = "stdout".to_owned())]
+    pub mailer: Operational<String>,
+
+    /// SMTP relay hostname (required when `--mailer=smtp`). Empty means unset.
+    #[config(name = "auth.smtp_host", default = String::new())]
+    pub smtp_host: Operational<String>,
+
+    /// SMTP port. Defaults to 587 (STARTTLS); use 465 for implicit SMTPS.
+    #[config(name = "auth.smtp_port", default = 587)]
+    pub smtp_port: Operational<u16>,
+
+    /// SMTP username (optional - server may allow unauthenticated relays).
+    /// Empty means unset.
+    #[config(name = "auth.smtp_username", default = String::new())]
+    pub smtp_username: Operational<String>,
+
+    /// Transport encryption for the transactional SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS - dev/test sinks like mailpit on :1025 ONLY).
+    #[arg(value_enum)]
+    #[config(name = "auth.smtp_tls", default = SmtpTls::Starttls)]
+    pub smtp_tls: Operational<SmtpTls>,
+
+    /// `From` address every transactional mail uses.
+    #[config(name = "auth.mail_from_email", default = "auth@zeroship.ai".to_owned())]
+    pub mail_from_email: Operational<String>,
+
+    /// `From` display name every transactional mail uses.
+    #[config(name = "auth.mail_from_name", default = "zeroship".to_owned())]
+    pub mail_from_name: Operational<String>,
+
+    /// Public, externally-reachable origin of this auth server. Used when
+    /// constructing absolute URLs embedded in outbound email (e.g. the
+    /// magic-link href). Distinct from [`Self::addr`] - that's the bind
+    /// address (`0.0.0.0:9092` in prod, which is NOT a real origin).
+    ///
+    /// Defaults to the dev-loopback value; production deployments MUST
+    /// override with the auth host, including scheme + (optional) port.
+    /// Read it through [`AuthConfig::public_url`], which trims a trailing `/`.
+    #[config(name = "auth.public_url", default = "http://localhost:9092".to_owned())]
+    pub public_url: Operational<String>,
+
+    /// Maximum dedicated refresh-family database sessions per auth worker.
+    ///
+    /// These sessions are used only for OP refresh-token root issuance,
+    /// rotation, revoke, and refresh-family sweeps. The pool is deliberately
+    /// small: excess concurrent refresh-family transactions wait instead of
+    /// opening unbounded PostgreSQL backends. Read it through
+    /// [`AuthConfig::refresh_pool_size`], which floors it at 1.
+    #[config(name = "auth.refresh_pool_size", default = 4)]
+    pub refresh_pool_size: Operational<usize>,
+
+    /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
+    /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
+    /// (sub-spec §9). The inbound webhook resolves `OriginalRecipient` against
+    /// this domain and the forward builder rewrites `From`/`Reply-To` to it.
+    #[config(
+        name = "auth.relay_domain",
+        default = "relay.zeroship.localhost".to_owned()
+    )]
+    pub relay_domain: Operational<String>,
+
+    /// HTTP Basic-auth username the inbound provider (Postmark Inbound) must
+    /// present on every `POST /webhooks/relay-inbound`. When empty, the handler
+    /// 401s so an unverified POST cannot drive a forward/suppression spoof
+    /// (sub-spec §4.3 step 1).
+    #[config(name = "auth.relay_inbound_user", default = String::new())]
+    pub relay_inbound_user: Operational<String>,
+
+    /// Relay-forward mailer driver: `smtp` (default - the forward path needs
+    /// envelope-from control) | `stdout` (dev terminal). `resend` is REJECTED
+    /// for this role (it cannot pin envelope-from, sub-spec §3.2/§5.2a). This
+    /// is a SECOND, dedicated mailer distinct from [`Self::mailer`] so the relay
+    /// sends from the relay-domain identity (§5.5 reputation isolation).
+    #[config(name = "auth.relay_forward_mailer", default = "smtp".to_owned())]
+    pub relay_forward_mailer: Operational<String>,
+
+    /// Relay-forward SMTP host (required when `--relay-forward-mailer=smtp`).
+    /// Independent of [`Self::smtp_host`] - the relay sending identity is
+    /// distinct from the transactional one (sub-spec §5.2a). Empty means unset.
+    #[config(name = "auth.relay_smtp_host", default = String::new())]
+    pub relay_smtp_host: Operational<String>,
+
+    /// Relay-forward SMTP port. Defaults to 587 (STARTTLS).
+    #[config(name = "auth.relay_smtp_port", default = 587)]
+    pub relay_smtp_port: Operational<u16>,
+
+    /// Relay-forward SMTP username (optional - dev sinks need none). Empty
+    /// means unset.
+    #[config(name = "auth.relay_smtp_username", default = String::new())]
+    pub relay_smtp_username: Operational<String>,
+
+    /// Transport encryption for the relay-forward SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS). Dev sinks (mailpit on :1025) use `plaintext`;
+    /// prod uses `starttls`.
+    #[arg(value_enum)]
+    #[config(name = "auth.relay_smtp_tls", default = SmtpTls::Starttls)]
+    pub relay_smtp_tls: Operational<SmtpTls>,
+
+    /// HTTP Basic-auth username Postmark must present on every
+    /// `POST /webhooks/postmark` request. Configured per-server in the
+    /// Postmark dashboard's webhook settings. When empty, the webhook
+    /// handler responds with 401 so misrouted traffic doesn't silently
+    /// succeed.
+    #[config(name = "auth.postmark_webhook_user", default = String::new())]
+    pub postmark_webhook_user: Operational<String>,
+
+    /// Cron tick interval in seconds. Default 86400 (24 h). Operators
+    /// drop this to seconds in staging/integration tests so a cron
+    /// behaviour change is observable inside a single test run.
+    #[config(name = "auth.cron_tick_secs", default = 86_400)]
+    pub cron_tick_secs: Operational<u64>,
+
+    /// Audit-retention sweeper tick interval in seconds. Default 3600
+    /// (hourly). The sweep itself is cheap (one indexed DELETE per
+    /// bucket) so hourly cadence keeps the table close to its hot-tier
+    /// shape without making the sweeper hot. Operators can drop this
+    /// for tests; production should leave the default.
+    #[config(name = "auth.audit_retention_check_secs", default = 3_600)]
+    pub audit_retention_check_secs: Operational<u64>,
 }
 
-impl OverlaySelector for AuthControlsSources {
+impl OverlaySelector for AuthSettingsSources {
     fn overlay_path(&self) -> Option<&Path> {
         self.config.as_deref()
     }
@@ -55,7 +328,7 @@ impl OverlaySelector for AuthControlsSources {
     }
 }
 
-impl ObservabilityControls for AuthControls {
+impl ObservabilityControls for AuthSettings {
     fn log_filter(&self) -> &str {
         self.log_filter.get()
     }
@@ -65,7 +338,11 @@ impl ObservabilityControls for AuthControls {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+/// `Deserialize` is present so the overlay accepts the same spellings the flag
+/// does; `rename_all` makes those spellings `native` and `supabase`, which is
+/// exactly what `clap::ValueEnum` derives from the variant names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuthProviderKind {
     Native,
     Supabase,
@@ -81,37 +358,20 @@ impl AuthProviderKind {
     }
 }
 
-#[derive(Clone, Parser)]
-#[command(name = "zeroship-auth")]
-pub struct AuthConfig {
-    /// Bootstrap, command and observability controls, generated from one
-    /// declaration above.
-    #[command(flatten)]
-    pub controls: AuthControlsSources,
-
-    /// Listen address. Defaults to loopback; compose passes `0.0.0.0:9092`.
-    #[arg(long, env = "AUTH_ADDR", default_value = "127.0.0.1:9092")]
-    pub addr: String,
-
+/// The auth secrets still spelled by hand.
+///
+/// Every field here is credential-bearing and therefore belongs to the SECRET
+/// conversion, not this one: a `Secret<T>` declaration replaces the value flag
+/// with a generated `-file` path flag so the material never reaches an argument
+/// list. Converting them here would change the flag surface twice. They are
+/// flattened into [`AuthCli`] and MOVED into [`AuthConfig`], so each is spelled
+/// exactly once. `zeroship-auth --check-config` reports each by presence only,
+/// and [`AuthConfig`]'s hand-written `Debug` redacts every one.
+#[derive(Clone, Args)]
+pub struct AuthSecretSources {
     /// `PostgreSQL` DSN.
     #[arg(long, env = "AUTH_DB_URL", hide_env_values = true)]
     pub db_url: String,
-
-    /// Platform auth provider backend.
-    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", value_enum)]
-    pub auth_provider: Option<AuthProviderKind>,
-
-    /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
-    #[arg(long = "supabase-url", env = "SUPABASE_URL")]
-    pub supabase_url: Option<String>,
-
-    /// Supabase anon API key used by the browser-side GoTrue login.
-    #[arg(
-        long = "supabase-anon-key",
-        env = "SUPABASE_ANON_KEY",
-        hide_env_values = true
-    )]
-    pub supabase_anon_key: Option<String>,
 
     /// Standard-Webhooks symmetric secret for GoTrue's Send Email hook.
     /// Set this to the same `v1,whsec_<base64>` value supplied to GoTrue via
@@ -123,10 +383,6 @@ pub struct AuthConfig {
         hide_env_values = true
     )]
     pub gotrue_email_hook_secret: Option<String>,
-
-    /// Control-plane base URL used by browser-mediated auth flows.
-    #[arg(long = "control-url", env = "CONTROL_URL")]
-    pub control_url: Option<String>,
 
     /// Shared internal control-plane bearer key. Auth uses this only to gate
     /// control -> auth internal OP mint calls; it is never exposed to browser
@@ -178,206 +434,21 @@ pub struct AuthConfig {
     )]
     pub totp_enc_key: String,
 
-    /// Console origin(s) allowed to FRAME the login/signup/consent documents
-    /// via CSP `frame-ancestors` (immersive iframe login, design §4.3/§10.1).
-    /// The framed-route security headers emit
-    /// `frame-ancestors 'self' <these origins>` and DROP `X-Frame-Options`;
-    /// every other route keeps `XFO: DENY` + `frame-ancestors 'none'`. This is
-    /// the browser-enforced anti-clickjacking gate that replaced the deleted
-    /// gateway credential-oracle first-party gate. Each entry is an exact origin
-    /// (`scheme://host[:port]`); NO wildcards (a `https://*.zeroship.ai` would
-    /// re-admit every creator app and defeat the property). Empty (the default)
-    /// ⇒ no origin is admitted, so the framing relax is a no-op and the strict
-    /// `frame-ancestors 'none'` default holds (dev / single-origin deployments).
-    /// Production sets exactly the console origin (e.g.
-    /// `https://console.zeroship.ai`).
-    ///
-    /// Each entry MUST be SAME-SITE (same registrable domain / eTLD+1) with the
-    /// auth issuer host ([`Self::public_url`]). The framed login's CSRF cookie is
-    /// `SameSite=Strict`, so it only reaches the in-frame POST when the console
-    /// shares the issuer's registrable domain; a cross-registrable-domain console
-    /// would silently break framed login (cookie withheld). [`Self::resolve`]
-    /// fail-closes by DROPPING any non-same-site origin — that deployment falls
-    /// back to popup login rather than getting a relaxed `frame-ancestors` that
-    /// can't actually authenticate (review finding I7).
-    #[arg(
-        long = "frame-ancestor-origin",
-        env = "FRAME_ANCESTOR_ORIGINS",
-        value_delimiter = ','
-    )]
-    pub frame_ancestor_origins: Vec<String>,
-
-    // ─── Google OAuth (optional — federation routes registered only when set) ───
-    /// Google OAuth 2.0 client ID. Without it, `/oauth/google/*` routes are
-    /// not registered (auth still boots).
-    #[arg(long, env = "AUTH_GOOGLE_CLIENT_ID")]
-    pub google_client_id: Option<String>,
-
     /// Google OAuth 2.0 client secret.
     #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET", hide_env_values = true)]
     pub google_client_secret: Option<String>,
-
-    /// Redirect URI registered with Google. Must match the value configured in
-    /// the Google Cloud Console exactly.
-    #[arg(
-        long,
-        env = "AUTH_GOOGLE_REDIRECT_URI",
-        default_value = "https://auth.zeroship.ai/oauth/google/callback"
-    )]
-    pub google_redirect_uri: String,
-
-    /// Google's authorize endpoint. Overridable so the e2e tests can point
-    /// at an in-process `tests/common/mock_provider` instead of the real
-    /// Google. Production deployments should leave the default in place.
-    #[arg(
-        long,
-        env = "AUTH_GOOGLE_AUTH_URL",
-        default_value = "https://accounts.google.com/o/oauth2/v2/auth"
-    )]
-    pub google_auth_url: String,
-
-    /// Google's token endpoint. Overridable for tests; production leaves
-    /// the default.
-    #[arg(
-        long,
-        env = "AUTH_GOOGLE_TOKEN_URL",
-        default_value = "https://oauth2.googleapis.com/token"
-    )]
-    pub google_token_url: String,
-
-    /// Google's JWKS endpoint. Overridable for tests; production leaves
-    /// the default.
-    #[arg(
-        long,
-        env = "AUTH_GOOGLE_JWKS_URL",
-        default_value = "https://www.googleapis.com/oauth2/v3/certs"
-    )]
-    pub google_jwks_url: String,
-
-    /// Expected `iss` claim on Google ID tokens. Overridable for tests
-    /// (mock provider uses its own loopback base URL); production leaves
-    /// the default — Google emits this exact string per its OIDC
-    /// discovery document.
-    #[arg(
-        long,
-        env = "AUTH_GOOGLE_ISSUER",
-        default_value = "https://accounts.google.com"
-    )]
-    pub google_issuer: String,
-
-    // ─── GitHub OAuth (optional) ───
-    /// GitHub OAuth App client ID. Without it, `/oauth/github/*` routes are
-    /// not registered (auth still boots).
-    #[arg(long, env = "AUTH_GITHUB_CLIENT_ID")]
-    pub github_client_id: Option<String>,
 
     /// GitHub OAuth App client secret.
     #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET", hide_env_values = true)]
     pub github_client_secret: Option<String>,
 
-    /// Callback URL registered on the GitHub OAuth App. Must match what's set
-    /// in the app's settings.
-    #[arg(
-        long,
-        env = "AUTH_GITHUB_REDIRECT_URI",
-        default_value = "https://auth.zeroship.ai/oauth/github/callback"
-    )]
-    pub github_redirect_uri: String,
-
-    /// GitHub's authorize endpoint. Overridable for the federation e2e
-    /// tests; production deployments leave the default in place.
-    #[arg(
-        long,
-        env = "AUTH_GITHUB_AUTHORIZE_URL",
-        default_value = "https://github.com/login/oauth/authorize"
-    )]
-    pub github_authorize_url: String,
-
-    /// GitHub's token endpoint. Overridable for tests.
-    #[arg(
-        long,
-        env = "AUTH_GITHUB_TOKEN_URL",
-        default_value = "https://github.com/login/oauth/access_token"
-    )]
-    pub github_token_url: String,
-
-    /// GitHub's `/user` endpoint. Overridable for tests.
-    #[arg(
-        long,
-        env = "AUTH_GITHUB_USER_URL",
-        default_value = "https://api.github.com/user"
-    )]
-    pub github_user_url: String,
-
-    /// GitHub's `/user/emails` endpoint. Overridable for tests.
-    #[arg(
-        long,
-        env = "AUTH_GITHUB_EMAILS_URL",
-        default_value = "https://api.github.com/user/emails"
-    )]
-    pub github_emails_url: String,
-
-    // ─── Mailer (driver selection + per-driver creds) ────────────────────
-    /// Mailer driver: `stdout` (dev default) | `smtp` | `resend`.
-    #[arg(long, env = "AUTH_MAILER", default_value = "stdout")]
-    pub mailer: String,
-
-    /// SMTP relay hostname (required when `--mailer=smtp`).
-    #[arg(long, env = "AUTH_SMTP_HOST")]
-    pub smtp_host: Option<String>,
-
-    /// SMTP port. Defaults to 587 (STARTTLS); use 465 for implicit SMTPS.
-    #[arg(long, env = "AUTH_SMTP_PORT", default_value = "587")]
-    pub smtp_port: u16,
-
-    /// SMTP username (optional — server may allow unauthenticated relays).
-    #[arg(long, env = "AUTH_SMTP_USERNAME")]
-    pub smtp_username: Option<String>,
-
     /// SMTP password (paired with `--smtp-username`).
     #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
     pub smtp_password: Option<String>,
 
-    /// Transport encryption for the transactional SMTP leg:
-    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
-    /// `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY).
-    #[arg(
-        long = "smtp-tls",
-        env = "AUTH_SMTP_TLS",
-        value_enum,
-        default_value_t = SmtpTls::Starttls
-    )]
-    pub smtp_tls: SmtpTls,
-
     /// Resend API key (required when `--mailer=resend`).
     #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
     pub resend_api_key: Option<String>,
-
-    /// `From` address every transactional mail uses.
-    #[arg(
-        long,
-        env = "AUTH_MAIL_FROM_EMAIL",
-        default_value = "auth@zeroship.ai"
-    )]
-    pub mail_from_email: String,
-
-    /// `From` display name every transactional mail uses.
-    #[arg(long, env = "AUTH_MAIL_FROM_NAME", default_value = "zeroship")]
-    pub mail_from_name: String,
-
-    /// Public, externally-reachable origin of this auth server. Used when
-    /// constructing absolute URLs embedded in outbound email (e.g. the
-    /// magic-link href). Distinct from [`Self::addr`] — that's the bind
-    /// address (`0.0.0.0:9092` in prod, which is NOT a real origin).
-    ///
-    /// Defaults to the dev-loopback value; production deployments MUST
-    /// override with the auth host, including scheme + (optional) port.
-    #[arg(
-        long,
-        env = "AUTH_PUBLIC_URL",
-        default_value = "http://localhost:9092"
-    )]
-    pub public_url: String,
 
     /// Platform OP Ed25519 private signing key file (PEM/PKCS#8 or DER).
     ///
@@ -429,38 +500,6 @@ pub struct AuthConfig {
     #[arg(long = "refresh-idem-key-file", env = "REFRESH_IDEM_KEY_FILE")]
     pub refresh_idem_key_file: Option<PathBuf>,
 
-    /// Maximum dedicated refresh-family database sessions per auth worker.
-    ///
-    /// These sessions are used only for OP refresh-token root issuance,
-    /// rotation, revoke, and refresh-family sweeps. The pool is deliberately
-    /// small: excess concurrent refresh-family transactions wait instead of
-    /// opening unbounded PostgreSQL backends.
-    #[arg(
-        long = "refresh-pool-size",
-        env = "AUTH_REFRESH_POOL_SIZE",
-        default_value = "4"
-    )]
-    pub refresh_pool_size: usize,
-
-    // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
-    /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
-    /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
-    /// (sub-spec §9). The inbound webhook resolves `OriginalRecipient` against
-    /// this domain and the forward builder rewrites `From`/`Reply-To` to it.
-    #[arg(
-        long = "relay-domain",
-        env = "RELAY_DOMAIN",
-        default_value = "relay.zeroship.localhost"
-    )]
-    pub relay_domain: String,
-
-    /// HTTP Basic-auth username the inbound provider (Postmark Inbound) must
-    /// present on every `POST /webhooks/relay-inbound`. When unset, the handler
-    /// 401s so an unverified POST cannot drive a forward/suppression spoof
-    /// (sub-spec §4.3 step 1).
-    #[arg(long = "relay-inbound-user", env = "AUTH_RELAY_INBOUND_USER")]
-    pub relay_inbound_user: Option<String>,
-
     /// HTTP Basic-auth password paired with [`Self::relay_inbound_user`].
     #[arg(
         long = "relay-inbound-password",
@@ -468,32 +507,6 @@ pub struct AuthConfig {
         hide_env_values = true
     )]
     pub relay_inbound_password: Option<String>,
-
-    /// Relay-forward mailer driver: `smtp` (default — the forward path needs
-    /// envelope-from control) | `stdout` (dev terminal). `resend` is REJECTED
-    /// for this role (it cannot pin envelope-from, sub-spec §3.2/§5.2a). This
-    /// is a SECOND, dedicated mailer distinct from [`Self::mailer`] so the relay
-    /// sends from the relay-domain identity (§5.5 reputation isolation).
-    #[arg(
-        long = "relay-forward-mailer",
-        env = "AUTH_RELAY_FORWARD_MAILER",
-        default_value = "smtp"
-    )]
-    pub relay_forward_mailer: String,
-
-    /// Relay-forward SMTP host (required when `--relay-forward-mailer=smtp`).
-    /// Independent of [`Self::smtp_host`] — the relay sending identity is
-    /// distinct from the transactional one (sub-spec §5.2a).
-    #[arg(long = "relay-smtp-host", env = "AUTH_RELAY_SMTP_HOST")]
-    pub relay_smtp_host: Option<String>,
-
-    /// Relay-forward SMTP port. Defaults to 587 (STARTTLS).
-    #[arg(long = "relay-smtp-port", env = "AUTH_RELAY_SMTP_PORT", default_value = "587")]
-    pub relay_smtp_port: u16,
-
-    /// Relay-forward SMTP username (optional — dev sinks need none).
-    #[arg(long = "relay-smtp-username", env = "AUTH_RELAY_SMTP_USERNAME")]
-    pub relay_smtp_username: Option<String>,
 
     /// Relay-forward SMTP password (paired with `--relay-smtp-username`).
     #[arg(
@@ -503,27 +516,6 @@ pub struct AuthConfig {
     )]
     pub relay_smtp_password: Option<String>,
 
-    /// Transport encryption for the relay-forward SMTP leg:
-    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
-    /// `plaintext` (no TLS). Dev sinks (mailpit on :1025) use `plaintext`;
-    /// prod uses `starttls`.
-    #[arg(
-        long = "relay-smtp-tls",
-        env = "AUTH_RELAY_SMTP_TLS",
-        value_enum,
-        default_value_t = SmtpTls::Starttls
-    )]
-    pub relay_smtp_tls: SmtpTls,
-
-    // ─── Postmark webhook (bounce/complaint receiver, P5-U7) ─────────────
-    /// HTTP Basic-auth username Postmark must present on every
-    /// `POST /webhooks/postmark` request. Configured per-server in the
-    /// Postmark dashboard's webhook settings. When unset, the webhook
-    /// handler responds with 401 so misrouted traffic doesn't silently
-    /// succeed.
-    #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_USER")]
-    pub postmark_webhook_user: Option<String>,
-
     /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
     /// See that field for the rationale.
     #[arg(
@@ -532,25 +524,21 @@ pub struct AuthConfig {
         hide_env_values = true
     )]
     pub postmark_webhook_password: Option<String>,
-
-    /// Cron tick interval in seconds. Default 86400 (24 h). Operators
-    /// drop this to seconds in staging/integration tests so a cron
-    /// behaviour change is observable inside a single test run.
-    #[arg(long, env = "AUTH_CRON_TICK_SECS", default_value = "86400")]
-    pub cron_tick_secs: u64,
-
-    /// Audit-retention sweeper tick interval in seconds. Default 3600
-    /// (hourly). The sweep itself is cheap (one indexed DELETE per
-    /// bucket) so hourly cadence keeps the table close to its hot-tier
-    /// shape without making the sweeper hot. Operators can drop this
-    /// for tests; production should leave the default.
-    #[arg(
-        long,
-        env = "AUTH_AUDIT_RETENTION_CHECK_SECS",
-        default_value = "3600"
-    )]
-    pub audit_retention_check_secs: u64,
 }
+
+/// zeroship-auth command line.
+#[derive(Clone, Parser)]
+#[command(name = "zeroship-auth")]
+pub struct AuthCli {
+    /// Every operational value, generated from one declaration above.
+    #[command(flatten)]
+    pub settings: AuthSettingsSources,
+
+    /// The secrets awaiting the secret conversion.
+    #[command(flatten)]
+    pub secrets: AuthSecretSources,
+}
+
 
 /// True when `origin` is a CONCRETE, frameable-ancestor origin safe to splice
 /// into a CSP `frame-ancestors` source-list: an exact `scheme://host[:port]`
@@ -648,90 +636,85 @@ fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
     registrable_domain(host) == registrable_domain(issuer_host)
 }
 
-fn parse_auth_provider_overlay(raw: Option<String>) -> Result<Option<AuthProviderKind>, String> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let value = raw.trim().to_ascii_lowercase();
-    match value.as_str() {
-        "" => Ok(None),
-        "native" => Ok(Some(AuthProviderKind::Native)),
-        "supabase" => Ok(Some(AuthProviderKind::Supabase)),
-        other => Err(format!(
-            "unknown auth_provider value {other:?}; expected native|supabase"
-        )),
-    }
-}
+/// The resolved auth-server configuration the rest of the crate reads.
+///
+/// Built by [`Self::from_resolved`], which is the ONLY constructor. That matters
+/// for one field: [`Self::frame_ancestor_origins`] is the fail-closed FILTERED
+/// allowlist, and the constructor is where the filter runs. The raw list on
+/// [`AuthSettings`] is still reachable, so the filter is not enforced by the
+/// type - it is enforced by every consumer reading the accessor, which is what
+/// `frame_ancestor_origins_are_filtered_before_any_consumer_sees_them` in this
+/// module's tests pins.
+#[derive(Clone)]
+pub struct AuthConfig {
+    /// Every operational value, resolved from CLI, environment, overlay, default.
+    pub settings: AuthSettings,
 
-fn resolved_optional_string(cli: Option<String>, file: Option<String>) -> Option<String> {
-    let resolved = resolve_overlay_string(cli, file, None);
-    let trimmed = resolved.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    /// The secrets, moved off the command line unchanged.
+    pub secrets: AuthSecretSources,
+
+    /// Frame-ancestor origins AFTER the concrete + same-site filter.
+    frame_ancestor_origins: Vec<String>,
 }
 
 impl AuthConfig {
-    /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
-    /// file overlay.
+    /// Build the resolved configuration and run auth's own resolve-time guards.
     ///
-    pub fn try_resolve(&mut self, auth: AuthSection) -> Result<(), String> {
-        self.refresh_pool_size = self.refresh_pool_size.max(1);
-        // Console framing allowlist (immersive iframe login, §4.3/§10.1).
-        // Precedence mirrors the deployment-injection pattern: a non-empty
-        // CLI/env (`--frame-ancestor-origin` / `FRAME_ANCESTOR_ORIGINS`) wins;
-        // otherwise fall back to the shared `[auth].frame_ancestor_origins`
-        // file overlay; otherwise stay empty (relax is a no-op → strict
-        // default). Empty CLI/env entries (a stray trailing comma) are dropped,
-        // and NON-CONCRETE origins (wildcards, bad scheme, control chars) are
-        // rejected here so a misconfiguration can never widen the
-        // `frame-ancestors` allowlist (§6.2) nor produce an un-serializable CSP
-        // header value (§4.3 `static_insert` fallback).
+    /// The generated resolver has already applied `CLI > env > overlay >
+    /// compiled default` to every value. What is left is the part that is not
+    /// mechanical:
+    ///
+    /// * the frame-ancestor allowlist is filtered fail-closed - non-concrete
+    ///   origins and origins that are not same-site with the issuer host are
+    ///   DROPPED, never carried into a CSP header;
+    /// * selecting the Supabase provider without its URL and anon key is a
+    ///   startup error rather than a half-configured boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the missing Supabase inputs.
+    pub fn from_resolved(
+        settings: AuthSettings,
+        secrets: AuthSecretSources,
+    ) -> Result<Self, String> {
         // The auth issuer host the SameSite=Strict `__Host-zsidp_csrf` cookie is
         // scoped to. Every admitted frame-ancestor MUST be same-site (eTLD+1)
-        // with it (review finding I7) — otherwise the Strict cookie is withheld
+        // with it (review finding I7) - otherwise the Strict cookie is withheld
         // on the in-frame POST (framed login silently breaks) and the only
-        // "fixes" are insecure (Strict→None re-opens cross-site CSRF). A
+        // "fixes" are insecure (Strict->None re-opens cross-site CSRF). A
         // non-same-site origin is therefore DROPPED here so the relaxed
         // `frame-ancestors` never admits it; that deployment falls back to popup.
-        let issuer_host = url::Url::parse(&self.public_url)
+        // NON-CONCRETE origins (wildcards, bad scheme, control chars) are
+        // rejected for the same reason: a misconfiguration must never widen the
+        // allowlist (design 6.2) nor produce an un-serializable CSP header value.
+        let issuer_host = url::Url::parse(settings.public_url.get())
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
-        let keep = |o: &String| {
-            is_concrete_frame_ancestor_origin(o) && is_same_site_with_issuer(o, &issuer_host)
-        };
-        self.frame_ancestor_origins.retain(|o| keep(o));
-        if self.frame_ancestor_origins.is_empty() {
-            if let Some(origins) = auth.frame_ancestor_origins {
-                self.frame_ancestor_origins =
-                    origins.into_iter().filter(|o| keep(o)).collect();
-            }
-        }
-        let overlay_provider = parse_auth_provider_overlay(auth.auth_provider)?;
-        self.auth_provider = Some(
-            self.auth_provider
-                .or(overlay_provider)
-                .unwrap_or(AuthProviderKind::Native),
-        );
-        self.supabase_url = resolved_optional_string(self.supabase_url.take(), auth.supabase_url);
-        self.supabase_anon_key =
-            resolved_optional_string(self.supabase_anon_key.take(), auth.supabase_anon_key);
-        self.control_url = Some(resolve_overlay_string(
-            self.control_url.take(),
-            auth.control_url,
-            Some(DEFAULT_CONTROL_URL),
-        ));
+        let frame_ancestor_origins = settings
+            .frame_ancestor_origins
+            .get()
+            .iter()
+            .filter(|origin| {
+                is_concrete_frame_ancestor_origin(origin)
+                    && is_same_site_with_issuer(origin, &issuer_host)
+            })
+            .cloned()
+            .collect();
 
-        if self.auth_provider() == AuthProviderKind::Supabase {
+        let resolved = Self {
+            settings,
+            secrets,
+            frame_ancestor_origins,
+        };
+
+        if resolved.auth_provider() == AuthProviderKind::Supabase {
             let mut missing = Vec::new();
-            if self.supabase_url().is_none() {
-                missing.push("SUPABASE_URL / --supabase-url");
+            if resolved.supabase_url().is_none() {
+                missing.push("ZEROSHIP_AUTH_SUPABASE_URL / --supabase-url");
             }
-            if self.supabase_anon_key().is_none() {
-                missing.push("SUPABASE_ANON_KEY / --supabase-anon-key");
+            if resolved.supabase_anon_key().is_none() {
+                missing.push("ZEROSHIP_AUTH_SUPABASE_ANON_KEY / --supabase-anon-key");
             }
             if !missing.is_empty() {
                 return Err(format!(
@@ -741,46 +724,101 @@ impl AuthConfig {
             }
         }
 
-        Ok(())
+        Ok(resolved)
     }
 
-    /// Resolve runtime state, panicking on invalid config. Existing tests and
-    /// fixtures use this convenience wrapper; real boot uses [`Self::try_resolve`]
-    /// so invalid Supabase config exits cleanly.
-    pub fn resolve(&mut self, auth: AuthSection) {
-        self.try_resolve(auth).expect("resolve auth config");
+    /// Parse a command line, resolve it against `overlay`, and run the guards.
+    ///
+    /// # Errors
+    ///
+    /// Returns the clap error for an unparsable command line, and the
+    /// resolve-time message otherwise.
+    pub fn try_parse_and_resolve<I, T>(
+        args: I,
+        overlay: Option<&toml::Value>,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = AuthCli::try_parse_from(args).map_err(|err| err.to_string())?;
+        Self::try_from_cli(cli, overlay)
+    }
+
+    /// Resolve an already-parsed command line against `overlay`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the generated resolver's value-free diagnostic, or auth's own
+    /// resolve-time message.
+    pub fn try_from_cli(cli: AuthCli, overlay: Option<&toml::Value>) -> Result<Self, String> {
+        let settings = AuthSettings::resolve_config(cli.settings, overlay)
+            .map_err(|err: ConfigResolveError| err.to_string())?;
+        Self::from_resolved(settings, cli.secrets)
+    }
+
+    /// Parse and resolve with no overlay, panicking on invalid input.
+    ///
+    /// The convenience the crate's tests and in-process fixtures use; real boot
+    /// goes through [`Self::try_from_cli`] so an invalid configuration exits
+    /// cleanly instead of unwinding.
+    ///
+    /// # Panics
+    ///
+    /// On an unparsable command line or a failed resolve-time guard.
+    #[must_use]
+    pub fn parse_from<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self::try_parse_and_resolve(args, None).expect("resolve auth config")
+    }
+
+    /// Frame-ancestor origins after the fail-closed filter. The ONLY list safe
+    /// to splice into a CSP `frame-ancestors` source-list.
+    #[must_use]
+    pub fn frame_ancestor_origins(&self) -> &[String] {
+        &self.frame_ancestor_origins
     }
 
     /// Resolved auth-provider backend.
     #[must_use]
     pub fn auth_provider(&self) -> AuthProviderKind {
-        self.auth_provider.unwrap_or(AuthProviderKind::Native)
+        *self.settings.provider.get()
     }
 
-    /// Resolved Supabase Auth / GoTrue base URL.
+    /// Resolved Supabase Auth / GoTrue base URL; `None` when unset.
     #[must_use]
     pub fn supabase_url(&self) -> Option<&str> {
-        self.supabase_url.as_deref()
+        non_empty(self.settings.supabase_url.get())
     }
 
-    /// Resolved Supabase anon API key.
+    /// Resolved Supabase anon API key; `None` when unset.
     #[must_use]
     pub fn supabase_anon_key(&self) -> Option<&str> {
-        self.supabase_anon_key.as_deref()
+        non_empty(self.settings.supabase_anon_key.get())
     }
 
     /// Resolved control-plane base URL.
     #[must_use]
     pub fn control_url(&self) -> &str {
-        self.control_url.as_deref().unwrap_or(DEFAULT_CONTROL_URL)
+        self.settings.control_url.get()
+    }
+
+    /// Refresh-family pool size, floored at 1: a zero-sized pool would deadlock
+    /// every refresh-token transaction rather than merely serialising them.
+    #[must_use]
+    pub fn refresh_pool_size(&self) -> usize {
+        (*self.settings.refresh_pool_size.get()).max(1)
     }
 
     /// External origin of this auth server (no trailing slash). Returns
-    /// [`Self::public_url`] with any trailing `/` trimmed so callers can
-    /// freely concatenate `/magic/verify?…`.
+    /// `auth.public_url` with any trailing `/` trimmed so callers can
+    /// freely concatenate `/magic/verify?...`.
     #[must_use]
     pub fn public_url(&self) -> String {
-        self.public_url.trim_end_matches('/').to_string()
+        self.settings.public_url.get().trim_end_matches('/').to_string()
     }
 
     /// Public issuer URL for the self-contained OAuth/OIDC provider.
@@ -794,44 +832,55 @@ impl AuthConfig {
     }
 }
 
+/// Treat an empty operational string as "unset".
+///
+/// Every optional auth string defaults to `String::new()` rather than
+/// `Option<String>`: `Operational<T>`'s supply set includes a compiled default,
+/// so "absent" has one spelling across the flag, the environment, the overlay
+/// and the default. Trimming here keeps a whitespace-only value from reading as
+/// configured.
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 impl std::fmt::Debug for AuthConfig {
     /// Hand-written so secrets (DSN, stash/OAuth/SMTP/Resend keys, webhook
     /// creds) never appear in `{:?}` output. The derive would print raw
     /// `String` secrets in plaintext (S2), so it is deliberately absent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthConfig")
-            .field("addr", &self.addr)
+            .field("settings", &self.settings)
+            .field("frame_ancestor_origins", &self.frame_ancestor_origins)
             .field("db_url", &"<redacted>")
-            .field("auth_provider", &self.auth_provider)
-            .field("supabase_url", &self.supabase_url)
             .field("supabase_anon_key", &"<redacted>")
             .field("gotrue_email_hook_secret", &"<redacted>")
-            .field("control_url", &self.control_url)
             .field("control_key", &"<redacted>")
             .field("stash_signing_key", &"<redacted>")
             .field("totp_enc_key", &"<redacted>")
-            .field("frame_ancestor_origins", &self.frame_ancestor_origins)
-            .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"<redacted>")
-            .field("github_client_id", &self.github_client_id)
             .field("github_client_secret", &"<redacted>")
-            .field("mailer", &self.mailer)
             .field("smtp_password", &"<redacted>")
             .field("resend_api_key", &"<redacted>")
-            .field("public_url", &self.public_url)
-            .field("auth_signing_key_file", &self.auth_signing_key_file)
-            .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
-            .field("auth_broker_secret_file", &self.auth_broker_secret_file)
+            .field(
+                "auth_signing_key_file",
+                &self.secrets.auth_signing_key_file,
+            )
+            .field(
+                "auth_pairwise_salt_file",
+                &self.secrets.auth_pairwise_salt_file,
+            )
+            .field(
+                "auth_broker_secret_file",
+                &self.secrets.auth_broker_secret_file,
+            )
             .field(
                 "auth_broker_secret_previous_file",
-                &self.auth_broker_secret_previous_file,
+                &self.secrets.auth_broker_secret_previous_file,
             )
-            .field("refresh_hash_key_file", &self.refresh_hash_key_file)
-            .field("refresh_idem_key_file", &self.refresh_idem_key_file)
-            .field("refresh_pool_size", &self.refresh_pool_size)
+            .field("refresh_hash_key_file", &self.secrets.refresh_hash_key_file)
+            .field("refresh_idem_key_file", &self.secrets.refresh_idem_key_file)
             .field("postmark_webhook_password", &"<redacted>")
-            .field("relay_domain", &self.relay_domain)
-            .field("relay_forward_mailer", &self.relay_forward_mailer)
             .field("relay_inbound_password", &"<redacted>")
             .field("relay_smtp_password", &"<redacted>")
             .finish_non_exhaustive()
