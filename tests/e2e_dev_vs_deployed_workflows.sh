@@ -346,7 +346,7 @@ for svc in "control:$ZEROSHIP_CONTROL_PORT" "worker:$ZEROSHIP_WORKER_PORT" "gate
 done
 pass "control + worker + gateway healthy"
 
-OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 [ -n "$API_KEY" ] && [ -n "$APP_ID" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }

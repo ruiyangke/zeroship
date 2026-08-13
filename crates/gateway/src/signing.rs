@@ -320,6 +320,50 @@ mod tests {
         assert_eq!(loaded, material);
     }
 
+    /// THE ONE-VARIABLE CONTROL for the two cases above, and the reason this
+    /// setting is a path rather than a `Secret<String>`.
+    ///
+    /// `read_secret_file` is the loader every string-tier secret goes through,
+    /// including this one while it was declared `Secret<String>`. Same file,
+    /// two loaders, and they disagree: it strips the newline the OP keeps, and
+    /// it cannot read the binary case at all. Without this assertion the two
+    /// tests above only say "raw bytes come back raw", which any loader that
+    /// happened to work would also satisfy.
+    #[cfg(unix)]
+    #[test]
+    fn the_string_tier_loader_would_not_have_agreed_with_the_op() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let newline = dir.path().join("broker-newline-control");
+        let material = b"gateway-broker-secret-test-master-32-bytes\n";
+        std::fs::write(&newline, material).expect("write");
+        set_mode(&newline, 0o600);
+        let as_string = zeroship_core::config::read_secret_file(
+            newline.to_str().expect("utf8 path"),
+        )
+        .expect("the string tier reads a text file");
+        assert_ne!(
+            as_string.as_bytes(),
+            &material[..],
+            "the string tier strips the trailing newline; the OP does not"
+        );
+        assert_eq!(
+            load_broker_master_secret(&newline).expect("raw loader"),
+            material.to_vec()
+        );
+
+        let binary = dir.path().join("broker-binary-control");
+        let mut bytes = vec![0x80u8; 32];
+        bytes[7] = 0xff;
+        std::fs::write(&binary, &bytes).expect("write");
+        set_mode(&binary, 0o600);
+        assert!(
+            zeroship_core::config::read_secret_file(binary.to_str().expect("utf8 path")).is_err(),
+            "the string tier cannot read `head -c 32 /dev/urandom` material"
+        );
+        assert_eq!(load_broker_master_secret(&binary).expect("raw loader"), bytes);
+    }
+
     #[cfg(unix)]
     #[test]
     fn broker_secret_rejects_group_readable_file() {

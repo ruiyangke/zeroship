@@ -336,7 +336,7 @@ sleep 4
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stack healthy" \
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
-OUT=$("$BIN/dev-provision" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
 KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$KEY" ] && ok "deployed stream-probe" || { no "provision: $OUT"; exit 1; }
 sleep 6

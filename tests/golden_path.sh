@@ -1071,6 +1071,9 @@ if [ "$LP_DSN" = "$DB_URL" ]; then
 else
   for _spec in "lpA:$LP_DSN:$LP_PORT_A" "lpB:$DB_URL:$LP_PORT_B"; do
     _tag="${_spec%%:*}"; _rest="${_spec#*:}"; _dsn="${_rest%:*}"; _port="${_rest##*:}"
+    # The DSN is the ONE variable between the two runs, and it is secret-classed,
+    # so it arrives as a per-process assignment rather than on the command line.
+    ZEROSHIP_CONTROL_DATABASE_URL="$_dsn" \
     "$BIN/zeroship-control" --port "$_port" --blob-store /tmp/gp-bundles \
       --signing-key-file "$GP_SIGNING_KEY" > "/tmp/gp-$_tag.log" 2>&1 &
     # `disown`, and deliberately NOT PIDS+=. These two are killed a few lines
@@ -1127,7 +1130,7 @@ if [ -n "$TOKEN" ]; then
   DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$TOKEN" 2>&1)
   echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
 else
-  OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
+  OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
   API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
   [ -n "$APP_ID" ] && [ -n "$API_KEY" ] && pass "dev-provisioned app ($APP_ID)" || { fail "dev-provision: $OUT"; exit 1; }
@@ -2380,7 +2383,7 @@ DB9_BUILD_BYTES=$(wc -c </tmp/gp-dbtodos9-build.log 2>/dev/null | tr -d ' ')
 if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   pass "db-todos builds through the real vite-plugin for the deployed leg ($(du -k "$TODOS/dist/app.zship" | cut -f1)KB)"
 
-  DB9_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
+  DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
   DB9_APP_ID=$(echo "$DB9_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB9_API_KEY=$(echo "$DB9_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
@@ -2713,7 +2716,7 @@ else
 fi
 
 # --- 10c. Deploy it, and give it a schema the way a real deploy does --------
-SC_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
+SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
 SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
 SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
 SC_READY=0
@@ -3078,7 +3081,7 @@ elif ! ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos-build.log 2>&1 || [ ! -f "
   fail "examples/db-todos does not build: $(tail -5 /tmp/gp-dbtodos-build.log | tr '\n' ' ')"
 else
   pass "db-todos builds through the real vite-plugin ($(du -k "$DB_ZSHIP" | cut -f1)KB)"
-  DB_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
+  DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
   DB_APP_ID=$(echo "$DB_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB_API_KEY=$(echo "$DB_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
@@ -3359,7 +3362,7 @@ if ! ( cd "$WP" && pnpm build ) >/tmp/gp-wall-build.log 2>&1 || [ ! -f "$WP_ZSHI
   fail "examples/wall-probe does not build: $(tail -5 /tmp/gp-wall-build.log | tr '\n' ' ')"
 else
   pass "wall-probe builds through the real vite-plugin ($(du -k "$WP_ZSHIP" | cut -f1)KB)"
-  WP_OUT=$("$BIN/dev-provision" --blob-store /tmp/gp-bundles --name "$WP_APP" --zship "$WP_ZSHIP" 2>&1)
+  WP_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$WP_APP" --zship "$WP_ZSHIP" 2>&1)
   WP_APP_ID=$(echo "$WP_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   if [ -z "$WP_APP_ID" ]; then
     fail "could not provision wall-probe: ${WP_OUT:0:200}"
@@ -4350,7 +4353,16 @@ gp_close_step
 # Second consecutive raise where the delta and the run agree to the assertion.
 # Mutation-proven before the run by deleting the app's message listener: 3/1,
 # only the frame arm red.
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-119}"
+# 119 -> 121, raised as a delta for step 2b's two new precedence arms. Step 2b
+# used to drive one CLI-beats-file case against the deleted `[secrets]`
+# urn:env tier; it now drives the overlay tier plus BOTH higher tiers (the
+# canonical env name and the generated --database-url-file path flag), each one
+# variable apart from the base case. MEASURED after the rewrite:
+#   golden path: 121 passed, 15 failed (floor 121)
+#   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
+# The delta and the run agree to the assertion, and the 15 reds are the same
+# ticketed set (#260 x6, #236 x2, #332/#333 x3, #331 x4).
+GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-121}"
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
