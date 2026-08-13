@@ -6268,3 +6268,154 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+// ---------------------------------------------------------------------------
+// A resumed backfill over a cohort the filter only PARTLY selects.
+//
+// `a_resumed_backfill_stops_at_the_boundary_its_first_run_captured` above covers
+// resumption, but its filter (`value = 'pending'`) is SELF-CONSUMING: every row
+// starts in the cohort and leaves it by being done. So the filter never has to
+// skip anything, and a resume that ignored it entirely would still land on the
+// right rows.
+//
+// This is the other shape. `grp = 'touch'` is PERMANENT - the `keep` rows never
+// match, at any point, and they sit BETWEEN cohort rows. A resume now has to
+// carry two things across the interruption at once: the stored boundary, and the
+// predicate. Getting the boundary right while dropping the predicate rewrites
+// rows that were never in the cohort; getting the predicate right while
+// re-deriving the boundary redoes work or skips it.
+//
+// The interleaving is what makes that visible. With a contiguous cohort, a
+// boundary alone is enough to look correct.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+
+    // Eight rows, alternating. Cohort = the four `touch` rows at 1, 3, 5, 7.
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".mixed_items (\
+                 id bigint PRIMARY KEY, grp text NOT NULL, value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".mixed_items (id, grp, value) VALUES \
+                 (1, 'touch', 'pending'), (2, 'keep', 'pending'), \
+                 (3, 'touch', 'pending'), (4, 'keep', 'pending'), \
+                 (5, 'touch', 'pending'), (6, 'keep', 'pending'), \
+                 (7, 'touch', 'pending'), (8, 'keep', 'pending')",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create the interleaved cohort");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("interleaved cohort resume");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "mixed_items".into(),
+        cursor_columns: vec!["id".into()],
+        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+            name: "mixed_items_id_immutable".into(),
+        },
+        cursor_contract: None,
+        batch_size: 2,
+        set_clause: "\"value\" = 'done'".into(),
+        per_row: BTreeMap::new(),
+        // PERMANENT: no row ever enters or leaves this predicate.
+        filter: Some("\"grp\" = 'touch'".into()),
+        name: "interleaved cohort resume".into(),
+    };
+
+    let run = || {
+        backend.run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+    };
+
+    let values = || async {
+        let rows = session
+            .query(
+                &format!(
+                    "SELECT id, grp, value FROM \"{}\".mixed_items ORDER BY id",
+                    cfg.project_schema
+                ),
+                &[],
+            )
+            .await
+            .expect("read the cohort");
+        rows.iter()
+            .map(|row| {
+                (
+                    row.try_get::<_, i64>("id").expect("id"),
+                    row.try_get::<_, String>("grp").expect("grp"),
+                    row.try_get::<_, String>("value").expect("value"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Phase 1 — interrupt after the first committed batch.
+    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    let error = run()
+        .await
+        .expect_err("the fault must abort the run after its first committed batch");
+    assert!(
+        error.to_string().contains("fault-injection"),
+        "unexpected pre-fault failure: {error}"
+    );
+
+    let after_crash = values().await;
+    let done_after_crash: Vec<i64> = after_crash
+        .iter()
+        .filter(|(_, _, value)| value == "done")
+        .map(|(id, _, _)| *id)
+        .collect();
+    // The premise: the interruption really did land mid-cohort. If the first run
+    // had finished, or done nothing, the resume below would prove nothing.
+    assert!(
+        !done_after_crash.is_empty() && done_after_crash.len() < 4,
+        "the crash must land mid-cohort, got {done_after_crash:?}"
+    );
+    assert!(
+        after_crash
+            .iter()
+            .all(|(_, grp, value)| grp == "touch" || value == "pending"),
+        "even the interrupted run must not touch an excluded row: {after_crash:?}"
+    );
+
+    // Phase 2 — the retry finishes the cohort and still honours the predicate.
+    run().await.expect("the retry completes the cohort");
+
+    assert_eq!(
+        values().await,
+        vec![
+            (1, "touch".to_string(), "done".to_string()),
+            (2, "keep".to_string(), "pending".to_string()),
+            (3, "touch".to_string(), "done".to_string()),
+            (4, "keep".to_string(), "pending".to_string()),
+            (5, "touch".to_string(), "done".to_string()),
+            (6, "keep".to_string(), "pending".to_string()),
+            (7, "touch".to_string(), "done".to_string()),
+            (8, "keep".to_string(), "pending".to_string()),
+        ],
+        "the resume must finish every cohort row and leave every excluded row alone"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
