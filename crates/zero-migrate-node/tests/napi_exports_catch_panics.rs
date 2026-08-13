@@ -117,3 +117,60 @@ fn the_scanner_joins_an_attribute_rustfmt_wrapped_over_several_lines() {
         joined[0].1
     );
 }
+
+/// The gate above reads ONE file, so it is only complete while every export lives
+/// in it. That assumption is exactly the kind the gate exists to defend - its own
+/// header says a reviewer "cannot see that an export elsewhere was added without
+/// the attribute", and an export added to `verbs.rs` or `api.rs` would be invisible
+/// to a scan of `bridge.rs`. So pin the assumption instead of trusting it.
+///
+/// This reads the source directory at test time rather than with `include_str!`,
+/// because the hazard is a file that does not exist yet and so cannot be named in
+/// an `include_str!` list - a list that must be updated to catch a new file catches
+/// nothing.
+#[test]
+fn bridge_rs_is_the_only_file_that_exports_to_n_api() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut strays: Vec<String> = Vec::new();
+
+    for entry in std::fs::read_dir(&src).expect("the crate has a src directory") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .expect("a source file has a name")
+            .to_string();
+        if name == "bridge.rs" {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&path).expect("a readable source file");
+        // Only CALLABLE exports matter. `#[napi(object)]` on a struct crosses the
+        // boundary as data and has no body to unwind out of, so it neither needs
+        // nor accepts `catch_unwind`.
+        for (number, attribute) in export_attributes(&source) {
+            let declares_fn = source
+                .lines()
+                .skip(number) // `number` is 1-based, so this starts after the attribute
+                .find(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.is_empty() && !trimmed.starts_with("#[") && !trimmed.starts_with("//")
+                })
+                .is_some_and(|line| line.contains("fn "));
+            if declares_fn {
+                strays.push(format!("{name}:{number}: {attribute}"));
+            }
+        }
+    }
+
+    assert!(
+        strays.is_empty(),
+        "these N-API function exports live outside `bridge.rs`, where the \
+         `catch_unwind` gate above cannot see them. Either move them into \
+         `bridge.rs` or widen that gate to scan every source file:\n{}",
+        strays.join("\n")
+    );
+}
