@@ -3,7 +3,7 @@
 {% block body %}
 {% if confirm %}
 <h2>Authorize {{ client_name }}</h2>
-<p class="subtle">{{ client_id }}</p>
+{% if !client_id.is_empty() %}<p class="subtle">{{ client_id }}</p>{% endif %}
 {% else %}
 <h2>Enter the code shown on your device</h2>
 {% endif %}

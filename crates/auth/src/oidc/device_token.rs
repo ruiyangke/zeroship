@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use compio_postgres::Client;
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -29,14 +29,9 @@ pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:devic
 const DEVICE_CODE_BYTES: usize = 32;
 const DEVICE_TTL_SECS: i64 = 600;
 const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
-const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
-const USER_CODE_GROUP_LEN: usize = 4;
-const USER_CODE_GROUPS: usize = 3;
-const USER_CODE_CHAR_LEN: usize = USER_CODE_GROUP_LEN * USER_CODE_GROUPS;
-const USER_CODE_FORMATTED_LEN: usize = USER_CODE_CHAR_LEN + (USER_CODE_GROUPS - 1);
 const USER_CODE_ATTEMPTS: usize = 8;
-const OP_DEVICE_PROVIDER: &str = "op";
 const DEFAULT_DEVICE_SCOPE: &str = "openid";
+pub(crate) use zeroship_core::device_grant::{OP_PROVIDER as OP_DEVICE_PROVIDER, PLATFORM_PROVIDER};
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -61,11 +56,26 @@ pub enum DeviceApproval {
     NotFound,
 }
 
+/// A pending grant the `/device` page found for a typed user code.
+///
+/// The `provider` column selects which service redeems the approved row, so the
+/// page renders from it rather than assuming: an [`OP_DEVICE_PROVIDER`] row is
+/// redeemed at this service's `/oauth2/token` and names a registered OAuth
+/// client, while a [`PLATFORM_PROVIDER`] row is redeemed at control's
+/// `/api/device/token` and names none.
 #[derive(Debug, Clone)]
-pub(crate) struct NativeDeviceGrantDetails {
+pub(crate) struct PendingDeviceGrant {
     pub client_id: String,
     pub client_name: String,
     pub scopes: Vec<String>,
+    pub provider: String,
+}
+
+impl PendingDeviceGrant {
+    /// Whether this row belongs to control's deploy-token flow.
+    pub(crate) fn is_platform(&self) -> bool {
+        self.provider == PLATFORM_PROVIDER
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,44 +189,73 @@ async fn device_authorization_inner(
     Err(OAuthError::server_error("device authorization unavailable"))
 }
 
+/// Look up a pending grant by user code, across BOTH device flows.
+///
+/// `user_code` is unique over the whole table (`device_grants_user_code_key`),
+/// so one code identifies at most one row and the `provider` column tells the
+/// caller which flow it belongs to. This deliberately does NOT filter on
+/// provider: filtering on [`OP_DEVICE_PROVIDER`] is precisely what made every
+/// code `zeroship login` printed read as "invalid or expired" on the only page
+/// that can approve anything.
+///
+/// The join to `oauth_clients` is a LEFT join for the same reason. Control's
+/// rows carry no `client_id` - the CLI is not a registered OP client - so an
+/// inner join dropped them even before the provider filter did.
 #[allow(clippy::future_not_send)]
-pub(crate) async fn native_user_code_details(
+pub(crate) async fn pending_user_code_details(
     db: &Client,
     user_code: &str,
-) -> Result<Option<NativeDeviceGrantDetails>, String> {
+) -> Result<Option<PendingDeviceGrant>, String> {
     let user_code = normalize_user_code(user_code);
     if user_code.is_empty() {
         return Ok(None);
     }
     let rows = db
         .query(
-            "SELECT dg.client_id, dg.scope, COALESCE(oc.client_name, dg.client_id) AS client_name \
+            "SELECT dg.provider, dg.client_id, dg.scope, \
+                    COALESCE(oc.client_name, dg.client_id, '') AS client_name \
              FROM zeroship.device_grants dg \
-             JOIN zeroship.oauth_clients oc ON oc.client_id = dg.client_id \
+             LEFT JOIN zeroship.oauth_clients oc ON oc.client_id = dg.client_id \
              WHERE dg.user_code = $1 \
-               AND dg.provider = $2 \
                AND dg.status = 'pending' \
                AND dg.expires_at > NOW() \
              LIMIT 1",
-            &[&user_code, &OP_DEVICE_PROVIDER],
+            &[&user_code],
         )
         .await
-        .map_err(|err| format!("native device grant detail lookup failed: {err}"))?;
+        .map_err(|err| format!("pending device grant detail lookup failed: {err}"))?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let scope: String = row.get("scope");
-    Ok(Some(NativeDeviceGrantDetails {
-        client_id: row.get("client_id"),
+    let provider: String = row.get("provider");
+    let scope: Option<String> = row.get("scope");
+    let client_id: Option<String> = row.get("client_id");
+    Ok(Some(PendingDeviceGrant {
+        client_id: client_id.unwrap_or_default(),
         client_name: row.get("client_name"),
-        scopes: parse_scopes(&scope),
+        scopes: scope.as_deref().map(parse_scopes).unwrap_or_default(),
+        provider,
     }))
 }
 
+/// Bind the signed-in user to a pending grant.
+///
+/// `provider` comes from the row [`pending_user_code_details`] just read, so the
+/// UPDATE approves the same flow the page rendered a confirmation for and never
+/// a different one that happened to reuse the code.
+///
+/// The write is identical for both flows because `principal_id` means the same
+/// thing in both: a `zeroship.users` id. That is what lets a signed-in browser
+/// approve a control-plane deploy grant with no control credential of its own -
+/// control reads the bound principal on the CLI's next poll and mints from it.
+/// `sid` and `auth_credential_version` are stamped either way; only the OP flow
+/// redeems them, and for a platform row they record which IdP session
+/// authorized a deploy token.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn approve_user_code(
     db: &Client,
     user_code: &str,
+    provider: &str,
     user_id: Uuid,
     sid: Uuid,
     auth_credential_version: i64,
@@ -241,11 +280,11 @@ pub(crate) async fn approve_user_code(
                 &sid.to_string(),
                 &auth_credential_version,
                 &user_code,
-                &OP_DEVICE_PROVIDER,
+                &provider,
             ],
         )
         .await
-        .map_err(|err| format!("native device grant approve failed: {err}"))?;
+        .map_err(|err| format!("device grant approve failed: {err}"))?;
     if updated == 0 {
         Ok(DeviceApproval::NotFound)
     } else {
@@ -502,64 +541,15 @@ fn generate_device_code() -> String {
 }
 
 fn generate_user_code() -> String {
-    let mut rng = rand::thread_rng();
-    let mut code = String::with_capacity(USER_CODE_FORMATTED_LEN);
-    for idx in 0..USER_CODE_CHAR_LEN {
-        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
-            code.push('-');
-        }
-        let alphabet_idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        code.push(char::from(USER_CODE_ALPHABET[alphabet_idx]));
-    }
-    code
+    zeroship_core::device_grant::generate_user_code(&mut rand::thread_rng())
 }
 
 fn normalize_user_code(value: &str) -> String {
-    let chars: String = value
-        .trim()
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-')
-        .map(|ch| ch.to_ascii_uppercase())
-        .collect();
-
-    if chars.len() != USER_CODE_CHAR_LEN
-        || !chars
-            .as_bytes()
-            .iter()
-            .all(|ch| USER_CODE_ALPHABET.contains(ch))
-    {
-        return value
-            .trim()
-            .chars()
-            .filter(|ch| !ch.is_ascii_whitespace())
-            .map(|ch| ch.to_ascii_uppercase())
-            .collect();
-    }
-
-    let mut normalized = String::with_capacity(USER_CODE_FORMATTED_LEN);
-    for (idx, ch) in chars.chars().enumerate() {
-        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
-            normalized.push('-');
-        }
-        normalized.push(ch);
-    }
-    normalized
+    zeroship_core::device_grant::normalize_user_code(value)
 }
 
 pub(crate) fn valid_user_code(value: &str) -> bool {
-    let code = normalize_user_code(value);
-    let bytes = code.as_bytes();
-    bytes.len() == USER_CODE_FORMATTED_LEN
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(idx, ch)| {
-                if (idx + 1) % (USER_CODE_GROUP_LEN + 1) == 0 {
-                    *ch == b'-'
-                } else {
-                    USER_CODE_ALPHABET.contains(ch)
-                }
-            })
+    zeroship_core::device_grant::valid_user_code(value)
 }
 
 fn sha256_hex(value: &str) -> String {
