@@ -140,8 +140,6 @@ pub struct ControlSection {
     pub smtp_username: Option<String>,
     /// Directory for in-flight deploy bodies.
     pub deploy_tmp_dir: Option<String>,
-    /// Platform auth provider backend (`platform` or `supabase`).
-    pub auth_provider: Option<String>,
     /// JWKS URL for asymmetric GoTrue JWT verification.
     pub supabase_jwks_url: Option<String>,
     /// GoTrue JWT issuer pinned during Supabase token verification.
@@ -287,8 +285,9 @@ pub struct AuthSection {
     /// Platform auth provider backend (`native` or `supabase`).
     ///
     /// `provider`, not `auth_provider`: the canonical identity is
-    /// `auth.provider`, and control's `platform|supabase` setting is a separate
-    /// identity at `control.auth_provider`.
+    /// `auth.provider`, and the scope segment already says `auth`. This ONE key
+    /// governs both the auth service and control; `[control] auth_provider` was
+    /// its second half and is gone, so `deny_unknown_fields` now rejects it.
     pub provider: Option<String>,
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     pub supabase_url: Option<String>,
