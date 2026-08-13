@@ -753,10 +753,21 @@ pub async fn ensure_journal<D: SqlSession>(
     ))
     .await?;
 
-    // 4. Attach the immutability triggers idempotently to BOTH append-only
-    // tables — the consolidated events table + …_supersedes (PG 16 has no
-    // CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger). Fewer triggers overall
-    // now that the two event tables are one.
+    // 4. Attach the immutability triggers idempotently to ALL THREE append-only
+    // tables — the consolidated events table, …_supersedes, and
+    // …_pending_contracts (PG 16 has no CREATE TRIGGER IF NOT EXISTS; guard on
+    // pg_trigger). Fewer triggers overall now that the two event tables are one.
+    //
+    // The loop below is the authority on that list; this comment used to say
+    // "BOTH … the consolidated events table + …_supersedes" and had not been
+    // updated when `schema_pending_contracts` joined it. Verified live: each of
+    // the three carries two triggers and refuses `TRUNCATE` with the append-only
+    // message.
+    //
+    // The other two meta tables are mutable ON PURPOSE and must NOT be added
+    // here: `…_inflight` is the side-table an operator clears by hand to
+    // recover an interrupted MySQL DDL, and `…_deploy_recovery` is transient
+    // progress rather than history.
     //
     // TWO triggers per table, both calling the same RAISE function:
     // - `BEFORE UPDATE OR DELETE... FOR EACH ROW` — blocks row mutation.
