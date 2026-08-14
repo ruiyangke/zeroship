@@ -34,8 +34,21 @@ const RUN = `${process.pid}-${Date.now()}`;
  *   attachments.list     -> key ABSENT from the row
  *   attachments.get      -> key ABSENT from .attachment
  *
- * Not nullable-ref in general: bugs.milestoneId is a nullable ref and comes
- * back with its key present. Specific to this column, on both read paths.
+ * Not nullable-ref in general: bugs.milestoneId has a BYTE-IDENTICAL column
+ * definition -- {"type":"string","refTarget":...,"refColumn":"id"}, no
+ * "required" -- and comes back with its key present. So the column shape is
+ * not what distinguishes them.
+ *
+ * It is the PROJECTION, not the query. A probe procedure run against the dev
+ * runtime showed both halves at once:
+ *
+ *   db.attachments.find({ commentId })      -> matched 1 row
+ *   the row it returned                     -> no commentId key
+ *
+ * The WHERE clause resolves the column against the real table; the returned
+ * row is assembled from a column list that lacks it. Values are not shifted
+ * either (uploaderId still holds a user id), so it is an exclusion rather
+ * than an off-by-one in the decoder.
  *
  * The app code is correct -- the composer sends commentId and the panel groups
  * on it -- so the user-visible symptom is a file that uploads, appears in
