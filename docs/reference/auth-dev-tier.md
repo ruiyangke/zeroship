@@ -166,9 +166,9 @@ from inside the dev runtime — no gateway, no external auth service:
   selected dev user's credentials so sign-in is one click, but it is **NOT
   auto-submitted** — the developer clicks "Sign in", exactly mirroring prod's
   framed `auth.zeroship.ai/login`. The form carries a CSRF token (same
-  double-submit *contract* as prod's `__Host-zsidp_csrf`, but server-reflected:
-  the GET renders the token into both the cookie and the hidden field, so the
-  cookie stays `HttpOnly` — a stricter dev variant) and hidden `state` /
+  double-submit *contract* as prod's `__Host-zsidp_csrf`, and the same
+  mechanism: the GET renders the token into both the cookie and the hidden
+  field, so the cookie is `HttpOnly` on both tiers) and hidden `state` /
   `redirect_uri` (pinned to the exact same-origin callback path). Multi-user
   configs render an email `<select>` of the configured users (the default
   pre-selected); a tiny inline script re-prefills the password on change. There

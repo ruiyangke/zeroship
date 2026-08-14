@@ -110,12 +110,15 @@ export interface DevAuthConfig {
 const DEV_SESSION_COOKIE = "__zeroship_dev_session";
 /**
  * Dev login CSRF cookie — the cookie half of a double-submit pair with the
- * hidden `csrf` form field. Same *contract* as prod's `__Host-zsidp_csrf`
- * (`crates/auth/src/csrf.rs`), but the mechanism differs deliberately: prod's
- * cookie is non-HttpOnly because its inline script READS it to populate the
- * field; the dev GET renders the token into BOTH the cookie and the field
- * server-side, so no JS read is needed and we keep the cookie `HttpOnly` (a
- * stricter dev variant). The POST compares cookie vs field.
+ * hidden `csrf` form field. Same *contract* AND same mechanism as prod's
+ * `__Host-zsidp_csrf` (`crates/auth/src/csrf.rs`): the GET renders the token
+ * into BOTH the cookie and the field server-side, so no JS read is needed and
+ * the cookie is `HttpOnly` on both tiers. The POST compares cookie vs field.
+ *
+ * This comment used to claim prod's cookie was non-HttpOnly "because its inline
+ * script READS it", making dev "a stricter dev variant". No such prod script
+ * existed; the asymmetry was a stale doc on both sides, and prod is now
+ * `HttpOnly` too.
  */
 const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
 /**
