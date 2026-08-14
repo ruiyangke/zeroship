@@ -38,10 +38,20 @@
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
 #   - deploy-app.sh past its argument and credential handling. No ssh, no
 #     port-forward, no upload. Those need a host and are not faked here.
-#   - deploy-remote.sh's DEPLOY path: docker build/push, the config sync, the
-#     secret provisioning, the render, the roll and the probe. Only --rollback
-#     is driven, and only through a stub ssh (see that section for exactly
-#     what a stub proves and what it cannot).
+#   - deploy-remote.sh's docker build, docker push, and the app probe. The rest
+#     of the deploy path IS driven now, but through a stub ssh and a stub
+#     docker, so what is established is the script's CONTROL FLOW -- which
+#     commands it sends, in what order, and where it stops. NOT established:
+#     that a real image exists, that a real `zeroship dev init` writes the
+#     right files, that a real server accepts or rejects a given
+#     configuration, or that the stack comes back up. The one exception is the
+#     conditional block at the end, which runs the compiled control binary
+#     against a real overlay and is therefore evidence about the SERVER.
+#   - whether the five --check-config runs cover every startup guard. They do
+#     not: auth's five key-file requirements and migrated's PAT signing key are
+#     enforced AFTER their check-config early return, so a dry run passes with
+#     those files absent. That gap is why the script ALSO checks the secret
+#     files exist, and why both are asserted here rather than one.
 #   - deploy-app.sh's tunnel teardown, the ControlMaster=no/ControlPath=none
 #     pairing that makes the PID real, and the `kill -0` liveness poll. That
 #     was measured by hand with `ss -tlnp` and has no coverage here.
@@ -159,6 +169,77 @@ expect_set "$ESC_ALL" "DEFAULTED_VAR ESCAPED_VAR PLAIN_VAR STRICT_VAR" \
 CMT_ALL="$(compose_vars '' "$FIX/comment_control.yml")"
 expect_set "$CMT_ALL" "COMMENT_ONLY_VAR DEFAULTED_VAR PLAIN_VAR STRICT_VAR" \
   "CONTROL: the same line uncommented IS counted (the exclusion is about the #, not the name)"
+
+# ------------------------------------------------ secret_files extraction
+#
+# WHY THIS FUNCTION EXISTS. Provisioning read its list out of `ENV_KEYS` in
+# crates/cli/src/dev.rs, which is env-shaped by construction, so the seven
+# secret FILES the servers open were in nobody's list and nothing created them.
+# The compose file is the only artefact that states which files this
+# deployment's binaries will be handed, so it is the thing to ask.
+echo ""
+echo "-- secret_files extraction (fixtures)"
+
+cat >"$FIX/secrets.yml" <<'FIXTURE'
+#      COMMENTED: ZEROSHIP_X_FILE: /etc/zeroship/secrets/commented-only
+services:
+  demo:
+    environment:
+      ZEROSHIP_A_FILE: /etc/zeroship/secrets/alpha-signing.pem
+      ZEROSHIP_B_FILE: /etc/zeroship/secrets/bravo-secret
+    command: >
+      zeroship-demo
+        --signing-key-file /etc/zeroship/secrets/alpha-signing.pem
+    volumes:
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+FIXTURE
+sed 's/^#\( *COMMENTED:\)/ \1/' "$FIX/secrets.yml" >"$FIX/secrets_comment_control.yml"
+
+expect_set "$(secret_files "$FIX/secrets.yml")" "alpha-signing.pem bravo-secret" \
+  "a path in an env value and the same path in a command are counted once; a commented one is not"
+expect_set "$(secret_files "$FIX/secrets_comment_control.yml")" \
+  "alpha-signing.pem bravo-secret commented-only" \
+  "CONTROL: the same line uncommented IS counted (the exclusion is about the #, not the name)"
+
+# THE MOUNT LINE, which names the directory and no file. If it were counted the
+# provisioning check would demand a file called `secrets` forever.
+if secret_files "$FIX/secrets.yml" | grep -qx 'secrets'; then
+  fail "the read-only mount of the secrets DIRECTORY was counted as a secret file"
+else
+  pass "the \${ZEROSHIP_SECRETS_DIR}:/etc/zeroship/secrets:ro mount is not counted as a file"
+fi
+
+EMPTY_SECRETS="$(secret_files "$FIX/empty.yml")"
+if usable "$EMPTY_SECRETS"; then
+  fail "an empty compose file produced secret files [$EMPTY_SECRETS]"
+else
+  pass "an empty compose file references no secret file (the extraction is not matching on nothing)"
+fi
+
+# THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
+# one of which nobody updated. Every file the SHIPPED compose hands a binary
+# must be a file the provisioner (`secret_specs()` + the pairwise-salt case in
+# crates/cli/src/dev.rs) knows how to create. This is asserted against the real
+# compose deliberately -- a fixture cannot go stale in the way that matters.
+DEV_RS="$ROOT/crates/cli/src/dev.rs"
+if [ -f "$REAL_COMPOSE" ] && [ -f "$DEV_RS" ]; then
+  REAL_SECRETS="$(secret_files "$REAL_COMPOSE")"
+  if ! usable "$REAL_SECRETS"; then
+    fail "secret_files extracted NOTHING from the shipped compose file"
+  else
+    unprovisioned=""
+    for n in $REAL_SECRETS; do
+      grep -qF "\"$n\"" "$DEV_RS" || unprovisioned="$unprovisioned $n"
+    done
+    [ -z "$unprovisioned" ] \
+      && pass "every secret file the shipped compose references is named in dev.rs ($(echo $REAL_SECRETS))" \
+      || fail "the shipped compose hands the binaries files the provisioner never creates:$unprovisioned"
+    # CONTROL: without it, "all named" could mean the grep matches anything.
+    grep -qF '"zs-not-a-real-secret"' "$DEV_RS" \
+      && fail "CONTROL: dev.rs appears to name an invented secret; the drift check discriminates nothing" \
+      || pass "CONTROL: an invented secret name is NOT found in dev.rs, so the check above can fail"
+  fi
+fi
 
 # ------------------------------------------------------- anti-vacuity itself
 echo ""
@@ -423,13 +504,29 @@ host="$1"; shift
 bash -c "$*"
 STUBEOF
 
-for prog in docker scp; do
-  cat >"$STUB/$prog" <<STUBEOF
+cat >"$STUB/scp" <<'STUBEOF'
 #!/usr/bin/env bash
-printf '### %s %s\n' "$prog" "\$*" >>"\$ZS_GATE_CAPTURE"
+printf '### scp %s\n' "$*" >>"$ZS_GATE_CAPTURE"
 exit 0
 STUBEOF
-done
+# The docker stub can be told to FAIL for one command shape. That is how the
+# deploy-path cases below reach "a server rejected the configuration" and "the
+# restored configuration does not render" without a host, an image or a server.
+# It proves what the SCRIPT does with a refusal, not that any particular
+# configuration would be refused; the second half is measured separately by
+# running the real binaries (see the conditional block near the end).
+cat >"$STUB/docker" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '### docker %s\n' "$*" >>"$ZS_GATE_CAPTURE"
+if [ -n "${ZS_GATE_DOCKER_FAIL:-}" ]; then
+  case "$*" in *"$ZS_GATE_DOCKER_FAIL"*) exit 1 ;; esac
+fi
+# The post-roll verification asks which image control is actually running. A
+# stub that says nothing makes the happy path fail for a reason unrelated to
+# anything under test, and a control that cannot succeed is not a control.
+[ "$1" = inspect ] && printf '%s\n' "${ZS_GATE_RUNNING_IMAGE:-}"
+exit 0
+STUBEOF
 # Must print something: the real call is \$(openssl rand -hex 32).
 cat >"$STUB/openssl" <<'STUBEOF'
 #!/usr/bin/env bash
@@ -450,7 +547,24 @@ chmod +x "$STUB"/*
 # this script's own rollback, an operator's `cp -p`, `rsync -a` or `tar -xp`
 # from an archive, all normal outage moves -- makes the next backup's mtime
 # older than an earlier backup's.
-ROLL_FILES="compose/.env compose/docker-compose.yml ops/Caddyfile"
+#
+# THE MEMBER LIST COMES FROM THE SCRIPT, not from a copy here. A member added
+# there and forgotten here would leave every case below seeding an incomplete
+# generation, which the script correctly refuses -- and the whole section would
+# go red for the wrong reason, or worse, a member could be REMOVED there and
+# this file would never notice.
+ROLL_FILES="$(printf '%s\n' $SNAPSHOT_MEMBERS | grep -v '^secrets\.tar$' | tr '\n' ' ')"
+
+# The seven secret files the shipped compose references. Derived, for the same
+# reason: this gate must not carry its own copy of a list the script reads.
+SECRET_NAMES="$(secret_files "$REAL_COMPOSE" | tr '\n' ' ')"
+
+seed_secrets() { # $1 sandbox. Writes the referenced secret files, non-empty.
+  local d="$1" n
+  mkdir -p "$d/secrets"
+  for n in $SECRET_NAMES; do printf 'SECRET-%s\n' "$n" >"$d/secrets/$n"; done
+}
+
 seed_sandbox() { # $1 dir, $2 body of the current (post-deploy) files
   local d="$1" body="$2" f
   mkdir -p "$d/compose" "$d/ops"
@@ -461,6 +575,22 @@ seed_sandbox() { # $1 dir, $2 body of the current (post-deploy) files
     touch -d '2026-08-20 00:00:00' "$d/$f.bak.20260101000000"   # oldest stamp, NEWEST mtime
     touch -d '2026-01-01 00:00:00' "$d/$f.bak.20260812010101"   # newest stamp, OLDEST mtime
   done
+  # The secrets member of each generation. GEN1 and GEN2 hold DIFFERENT bytes
+  # for the same file, so "which generation was restored" is answerable from
+  # the key material and not only from the config files. Each archive is built
+  # from the real directory at its real path with `tar -cpP`, which is exactly
+  # how the script builds it -- an archive assembled some other way would be
+  # testing this file's idea of the format rather than the script's.
+  local n gen
+  for gen in 20260101000000:GEN1 20260812010101:GEN2; do
+    mkdir -p "$d/secrets"
+    for n in $SECRET_NAMES; do printf '%s-%s\n' "${gen#*:}" "$n" >"$d/secrets/$n"; done
+    tar -cpPf "$d/secrets.tar.bak.${gen%%:*}" "$d/secrets"
+  done
+  # Leave the live directory holding NEITHER generation, so a restore is
+  # visible as a change rather than as a coincidence.
+  for n in $SECRET_NAMES; do printf 'CURRENT-%s\n' "$n" >"$d/secrets/$n"; done
+  printf 'ZEROSHIP_SECRETS_DIR=%s\n' "$d/secrets" >>"$d/compose/.env"
 }
 
 CAP_N=0
@@ -518,6 +648,24 @@ for f in $ROLL_FILES; do
   fi
 done
 
+# THE SECRET FILES, which no rollback touched before 2026-08-13. Provisioning
+# writes into that directory during a deploy, so it is a deploy INPUT and has to
+# come back with the rest. The live copies were seeded to CURRENT-<name>, so
+# GEN2-<name> can only have come from the archive.
+roll_secret_bad=""
+for n in $SECRET_NAMES; do
+  [ "$(cat "$SB/secrets/$n" 2>/dev/null)" = "GEN2-$n" ] || roll_secret_bad="$roll_secret_bad $n"
+done
+[ -z "$roll_secret_bad" ] \
+  && pass "the secret files are restored from the same generation as the config ($(echo $SECRET_NAMES))" \
+  || fail "--rollback left these secret files un-restored:$roll_secret_bad. A deploy provisions into that directory, so a rollback that skips it does not return the host to its pre-deploy state"
+
+# The render check on the RESTORED files, which is what stops a rollback from
+# restarting the stack onto a state that was already broken before the deploy.
+seen "$CAP" '### docker compose config' \
+  && pass "--rollback verifies the restored configuration renders" \
+  || fail "--rollback restarted the stack without checking that what it restored renders"
+
 seen "$CAP" '### docker compose up -d --remove-orphans' \
   && pass "--rollback restarts the whole stack (docker compose up -d --remove-orphans RAN)" \
   || fail "--rollback never reached 'docker compose up -d --remove-orphans'; it restored files and left the stack on the old ones"
@@ -525,22 +673,32 @@ seen "$CAP" '### docker compose up -d --remove-orphans' \
 # THE SHORT-CIRCUIT. This is what makes --rollback safe to run in a panic: it
 # must not build, must not push, must not overwrite host config, and must not
 # provision anything.
-for tok in '### docker build' '### docker push' '### scp' '### openssl' '### docker compose config' 'ZEROSHIP_IMAGE='; do
+#
+# `### docker compose config` USED TO BE ON THIS LIST and is not any more. It
+# was a proxy for "did not fall through to the deploy path", and the rollback
+# now runs it deliberately, on the RESTORED files, to refuse to restart onto a
+# configuration that does not render. The two uses are indistinguishable in the
+# capture, so the token moved from the negatives to the positives below rather
+# than being asserted both ways. The fall-through it was standing in for is
+# still covered, by `### docker build` / `### docker push` / `### scp`.
+FORBIDDEN="### docker build|### docker push|### scp|### openssl|ZEROSHIP_IMAGE="
+IFS='|' read -r -a FORBIDDEN_TOKENS <<<"$FORBIDDEN"
+for tok in "${FORBIDDEN_TOKENS[@]}"; do
   seen "$CAP" "$tok" \
     && fail "--rollback reached '$tok'; it is not a short-circuit and is not safe to run blind" \
     || pass "--rollback never reaches '$tok'"
 done
 
-# CONTROL for the six negatives above. Without it, a scanner that matches
-# nothing would report all six as clean.
+# CONTROL for the negatives above. Without it, a scanner that matches nothing
+# would report all of them as clean.
 printf '### docker build --target runtime\n### docker push x\n### scp a b\n### openssl rand -hex 32\n### docker compose config -q\nZEROSHIP_IMAGE=x\n' >"$FIX/synthetic"
 ctl_missed=""
-for tok in '### docker build' '### docker push' '### scp' '### openssl' '### docker compose config' 'ZEROSHIP_IMAGE='; do
+for tok in "${FORBIDDEN_TOKENS[@]}"; do
   seen "$FIX/synthetic" "$tok" || ctl_missed="$ctl_missed [$tok]"
 done
 [ -z "$ctl_missed" ] \
-  && pass "CONTROL: the scanner finds all six forbidden commands in a capture that contains them" \
-  || fail "CONTROL: the scanner missed$ctl_missed in a capture that contains them; the six negatives above prove nothing"
+  && pass "CONTROL: the scanner finds every forbidden command in a capture that contains them" \
+  || fail "CONTROL: the scanner missed$ctl_missed in a capture that contains them; the negatives above prove nothing"
 
 # --------------------------------------------------------- argument contract
 run_case "--rollback still requires --host" \
@@ -601,7 +759,7 @@ run_rollback "$SB_MISS"
 [[ "$ROLL_OUT" == *"ops/Caddyfile"* && "$ROLL_OUT" == *"REFUSING to roll back"* ]] \
   && pass "the refusal says it is refusing and names the file that has no backup" \
   || fail "the refusal did not both say REFUSING and name ops/Caddyfile: $ROLL_OUT"
-if [ "$(cat "$SB_MISS/compose/.env")" = "CURRENT" ] \
+if [ "$(head -1 "$SB_MISS/compose/.env")" = "CURRENT" ] \
    && [ "$(cat "$SB_MISS/compose/docker-compose.yml")" = "CURRENT" ]; then
   pass "the two files that DO have backups are left untouched (no half-restored configuration)"
 else
@@ -639,16 +797,420 @@ run_rollback "$SB_MAN"
   && pass "a hand-made .bak.manual is not a rollback candidate (no stamp, no position in the ordering)" \
   || fail "restored [$(cat "$SB_MAN/compose/.env")] instead of GEN2; an unstamped file was treated as a backup"
 
+# ------------------------------------- ONE GENERATION, NEVER A MIX (D3)
+#
+# The selection used to be per file: each member independently took its own
+# newest backup. Give ONE member an extra stamp the others do not have -- which
+# is what a deploy that died mid-backup, a hand-taken backup, or a member added
+# by a later version of this script all leave behind -- and the per-file
+# selector stitches that member's newer content onto everyone else's older
+# content. The result is a .env from one moment against a compose file from
+# another: exactly the mismatched pair the whole script exists to prevent,
+# assembled by the recovery path itself.
+#
+# This case FAILS against the pre-2026-08-13 script, which restores GEN3 for
+# .env and GEN2 for the rest.
+SB_MIX="$FIX/sb_mixed"; seed_sandbox "$SB_MIX" CURRENT
+printf 'GEN3\n' >"$SB_MIX/compose/.env.bak.20260813020202"
+run_rollback "$SB_MIX"
+[ "$ROLL_RC" = 0 ] \
+  && pass "an extra stamp on ONE member does not make --rollback refuse; it falls back to the newest COMPLETE generation" \
+  || fail "--rollback exited $ROLL_RC when one member had an extra stamp: $ROLL_OUT"
+mix_bad=""
+for f in $ROLL_FILES; do
+  [ "$(head -1 "$SB_MIX/$f")" = "GEN2" ] || mix_bad="$mix_bad $f=[$(head -1 "$SB_MIX/$f")]"
+done
+[ -z "$mix_bad" ] \
+  && pass "every member is restored from the SAME stamp; the lone newer .env backup is not stitched onto the older compose file" \
+  || fail "the restore mixed generations:$mix_bad (wanted GEN2 everywhere). Selecting the newest backup PER FILE pairs a .env from one moment with a compose file from another"
+
+# CONTROL for the case above. Without it, "GEN2 everywhere" could mean the
+# script simply cannot see 20260813020202 at all. Complete that generation and
+# it must be the one chosen.
+SB_MIX2="$FIX/sb_mixed_complete"; seed_sandbox "$SB_MIX2" CURRENT
+for f in $ROLL_FILES; do printf 'GEN3\n' >"$SB_MIX2/$f.bak.20260813020202"; done
+cp -a "$SB_MIX2/secrets.tar.bak.20260812010101" "$SB_MIX2/secrets.tar.bak.20260813020202"
+run_rollback "$SB_MIX2"
+[ "$(head -1 "$SB_MIX2/compose/.env")" = "GEN3" ] \
+  && pass "CONTROL: when 20260813020202 is COMPLETE it is the generation chosen, so the case above is about completeness and not about visibility" \
+  || fail "CONTROL: a complete newer generation was not chosen; restored [$(head -1 "$SB_MIX2/compose/.env")]"
+
+# ---------------------------- restoring into a state that does not render
+#
+# The state a rollback returns to is only as good as the state before the
+# deploy, and that state can itself be broken: migrate renamed names in .env by
+# hand, deploy, and the snapshot faithfully records a .env and a compose file
+# that do not agree. Restarting onto that turns one outage into two. The files
+# must still be restored -- that IS the requested state -- but the restart is
+# withheld and the exit code says which of the two things happened.
+SB_NR="$FIX/sb_norender"; seed_sandbox "$SB_NR" CURRENT
+CAP_N=$((CAP_N+1)); CAP="$FIX/capture.$CAP_N"; : >"$CAP"
+NR_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" ZS_GATE_DOCKER_FAIL='compose config' \
+  "$REMOTE" --host fakehost --remote-dir "$SB_NR" --rollback 2>&1)"; NR_RC=$?
+[ "$NR_RC" = 4 ] \
+  && pass "a restored configuration that does not render exits 4 (distinct from 3, which is the refusal to restore at all)" \
+  || fail "--rollback exited $NR_RC when the restored configuration did not render; 4 is 'restored but not restarted': $NR_OUT"
+[ "$(head -1 "$SB_NR/compose/.env")" = "GEN2" ] \
+  && pass "the files stay restored even though the stack was not restarted (the operator asked for that state)" \
+  || fail "the restore was rolled back as well; the host is now on neither state"
+seen "$CAP" '### docker compose up -d' \
+  && fail "--rollback restarted the stack onto a configuration it had just proved does not render" \
+  || pass "--rollback does not restart the stack when the restored configuration does not render"
+
+# ------------------------------------------------------------ --rollback-to
+#
+# The recovery this replaces was "restore from backups I happened to take by
+# hand". An operator who lands on an older-but-good generation needs to be able
+# to name it.
+SB_TO="$FIX/sb_rollback_to"; seed_sandbox "$SB_TO" CURRENT
+run_rollback "$SB_TO" >/dev/null 2>&1
+CAP_N=$((CAP_N+1)); CAP="$FIX/capture.$CAP_N"; : >"$CAP"
+SB_TO2="$FIX/sb_rollback_to2"; seed_sandbox "$SB_TO2" CURRENT
+TO_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" \
+  "$REMOTE" --host fakehost --remote-dir "$SB_TO2" --rollback-to 20260101000000 2>&1)"; TO_RC=$?
+[ "$TO_RC" = 0 ] && [ "$(head -1 "$SB_TO2/compose/.env")" = "GEN1" ] \
+  && pass "--rollback-to restores the NAMED generation, not the newest one" \
+  || fail "--rollback-to 20260101000000 exited $TO_RC and left [$(head -1 "$SB_TO2/compose/.env")], wanted GEN1: $TO_OUT"
+
+SB_TO3="$FIX/sb_rollback_to3"; seed_sandbox "$SB_TO3" CURRENT
+rm -f "$SB_TO3"/ops/zeroship.toml.bak.20260101000000
+CAP_N=$((CAP_N+1)); CAP="$FIX/capture.$CAP_N"; : >"$CAP"
+TO_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" \
+  "$REMOTE" --host fakehost --remote-dir "$SB_TO3" --rollback-to 20260101000000 2>&1)"; TO_RC=$?
+[ "$TO_RC" = 3 ] \
+  && pass "--rollback-to refuses an INCOMPLETE named generation rather than silently using a different one" \
+  || fail "--rollback-to an incomplete generation exited $TO_RC, wanted 3: $TO_OUT"
+[ "$(head -1 "$SB_TO3/compose/.env")" = "CURRENT" ] \
+  && pass "nothing is restored when --rollback-to refuses" \
+  || fail "--rollback-to refused and restored anyway; the host is on a mixed configuration"
+
+# ----------------------------------------------------------- --list-backups
+SB_LS="$FIX/sb_list"; seed_sandbox "$SB_LS" CURRENT
+rm -f "$SB_LS"/ops/Caddyfile.bak.20260101000000
+CAP_N=$((CAP_N+1)); CAP="$FIX/capture.$CAP_N"; : >"$CAP"
+LS_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" \
+  "$REMOTE" --host fakehost --remote-dir "$SB_LS" --list-backups 2>&1)"; LS_RC=$?
+[ "$LS_RC" = 0 ] && [[ "$LS_OUT" == *"20260812010101  complete"* ]] \
+  && pass "--list-backups reports a complete generation as complete" \
+  || fail "--list-backups (rc=$LS_RC) did not report 20260812010101 complete: $LS_OUT"
+[[ "$LS_OUT" == *"20260101000000  INCOMPLETE"* && "$LS_OUT" == *"ops/Caddyfile"* ]] \
+  && pass "--list-backups names the members an INCOMPLETE generation is missing" \
+  || fail "--list-backups did not flag 20260101000000 incomplete and name ops/Caddyfile: $LS_OUT"
+seen "$CAP" '### docker compose up -d' \
+  && fail "--list-backups restarted the stack; it is a read-only question" \
+  || pass "--list-backups restarts nothing"
+
+# ============================================================================
+# The DEPLOY path, driven through the same stub ssh
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. On 2026-08-13 a roll of a new image took the site
+# down three times over, and every one of the three defects was on this path,
+# which had no coverage at all: the ops overlay was never synced, the secret
+# FILES were never provisioned, and nothing asked the servers whether they
+# accepted the configuration before restarting them.
+#
+# WHAT A STUB PROVES HERE, and it is narrower than it looks. `docker` and `scp`
+# record and succeed, so what is under test is the SCRIPT'S CONTROL FLOW: which
+# commands it decides to send, in what order, and where it stops. It is real
+# evidence about the script.
+#
+# WHAT IT DOES NOT PROVE: that a real server rejects a stale overlay, that a
+# real `zeroship dev init` creates the right files, that the image exists, or
+# that the stack comes back. The first of those is measured separately against
+# the compiled binaries in the conditional block below; the rest need a host.
+echo ""
+echo "-- the deploy path (stub ssh, stub docker; nothing is built or pushed)"
+
+FAKE_IMAGE="ghcr.io/example/zeroship-platform:testonly"
+
+seed_deploy() { # $1 sandbox. A host that would pass every contract.
+  local d="$1"
+  mkdir -p "$d/compose" "$d/ops" "$d/secrets"
+  compose_vars '' "$REAL_COMPOSE" | sed 's/$/=x/' >"$d/compose/.env"
+  printf 'ZEROSHIP_SECRETS_DIR=%s\n' "$d/secrets" >>"$d/compose/.env"
+  printf 'ZEROSHIP_IMAGE=%s\n' "ghcr.io/example/zeroship-platform:previous" >>"$d/compose/.env"
+  printf 'HOSTCOMPOSE\n' >"$d/compose/docker-compose.yml"
+  printf 'HOSTCADDY\n'   >"$d/ops/Caddyfile"
+  printf 'HOSTOVERLAY\n' >"$d/ops/zeroship.toml"
+  seed_secrets "$d"
+}
+
+run_deploy() { # $1 sandbox, rest: extra argv. Sets DEP_RC, DEP_OUT and CAP.
+  CAP_N=$((CAP_N+1))
+  CAP="$FIX/capture.$CAP_N"
+  : >"$CAP"
+  local sb="$1"; shift
+  DEP_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" ZS_GATE_RUNNING_IMAGE="$FAKE_IMAGE" "$@" \
+    "$REMOTE" --host fakehost --remote-dir "$sb" \
+      --registry ghcr.io/example/zeroship-platform --image "$FAKE_IMAGE" 2>&1)"
+  DEP_RC=$?
+}
+
+# --- the happy path, which is the CONTROL for every refusal below ----------
+#
+# Without it, "the deploy stopped before restarting" could mean the deploy stops
+# before restarting for reasons that have nothing to do with the check under
+# test. This run must reach the roll.
+SB_DEP="$FIX/sb_deploy"; seed_deploy "$SB_DEP"
+# Snapshot the pre-deploy state so the end-to-end restore below has something
+# to compare against that was captured before the script ran, not after.
+DEP_BEFORE="$FIX/before"; rm -rf "$DEP_BEFORE"; cp -a "$SB_DEP" "$DEP_BEFORE"
+run_deploy "$SB_DEP"
+
+[ "$DEP_RC" = 0 ] \
+  && pass "CONTROL: a host that passes every contract deploys to completion (exit 0)" \
+  || fail "CONTROL: the happy path exited $DEP_RC, so every refusal below could be an unrelated stop: $DEP_OUT"
+seen "$CAP" '### scp' \
+  && pass "CONTROL: a host that passes every contract reaches the config sync" \
+  || fail "CONTROL: the deploy never reached scp (rc=$DEP_RC): $DEP_OUT"
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && pass "CONTROL: the same run reaches 'docker compose up -d --remove-orphans', so the refusals below are about the checks and not about an unrelated stop" \
+  || fail "CONTROL: the deploy never reached the roll (rc=$DEP_RC): $DEP_OUT"
+
+# --- D1: the ops overlay is SYNCED ----------------------------------------
+#
+# It was not, and the host kept an overlay written for older binaries. The new
+# ones parse it with deny_unknown_fields, so every service exited at parse time.
+# This assertion FAILS against the pre-fix script, which scp'd two files.
+seen "$CAP" 'ops/zeroship.toml' \
+  && pass "the deploy SYNCS ops/zeroship.toml (D1: a host copy written for an older binary made every service refuse to start)" \
+  || fail "the deploy never syncs ops/zeroship.toml; a stale overlay survives the roll"
+dep_synced=""
+for f in docker-compose.yml Caddyfile zeroship.toml; do
+  grep -qF -- "### scp" "$CAP" && grep -q "### scp .*$f" "$CAP" || dep_synced="$dep_synced $f"
+done
+[ -z "$dep_synced" ] \
+  && pass "all three tracked config files are synced (docker-compose.yml, Caddyfile, zeroship.toml)" \
+  || fail "these tracked config files are never sent to the host:$dep_synced"
+
+# --- D1: --check-config runs, for every server, before the roll ------------
+check_missing=""
+for svc in $CHECK_SERVICES; do
+  seen "$CAP" "--entrypoint ${svc#*:} ${svc%%:*} --check-config" || check_missing="$check_missing ${svc%%:*}"
+done
+[ -z "$check_missing" ] \
+  && pass "--check-config is run for every server ($(for s in $CHECK_SERVICES; do printf '%s ' "${s%%:*}"; done))" \
+  || fail "no --check-config run for:$check_missing. A server that rejects the new configuration is then discovered by restarting it"
+
+# ORDER MATTERS MORE THAN PRESENCE. A check that runs after the roll is a
+# post-mortem, not a gate.
+CHK_LINE="$(grep -n -- '--check-config' "$CAP" | head -1 | cut -d: -f1)"
+UP_LINE="$(grep -n -- '### docker compose up -d --remove-orphans' "$CAP" | head -1 | cut -d: -f1)"
+if [ -n "$CHK_LINE" ] && [ -n "$UP_LINE" ] && [ "$CHK_LINE" -lt "$UP_LINE" ]; then
+  pass "every --check-config run precedes 'docker compose up -d' in the command stream"
+else
+  fail "--check-config at line ${CHK_LINE:-none} does not precede the roll at line ${UP_LINE:-none}; the check is a post-mortem"
+fi
+
+# --- D2: provisioning uses the IMAGE'S OWN dev init ------------------------
+seen "$CAP" "--entrypoint zeroship $FAKE_IMAGE dev init" \
+  && pass "secrets are provisioned by the deployed image's own 'zeroship dev init', which owns BOTH the env list and the file list" \
+  || fail "provisioning does not run the image's zeroship dev init; it is keeping a second list that cannot cover the secret FILES"
+seen "$CAP" '### openssl' \
+  && fail "provisioning still generates values with 'openssl rand'; that path only ever produced the eight env-shaped secrets and no key files" \
+  || pass "provisioning no longer hand-rolls values with openssl"
+
+# --- D3: the snapshot covers every member, under ONE stamp -----------------
+snap_missing=""
+for m in $SNAPSHOT_MEMBERS; do
+  ls "$SB_DEP/$m".bak.[0-9]* >/dev/null 2>&1 || snap_missing="$snap_missing $m"
+done
+[ -z "$snap_missing" ] \
+  && pass "the deploy snapshots every member --rollback needs ($SNAPSHOT_MEMBERS)" \
+  || fail "the deploy never backs up:$snap_missing, so --rollback can never restore them"
+SNAP_STAMPS="$(for m in $SNAPSHOT_MEMBERS; do ls -1d "$SB_DEP/$m".bak.[0-9]* 2>/dev/null; done | sed 's|.*\.bak\.||' | sort -u | wc -l)"
+[ "$SNAP_STAMPS" = 1 ] \
+  && pass "every member is snapshotted under ONE stamp, which is what lets --rollback name a generation" \
+  || fail "the members carry $SNAP_STAMPS different stamps; there is no single generation to restore"
+
+# END TO END: deploy, then roll back, and the host is byte-identical to what it
+# was before the deploy. Reading the restore code is not the same as running it.
+#
+# The stub cannot mutate the host the way a real deploy does (scp and dev init
+# record and succeed), so the mutations a real deploy WOULD make are applied
+# here by hand, after the snapshot the real script took.
+VICTIM="$(printf '%s\n' $SECRET_NAMES | head -1)"
+for f in compose/docker-compose.yml ops/Caddyfile ops/zeroship.toml; do printf 'NEWLY-DEPLOYED\n' >"$SB_DEP/$f"; done
+printf 'MUTATED\n' >>"$SB_DEP/compose/.env"
+printf 'CHANGED\n' >"$SB_DEP/secrets/$VICTIM"
+printf 'EXTRA\n'   >"$SB_DEP/secrets/added-after-the-snapshot"
+run_rollback "$SB_DEP"
+[ "$ROLL_RC" = 0 ] \
+  && pass "END TO END: --rollback of a snapshot taken by an actual deploy run exits 0" \
+  || fail "END TO END: --rollback exited $ROLL_RC: $ROLL_OUT"
+e2e_bad=""
+for f in compose/.env compose/docker-compose.yml ops/Caddyfile ops/zeroship.toml; do
+  cmp -s "$SB_DEP/$f" "$DEP_BEFORE/$f" || e2e_bad="$e2e_bad $f"
+done
+for n in $SECRET_NAMES; do
+  cmp -s "$SB_DEP/secrets/$n" "$DEP_BEFORE/secrets/$n" || e2e_bad="$e2e_bad secrets/$n"
+done
+[ -z "$e2e_bad" ] \
+  && pass "END TO END: every deploy input is byte-identical to its pre-deploy content after --rollback (.env, compose, Caddyfile, ops/zeroship.toml and all $(printf '%s\n' $SECRET_NAMES | wc -l) secret files)" \
+  || fail "END TO END: --rollback did not restore:$e2e_bad"
+[ -f "$SB_DEP/secrets/added-after-the-snapshot" ] \
+  && pass "a secret file created AFTER the snapshot is left in place, not deleted (an inert extra beats unrecoverable key loss)" \
+  || fail "--rollback deleted a secret file that was not in the snapshot; deleting key material something may already be signing with is unrecoverable"
+
+# --- D1 refusal: a server that rejects the configuration stops the deploy ---
+#
+# This is the assertion the outage is about. It FAILS against the pre-fix
+# script, which has no check-config step at all and goes straight to the roll.
+SB_CHK="$FIX/sb_deploy_checkfail"; seed_deploy "$SB_CHK"
+run_deploy "$SB_CHK" ZS_GATE_DOCKER_FAIL='--check-config'
+[ "$DEP_RC" != 0 ] \
+  && pass "a server rejecting the new configuration makes the deploy exit non-zero" \
+  || fail "the deploy exited 0 even though a server rejected the configuration"
+[[ "$DEP_OUT" == *"reject the new configuration"* ]] \
+  && pass "the refusal says which servers rejected the configuration" \
+  || fail "the refusal did not name the failing servers: $DEP_OUT"
+seen "$CAP" '### docker compose up -d' \
+  && fail "the deploy restarted the stack after a server had already refused the configuration; the check bought nothing" \
+  || pass "NOTHING IS RESTARTED when a server rejects the configuration (the old stack keeps serving)"
+
+# --- D2 refusal: a missing secret FILE stops the deploy --------------------
+#
+# The compose file hands each binary an absolute path under
+# /etc/zeroship/secrets. Provisioning is supposed to create every one; this asks
+# independently, because the whole defect was two lists that disagreed. FAILS
+# against the pre-fix script, which never looks at the secrets directory.
+SB_SEC="$FIX/sb_deploy_nosecret"; seed_deploy "$SB_SEC"
+VICTIM="$(printf '%s\n' $SECRET_NAMES | head -1)"
+rm -f "$SB_SEC/secrets/$VICTIM"
+run_deploy "$SB_SEC"
+[ "$DEP_RC" != 0 ] \
+  && pass "a missing secret file makes the deploy exit non-zero" \
+  || fail "the deploy exited 0 with $VICTIM absent; the servers would have found out by crash-looping"
+[[ "$DEP_OUT" == *"$VICTIM"* ]] \
+  && pass "the refusal names the missing secret file ($VICTIM)" \
+  || fail "the refusal did not name $VICTIM: $DEP_OUT"
+seen "$CAP" '### docker compose up -d' \
+  && fail "the deploy restarted the stack with $VICTIM absent" \
+  || pass "NOTHING IS RESTARTED when a secret file the new compose references is missing"
+
+# An EMPTY file is not a provisioned file. This is the shape a bind mount of a
+# missing source leaves behind, and it fails at boot rather than at deploy.
+SB_EMP="$FIX/sb_deploy_emptysecret"; seed_deploy "$SB_EMP"
+: >"$SB_EMP/secrets/$VICTIM"
+run_deploy "$SB_EMP"
+[ "$DEP_RC" != 0 ] && [[ "$DEP_OUT" == *"$VICTIM"* ]] \
+  && pass "an EMPTY secret file is treated as missing" \
+  || fail "an empty $VICTIM was accepted (rc=$DEP_RC): $DEP_OUT"
+
+# --- the rename trap: a GENERATED secret that was renamed ------------------
+#
+# THE MOST EXPENSIVE HOLE IN THE SCRIPT. Provisioning keeps a value only when
+# THAT EXACT NAME is already in .env. The classification loop used to skip every
+# generated secret before the rename pairing ran, on the grounds that
+# provisioning would create it -- true on a fresh host, and catastrophic across
+# a rename: the old value is orphaned, a new one is generated, and for
+# ZEROSHIP_CONTROL_MASTER_KEY that means existing encrypted data can never be
+# decrypted. Both `created` and `kept` read identically in the output.
+#
+# FAILS against the pre-fix script, which deploys quietly.
+SB_REN="$FIX/sb_deploy_rename"; seed_deploy "$SB_REN"
+grep -v '^ZEROSHIP_CONTROL_MASTER_KEY=' "$SB_REN/compose/.env" >"$SB_REN/compose/.env.tmp"
+mv "$SB_REN/compose/.env.tmp" "$SB_REN/compose/.env"
+printf 'CONTROL_MASTER_KEY=the-real-one\n' >>"$SB_REN/compose/.env"
+run_deploy "$SB_REN"
+[ "$DEP_RC" != 0 ] \
+  && pass "a renamed GENERATED secret (CONTROL_MASTER_KEY -> ZEROSHIP_CONTROL_MASTER_KEY) refuses the deploy" \
+  || fail "the deploy proceeded with the old name orphaned; provisioning would have generated a NEW master key and the existing ciphertext would be undecryptable"
+[[ "$DEP_OUT" == *"RENAME OF A GENERATED SECRET"* && "$DEP_OUT" == *"ZEROSHIP_CONTROL_MASTER_KEY"* ]] \
+  && pass "the refusal says it is a generated secret and names both spellings" \
+  || fail "the refusal did not identify the generated-secret rename: $DEP_OUT"
+seen "$CAP" "dev init" \
+  && fail "provisioning ran anyway; the new master key has already been written" \
+  || pass "provisioning never runs when a generated-secret rename is suspected"
+
+# CONTROL: a FRESH host has no orphans, so absent generated secrets are exactly
+# the case provisioning exists for and must NOT be refused. Without this, the
+# guard above could simply be "refuse whenever a generated secret is absent",
+# which would block every first deploy.
+SB_FRESH="$FIX/sb_deploy_fresh"; seed_deploy "$SB_FRESH"
+grep -v '^ZEROSHIP_CONTROL_MASTER_KEY=' "$SB_FRESH/compose/.env" >"$SB_FRESH/compose/.env.tmp"
+mv "$SB_FRESH/compose/.env.tmp" "$SB_FRESH/compose/.env"
+run_deploy "$SB_FRESH"
+seen "$CAP" "dev init" \
+  && pass "CONTROL: an absent generated secret with NO orphan on the host is provisioned, not refused (the fresh-install case)" \
+  || fail "CONTROL: a fresh host was refused (rc=$DEP_RC); the rename guard has become 'refuse whenever a generated secret is absent': $DEP_OUT"
+
+# --- the host layout must be complete before anything is backed up ---------
+SB_LAY="$FIX/sb_deploy_layout"; seed_deploy "$SB_LAY"
+rm -f "$SB_LAY/ops/zeroship.toml"
+run_deploy "$SB_LAY"
+[ "$DEP_RC" != 0 ] && [[ "$DEP_OUT" == *"ops/zeroship.toml"* ]] \
+  && pass "a host missing ops/zeroship.toml is refused by name before anything is backed up or synced" \
+  || fail "a missing ops/zeroship.toml was not refused (rc=$DEP_RC): $DEP_OUT"
+seen "$CAP" '### scp' \
+  && fail "the deploy synced config to a host whose layout it could not back up" \
+  || pass "nothing is synced when the host layout is incomplete"
+
+# ============================================================================
+# The other half of D1, measured against the REAL binaries
+# ============================================================================
+#
+# Everything above proves what the SCRIPT does with a refusal. It cannot prove
+# that a stale overlay IS refused -- with stubbed docker, every configuration
+# passes. That half is a fact about the servers, and the only honest way to
+# establish it is to run one.
+#
+# CONDITIONAL, and not counted in the floor, for the same reason the shipped
+# compose block is: this gate must stay runnable with no build. Build with
+# `cargo build --bin zeroship-control` to turn it on.
+echo ""
+echo "-- a stale overlay field is REFUSED by the real binary (needs target/debug)"
+CTL_BIN="$ROOT/target/debug/zeroship-control"
+if [ ! -x "$CTL_BIN" ]; then
+  echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
+else
+  ovl_env=(
+    ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
+    ZEROSHIP_CONTROL_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    ZEROSHIP_WORKER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    ZEROSHIP_PAIRWISE_SALT=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    ZEROSHIP_CONTROL_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    ZEROSHIP_CONTROL_SIGNING_KEY_FILE=/etc/zeroship/secrets/control-signing.pem
+    ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
+  )
+  # The GOOD overlay is the one this repo ships, so the control below is not a
+  # hand-written minimum that happens to parse.
+  env -i PATH=/usr/bin:/bin HOME=/tmp "${ovl_env[@]}" \
+    ZEROSHIP_CONFIG="$ROOT/deploy/ops/zeroship.toml" "$CTL_BIN" --check-config >/dev/null 2>&1
+  good_rc=$?
+  # ONE VARIABLE: the same file with the ONE key spelled the way the host still
+  # spelled it. Appending a second [observability] table instead would also be
+  # refused -- as a duplicate table header, which is a different defect and
+  # would let this assertion pass while proving nothing about the rename.
+  sed 's/^log_filter =/rust_log =/' "$ROOT/deploy/ops/zeroship.toml" >"$FIX/stale.toml"
+  cmp -s "$FIX/stale.toml" "$ROOT/deploy/ops/zeroship.toml" \
+    && fail "the stale fixture is identical to the shipped overlay; the sed did not apply and the case below is vacuous"
+  STALE_OUT="$(env -i PATH=/usr/bin:/bin HOME=/tmp "${ovl_env[@]}" \
+    ZEROSHIP_CONFIG="$FIX/stale.toml" "$CTL_BIN" --check-config 2>&1)"
+  stale_rc=$?
+  [ "$good_rc" = 0 ] \
+    && pass "CONTROL: --check-config accepts the overlay this repo ships (exit 0)" \
+    || fail "CONTROL: --check-config rejected the SHIPPED overlay (exit $good_rc); the stale case below would prove nothing"
+  [ "$stale_rc" != 0 ] && [[ "$STALE_OUT" == *"rust_log"* ]] \
+    && pass "the same overlay plus the host's stale 'rust_log' is REFUSED by name (exit $stale_rc), so --check-config would have caught this before the roll" \
+    || fail "a stale rust_log was accepted (exit $stale_rc): $STALE_OUT"
+fi
+
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED: a mutation moves an
-# outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
-# real-compose block is conditional and deliberately NOT counted in the floor.
+# outcome BETWEEN those columns, so only a LOST assertion drops the sum. Blocks
+# that depend on something outside this file are conditional and deliberately
+# NOT counted in the floor.
 # MEASURED 2026-08-12: 53 unconditional assertions (54 ran with the shipped
 # compose present). RE-MEASURED 2026-08-13 after the rule-2 rename block: 63
 # unconditional (64 with the shipped compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-63}"
+# RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
+# blocks: 108 unconditional; 111 with the shipped compose + dev.rs present;
+# 113 with target/debug/zeroship-control built as well.
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-108}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
