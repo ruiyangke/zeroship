@@ -8303,17 +8303,29 @@ impl DeclarativeAuthor {
         body: &str,
         gated: bool,
     ) -> LoweredUnit {
-        let up = format!(
-            "ALTER TABLE {} ADD CONSTRAINT {} {}",
-            self.qualified(table),
-            quote_ident(name),
-            body,
-        );
-        let down = format!(
-            "ALTER TABLE {} DROP CONSTRAINT {}",
-            self.qualified(table),
-            quote_ident(name),
-        );
+        // Identifier syntax follows the TARGET dialect, exactly as `render_add_fk`
+        // does a few hundred lines up. Without this the MySQL leg emitted
+        // PostgreSQL double quotes — `ALTER TABLE "db"."t" ADD CONSTRAINT "t_uq"
+        // UNIQUE (val)` — which MySQL rejects as a syntax error PARTWAY THROUGH a
+        // deploy, even though it declares `Capability::AlterTableAddConstraint` and
+        // supports the statement perfectly well in its own spelling.
+        //
+        // Only the MySQL arm is introduced: PostgreSQL and SQLite keep the exact
+        // bytes they emitted before, because this seam is shared with the differ and
+        // the FK rendering is deliberately byte-identical between the imperative and
+        // declarative paths.
+        let (table_ref, constraint_ident) = match self.dialect {
+            SqlDialect::Mysql => (
+                mysql_qualified(&self.project_schema, table),
+                mysql_quote_ident(name),
+            ),
+            SqlDialect::Postgres | SqlDialect::Sqlite => (self.qualified(table), quote_ident(name)),
+        };
+        let up = format!("ALTER TABLE {table_ref} ADD CONSTRAINT {constraint_ident} {body}");
+        // MySQL has supported `DROP CONSTRAINT` since 8.0.19. FKs still need
+        // `DROP FOREIGN KEY` there, which is why `render_add_fk` spells its own
+        // down separately rather than routing through here.
+        let down = format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}");
         let flags = if gated {
             MigrationFlags {
                 requires_approval: true,
@@ -8340,11 +8352,17 @@ impl DeclarativeAuthor {
     /// constraint's body from a bare name (the IR carries no body on a drop), so
     /// there is no structural reverse; a re-declaration re-adds it.
     pub(crate) fn lower_drop_constraint(&self, table: &str, name: &str) -> LoweredUnit {
-        let up = format!(
-            "ALTER TABLE {} DROP CONSTRAINT {}",
-            self.qualified(table),
-            quote_ident(name),
-        );
+        // Same dialect-matched identifiers as the add path above, for the same
+        // reason: the PostgreSQL spelling reached MySQL and died as a syntax error
+        // mid-deploy. PostgreSQL and SQLite keep their existing bytes.
+        let (table_ref, constraint_ident) = match self.dialect {
+            SqlDialect::Mysql => (
+                mysql_qualified(&self.project_schema, table),
+                mysql_quote_ident(name),
+            ),
+            SqlDialect::Postgres | SqlDialect::Sqlite => (self.qualified(table), quote_ident(name)),
+        };
+        let up = format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}");
         single_stmt(self.make(
             &format!("drop_constraint_{table}_{name}"),
             up,
