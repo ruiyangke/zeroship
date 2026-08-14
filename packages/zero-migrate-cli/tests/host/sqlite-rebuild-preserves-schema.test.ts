@@ -330,3 +330,90 @@ test("rebuilding the child keeps its own foreign key", async () => {
 test("rebuilding the parent keeps the child's foreign key pointing at it", async () => {
   await assertFkIntact("parent");
 });
+
+/** A PARTIAL index must come back with its predicate.
+ *
+ *  Re-emitting the index without its `WHERE` would leave an object with the right
+ *  name over the right column that is silently a DIFFERENT index: it covers every
+ *  row rather than the filtered subset, changing size, plan choice, and — for a
+ *  partial UNIQUE — which duplicates are allowed. A name-only check cannot see any
+ *  of that, so this asserts the predicate itself. */
+test("a rebuild keeps a partial index's predicate", async () => {
+  const work = mkdtempSync(join(HERE, "sqlitepartial-"));
+  mkdirSync(join(work, "migrations"));
+  writeFileSync(
+    join(work, "policy.toml"),
+    `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`,
+  );
+  writeFileSync(join(work, "registry.json"), JSON.stringify({ partial_rows: OWNER_APP }));
+  writeFileSync(
+    join(work, "migrations", "20260101000000_base.ts"),
+    `import { table, t } from "zero-migrate";
+export const name = "base";
+export default {
+  up() {
+    table("partial_rows").create({
+      columns: {
+        id: t.int().notNull(),
+        status: t.string({ length: 20 }).notNull(),
+        spare: t.int(),
+      },
+      primaryKey: ["id"],
+      indexes: [
+        { name: "partial_rows_active_ix", on: ["status"], where: (col) => col("status").eq("active") },
+      ],
+    });
+    table("partial_rows").insert({ rows: [{ id: 1, status: "active", spare: 1 }] });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260102000000_drop.ts"),
+    `import { table } from "zero-migrate";
+export const name = "drop_spare";
+export default { up() { table("partial_rows").column("spare").drop(); } };
+`,
+  );
+  try {
+    const applied = await apply(work);
+    assert.equal(applied.code, 0, `the rebuild must succeed; ${applied.text}`);
+
+    const db = new DatabaseSync(join(work, "app.db"), { readOnly: true });
+    const index = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND name = ?`)
+      .get("partial_rows_active_ix") as { sql: string } | undefined;
+    db.close();
+
+    assert.ok(index, "the partial index must survive the rebuild");
+    assert.match(
+      index.sql,
+      /WHERE/i,
+      `and must keep its predicate — without it this is a FULL index wearing the ` +
+        `same name: ${index.sql}`,
+    );
+    assert.match(
+      index.sql,
+      /active/,
+      `and the predicate must still be the authored one: ${index.sql}`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
