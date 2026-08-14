@@ -229,6 +229,47 @@ else
   fail "no pairing at all; the negatives above prove nothing"
 fi
 
+# --- rule 2, canonical re-scoping ---------------------------------------
+# The eight compose aliases renamed on 2026-08-13 to satisfy the alias-equality
+# rule. Rule 1 was SILENT on six of these because every token they own is
+# stoplisted, and every one carries a `:-default`, so a host still setting only
+# the old name would have rendered green on the built-in default. Each of these
+# assertions FAILS against the pre-2026-08-13 rename_suspects.
+for pair in \
+  "CONTROL_DATABASE_URL ZEROSHIP_CONTROL_DATABASE_URL" \
+  "GATEWAY_DATABASE_URL ZEROSHIP_GATEWAY_DATABASE_URL" \
+  "WORKER_DATABASE_URL ZEROSHIP_WORKER_DATABASE_URL" \
+  "MIGRATED_DATABASE_URL ZEROSHIP_MIGRATED_DATABASE_URL" \
+  "WORKER_KV_URL ZEROSHIP_WORKER_KV_URL" \
+  "PROVISION_DATABASE_URL ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL" \
+  "STRIPE_WEBHOOK_SECRET ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET"; do
+  set -- $pair
+  SUS="$(rename_suspects "$1" "$2")"
+  if [ -n "$SUS" ]; then
+    pass "$1 pairs with its canonical $2"
+  else
+    fail "$1 -> $2 was NOT detected; a host keeping the old name would silently take the compose default"
+  fi
+done
+
+# The eighth is not a pure re-scoping: DB abbreviates to DATABASE as well.
+SUS="$(rename_suspects "AUTH_DB_URL" "ZEROSHIP_AUTH_DATABASE_URL")"
+[ -n "$SUS" ] && pass "AUTH_DB_URL pairs with ZEROSHIP_AUTH_DATABASE_URL (DB expands to DATABASE)" \
+              || fail "the DB/DATABASE abbreviation was not resolved; AUTH_DB_URL -> ZEROSHIP_AUTH_DATABASE_URL is silent"
+
+# NEGATIVE for rule 2: a bare name that is NOT a suffix of the needed one must
+# still not pair, or rule 2 has simply replaced "never fires" with "always
+# fires". Same shape as the positives, one variable changed: the scope.
+SUS="$(rename_suspects "WORKER_KV_URL" "ZEROSHIP_CONTROL_DATABASE_URL")"
+[ -z "$SUS" ] && pass "a bare name that is not a suffix of the needed name does not pair" \
+              || fail "rule 2 paired two unrelated names:$SUS"
+
+# NEGATIVE for rule 2: a single generic token must not pair with everything that
+# happens to end in it.
+SUS="$(rename_suspects "URL" "ZEROSHIP_CONTROL_DATABASE_URL")"
+[ -z "$SUS" ] && pass "a single-token orphan does not pair by suffix alone" \
+              || fail "a bare generic token paired by suffix:$SUS"
+
 # Either side empty is the fresh-install case and must never refuse.
 SUS="$(rename_suspects "" "ZEROSHIP_ORIGIN_SCHEME")"
 [ -z "$SUS" ] && pass "no orphans at all cannot be a rename (fresh install)" \
@@ -605,8 +646,9 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # outcome BETWEEN those columns, so only a LOST assertion drops the sum. The
 # real-compose block is conditional and deliberately NOT counted in the floor.
 # MEASURED 2026-08-12: 53 unconditional assertions (54 ran with the shipped
-# compose present).
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-53}"
+# compose present). RE-MEASURED 2026-08-13 after the rule-2 rename block: 63
+# unconditional (64 with the shipped compose present).
+MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-63}"
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

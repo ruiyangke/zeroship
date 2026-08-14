@@ -88,23 +88,62 @@ compose_vars() {
 # version refused every deploy. A guard that always fails gets removed just as
 # fast as one that never does.
 #
-# Relatedness = a shared underscore-separated token, minus a stoplist of tokens
-# so common they carry no signal (the product name, service names, and the
-# generic KEY/SECRET/URL suffixes). ZEROSHIP_SCHEME and ZEROSHIP_ORIGIN_SCHEME
-# share SCHEME and pair; ZEROSHIP_GATEWAY_BROKER_SECRET_FILE and
-# ZEROSHIP_GATEWAY_DATABASE_URL share only GATEWAY and do not.
+# Two independent rules; a pair matching EITHER is reported.
+#
+# Rule 1, shared token. Relatedness = a shared underscore-separated token, minus
+# a stoplist of tokens so common they carry no signal (the product name, service
+# names, and the generic KEY/SECRET/URL suffixes). ZEROSHIP_SCHEME and
+# ZEROSHIP_ORIGIN_SCHEME share SCHEME and pair; ZEROSHIP_GATEWAY_BROKER_SECRET_FILE
+# and ZEROSHIP_GATEWAY_DATABASE_URL share only GATEWAY and do not.
+#
+# Rule 2, canonical re-scoping. Rule 1 alone was BLIND to the exact rename this
+# guard is most likely to meet: giving a bare deployment name its canonical
+# ZEROSHIP_<scope>_ prefix. Measured 2026-08-13 over the eight compose aliases
+# that were renamed to satisfy the alias-equality rule, rule 1 fired on two and
+# was SILENT on six -- CONTROL_DATABASE_URL -> ZEROSHIP_CONTROL_DATABASE_URL
+# among them, because every token it owns (CONTROL, DATABASE, URL) is
+# stoplisted. Silence there is the expensive direction: the value has a compose
+# default, so the stack boots green with the control plane pointed at the
+# built-in database instead of the operator's.
+#
+# So: strip a leading ZEROSHIP_ from both, expand the DB abbreviation to
+# DATABASE, and pair when the needed name equals the orphan or ends with
+# _<orphan>. Requiring the orphan to hold at least one underscore keeps a single
+# generic token (URL, KEY) from pairing with everything.
+#
+# Over-firing is cheap and under-firing is not: a false pair prints a refusal an
+# operator clears by deleting one stale line, while a missed pair silently
+# changes what the stack points at.
+rename_norm() {
+  local n="${1#ZEROSHIP_}"
+  case "$n" in
+    *_DB_*) n="${n%%_DB_*}_DATABASE_${n#*_DB_}" ;;
+    *_DB) n="${n%_DB}_DATABASE" ;;
+  esac
+  printf '%s' "$n"
+}
+
 rename_suspects() {
   local stopwords=" ZEROSHIP AUTH CONTROL GATEWAY WORKER MIGRATED DB DATABASE URL KEY SECRET "
-  local o d tok
+  local o d tok on dn hit
   for o in $1; do
+    on="$(rename_norm "$o")"
     for d in $2; do
+      hit=""
       for tok in $(echo "$o" | tr '_' ' '); do
         [ "${#tok}" -ge 4 ] || continue
         case "$stopwords" in *" $tok "*) continue ;; esac
         case "_${d}_" in
-          *"_${tok}_"*) printf '\n    %s (host, now unused)  <->  %s (needed, would default)' "$o" "$d" ;;
+          *"_${tok}_"*) hit=1 ;;
         esac
       done
+      if [ -z "$hit" ] && [ "${on#*_}" != "$on" ]; then
+        dn="$(rename_norm "$d")"
+        case "$dn" in
+          "$on"|*"_$on") hit=1 ;;
+        esac
+      fi
+      [ -n "$hit" ] && printf '\n    %s (host, now unused)  <->  %s (needed, would default)' "$o" "$d"
     done
   done
   return 0
