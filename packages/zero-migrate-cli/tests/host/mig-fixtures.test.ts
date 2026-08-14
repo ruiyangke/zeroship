@@ -45,6 +45,19 @@ function fallbackName(file: string): string {
   return file.replace(/\.ts$/, "").replace(/^\d+_/, "");
 }
 
+/** Every table the fixtures touch, owned by the deploying app.
+ *
+ *  A createTable establishes ownership implicitly, so the DDL fixtures validate
+ *  against an empty registry. A DML fixture does not: it targets a table some
+ *  EARLIER migration created, and ownership is refused fail-closed for a table
+ *  the registry does not name. Without this, the gate would report an ownership
+ *  verdict while claiming to measure dialect support. */
+const REGISTRY: Record<string, string> = {
+  widgets: "app_fixture_dialects",
+  gadgets: "app_fixture_dialects",
+  dml_flow_items: "app_fixture_dialects",
+};
+
 test("every host migration fixture validates for every dialect", async () => {
   assert.ok(FIXTURES.length > 0, `no fixtures found in ${MIG_DIR}`);
 
@@ -55,6 +68,7 @@ test("every host migration fixture validates for every dialect", async () => {
       const verdict = validate({
         migration: migration as never,
         ownerApp: "app_fixture_dialects",
+        registry: REGISTRY,
         dialect,
         nameFallback: fallbackName(file),
       });

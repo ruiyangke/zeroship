@@ -90,11 +90,12 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-const SEED = `table("items").create({
+const SEED_DDL = `table("items").create({
       columns: { id: t.int().notNull(), grp: t.text(), val: t.int() },
       primaryKey: ["id"],
-    });
-    table("items").insert({ rows: [{ id: 1, grp: "a", val: 1 }, { id: 2, grp: "b", val: 2 }] });`;
+    });`;
+
+const SEED_DML = `table("items").insert({ rows: [{ id: 1, grp: "a", val: 1 }, { id: 2, grp: "b", val: 2 }] });`;
 
 function project(schema: string): string {
   const work = mkdtempSync(join(HERE, "apprscope-"));
@@ -120,11 +121,23 @@ scope = "all"
 `,
   );
   writeFileSync(join(work, "registry.json"), JSON.stringify({ items: OWNER_APP }));
+  // The table and the rows it holds are SEPARATE migrations: one module may carry
+  // DDL or DML, never both.
   writeFileSync(
-    join(work, "migrations", "20260101000000_seed.ts"),
+    join(work, "migrations", "20260101000000_create.ts"),
     `import { table, t } from "zero-migrate";
+export const name = "create";
+export default { schema() { ${SEED_DDL} } };
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
 export const name = "seed";
-export default { up() { ${SEED} } };
+export default {
+  data() { ${SEED_DML} },
+  inverse() { table("items").delete({ where: (c) => c("id").in([1, 2]) }); },
+};
 `,
   );
   return work;
