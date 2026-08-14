@@ -715,6 +715,7 @@ Gateway, control, and worker all read from a shared `LocalDiskBlobStore`; **no S
 | sha256_hex() / validate_hash_format() | 🟢 | internal | `crates/bundle/src/blob.rs` | — | `crates/bundle/tests/blob_test.rs` | pub re-exported. |
 | BundleStore trait + LocalFs (legacy VFS) | 🟡 | internal (plugin-storage) | `crates/bundle/src/store.rs` | — | `crates/bundle/tests/store_test.rs` | Predates BlobStore; blocking std::fs; no remote. |
 | CLI deploy command | 🟢 | `zeroship deploy <path>.zship --app=<id>` | `crates/cli/src/main.rs` | — | — | curl wrapper; token 3-priority chain. |
+| CLI migrate command | 🟢 | `zeroship migrate [ir.json] --app=<id>` | `crates/cli/src/migrate.rs` | — | — | Same token chain; posts the build's recorded IR through control to migrated. |
 | middleware list on ResourceEntry | 🟡 | internal | `crates/bundle/src/rule.rs` | — | — | Wire+compile ship; dispatch target not implemented. |
 | idempotent / idempotency_ttl_hours | 🟢 | internal | `crates/bundle/src/rule.rs` | — | `crates/gateway/src/idempotency.rs` | TTL [1,168]; gateway implements dedup. |
 | max_input_bytes on ResourceEntry | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Gateway enforces. |
@@ -964,7 +965,8 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | zeroship serve | 🟢 | `zeroship serve <file> [--port] [...]` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | `examples/http-handler.js` | .js path only; registers db/storage/auth/kv. |
-| zeroship deploy | 🟢 | `zeroship deploy <path.zship> --app=<id>` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | — | curl POST; prints deploy_hash. |
+| zeroship deploy | 🟢 | `zeroship deploy <path.zship> --app=<id>` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | — | curl POST; prints deploy_hash. Does NOT apply migrations. |
+| zeroship migrate | 🟢 | `zeroship migrate [migrations.ir.json] --app=<id>` | `crates/cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | POSTs to control, which forwards to migrated; required after deploy for env.db apps. |
 | zeroship login (Device Grant) | 🟢 | `zeroship login [--auth-url]` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | RFC 8628; token.json mode 0600. |
 | zeroship logout | 🟢 | `zeroship logout` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /oauth2/revoke; deletes creds. |
 | zeroship whoami | 🟢 | `zeroship whoami` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /userinfo; transparent refresh. |
