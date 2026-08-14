@@ -476,6 +476,20 @@ struct RollbackSet {
     /// engine refuses as `MissingFromSet`, and the map is what turns that refusal
     /// from an opaque derived version into a name the operator authored.
     unrepresentable: std::collections::BTreeMap<String, String>,
+    /// Logical PLAN version to the journaled STEP version it lowered to, for the
+    /// single-step plans above.
+    ///
+    /// The two are different `mig_…` values for the same migration, and `status`
+    /// reports the plan one while the journal, `apply` and `rollback` speak the
+    /// step one. Without this map every version `status` listed as applied was
+    /// rejected by `--to` as "not currently applied", which made the obvious
+    /// workflow -- read a version from `status`, roll back to it -- impossible.
+    ///
+    /// Only single-step plans are recorded, which is what makes the mapping
+    /// unambiguous: a multi-step plan is refused as `unrepresentable` before
+    /// rollback can act on it, so for everything reachable here plan and step
+    /// stand 1:1.
+    plan_to_step: std::collections::BTreeMap<String, String>,
 }
 
 /// Project the lowered artifacts into the authored migration set `rollback` takes.
@@ -497,9 +511,17 @@ fn rollback_migration_set(
     let mut set = RollbackSet {
         migrations: Vec::with_capacity(artifacts.len()),
         unrepresentable: std::collections::BTreeMap::new(),
+        plan_to_step: std::collections::BTreeMap::new(),
     };
     for artifact in artifacts {
         if let Ok(migration) = artifact.plan.single_step_migration() {
+            // Recorded only for the single-step case, on purpose: this is exactly
+            // the set where one plan means one journal identity, so resolving a
+            // plan version to a step version cannot be ambiguous.
+            set.plan_to_step.insert(
+                artifact.plan.version.as_str().to_string(),
+                migration.version.as_str().to_string(),
+            );
             set.migrations.push(migration.clone());
             continue;
         }
@@ -623,6 +645,27 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
             &resolved_contracts,
         )?;
         let set = rollback_migration_set(&artifacts)?;
+        // `--to` accepts EITHER spelling of a migration's version. The engine
+        // anchors on the journaled step identity, so a logical plan version is
+        // rewritten to the step it lowered to; anything already a step version, or
+        // belonging to neither space, passes through untouched and the engine's own
+        // `UnknownTarget` refusal still reports it verbatim.
+        //
+        // Widening the accepted spellings must not widen what is ACCEPTED overall:
+        // an unrecognised version is still refused, and still unwinds nothing.
+        let target = match target {
+            RollbackTarget::ToVersion(version) => {
+                let resolved = set
+                    .plan_to_step
+                    .get(version.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| version.as_str().to_string());
+                RollbackTarget::ToVersion(
+                    zero_migrate::MigrationId::parse(&resolved).unwrap_or(version),
+                )
+            }
+            other => other,
+        };
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
