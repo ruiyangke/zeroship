@@ -774,14 +774,13 @@ fi
 # the deleted-source set, the canonical-path overlay tiers, the inverted literal
 # rule and the presence-only sentinel.
 #
-# Case 18 (the platform mint destination, split from the issuer) added seven:
-# four on the reported pair, one on the refusal, three on the rejected
-# spellings, less one because the "not contains" and "contains" pair are two.
-# RE-MEASURED after it landed: 83.
+# Case 18 (the platform mint destination, split from the issuer) added eight:
+# four on the reported issuer/mint pair, one on the refusal when only the
+# issuer is set, three on the rejected spellings. MEASURED after it landed: 84.
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-83}"
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-84}"
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2
