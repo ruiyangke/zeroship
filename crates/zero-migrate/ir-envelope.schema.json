@@ -5072,7 +5072,7 @@
       ]
     },
     "IrIndex": {
-      "description": "An index definition inside a `createTable` op.",
+      "description": "An index definition inside a `createTable` op.\n\n`rename_all` is not decoration here. Every other field on this struct is a\nsingle word, so camelCase and snake_case coincide and the attribute changes\nnothing for them; `nulls_not_distinct` is the only multi-word field, and\nwithout the rename its wire name was snake_case while the DSL (and the add-op\nroute, whose `Op::CreateIndex` inherits `rename_all_fields` from the enclosing\nenum) both spell it camelCase. With `deny_unknown_fields` that made the option\nunreachable through `create({ indexes })` alone: it typechecked and then failed\nas `unknown field nullsNotDistinct`. Because the field is\n`skip_serializing_if = \"Option::is_none\"` and nothing could ever set it on this\nroute, no envelope carrying the old spelling can exist, so the rename is\nbyte-neutral for existing content.",
       "type": "object",
       "properties": {
         "name": {
@@ -5143,7 +5143,7 @@
             "null"
           ]
         },
-        "nulls_not_distinct": {
+        "nullsNotDistinct": {
           "description": "`PostgreSQL` 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as\nequal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.\n`None` serializes identically to the pre-`nullsNotDistinct` wire shape\n(byte-neutral when absent).",
           "type": [
             "boolean",

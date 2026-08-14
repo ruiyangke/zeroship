@@ -1754,8 +1754,20 @@ impl IndexStorageParams {
 }
 
 /// An index definition inside a `createTable` op.
+///
+/// `rename_all` is not decoration here. Every other field on this struct is a
+/// single word, so camelCase and snake_case coincide and the attribute changes
+/// nothing for them; `nulls_not_distinct` is the only multi-word field, and
+/// without the rename its wire name was snake_case while the DSL (and the add-op
+/// route, whose `Op::CreateIndex` inherits `rename_all_fields` from the enclosing
+/// enum) both spell it camelCase. With `deny_unknown_fields` that made the option
+/// unreachable through `create({ indexes })` alone: it typechecked and then failed
+/// as `unknown field nullsNotDistinct`. Because the field is
+/// `skip_serializing_if = "Option::is_none"` and nothing could ever set it on this
+/// route, no envelope carrying the old spelling can exist, so the rename is
+/// byte-neutral for existing content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct IrIndex {
     /// Optional index name (engine-derived if absent).
     #[serde(skip_serializing_if = "Option::is_none")]
