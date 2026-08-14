@@ -275,7 +275,7 @@ export function RichTextEditor({
   if (!editor) return null;
 
   return (
-    <div className="rich-text-editor">
+    <div className="app-field-shell rich-text-editor">
       {/* Shown once the editor has focus or content. A blurred, empty
           composer needs no formatting controls. */}
       {!collapsible || focused || hasText(value) ? (

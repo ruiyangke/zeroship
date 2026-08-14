@@ -162,7 +162,7 @@ export function NewBugPage() {
                   <Field>
                     <Field.Label htmlFor="new-bug-description">Description</Field.Label>
                     <textarea
-                      className="app-textarea"
+                      className="app-field-shell app-textarea"
                       id="new-bug-description"
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}

@@ -73,23 +73,50 @@ button { font-family: inherit; font-size: 0.88rem; }
    name rather than by class name. The app's own fields are DS <Input> now,
    so nothing here needs to style a field at all.
 
-   The one exception is the description <textarea>, which the DS has no
-   component for. It is styled by its own class, matched to the DS look
-   deliberately rather than by a rule that sprays every field on the page. */
+   Two fields have no DS component to be: the description <textarea> and the
+   tiptap comment editor, which is a contenteditable rather than a form
+   control. Both wear `.app-field-shell` -- ONE class, so the gap in the DS is
+   named in one place instead of drifting into two hand-matched imitations.
+   They already had: 8px radius against the editor's 9.6px, and a focus
+   treatment that changed a border colour against one that did nothing at all.
+
+   The recipe is the DS's own, through its published focus tokens -- the same
+   ones Select, Combobox, NumberField and Slider use, so this is the theming
+   API rather than a fourth private copy of it. Critically it is also the DS's
+   MODEL: no `border`, the resting hairline is an inset shadow, and focus
+   morphs that same shadow and adds the halo. A border plus a ring is how the
+   dual-edge bug above happened; there is only ever one edge here. */
+.app-field-shell {
+  border: none;
+  border-radius: var(--zs-control-radius-md);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+/* `:focus-within`, not `:focus-visible`. The editor's focus lands on a
+   contenteditable child, so a rule keyed on the shell itself never fires --
+   which is exactly why the comment box, the most-used control on the bug
+   page, measured byte-identical at rest and focused. */
+.app-field-shell:focus-within {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
 .app-textarea {
   font: inherit;
   font-size: 0.88rem;
   inline-size: 100%;
-  background: var(--surface);
-  border: 1px solid var(--line-2);
-  border-radius: 8px;
   padding: 0.45rem 0.6rem;
-  color: var(--ink);
-}
-.app-textarea:focus-visible {
-  /* ONE ring. A border plus an outline is what this block is a monument to. */
+  /* The control keeps no edge of its own -- the shell owns it. */
   outline: none;
-  border-color: var(--accent);
 }
 fieldset { border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 0.9rem; margin: 0.6rem 0; }
 fieldset[disabled] { opacity: 0.5; }
@@ -646,11 +673,11 @@ tbody tr:hover { background: var(--surface-2); }
 /* ---------------------------------------------------------------------------
    Rich text (tiptap).
    --------------------------------------------------------------------------- */
+/* Edge, radius, background and focus ring all come from `.app-field-shell`,
+   which this element also carries. Only the clip is local: the toolbar's own
+   background has square corners and would poke out of the rounded shell. */
 .rich-text-editor {
-  border: 1px solid var(--hairline, rgba(0, 0, 0, 0.12));
-  border-radius: 0.6rem;
   overflow: hidden;
-  background: var(--surface, #fff);
 }
 .rich-text-toolbar {
   padding: 0.25rem 0.35rem;
@@ -1272,15 +1299,12 @@ fieldset.bug-detail-extras { display: grid; }
    If a field here ever needs focus styling again: check what the wrapper
    already draws, untruncated, before adding anything. */
 
-/* The description textarea is not a DS component, so it draws its own.
-   Shaped like the DS treatment on purpose -- one border that takes the
-   accent, plus a soft halo -- so it does not read as a different species
-   of field next to the real ones. */
-.app-textarea:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 0.1875rem var(--accent-soft);
-}
+/* A SECOND `.app-textarea:focus-visible` lived here, 1200 lines from the
+   first, drawing its own accent halo in `--accent-soft` -- and winning, since
+   it came later. Two hand-matched imitations of one DS ring in one stylesheet,
+   neither aware of the other. `.app-field-shell` is the only one now, and a
+   spec compares it against a real Input rather than against a description of
+   one, which is how this copy was found at all. */
 
 /* The rail stays put while the conversation scrolls.
    ==================================================
