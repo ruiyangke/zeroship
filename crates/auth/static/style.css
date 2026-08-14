@@ -15,9 +15,22 @@ p { font-size: 0.875rem; margin-top: 1rem; }
 .scopes { list-style: none; padding: 0; }
 .scopes li { padding: 0.5rem; background: #f5f5f5; margin: 0.25rem 0; border-radius: 0.25rem; font-size: 0.95rem; }
 .scope-tag { color: #888; margin-left: 0.25rem; }
+/* An app-declared scope's description, loaded per scope from the database. It
+   is the sentence that tells the user what they are approving, and it had no
+   rule at all, so it ran inline straight after the label: "See invoices See
+   invoices and plan." on one line. Block-level and muted makes it the
+   secondary line it reads as. */
+.scope-desc { display: block; color: #888; font-size: 0.8125rem; margin-top: 0.25rem; }
 .buttons { display: flex; gap: 0.75rem; margin-top: 1rem; }
 .buttons button { flex: 1; }
-.buttons button.primary { background: #111; color: white; }
+/* `.primary` is scoped to the class, not to `.buttons`. It was
+   `.buttons button.primary`, which matched the consent screen's Allow/Deny pair
+   and NOT the two standalone primary buttons (logout's "Sign out", device's
+   "Authorize <app>"), because neither sits in a `.buttons` row. That was
+   invisible only because the base `button` rule happens to set the same two
+   declarations - so the moment the base style changes, those two silently stop
+   being primary. A class should mean the same thing wherever it is written. */
+.primary { background: #111; color: white; }
 .buttons button:not(.primary) { background: #f0f0f0; color: #111; }
 .profile { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1rem; margin: 1rem 0; }
 .profile dt { color: #888; font-size: 0.875rem; }
