@@ -214,3 +214,70 @@ test("an index method the IR does not define is refused with the defined ones na
     }
   }
 });
+
+/** The vector/geoPoint derived index is a different shape from the facets above -
+ *  it is declared by the COLUMN TYPE rather than by an index option - so it gets
+ *  its own arm rather than a row in the matrix.
+ *
+ *  It belongs in this file because it is where lint and apply most recently
+ *  disagreed. `lint --dialect mysql` passed these declarations while apply refused
+ *  three of the four, since MySQL cannot build an index over a `blob` and cannot
+ *  build a SPATIAL one over a nullable column. Apply no longer emits that index on
+ *  MySQL, so lint's green is now the CORRECT verdict on every target - and this
+ *  arm is what fails if someone later teaches lint to refuse these types without
+ *  teaching apply the same thing.
+ *
+ *  The live half is `ann-index-only-where-buildable.test.ts`, which asserts the
+ *  apply side against real databases and that MySQL really carries no index. */
+test("vector and geoPoint lint clean on every dialect, matching what apply now does", () => {
+  const COLUMNS: ReadonlyArray<readonly [string, string]> = [
+    ["vector", `t.vector({ dimensions: 3, metric: "cosine" })`],
+    ["geoPoint", `t.geoPoint()`],
+    ["geoPoint notNull", `t.geoPoint().notNull()`],
+  ];
+  for (const [what, column] of COLUMNS) {
+    const work = mkdtempSync(join(HERE, "lintann-"));
+    try {
+      mkdirSync(join(work, "migrations"));
+      writeFileSync(
+        join(work, "policy.toml"),
+        `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+`,
+      );
+      writeFileSync(
+        join(work, "migrations", "20260101000000_m.ts"),
+        `import { table, t } from "zero-migrate";
+export const name = "typed";
+export default {
+  up() {
+    table("things").create({
+      columns: { id: t.int().notNull(), payload: ${column} },
+      primaryKey: ["id"],
+    });
+  },
+};
+`,
+      );
+      for (const dialect of DIALECTS) {
+        const { status, output } = lint(work, dialect);
+        assert.equal(
+          status,
+          0,
+          `${what} must lint clean on ${dialect}, since apply accepts it there; got: ${output}`,
+        );
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});
