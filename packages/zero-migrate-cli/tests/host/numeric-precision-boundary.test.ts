@@ -69,27 +69,49 @@ test("an exact int64 survives the whole stack, and an unsafe JS number is refuse
     read: string,
     schema: string,
   ): Promise<Record<string, unknown> | undefined> => {
-    await apply({
-      migration: {
+    // Schema and data are SEPARATE migrations now: one module may not carry both,
+    // so the fixture applies the table first and the row second.
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: schema,
+        driver,
+        registry: { items: OWNER_APP },
+        policy: [charter(schema)],
+        approved: true,
+        appliedBy: "numeric-precision-boundary",
+        nameFallback,
+      });
+
+    await applyOne(
+      {
         default: {
-          up() {
+          schema() {
             table("items").create({
               columns: { id: t.int().notNull(), ...(columns as never) },
               primaryKey: ["id"],
             });
-            table("items").insert({ rows: { id: 1, ...row } });
           },
         },
       } as MigrationModule,
-      ownerApp: OWNER_APP,
-      projectSchema: schema,
-      driver,
-      registry: {},
-      policy: [charter(schema)],
-      approved: true,
-      appliedBy: "numeric-precision-boundary",
-      nameFallback: "insert_it",
-    });
+      "create_it",
+    );
+    await applyOne(
+      {
+        default: {
+          data() {
+            table("items").insert({ rows: { id: 1, ...row } });
+          },
+          // Exactly reversible: the forward inserts one known row, so the
+          // inverse deletes exactly that row.
+          inverse() {
+            table("items").delete({ where: (col) => col("id").eq(1) });
+          },
+        },
+      } as MigrationModule,
+      "insert_it",
+    );
     const { rows } = await client.query(read.replaceAll("@S", `"${schema}"`));
     return rows[0];
   };
