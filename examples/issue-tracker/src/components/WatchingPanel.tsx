@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Stack } from "@zeroship/ui";
 
-import { addWatcher, listWatchers, removeWatcher } from "../api";
+import { addWatcher, removeWatcher } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import { useAppMutation, useWatchers } from "../lib/queries";
 import { errorMessage } from "./rpc";
 import { UserPicker } from "./UserPicker";
 
@@ -19,50 +21,39 @@ import { UserPicker } from "./UserPicker";
  * your inbox, and the inbox is here.
  */
 export function WatchingPanel() {
-  const [watching, setWatching] = useState<Awaited<ReturnType<typeof listWatchers>>>([]);
-  const [busy, setBusy] = useState(false);
+  const watchingQ = useWatchers();
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      setWatching(await listWatchers({}));
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const add = useAppMutation(
+    (watchedId: string) => addWatcher({ watchedId }),
+    () => invalidatedBy.watchersChanged(),
+  );
+  const remove = useAppMutation(
+    (watchedId: string) => removeWatcher({ watchedId }),
+    () => invalidatedBy.watchersChanged(),
+  );
+  const watching = watchingQ.data ?? [];
+  const busy = add.isPending || remove.isPending;
+  const shownError = error ?? (watchingQ.isError ? errorMessage(watchingQ.error) : null);
 
   const watch = async (watchedId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await addWatcher({ watchedId });
+      await add.mutateAsync(watchedId);
       setPicking(false);
-      await load();
     } catch (err) {
       // "you cannot watch yourself" arrives here. It is a real answer, not a
       // failure, so it is shown rather than swallowed.
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const unwatch = async (watchedId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await removeWatcher({ watchedId });
-      await load();
+      await remove.mutateAsync(watchedId);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -100,7 +91,7 @@ export function WatchingPanel() {
         {picking ? "Cancel" : "Watch someone"}
       </Button>
       {picking ? <UserPicker onPick={(user) => void watch(user.id)} /> : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {shownError ? <p className="field-error">{shownError}</p> : null}
     </section>
   );
 }

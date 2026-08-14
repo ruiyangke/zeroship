@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Field, Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
-  listGroupMembers,
   removeGroupMember,
   createGroup,
   deleteGroup,
-  listGroups,
-  listProducts,
-  listUsers,
   restrictProduct,
   unrestrictProduct,
 } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import {
+  useAppMutation,
+  useGroupMembers,
+  useGroups,
+  useProducts,
+  useUserSearch,
+} from "../lib/queries";
 import { errorMessage } from "./rpc";
 
 /**
@@ -27,88 +31,94 @@ import { errorMessage } from "./rpc";
  * installer creates one.
  */
 export function GroupsAdmin() {
-  const [groups, setGroups] = useState<Awaited<ReturnType<typeof listGroups>> | null>(null);
-  const [denied, setDenied] = useState(false);
+  const groupsQ = useGroups();
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [memberGroup, setMemberGroup] = useState("");
   const [memberQuery, setMemberQuery] = useState("");
-  const [matches, setMatches] = useState<Awaited<ReturnType<typeof listUsers>>>([]);
-  const [members, setMembers] = useState<Awaited<ReturnType<typeof listGroupMembers>>>([]);
+  const [submittedMemberQuery, setSubmittedMemberQuery] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setGroups(await listGroups({}));
-      setDenied(false);
-    } catch (err) {
-      if (errorMessage(err).toLowerCase().includes("admin")) setDenied(true);
-      else setError(errorMessage(err));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const matchesQ = useUserSearch(
+    { text: submittedMemberQuery ?? "", limit: 10 },
+    { enabled: submittedMemberQuery !== null },
+  );
+  const membersQ = useGroupMembers(memberGroup);
+  const createGroupMutation = useAppMutation(
+    (input: Parameters<typeof createGroup>[0]) => createGroup(input),
+    () => invalidatedBy.groupsChanged(),
+  );
+  const deleteGroupMutation = useAppMutation(
+    (input: Parameters<typeof deleteGroup>[0]) => deleteGroup(input),
+    () => invalidatedBy.groupsChanged(),
+  );
+  const addMemberMutation = useAppMutation(
+    (input: Parameters<typeof addGroupMember>[0]) => addGroupMember(input),
+    ({ groupId }) => invalidatedBy.groupMembershipChanged(groupId),
+  );
+  const removeMemberMutation = useAppMutation(
+    (input: Parameters<typeof removeGroupMember>[0]) => removeGroupMember(input),
+    ({ groupId }) => invalidatedBy.groupMembershipChanged(groupId),
+  );
+  const groups = groupsQ.data;
+  const matches = submittedMemberQuery === null ? [] : matchesQ.data ?? [];
+  const members = membersQ.data ?? [];
+  const busy =
+    createGroupMutation.isPending ||
+    deleteGroupMutation.isPending ||
+    addMemberMutation.isPending ||
+    removeMemberMutation.isPending;
+  const groupsError = groupsQ.error ? errorMessage(groupsQ.error) : null;
+  const denied = groupsError?.toLowerCase().includes("admin") ?? false;
+  const queryError = denied ? null : groupsError ?? matchesQ.error ?? membersQ.error;
+  const displayedError = error ?? (queryError ? errorMessage(queryError) : null);
 
   // Refusal is an ANSWER here, not a failure: the server declines while the
   // group still restricts issues or products and says how many, because
   // deleting it then would quietly widen who can read them. So the message
   // is surfaced rather than swallowed.
   const remove = async (groupId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await deleteGroup({ id: groupId });
+      await deleteGroupMutation.mutateAsync({ id: groupId });
       if (memberGroup === groupId) {
         setMemberGroup("");
-        setMembers([]);
       }
-      await load();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const create = async () => {
     if (!name.trim()) return;
-    setBusy(true);
     setError(null);
     try {
-      await createGroup({ name: name.trim() });
+      await createGroupMutation.mutateAsync({ name: name.trim() });
       setName("");
-      await load();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
-  const search = async () => {
-    try {
-      setMatches(await listUsers({ text: memberQuery.trim(), limit: 10 }));
-    } catch (err) {
-      setError(errorMessage(err));
+  const search = () => {
+    setError(null);
+    const query = memberQuery.trim();
+    if (query === submittedMemberQuery) {
+      void matchesQ.refetch();
+    } else {
+      setSubmittedMemberQuery(query);
     }
   };
 
   const add = async (userId: string) => {
     if (!memberGroup) return;
-    setBusy(true);
     setError(null);
     try {
-      await addGroupMember({ groupId: memberGroup, userId });
-      setMatches([]);
+      await addMemberMutation.mutateAsync({ groupId: memberGroup, userId });
+      setSubmittedMemberQuery(null);
       setMemberQuery("");
-      await loadMembers(memberGroup);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -124,28 +134,12 @@ export function GroupsAdmin() {
     );
   }
 
-  const loadMembers = async (groupId: string) => {
-    if (!groupId) {
-      setMembers([]);
-      return;
-    }
-    try {
-      setMembers(await listGroupMembers({ groupId }));
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  };
-
   const removeMember = async (userId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await removeGroupMember({ groupId: memberGroup, userId });
-      await loadMembers(memberGroup);
+      await removeMemberMutation.mutateAsync({ groupId: memberGroup, userId });
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -167,7 +161,7 @@ export function GroupsAdmin() {
         </Button>
       </div>
 
-      {groups === null ? (
+      {groups === undefined ? (
         <p className="state-hint small">Loading groups...</p>
       ) : groups.length === 0 ? (
         <p className="state-hint small">No groups yet.</p>
@@ -214,7 +208,6 @@ export function GroupsAdmin() {
               value={memberGroup}
               onValueChange={(next) => {
                 setMemberGroup(next ?? "");
-                void loadMembers(next ?? "");
               }}
               placeholder="Select a group"
               aria-label="Add member to"
@@ -235,7 +228,7 @@ export function GroupsAdmin() {
               placeholder="name or email"
             />
           </Field>
-          <Button variant="gray" size="small" onClick={() => void search()}>
+          <Button variant="gray" size="small" onClick={search}>
             Search
           </Button>
         </div>
@@ -290,7 +283,7 @@ export function GroupsAdmin() {
 
       {groups && groups.length > 0 ? <ProductRestrictions groups={groups} /> : null}
 
-      {error ? <p className="field-error">{error}</p> : null}
+      {displayedError ? <p className="field-error">{displayedError}</p> : null}
     </section>
   );
 }
@@ -302,34 +295,40 @@ export function GroupsAdmin() {
  * and the one that silently changes what a whole team can see, so the
  * confirmation names the consequence rather than saying "saved".
  */
-function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof listGroups>> }) {
-  const [products, setProducts] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
+function ProductRestrictions({
+  groups,
+}: {
+  groups: NonNullable<ReturnType<typeof useGroups>["data"]>;
+}) {
+  const productsQ = useProducts();
   const [productId, setProductId] = useState("");
   const [groupId, setGroupId] = useState("");
-  const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Awaited rather than chained: the generated client types this as
-    // `Row[] | Promise<Row[]>`, so `.then` does not exist on the union.
-    void (async () => {
-      try {
-        setProducts(await listProducts({}));
-      } catch (err) {
-        setError(errorMessage(err));
-      }
-    })();
-  }, []);
+  // The query owns the generated client's `Row[] | Promise<Row[]>` return
+  // shape, so this panel consumes one resolved, cached products list.
+  const products = productsQ.data ?? [];
+  const changeRestriction = useAppMutation(
+    ({ action, productId, groupId }: {
+      action: "restrict" | "unrestrict";
+      productId: string;
+      groupId: string;
+    }) =>
+      action === "restrict"
+        ? restrictProduct({ productId, groupId })
+        : unrestrictProduct({ productId, groupId }),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = changeRestriction.isPending;
+  const displayedError = error ?? (productsQ.error ? errorMessage(productsQ.error) : null);
 
   const apply = async (action: "restrict" | "unrestrict") => {
     if (!productId || !groupId) return;
-    setBusy(true);
     setError(null);
     setNote(null);
     try {
-      if (action === "restrict") await restrictProduct({ productId, groupId });
-      else await unrestrictProduct({ productId, groupId });
+      await changeRestriction.mutateAsync({ action, productId, groupId });
       setNote(
         action === "restrict"
           ? "Restricted. Only members of that group can now see this product and its issues."
@@ -337,8 +336,6 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
       );
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -392,7 +389,7 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
         </Button>
       </div>
       {note ? <p className="state-hint small">{note}</p> : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {displayedError ? <p className="field-error">{displayedError}</p> : null}
     </div>
   );
 }

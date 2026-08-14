@@ -6,6 +6,8 @@ import {
   getAttachment,
   getIssue,
   getProduct,
+  listFlagTypes,
+  listGroupMembers,
   listAttachments,
   listCc,
   listComments,
@@ -19,6 +21,9 @@ import {
   listNotifications,
   listProducts,
   listSavedSearches,
+  listSeeAlso,
+  listUsers,
+  listWatchers,
   unreadNotificationCount,
   reportByAssignee,
   reportByComponent,
@@ -72,6 +77,19 @@ type Gate = { enabled?: boolean };
 
 export function useCurrentUser() {
   return useQuery({ queryKey: queryKeys.users.me(), queryFn: () => currentUser({}) });
+}
+
+export type UserSearchInput = Parameters<typeof listUsers>[0];
+
+export function useUserSearch(input: UserSearchInput, gate: Gate = {}) {
+  return useQuery({
+    queryKey: queryKeys.users.search(input as Record<string, unknown>),
+    queryFn: () => listUsers(input),
+    // An explicit second search keeps the prior answer on screen until the
+    // newly submitted question resolves, matching the old button-driven UI.
+    placeholderData: (previous) => previous,
+    enabled: gate.enabled,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +168,14 @@ export function useDuplicates(issueId: string) {
   });
 }
 
+export function useSeeAlso(issueId: string) {
+  return useQuery({
+    queryKey: queryKeys.relations.seeAlso(issueId),
+    queryFn: () => listSeeAlso({ issueId }),
+    enabled: Boolean(issueId),
+  });
+}
+
 export function useFlags(issueId: string) {
   return useQuery({
     queryKey: queryKeys.relations.flags(issueId),
@@ -176,6 +202,10 @@ export function useFlagRequests() {
 
 export function useGroups() {
   return useQuery({ queryKey: queryKeys.groups.list(), queryFn: () => listGroups({}) });
+}
+
+export function useWatchers() {
+  return useQuery({ queryKey: queryKeys.watchers.list(), queryFn: () => listWatchers({}) });
 }
 
 /** One flag request row, once the issue behind it is known. */
@@ -290,6 +320,26 @@ export function useSavedSearches() {
 // ---------------------------------------------------------------------------
 
 export type ProductListInput = Parameters<typeof listProducts>[0];
+
+export type FlagTypeListInput = Parameters<typeof listFlagTypes>[0];
+
+export function useFlagTypes(input: FlagTypeListInput = {}) {
+  return useQuery({
+    queryKey: queryKeys.flags.types(input as Record<string, unknown>),
+    queryFn: () => listFlagTypes(input),
+  });
+}
+
+export function useGroupMembers(groupId: string, gate: Gate = {}) {
+  return useQuery({
+    queryKey: queryKeys.groups.members(groupId),
+    queryFn: () => listGroupMembers({ groupId }),
+    // Group selection used to leave the current member list in place while
+    // the next group loaded. Keep that stable layout across key changes.
+    placeholderData: (previous) => previous,
+    enabled: gate.enabled ?? Boolean(groupId),
+  });
+}
 
 /** Five call sites before the cache; one entry per distinct input after it. */
 export function useProducts(input: ProductListInput = {}) {

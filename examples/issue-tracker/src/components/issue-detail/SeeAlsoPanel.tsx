@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Field, Input } from "@zeroship/ui";
 
-import { addSeeAlso, listSeeAlso, removeSeeAlso } from "../../api";
+import { addSeeAlso, removeSeeAlso } from "../../api";
+import { useAppMutation, useSeeAlso } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import { RailDisclosure } from "./RailDisclosure";
 import { errorMessage } from "../rpc";
 import { Absent, Pending } from "./Absent";
@@ -18,60 +20,48 @@ import { Absent, Pending } from "./Absent";
  * nothing about.
  */
 export function SeeAlsoPanel({ issueId }: { issueId: string }) {
-  const [links, setLinks] = useState<Awaited<ReturnType<typeof listSeeAlso>>>([]);
-  // Distinct from `links.length === 0`. Seeding the list empty makes "no links"
-  // and "not asked yet" the same value, so the rail asserted the issue had no
-  // See Also entries for as long as the request took -- and if it failed, for
-  // good. Only after this flips is an empty list a fact about the issue.
-  const [loaded, setLoaded] = useState(false);
+  const linksQ = useSeeAlso(issueId);
+  const links = linksQ.data ?? [];
   const [url, setUrl] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setLinks(await listSeeAlso({ issueId }));
-      setLoaded(true);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }, [issueId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const addLink = useAppMutation(
+    (nextUrl: string) => addSeeAlso({ issueId, url: nextUrl }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const removeLink = useAppMutation(
+    (id: string) => removeSeeAlso({ id }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const busy = addLink.isPending || removeLink.isPending;
 
   const add = async () => {
     if (!url.trim()) return;
-    setBusy(true);
     setError(null);
     try {
-      await addSeeAlso({ issueId, url: url.trim() });
+      await addLink.mutateAsync(url.trim());
       setUrl("");
-      await load();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const remove = async (id: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await removeSeeAlso({ id });
-      await load();
+      await removeLink.mutateAsync(id);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
+  // Distinct from `links.length === 0`. The query keeps data undefined until
+  // the first successful answer, so "no links" and "not asked yet" remain
+  // different values without a second `loaded` flag. Only an answered empty
+  // array is a fact about the issue; pending or failed first reads stay a
+  // Skeleton rather than asserting absence.
   const summary =
-    !loaded ? (
+    linksQ.data === undefined ? (
       <Pending width="5rem" />
     ) : links.length === 0 ? (
       <Absent />
@@ -114,7 +104,9 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
           Add
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error || linksQ.isError ? (
+        <p className="field-error">{error ?? errorMessage(linksQ.error)}</p>
+      ) : null}
     </section>
     </RailDisclosure>
   );

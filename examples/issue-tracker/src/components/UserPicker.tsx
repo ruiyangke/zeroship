@@ -1,9 +1,10 @@
 // Minimal "find a user" widget: type a fragment of name/handle/email, pick
-// from the matches. There is no dedicated typeahead RPC, so this just calls
-// users.list({text}) -- which is exactly what it is for.
+// from the matches. There is no dedicated typeahead RPC, so the submitted text
+// becomes the argument to the cached users.list({text}) query -- which is
+// exactly what it is for.
 import { useState } from "react";
 import { Button, Input } from "@zeroship/ui";
-import { listUsers } from "../api";
+import { useUserSearch } from "../lib/queries";
 import { errorMessage } from "./rpc";
 import type { UserRow } from "./types";
 
@@ -15,26 +16,30 @@ export function UserPicker({
   onPick: (user: UserRow) => void;
 }) {
   const [text, setText] = useState("");
-  const [results, setResults] = useState<UserRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [submittedText, setSubmittedText] = useState<string | null>(null);
+  const usersQ = useUserSearch(
+    { text: submittedText ?? "", limit: 8 },
+    { enabled: Boolean(submittedText) },
+  );
+  const results = submittedText && !usersQ.isError ? usersQ.data ?? null : null;
+  const error = submittedText && usersQ.isError && !usersQ.isFetching
+    ? errorMessage(usersQ.error)
+    : null;
 
-  const search = async () => {
+  const search = () => {
     const query = text.trim();
     if (!query) {
-      setResults(null);
+      setSubmittedText(null);
       return;
     }
-    setSearching(true);
-    setError(null);
-    try {
-      const rows = await listUsers({ text: query, limit: 8 });
-      setResults(rows);
-    } catch (err) {
-      setError(errorMessage(err));
-      setResults(null);
-    } finally {
-      setSearching(false);
+
+    // The Find button remains an explicit action rather than turning this
+    // into a typeahead. Re-submitting the same key asks the query to refetch;
+    // changing the submitted argument starts the newly enabled query.
+    if (query === submittedText) {
+      void usersQ.refetch();
+    } else {
+      setSubmittedText(query);
     }
   };
 
@@ -48,12 +53,12 @@ export function UserPicker({
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              void search();
+              search();
             }
           }}
         />
-        <Button variant="gray" size="small" onClick={() => void search()} disabled={searching}>
-          {searching ? "..." : "Find"}
+        <Button variant="gray" size="small" onClick={search} disabled={usersQ.isFetching}>
+          {usersQ.isFetching ? "..." : "Find"}
         </Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
@@ -68,7 +73,7 @@ export function UserPicker({
                   onClick={() => {
                     onPick(user);
                     setText("");
-                    setResults(null);
+                    setSubmittedText(null);
                   }}
                 >
                   {user.name} <span className="dim">@{user.handle}</span>

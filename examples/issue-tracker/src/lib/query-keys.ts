@@ -51,6 +51,8 @@ export const queryKeys = {
      *  the key that makes the four-times fetch impossible rather than merely
      *  discouraged. */
     me: () => ["users", "me"] as const,
+    search: (input: Readonly<Record<string, unknown>>) =>
+      ["users", "search", input] as const,
     resolve: (ids: readonly string[]) => ["users", "resolve", [...ids].sort()] as const,
   },
 
@@ -127,9 +129,19 @@ export const queryKeys = {
 
   savedSearches: { all: ["savedSearches"] as const, list: () => ["savedSearches", "list"] as const },
 
-  flags: { all: ["flags"] as const, requests: () => ["flags", "requests"] as const },
+  flags: {
+    all: ["flags"] as const,
+    requests: () => ["flags", "requests"] as const,
+    types: (input: Readonly<Record<string, unknown>>) => ["flags", "types", input] as const,
+  },
 
-  groups: { all: ["groups"] as const, list: () => ["groups", "list"] as const },
+  groups: {
+    all: ["groups"] as const,
+    list: () => ["groups", "list"] as const,
+    members: (groupId: string) => ["groups", "members", groupId] as const,
+  },
+
+  watchers: { all: ["watchers"] as const, list: () => ["watchers", "list"] as const },
 
   reports: {
     all: ["reports"] as const,
@@ -200,6 +212,14 @@ export const invalidatedBy = {
     queryKeys.issues.detail(issueId),
     queryKeys.keywords.all,
   ],
+  /** A new type changes the admin list and every product detail that embeds
+   *  the flag types available to that product. */
+  flagTypeCreated: () => [queryKeys.flags.all, queryKeys.products.all],
+  /** Creating or deleting a group changes the list. The broad prefix also
+   *  retires a deleted group's now-unanswerable member query. */
+  groupsChanged: () => [queryKeys.groups.all],
+  groupMembershipChanged: (groupId: string) => [queryKeys.groups.members(groupId)],
+  watchersChanged: () => [queryKeys.watchers.all],
   savedSearchChanged: () => [queryKeys.savedSearches.all],
   notificationsChanged: () => [queryKeys.notifications.all],
 } as const;

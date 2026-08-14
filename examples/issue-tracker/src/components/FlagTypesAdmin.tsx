@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button, Field, Input, Select } from "@zeroship/ui";
 
-import { createFlagType, listFlagTypes, listProducts } from "../api";
+import { createFlagType } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
 import { errorMessage } from "./rpc";
 
 /**
@@ -19,47 +21,43 @@ import { errorMessage } from "./rpc";
  * administrator rather than invented by a reporter while filing.
  */
 export function FlagTypesAdmin() {
-  const [types, setTypes] = useState<Awaited<ReturnType<typeof listFlagTypes>> | null>(null);
+  const typesQ = useFlagTypes();
+  const productsQ = useProducts();
   const [denied, setDenied] = useState(false);
   const [name, setName] = useState("");
   const [targetType, setTargetType] = useState<"issue" | "attachment">("issue");
   const [productId, setProductId] = useState("");
-  const [products, setProducts] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setTypes(await listFlagTypes({}));
-      setProducts(await listProducts({}));
-      setDenied(false);
-    } catch (err) {
-      // Listing is not admin-gated, so a failure here is a real error rather
-      // than the not-an-admin case. `denied` is set by the CREATE below.
-      setError(errorMessage(err));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const createType = useAppMutation(
+    (input: Parameters<typeof createFlagType>[0]) => createFlagType(input),
+    () => invalidatedBy.flagTypeCreated(),
+  );
+  const types = typesQ.data;
+  const products = productsQ.data ?? [];
+  const busy = createType.isPending;
+  // Listing is not admin-gated, so a query failure here is a real error rather
+  // than the not-an-admin case. `denied` is set by the CREATE below.
+  const queryError = typesQ.error ?? productsQ.error;
+  const displayedError = error ?? (queryError ? errorMessage(queryError) : null);
 
   const create = async () => {
     if (!name.trim()) return;
-    setBusy(true);
     setError(null);
     try {
-      await createFlagType({ name: name.trim(), targetType, productId: productId || null });
+      await createType.mutateAsync({
+        name: name.trim(),
+        targetType,
+        productId: productId || null,
+      });
       setName("");
-      await load();
+      setDenied(false);
     } catch (err) {
       const message = errorMessage(err);
       // Says so rather than leaving a form that will keep failing. The first
       // account to exist is the admin.
       if (/admin/i.test(message)) setDenied(true);
       setError(message);
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -111,8 +109,8 @@ export function FlagTypesAdmin() {
           Create
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
-      {types === null ? (
+      {displayedError ? <p className="field-error">{displayedError}</p> : null}
+      {types === undefined ? (
         <p className="state-hint small">Loading flag types...</p>
       ) : types.length === 0 ? (
         <p className="state-hint small">No flag types defined yet.</p>
