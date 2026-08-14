@@ -498,6 +498,9 @@ impl Fixture {
                 supabase,
             ])
             .expect("distinct fixture issuers"),
+            FixtureProvider::SupabaseOnly => {
+                AuthProvider::new(vec![supabase]).expect("single supabase fixture issuer")
+            }
         });
 
         let state = Arc::new(AppState {
