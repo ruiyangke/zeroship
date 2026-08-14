@@ -1116,10 +1116,24 @@ async fn do_refresh(
     // profile claims, so reading them off it alone silently degrades
     // name/avatar/email_verified across a reload-recovery vs the original
     // /token row. We verify the rotated id_token sig/iss/aud against the same
-    // gateway JWKS; on a refresh grant there is no `code`, so the
-    // at_hash/c_hash/nonce bindings are not applicable (None). A present but
-    // INVALID id_token is a hard upstream failure (a rotated token must verify);
-    // an ABSENT id_token transparently falls back to the access JWT.
+    // gateway JWKS. A present but INVALID id_token is a hard upstream failure
+    // (a rotated token must verify); an ABSENT id_token transparently falls
+    // back to the access JWT.
+    //
+    // `c_hash` and `nonce` really are inapplicable here: both bind to the
+    // authorization request, and a refresh grant has neither a `code` nor a
+    // nonce. `at_hash` is DIFFERENT - it binds to the ACCESS TOKEN, which a
+    // refresh grant does return, and which we are holding. This used to pass
+    // `None` for all three under one rationale ("on a refresh grant there is no
+    // `code`"), which is true of c_hash and false of at_hash. That had two
+    // costs: the binding went unchecked, and because the verifier fails closed
+    // on a binding claim it cannot check (`AtHashInputMissing`), an OP that
+    // mints a spec-conformant `at_hash` on its refresh grant was REJECTED.
+    // Our own OP returns `id_token: None` on refresh (`oidc/refresh.rs`), so
+    // this never fired against the native provider - which is why nothing
+    // noticed until the mock OP started binding its rotated token the way the
+    // real issuer binds every token it mints (`oidc/issuer.rs`, at_hash is
+    // unconditional there).
     let id_claims: Option<zeroship_core::oidc_verify::TokenClaims> =
         match tokens.id_token.as_deref() {
             Some(id_token) => match zeroship_core::oidc_verify::verify_id_token(
@@ -1128,7 +1142,7 @@ async fn do_refresh(
                 &state.oidc_rp.issuer,
                 client_id,
                 None,
-                None,
+                Some(&tokens.access_token),
                 None,
             )
             .await
