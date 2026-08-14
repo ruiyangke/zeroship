@@ -216,12 +216,31 @@ revoked" arm depended on the previous run).
 revoking app B instead of app A turns it red on the app A assertion, and
 restoring it turns it green. Full gateway `--lib`: 404 passed, 0 failed.
 
-**Still open:** `oac_app`, `oac_myapp`, `oac_other` and `oac_revparity` remain as
-placeholder client ids elsewhere in `router/auth.rs`. Any test that reaches the
-raw-OP-bearer arm with one of those is rejected on the same shape check. Whether
-each such test asserts something that survives that rejection has NOT been
-checked one by one; the two in `bearer_raw_op_revocation_is_per_app_not_global`
-did not.
+**The other placeholder client ids were then audited, and they are sound.**
+`oac_app`, `oac_myapp`, `oac_other` and `oac_revparity` are still used across
+`router/auth.rs`, so the obvious worry is that those tests are vacuous too. They
+are not, and the reason is structural: the shape check has exactly ONE call site
+(`router/auth.rs:710`), and it sits AFTER signature verification and AFTER the
+`client_id` binding check (`:697`). A token only reaches it if it is correctly
+signed AND its `client_id` claim matches what the route expects.
+
+Each remaining test fails earlier, for the reason it actually names:
+
+- `bearer_non_jwt_token_is_not_user_session` and
+  `bearer_unrecognized_iss_jwt_is_not_user_session` assert `NotUserSession`,
+  which the shape check never returns (it returns `Invalid`). The client id is
+  irrelevant to them.
+- The wrong-signing-key test is rejected at signature verification, before the
+  arm reads any claim.
+- `bearer_raw_op_client_id_mismatch_rejected` presents `oac_app_a` at `oac_app_b`
+  and dies at the binding check on `:697`, which is precisely its subject.
+- The `scope_cookie_req` tests drive the COOKIE arm, which never calls the shape
+  check at all.
+
+`bearer_raw_op_revocation_is_per_app_not_global` was the only test that signed
+its token with the JWKS key AND matched the expected client id, so it was the
+only one that got as far as `:710`. That is why it alone was vacuous - not bad
+luck, but the one fixture that had everything else right.
 
 ---
 
