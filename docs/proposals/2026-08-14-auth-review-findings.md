@@ -129,6 +129,18 @@ OP, so they pin the gateway's half of the contract. They would not catch the
 real OP dropping `at_hash`, because the mock computes it from the OP's own
 helper. That direction is covered by the auth crate's own OIDC suites.
 
+**Why no gate caught this, which matters more than the bug.** `run_auth_suite.sh`
+guards coverage two ways: a MINIMUM passed-count (floor 505) and a skip census.
+The floor could not have caught this and never will: a test that gates on a
+missing DSN and returns early reports `ok`, so all 13 were counted as PASSING
+the whole time. Before: 577 passed, 14 allowlisted. After: 589 passed, 1
+allowlisted. The pass count barely moved because those tests were already in it.
+
+Only the census saw them, and only because they announce. The 7 OIDC suites that
+gate with a silent `let Some(fx) = ... else { return; }` announce nothing, and
+the file already says so. A pass count cannot distinguish a test that ran from a
+test that declined to.
+
 ---
 
 ## 3. `docs/reference/auth.md` disagreed with the code on cookies - FIXED (`ed596318f`)
@@ -148,20 +160,6 @@ the prose:
 
 All eight `SameSite` values were read at their construction sites before the
 table was rewritten, not inferred from nearby comments.
-
----
-
-**Why no gate caught this, which matters more than the bug.** `run_auth_suite.sh`
-guards coverage two ways: a MINIMUM passed-count (floor 505) and a skip census.
-The floor could not have caught this and never will: a test that gates on a
-missing DSN and returns early reports `ok`, so all 13 were counted as PASSING
-the whole time. Before: 577 passed, 14 allowlisted. After: 589 passed, 1
-allowlisted. The pass count barely moved because those tests were already in it.
-
-Only the census saw them, and only because they announce. The 7 OIDC suites that
-gate with a silent `let Some(fx) = ... else { return; }` announce nothing, and
-the file already says so. A pass count cannot distinguish a test that ran from a
-test that declined to.
 
 ---
 
@@ -244,7 +242,104 @@ luck, but the one fixture that had everything else right.
 
 ---
 
-## 6. The `CI` fail-loud guard has never fired - OPEN, low priority
+## 6. A failed sign-in was never announced - FIXED (`8fbf5e34f`)
+
+Measured in real Chromium against a live auth server. The accessibility tree
+after a failed login:
+
+```text
+- generic [ref=e7]: invalid email or password
+- textbox "Email" [active] [ref=e10]
+- textbox "Password" [ref=e12]
+```
+
+A bare `generic` node is not announced, and neither field reported an invalid
+state. Someone using a screen reader who typed the wrong password got no signal
+that anything had failed - the page simply changed.
+
+All eleven error banners are now `role="alert" id="form-error"`, and login,
+signup, forgot and reset wire `aria-invalid` + `aria-describedby` to it. Both
+login fields point at the ONE banner deliberately: the message does not say
+which of email or password was wrong (enumeration defense), so there is no
+per-field message to point at.
+
+The render test's control is the part that matters: on a CLEAN render the
+attributes must be ABSENT. Hardcoding `aria-invalid` unconditionally would
+satisfy every positive assertion while telling every first-time visitor their
+empty form was already wrong.
+
+---
+
+## 7. Every Unlink button had the same name - FIXED (`223db4968`)
+
+`me.html` renders one Unlink button per linked identity with identical visible
+text. A screen-reader user tabbing the page hears "Unlink, button" once per
+provider with nothing to tell them apart, and the wrong choice is destructive -
+it can remove the account's last sign-in method, which the code already guards
+against in `refuses_unlink_when_orphans_account`.
+
+**Why the browser spec missed it.** The a11y pass asserted that every form
+control HAS an accessible name, and passed: "Unlink" is a name. The property
+that matters is that the names are DISTINCT, and a presence check cannot see the
+difference. Fixed with `aria-label="Unlink {provider}"`, visible text unchanged.
+
+---
+
+## 8. The consent screen's scope descriptions had no rule - FIXED (`66a1a0989`)
+
+`consent.html` writes `class="scope-desc"` on the sentence that tells a user what
+an app is asking permission to do. `style.css` had no rule for it, so it rendered
+inline straight after the label: "See invoices See invoices and plan." on one
+line. The neighbouring `.scope-tag`, which only marks a scope "(unrecognized)",
+WAS styled - the less important of the two got the rule.
+
+Bounded before it was called a defect: descriptions are genuinely populated,
+loaded per app-declared scope by `SELECT scope_id, label, description`, so this
+renders for real users on the one screen whose entire purpose is understanding
+what is being approved.
+
+---
+
+## 9. `.primary` only worked inside `.buttons` - FIXED (`66a1a0989`)
+
+The rule was `.buttons button.primary`, which matches the consent Allow/Deny
+pair and NOT the two standalone primary buttons - logout's "Sign out" and
+device's "Authorize {app}" - because neither sits in a `.buttons` row.
+
+Invisible today only because the base `button` rule happens to set the same two
+declarations. The moment that base style changes, both silently stop being
+primary. A class should mean the same thing wherever it is written.
+
+Found by auditing every class in every template against the stylesheet rather
+than by reading. Three others came back as intentional unstyled hooks
+(`auth-shell` is redundant with the `body` layout; the per-provider oauth
+classes would break dark mode, and `.oauth-button` already styles them fully),
+and they are named in `template_css_test.rs` with those reasons rather than
+silently tolerated.
+
+---
+
+## 10. Six of nine security headers were asserted nowhere - FIXED (`317b95f74`)
+
+`headers::apply` sets nine headers and reasons about all of them in its doc
+comment. Only `referrer-policy`, `x-frame-options` and the CSP were checked
+against a live response, each as a side-condition of a test about something
+else. HSTS, `nosniff`, `permissions-policy`, COOP, CORP and the `no-store`
+default were asserted nowhere: deleting any one of them broke no test.
+`framing_config_test.rs` is not that check either - it reads the Caddy config
+FILES and never sends a request.
+
+The new test caught a wrong assumption on its first run, which is the best thing
+it could have done. It was written asserting `X-Frame-Options: DENY` on
+`/login`; the fixture configures a console origin, so `/login` takes the FRAMED
+arm and correctly DROPS that header. An empty XFO there is right, not missing.
+It now drives both arms - framed `/login` and unframed `/forgot` - because
+without the unframed partner every assertion in the framed block is equally
+consistent with the headers being absent everywhere.
+
+---
+
+## 11. The `CI` fail-loud guard has never fired - OPEN, low priority
 
 `auth_token_anchors_test.rs` panics if `CI` is set while
 `GATEWAY_ANCHORS_DB_URL` is not, so the coverage hole cannot survive in CI. The
@@ -259,6 +354,22 @@ Worth knowing before treating any CI-only guard as load-bearing.
 ## Checked and found sound
 
 Recorded so the next pass does not spend time re-deriving them.
+
+- **Session fixation.** `threat_model.rs::session_id_rotates_post_login_success`
+  drives two logins and asserts the cookie value differs. It runs in the gate.
+- **Magic link.** 15-minute token TTL matched by the cookie `Max-Age`, an
+  `HttpOnly` per-device CSRF nonce, and the nonce cookie cleared after a
+  successful redeem so it cannot be replayed. Three dedicated test files.
+- **Rate limits.** Every bucket's doc comment was checked against its numbers
+  (`LOGIN_EIP` 5/900s = 5 per 15 min, `TOTP_VERIFY` 5/900s, and so on). No
+  drift, and the per-(email, ip) plus per-account layering means rotating IPs
+  still hits the account-level backstop.
+- **`/logout`.** A GET confirmation page whose action is a POST carrying the
+  CSRF token - not a GET side effect.
+- **TOTP challenge input.** No `maxlength`/`pattern`, correctly: the field also
+  accepts backup codes, which are longer than six digits.
+- **`can_grant == false` on consent.** Not a dead end; the handler sets
+  `grant_error` so the page explains itself.
 
 - **Device-flow CSRF.** An archived 2026-06-02 review reported `POST /device`
   approving a device with no CSRF check. It is present now:
