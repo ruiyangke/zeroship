@@ -216,6 +216,21 @@ else
   pass "an empty compose file references no secret file (the extraction is not matching on nothing)"
 fi
 
+# NO SECRET PATH MAY ARRIVE AS A COMMAND FLAG. The pre-roll dry run is
+# `docker compose run --entrypoint <bin> <svc> --check-config`, and passing a
+# command to `run` REPLACES the service's own command. Anything supplied there
+# is invisible to the dry run, so a key path passed as `--x-file` makes
+# check-config report a required secret missing on a host where it is present
+# -- a false refusal, which is how a gate gets switched off. Control's
+# `--signing-key-file` was the last one and is now
+# ZEROSHIP_CONTROL_SIGNING_KEY_FILE.
+if [ -f "$REAL_COMPOSE" ]; then
+  FLAG_FILES="$(grep -vE '^[[:space:]]*#' "$REAL_COMPOSE" | grep -oE -- '--[a-z-]+-file' | sort -u)"
+  [ -z "$FLAG_FILES" ] \
+    && pass "no secret path is passed as a command flag in the shipped compose, so --check-config sees every one of them" \
+    || fail "these secret paths are passed as command flags and are therefore invisible to the pre-roll --check-config: $(echo $FLAG_FILES). Move them to their canonical ZEROSHIP_*_FILE environment name"
+fi
+
 # THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
 # one of which nobody updated. Every file the SHIPPED compose hands a binary
 # must be a file the provisioner (`secret_specs()` + the pairwise-salt case in
@@ -973,16 +988,22 @@ seen "$CAP" '### docker compose up -d --remove-orphans' \
 # It was not, and the host kept an overlay written for older binaries. The new
 # ones parse it with deny_unknown_fields, so every service exited at parse time.
 # This assertion FAILS against the pre-fix script, which scp'd two files.
-seen "$CAP" 'ops/zeroship.toml' \
-  && pass "the deploy SYNCS ops/zeroship.toml (D1: a host copy written for an older binary made every service refuse to start)" \
-  || fail "the deploy never syncs ops/zeroship.toml; a stale overlay survives the roll"
+# Match the `### scp` INVOCATION, not the bare name. `ops/zeroship.toml` also
+# appears in the snapshot body that this same run sends over ssh, so a scan for
+# the name alone stays green with the sync deleted -- measured, by deleting the
+# scp line and watching this assertion pass.
 dep_synced=""
-for f in docker-compose.yml Caddyfile zeroship.toml; do
-  grep -qF -- "### scp" "$CAP" && grep -q "### scp .*$f" "$CAP" || dep_synced="$dep_synced $f"
+for f in deploy/compose/docker-compose.yml deploy/ops/Caddyfile deploy/ops/zeroship.toml; do
+  grep -q "### scp .*$f " "$CAP" || dep_synced="$dep_synced $f"
 done
 [ -z "$dep_synced" ] \
-  && pass "all three tracked config files are synced (docker-compose.yml, Caddyfile, zeroship.toml)" \
-  || fail "these tracked config files are never sent to the host:$dep_synced"
+  && pass "all three tracked config files are scp'd to the host, ops/zeroship.toml included (D1: a host copy written for an older binary made every service refuse to start)" \
+  || fail "these tracked config files are never sent to the host:$dep_synced. A stale one survives the roll, and the overlay is parsed with deny_unknown_fields"
+# CONTROL: a repo file the deploy does NOT sync must not match, or the loop
+# above would report success against any capture at all.
+grep -q "### scp .*deploy/ops/postgres-init.sql " "$CAP" \
+  && fail "CONTROL: the matcher found a file the deploy does not sync; the loop above discriminates nothing" \
+  || pass "CONTROL: deploy/ops/postgres-init.sql is NOT matched (it is host-layout config, shipped once by hand)"
 
 # --- D1: --check-config runs, for every server, before the roll ------------
 check_missing=""
@@ -1208,8 +1229,8 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # compose present). RE-MEASURED 2026-08-13 after the rule-2 rename block: 63
 # unconditional (64 with the shipped compose present).
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
-# blocks: 108 unconditional; 111 with the shipped compose + dev.rs present;
-# 113 with target/debug/zeroship-control built as well.
+# blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
+# 114 with target/debug/zeroship-control built as well.
 MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-108}"
 RAN=$((PASS + FAIL))
 rc=0
