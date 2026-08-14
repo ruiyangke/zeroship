@@ -48,7 +48,7 @@ test("bodies are stored as markdown and render as rich text", async ({ page, bas
     description: "seed",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   const editor = page.getByLabel("Add a comment");
   await expect(editor).toBeVisible();
 

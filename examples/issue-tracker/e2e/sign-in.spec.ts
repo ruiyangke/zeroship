@@ -27,7 +27,7 @@ import { expect, test } from "@playwright/test";
  */
 
 test("a signed-out visitor signs in and the app notices", async ({ page, context }) => {
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
 
   const signIn = page.getByRole("button", { name: "Sign in" });
   await expect(signIn, "the app offers a way in").toBeVisible({ timeout: 15000 });

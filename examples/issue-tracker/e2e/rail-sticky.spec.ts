@@ -58,7 +58,7 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
   // A laptop, not a tall test window -- the bug only exists when the rail is
   // taller than the scrollport.
   await page.setViewportSize({ width: 1440, height: 800 });
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.locator("ul.comment-list")).toBeVisible();
 
   // The page itself does not scroll; the shell's main does. Scrolling the

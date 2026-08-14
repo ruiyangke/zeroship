@@ -51,7 +51,7 @@ test("the bug page fits a phone", async ({ page, baseURL }) => {
     description: "The progress bar reaches 99% and never completes.",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.locator("li.comment").first()).toBeVisible();
 
   const overflowing = await page.evaluate(() => {

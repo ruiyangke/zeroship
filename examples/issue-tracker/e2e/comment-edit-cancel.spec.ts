@@ -52,7 +52,7 @@ test("cancelling a comment edit throws the draft away, saving keeps it", async (
   const original = `original-${RUN}`;
   await rpc("comments.add", { bugId: bug.id, body: original });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   // Anchored to the comment element, NOT to its text. Filtering by the body
   // and then replacing that body in the editor makes the locator stop matching
   // the very element being driven -- the Cancel button then "does not exist"

@@ -56,7 +56,7 @@ test("the component report distinguishes same-named components across products",
     created.push({ product: name, componentId: component.id });
   }
 
-  await page.goto("/#/reports");
+  await page.goto("/reports");
   const section = page.locator("section.report-section").filter({ hasText: "By component" });
   await expect(section).toBeVisible();
 

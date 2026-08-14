@@ -64,7 +64,7 @@ test("a notification renders its comment as markup, not as markdown source", asy
     data: { json: { bugId: bug.id, body: `Reproduced on **${marker}** already.` } },
   });
 
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
   const row = page.locator("li", { hasText: marker }).first();
   await expect(row).toBeVisible({ timeout: 20_000 });
 

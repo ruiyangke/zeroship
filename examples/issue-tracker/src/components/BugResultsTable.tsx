@@ -2,6 +2,7 @@
 // and the "my dashboard" sections. Presentation only -- callers own data
 // fetching, filtering, and (for the bug list) which columns are visible.
 import { DataTable, type DataTableColumn, type DataTableSort } from "@zeroship/ui";
+import { Link } from "react-router-dom";
 
 import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
 import type { Bug } from "./types";
@@ -113,9 +114,9 @@ export function BugResultsTable({
       key: "id",
       header: "ID",
       cell: (bug) => (
-        <a href={`#/bugs/${bug.id}`} className="bug-link" title={bug.id}>
+        <Link to={`/bugs/${bug.id}`} className="bug-link" title={bug.id}>
           {bugLabel(bug, productKeysById)}
-        </a>
+        </Link>
       ),
     },
     status: { key: "status", header: "Status", cell: (bug) => <StatusBadge status={bug.status} /> },
@@ -147,9 +148,9 @@ export function BugResultsTable({
       key: "summary",
       header: "Summary",
       cell: (bug) => (
-        <a href={`#/bugs/${bug.id}`} className="bug-summary-link">
+        <Link to={`/bugs/${bug.id}`} className="bug-summary-link">
           {bug.summary}
-        </a>
+        </Link>
       ),
     },
     assignee: {

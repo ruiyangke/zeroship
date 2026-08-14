@@ -58,7 +58,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
   const tableOf = (page_: typeof page) => page_.locator("table").first();
 
   // The bug list, filtered to this run so the assertion is about this row.
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(tableOf(page)).toContainText(productName);
@@ -70,7 +70,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
   // The dashboard. Its three tables are the ones that were rendering ids, and
   // they are unfiltered, so this checks every row rather than just ours --
   // a stronger claim, and the rows all come from the same dev database.
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
   const sections = page.locator("section.dashboard-section");
   await expect(sections.first()).toBeVisible();
   // Wait for the lookups to arrive; before they do, the table legitimately

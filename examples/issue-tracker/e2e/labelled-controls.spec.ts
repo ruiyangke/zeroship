@@ -36,12 +36,12 @@ test("no reachable control is missing an accessible name", async ({ page, baseUR
   expect(bugs.length, "the fixture needs a bug to open").toBeGreaterThan(0);
 
   const pages: [string, string][] = [
-    ["bug list", "/#/bugs"],
-    ["new bug", "/#/bugs/new"],
-    ["dashboard", "/#/dashboard"],
-    ["products admin", "/#/products"],
-    ["reports", "/#/reports"],
-    ["bug detail", `/#/bugs/${bugs[0].id}`],
+    ["bug list", "/bugs"],
+    ["new bug", "/bugs/new"],
+    ["dashboard", "/dashboard"],
+    ["products admin", "/products"],
+    ["reports", "/reports"],
+    ["bug detail", `/bugs/${bugs[0].id}`],
   ];
 
   const offenders: string[] = [];

@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
+import { Link, NavLink } from "react-router-dom";
 import { AppShell, Badge, Button, Cluster, Stack } from "@zeroship/ui";
 
-import type { RouteName } from "../App";
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
@@ -19,19 +19,17 @@ import type { CurrentUser } from "./types";
  * root render without either.
  */
 
-const LINKS: { route: RouteName; label: string; href: string }[] = [
-  { route: "bugs", label: "Bugs", href: "#/bugs" },
-  { route: "dashboard", label: "My dashboard", href: "#/dashboard" },
-  { route: "products", label: "Products", href: "#/products" },
-  { route: "reports", label: "Reports", href: "#/reports" },
+const LINKS: { label: string; href: string }[] = [
+  { label: "Bugs", href: "/bugs" },
+  { label: "My dashboard", href: "/dashboard" },
+  { label: "Products", href: "/products" },
+  { label: "Reports", href: "/reports" },
 ];
 
 export function Shell({
-  route,
   userState,
   children,
 }: {
-  route: RouteName;
   userState: AsyncState<CurrentUser>;
   children: ReactNode;
 }) {
@@ -52,9 +50,9 @@ export function Shell({
             >
               ☰
             </Button>
-            <a href="#/bugs" className="brand">
+            <Link to="/bugs" className="brand">
               Issue Tracker
-            </a>
+            </Link>
           </Cluster>
           <Cluster align="center" gap={2}>
             {/* asChild, not render: this library composes onto the child element,
@@ -68,7 +66,7 @@ export function Shell({
                 competing with it for the one action that actually works. */}
             {signedIn ? (
               <Button variant="filled" size="small" asChild>
-                <a href="#/bugs/new">New bug</a>
+                <Link to="/bugs/new">New bug</Link>
               </Button>
             ) : null}
             <UserChip userState={userState} />
@@ -81,22 +79,22 @@ export function Shell({
           <nav aria-label="Primary">
             <Stack gap={1}>
               {LINKS.map((link) => (
-                <a
-                  key={link.route}
-                  href={link.href}
+                <NavLink
+                  key={link.href}
+                  to={link.href}
                   className="rail-link"
-                  // The current page is marked on the element, not by swapping
-                  // class names, so the styling rule and the accessible state
-                  // cannot drift apart.
-                  aria-current={route === link.route ? "page" : undefined}
+                  // NavLink sets aria-current="page" itself, so the styling
+                  // rule and the accessible state cannot drift apart -- and
+                  // the app no longer threads a route name down here to work
+                  // out which link is current.
                 >
                   <Cluster justify="between" align="center">
                     <span>{link.label}</span>
-                    {link.route === "dashboard" ? (
+                    {link.href === "/dashboard" ? (
                       <UnreadBadge signedIn={signedIn} />
                     ) : null}
                   </Cluster>
-                </a>
+                </NavLink>
               ))}
             </Stack>
           </nav>

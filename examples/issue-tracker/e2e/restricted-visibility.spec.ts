@@ -74,14 +74,14 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   const bob = await bobContext.newPage();
 
   const openDetail = async () => {
-    await bob.goto(`/#/bugs/${bug.id}`);
+    await bob.goto(`/bugs/${bug.id}`);
     // A full reload, not just a hash change. Arriving from the list is a
     // same-document navigation, so without this the second visit could render
     // whatever the router already had rather than refetching.
     await bob.reload();
   };
   const search = async () => {
-    await bob.goto("/#/bugs");
+    await bob.goto("/bugs");
     await bob.reload();
     await bob.getByPlaceholder("Search, or type").fill(RUN);
     await bob.getByRole("button", { name: "Apply" }).click();
@@ -94,14 +94,14 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   await expect(bob.getByText(summary), "and should find it in the list").toBeVisible();
 
   // ---- The one variable: Alice restricts it, through the UI. --------------
-  await page.goto("/#/products");
+  await page.goto("/products");
   const groups = page.locator("section.groups-admin");
   await expect(groups).toBeVisible();
   await groups.getByLabel("New group").fill(`vis-${RUN}`);
   await groups.getByRole("button", { name: "Create" }).click();
   await expect(groups.locator("ul.group-list").getByText(`vis-${RUN}`)).toBeVisible();
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
@@ -143,7 +143,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
 
   // Alice, in the same state, still sees it. Without this the "after" half is
   // also satisfied by a tracker that broke for everyone.
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await page.reload();
   await expect(page.locator("h1"), "the restriction must not hide it from a member").toContainText(
     summary,

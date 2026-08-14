@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button, Checkbox, Field, Input, Select } from "@zeroship/ui";
 import { createBug, currentUser, getProduct, listProducts } from "../api";
 import { AsyncSection } from "../components/StateViews";
@@ -7,6 +8,7 @@ import type { ProductDetail } from "../components/types";
 import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../lib/quicksearch";
 
 export function NewBugPage() {
+  const navigate = useNavigate();
   const { state: userState } = useAsync(() => currentUser({}), []);
   const productsQ = useAsync(() => listProducts({}), []);
 
@@ -63,7 +65,7 @@ export function NewBugPage() {
         url: url || undefined,
         confirmed: confirmed || undefined,
       });
-      window.location.hash = `#/bugs/${bug.id}`;
+      navigate(`/bugs/${bug.id}`);
     } catch (err) {
       setError(errorMessage(err));
     } finally {

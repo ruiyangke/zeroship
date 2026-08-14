@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button, Input } from "@zeroship/ui";
 import { addDependency, dependencyGraph, listDuplicates, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
@@ -8,10 +9,10 @@ import { RailDisclosure } from "./RailDisclosure";
 
 function BugLink({ id, summary, status }: { id: string; summary: string; status: string }) {
   return (
-    <a href={`#/bugs/${id}`} className="relation-link">
+    <Link to={`/bugs/${id}`} className="relation-link">
       <StatusBadge status={status} />
       <span>{summary}</span>
-    </a>
+    </Link>
   );
 }
 
@@ -168,7 +169,7 @@ export function DuplicatesPanel({
       {duplicateOfId ? (
         <p className="state-hint small">
           This bug is marked as a duplicate of{" "}
-          <a href={`#/bugs/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</a>.
+          <Link to={`/bugs/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</Link>.
         </p>
       ) : null}
       <AsyncSection

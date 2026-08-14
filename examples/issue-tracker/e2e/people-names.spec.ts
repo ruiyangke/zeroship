@@ -51,7 +51,7 @@ test("the bug page names people rather than printing their ids", async ({
   });
   await rpc("comments.add", { bugId: bug.id, body: `A comment ${RUN}` });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   const main = page.locator(".bug-detail-main");
   await expect(main).toBeVisible();
 

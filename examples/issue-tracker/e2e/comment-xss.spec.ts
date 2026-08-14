@@ -85,7 +85,7 @@ test("stored comment markup cannot execute", async ({ page, baseURL }) => {
     await dialog.dismiss();
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.locator("li.comment")).toHaveCount(PAYLOADS.length + 2);
 
   // The control first: if this fails, the rest proves nothing.

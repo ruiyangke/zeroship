@@ -43,7 +43,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 test("the app adds no edge of its own to a design-system field", async ({ page, baseURL }) => {
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
 
   const control = page.locator("input.zs-input__control").first();
   await expect(control).toBeVisible();

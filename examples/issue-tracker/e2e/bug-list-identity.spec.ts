@@ -64,7 +64,7 @@ test("every bug in the list shows a distinct id", async ({ page, baseURL, contex
   // Narrow the list to this run's product so the assertion is about these
   // eight rows and cannot be satisfied by unrelated bugs already in the dev
   // database.
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
 

@@ -37,7 +37,7 @@ test("the bug table is marked loading rather than hidden on first load", async (
     await route.continue();
   });
 
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
 
   // While the search is still in flight: the table is there, marked busy.
   const table = page.locator("table");

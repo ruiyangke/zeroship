@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Avatar, Button, Checkbox, Cluster, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
@@ -146,12 +147,12 @@ function CommentRow({
             Nothing is routed at #comment-3" -- from every comment, in every
             thread. The <li> keeps its id so the page can scroll to it. */}
         {comment.commentNumber > 0 ? (
-          <a
+          <Link
             className="comment-number"
-            href={`#/bugs/${comment.bugId}/c/${comment.commentNumber}`}
+            to={`/bugs/${comment.bugId}/c/${comment.commentNumber}`}
           >
             #{comment.commentNumber}
-          </a>
+          </Link>
         ) : null}
         {readOnly ? null : (
         <span className="comment-actions">
@@ -211,7 +212,7 @@ function CommentRow({
           {attachments.map((file) => (
             <li key={file.id}>
               {/* A button. It was an anchor to
-                  "#/bugs/<id>?attachment=<fileId>", which is not a deep link
+                  "/bugs/<id>?attachment=<fileId>", which is not a deep link
                   in a hash-routed app: the hash splits on "/", so the query
                   rode inside the bug id and the page asked the server for a
                   bug that cannot exist. Nothing read the parameter either.

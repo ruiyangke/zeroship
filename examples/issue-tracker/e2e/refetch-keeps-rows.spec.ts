@@ -28,7 +28,7 @@ test("the bug table stays on screen and marks itself busy while reloading", asyn
 }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   const rows = page.locator("table tbody tr");
   // Wait for REAL rows, not the skeleton. The first load now renders the table
   // in its loading state instead of a spinner, so "a tbody tr is visible" is

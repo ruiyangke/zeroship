@@ -31,11 +31,11 @@ const RUN = `${process.pid}-${Date.now()}`;
 const RAW_ID = /\b(prod|comp|vers|mile|user|pws|grp|bug|kw|flag|att|cmt|note)_[A-Za-z0-9]{12,}/;
 
 const PAGES: [string, string][] = [
-  ["bug list", "/#/bugs"],
-  ["new bug", "/#/bugs/new"],
-  ["dashboard", "/#/dashboard"],
-  ["products admin", "/#/products"],
-  ["reports", "/#/reports"],
+  ["bug list", "/bugs"],
+  ["new bug", "/bugs/new"],
+  ["dashboard", "/dashboard"],
+  ["products admin", "/products"],
+  ["reports", "/reports"],
 ];
 
 test("no page renders a raw typed id as visible text", async ({ page, baseURL, context }) => {
@@ -112,7 +112,7 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
     await check(label);
   }
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await page.waitForTimeout(1600);
   await check("bug detail");
 

@@ -54,7 +54,7 @@ test("the builder runs a search into the bug list and hands it back", async ({
     description: "d",
   });
 
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await expect(page.locator("table tbody tr").first()).toBeVisible();
 
   // There is no Search destination in the rail any more.

@@ -57,7 +57,7 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
 
   // Signed IN -- the control half. Without it, "no composer" would pass
   // against a page that never offers one to anybody.
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.getByLabel("Add a comment"), "a signed-in user can comment").toBeVisible();
   // The way in is the per-property Edit affordance; the control itself does
   // not exist until it is asked for.
@@ -69,7 +69,7 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
   // Signed OUT.
   const anon = await browser.newContext();
   const visitor = await anon.newPage();
-  await visitor.goto(`${baseURL}/#/bugs/${bug.id}`);
+  await visitor.goto(`${baseURL}/bugs/${bug.id}`);
 
   await expect(visitor.locator("h1"), "the bug is still readable").toContainText(summary);
   await expect(visitor.getByText("public description")).toBeVisible();

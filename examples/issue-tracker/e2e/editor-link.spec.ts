@@ -44,7 +44,7 @@ test("the link control applies safe URLs and states refusals", async ({ page, ba
     description: "<p>seed</p>",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   const editor = page.getByLabel("Add a comment");
   const composer = page.locator(".new-comment");

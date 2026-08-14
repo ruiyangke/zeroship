@@ -57,7 +57,7 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
 
   const summary = `Parser drops trailing newline ${RUN}`;
 
-  await page.goto("/#/bugs/new");
+  await page.goto("/bugs/new");
 
   // The component list is populated by a fetch that only fires once a product
   // is chosen, so selecting the product must change what the next select
@@ -90,7 +90,7 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // id) and the h2, so a bare getByText matches two nodes and fails strict
   // mode -- which reads as "not found" and sends you looking for a filing bug
   // that isn't there.
-  await expect(page).toHaveURL(/#\/bugs\/bug_/);
+  await expect(page).toHaveURL(/\/bugs\/bug_/);
   // The page heading, level 1. The detail panel used to repeat the summary as
   // an h2 directly above an input holding the same text; this asserted on that
   // duplicate, so removing it broke a spec that was pinning the defect.
@@ -116,7 +116,7 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   ).toContainText("P1");
 
   // The bug is findable from the list by its summary.
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.keyboard.press("Enter");
   await expect(page.getByText(summary)).toBeVisible();
@@ -132,7 +132,7 @@ test("an anonymous visitor is told to sign in rather than shown an empty list", 
   // "you cannot see it".
   const anon = await browser.newContext();
   const page = await anon.newPage();
-  await page.goto(`${baseURL}/#/dashboard`);
+  await page.goto(`${baseURL}/dashboard`);
 
   // The dashboard is entirely authenticated reads, so it must say so.
   await expect(
@@ -182,7 +182,7 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
   // Before the CC exists the dashboard must NOT already show it -- otherwise a
   // section that lists everything would pass this test without cc.listMine
   // working at all.
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
   const ccSection = page.locator("section.dashboard-section", { hasText: "Bugs I'm CC'd on" });
   await expect(ccSection).toBeVisible();
   await expect(ccSection.getByText(summary)).toHaveCount(0);
@@ -221,7 +221,7 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
 
   // Voting off by default: the panel must say so rather than show a control
   // that always fails.
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await openMorePanels(page);
   const votes = page.locator("section.votes-panel");
   await expect(votes).toBeVisible();
@@ -290,7 +290,7 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
   // unread count rises for the CC'd user. What this spec pins is the inbox
   // rendering at all, and the negative that a self-authored comment does not
   // appear in it.
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
   const inbox = page.locator("section.notifications-panel");
   await expect(inbox).toBeVisible();
   await expect(inbox.getByRole("heading", { name: "Notifications" })).toBeVisible();
@@ -332,7 +332,7 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
 
   // Create the group through the admin page, not over RPC: that surface is
   // the thing under test.
-  await page.goto("/#/products");
+  await page.goto("/products");
   const groups = page.locator("section.groups-admin");
   await expect(groups).toBeVisible();
   await groups.getByLabel("New group").fill(`sec-${RUN}`);
@@ -343,7 +343,7 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   await expect(groups.locator("ul.group-list").getByText(`sec-${RUN}`)).toBeVisible();
 
   // Then restrict the bug from its detail page.
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
@@ -390,7 +390,7 @@ test("see also links are added, listed and removed from the bug page", async ({ 
     description: "has links",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await openMorePanels(page);
   await openRailGroup(page, "See also");
   const panel = page.locator("section.see-also-panel");

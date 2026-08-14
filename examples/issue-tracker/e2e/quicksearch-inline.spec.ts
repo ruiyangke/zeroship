@@ -53,7 +53,7 @@ test("typing P1 in the search box filters by priority", async ({ page, baseURL, 
     await rpc("bugs.setPriority", { id: bug.id, priority });
   }
 
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   const search = page.getByPlaceholder("Search, or type");
 
   // The run marker alone: both bugs.

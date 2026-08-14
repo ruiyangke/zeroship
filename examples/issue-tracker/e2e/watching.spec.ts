@@ -87,7 +87,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   }
   expect(bobUser, "Bob must exist as an app user before he can be watched").toBeTruthy();
 
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
   const panel = page.locator("section.watching-panel");
   await expect(panel).toBeVisible();
   const bobRow = panel.locator("ul.member-list li", { hasText: otherUser.name });

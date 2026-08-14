@@ -54,7 +54,7 @@ test("a comment permalink lands on the bug, at that comment", async ({ page, bas
   }
 
   await page.setViewportSize({ width: 1440, height: 800 });
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.locator("ul.comment-list")).toBeVisible();
 
   // FOLLOW it, as a person does.
@@ -70,11 +70,11 @@ test("a comment permalink lands on the bug, at that comment", async ({ page, bas
 
   // And the URL is one you could paste to someone.
   expect(page.url(), "the permalink is a route, not a bare fragment").toContain(
-    `#/bugs/${bug.id}/c/3`,
+    `/bugs/${bug.id}/c/3`,
   );
 
   // Pasting it cold lands in the same place.
-  await page.goto(`/#/bugs/${bug.id}/c/3`);
+  await page.goto(`/bugs/${bug.id}/c/3`);
   await expect(page.locator("ul.comment-list")).toBeVisible();
   await expect(
     page.getByText("No page here"),

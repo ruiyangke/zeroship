@@ -6,7 +6,7 @@ import { getAttachment } from "../api";
  * Shared because the same file is offered in two places -- the FILES panel and
  * the chip on the comment it arrived with -- and the second one had no way to
  * do this. It linked to `#/bugs/<id>?attachment=<fileId>`, which looks like a
- * deep link and is not one: the app routes on the hash and splits it on "/",
+ * deep link and is not one: the app routed on the hash and split it on "/",
  * so the query rode along inside the bug id and produced a request for a bug
  * called "bug_0346...?attachment=atta_...". Nothing read the parameter either.
  *

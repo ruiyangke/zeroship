@@ -18,7 +18,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 test("signing out ends the session", async ({ page, baseURL, context }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
 
   // Signed in: the account menu names you.
   const account = page.getByRole("button", { name: /Alice Dev/ });

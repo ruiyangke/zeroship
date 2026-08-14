@@ -1,4 +1,5 @@
 import { listNotifications, markNotificationRead } from "../api";
+import { Link } from "react-router-dom";
 import { Button } from "@zeroship/ui";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
@@ -49,7 +50,7 @@ export function NotificationsPanel() {
             {rows.map((row) => (
               <li key={row.id} className={row.isRead ? "read" : "unread"}>
                 {row.bugId ? (
-                  <a href={`#/bugs/${row.bugId}`}>{row.title}</a>
+                  <Link to={`/bugs/${row.bugId}`}>{row.title}</Link>
                 ) : (
                   <span>{row.title}</span>
                 )}

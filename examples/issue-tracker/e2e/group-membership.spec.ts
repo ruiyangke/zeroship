@@ -68,11 +68,11 @@ test("an admin can see who is in a group and remove them", async ({
   await rpc("bugs.restrict", { bugId: bug.id, groupId: group.id });
 
   // Restricted: Bob cannot read it.
-  await bob.goto(`/#/bugs/${bug.id}`);
+  await bob.goto(`/bugs/${bug.id}`);
   await expect(bob.getByText(summary), "a non-member is refused").toHaveCount(0);
 
   // Grant through the UI.
-  await page.goto("/#/products");
+  await page.goto("/products");
   const admin = page.locator("section.groups-admin");
   await chooseOption(page, admin, "Add member to", `mem-${RUN}`);
   await admin.getByLabel("Find user").fill(otherUser.email);

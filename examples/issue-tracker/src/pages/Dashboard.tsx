@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { Link } from "react-router-dom";
 import { PageHeader } from "@zeroship/ui";
 import {
   currentUser,
@@ -80,7 +81,7 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
                 {entry.flagType?.name ?? entry.flag.flagTypeId} {entry.flag.status}
               </span>
               {bug ? (
-                <a href={`#/bugs/${bug.id}`}>{bug.summary}</a>
+                <Link to={`/bugs/${bug.id}`}>{bug.summary}</Link>
               ) : (
                 <span className="dim">on an attachment</span>
               )}

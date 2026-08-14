@@ -19,7 +19,7 @@ import { expect, test } from "@playwright/test";
 test("the dashboard asks a signed-out visitor to sign in instead of reporting zero", async ({
   page,
 }) => {
-  await page.goto("/#/dashboard");
+  await page.goto("/dashboard");
 
   await expect(page.getByText(/sign-in required/i), "the page states the real reason").toBeVisible();
 
@@ -38,7 +38,7 @@ test("the bug list stays public and readable while signed out", async ({ page })
   // The paired half. The fix must not turn every page into a sign-in wall:
   // browsing bugs is deliberately anonymous, and a spec that only checked the
   // dashboard would pass on an app that had locked the whole tracker.
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await expect(page.locator("table")).toBeVisible();
   await expect(page.getByText(/sign-in required/i)).toHaveCount(0);
 });

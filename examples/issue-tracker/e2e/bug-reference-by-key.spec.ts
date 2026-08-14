@@ -60,7 +60,7 @@ test("a bug is referenced by its key, and shown by its key", async ({ page, base
   const blockerKey = `${key}-${blocker.number}`;
   const originalKey = `${key}-${original.number}`;
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   // 1. A dependency, added by key through the real control.
   await openRailGroup(page, "Dependencies");

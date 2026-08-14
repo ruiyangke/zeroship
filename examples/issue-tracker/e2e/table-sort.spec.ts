@@ -60,7 +60,7 @@ test("headers sort the server query, and only where the server can", async ({
     await rpc("bugs.setPriority", { id: bug.id, priority });
   }
 
-  await page.goto("/#/bugs");
+  await page.goto("/bugs");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
 

@@ -51,7 +51,7 @@ test("the summary is edited from the page head, and can be abandoned", async ({
     description: "seed",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await expect(page.locator("h1")).toContainText(original);
 
   // Reachable by keyboard: focusing the control is what reveals it.

@@ -24,7 +24,8 @@
     "@zeroship/server": "workspace:*",
     "@zeroship/ui": "workspace:*",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "react-router-dom": "catalog:"
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",

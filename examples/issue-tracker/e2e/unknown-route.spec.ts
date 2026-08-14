@@ -5,7 +5,7 @@ import { signIn } from "./session";
 /**
  * A hash that matches nothing says so, instead of rendering the bug list.
  *
- * The router's default arm returned `{ name: "bugs" }`, so `#/reprots`, a
+ * The router's default arm returned `{ name: "bugs" }`, so `/reprots`, a
  * stale bookmark, or a link with a dropped segment all answered with a
  * plausible, fully populated page. That is the worst shape of wrong: nothing
  * looks broken, so you conclude the data is missing rather than the URL.
@@ -24,11 +24,11 @@ test("an unknown hash reports itself rather than impersonating the bug list", as
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
   // The control: a real route still renders its page.
-  await page.goto("/#/reports");
+  await page.goto("/reports");
   await expect(page.locator("h1"), "a known route renders its own page").toContainText("Reports");
 
   // The regression: a hash that matches nothing.
-  await page.goto("/#/reprots");
+  await page.goto("/reprots");
   await expect(
     page.getByText("No page here"),
     "an unknown hash is named as unknown",

@@ -57,7 +57,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // was broken for some other reason would look the same as one correctly
   // reporting that no types are defined.
   const typeName = `review-${RUN}`.slice(0, 30);
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await openMorePanels(page);
   const flags = page.locator("section.flags-panel");
   await expect(flags).toBeVisible();
@@ -68,7 +68,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   await expect(flags, "this type does not exist yet").not.toContainText(typeName);
 
   // Define one through the admin page, the way an operator would.
-  await page.goto("/#/products");
+  await page.goto("/products");
   const admin = page.locator("section.flag-types-admin");
   await expect(admin).toBeVisible();
   await admin.getByLabel("New flag type").fill(typeName);
@@ -82,7 +82,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // The bug page now offers it. `products.get` already returned the product's
   // flag types, so nothing there needed changing -- the table was simply
   // always empty.
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   // The fold resets on navigation, as it should -- it is view state, not a
   // preference. Re-opened here rather than made sticky, because a page that
   // silently remembers a disclosure across bugs is its own surprise.
@@ -107,7 +107,13 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
     summary: `Unrelated bug ${RUN}`,
     description: "no flags here",
   });
-  await page.goto(`/#/bugs/${otherBug.id}`);
+  await page.goto(`/bugs/${otherBug.id}`);
+  // Open the fold again. Under the old hash router this goto changed only the
+  // fragment, so the document never reloaded and the fold stayed open across
+  // it -- the assertion below was reading a panel left over from the previous
+  // bug. On real paths this is a genuine navigation, so the panel has to be
+  // asked for, which is also what a person does.
+  await openMorePanels(page);
   await expect(flags, "a product-scoped type must not appear on another product").not.toContainText(
     typeName,
   );

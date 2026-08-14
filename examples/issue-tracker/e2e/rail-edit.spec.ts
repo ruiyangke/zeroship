@@ -48,7 +48,7 @@ test("a rail property reads as a value and edits in place", async ({ page, baseU
     description: "seed",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   const row = page.locator(".rail-choice", { hasText: "Severity" });
   await expect(row, "the property states its value").toContainText("normal");
@@ -119,7 +119,7 @@ test("the assignee editor stays inside the rail", async ({ page, baseURL }) => {
   });
 
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   await page.getByRole("button", { name: "Edit Assignee", exact: true }).click();
 

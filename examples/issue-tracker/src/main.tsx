@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { AuthProvider } from "@zeroship/auth/react";
+import { BrowserRouter } from "react-router-dom";
 import { ThemeProvider } from "@zeroship/ui";
 // The design system ships its stylesheet as a separate export. Importing only
 // the module gets you the components with no chrome at all -- the AppShell
@@ -22,7 +23,9 @@ createRoot(el).render(
           hand, which is what the e2e helper does and what no person would.
           The platform ships the flow; the app simply never called it. */}
       <AuthProvider>
-        <App />
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
   </React.StrictMode>,

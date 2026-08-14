@@ -61,7 +61,7 @@ test("a file attached moments after filing still appears in the timeline", async
     contentType: "text/plain",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   const timeline = page.locator("ul.comment-list");
   await expect(timeline, "the thread rendered").toBeVisible();

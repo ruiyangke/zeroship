@@ -48,7 +48,7 @@ test("a file attached while commenting appears with that comment", async ({ page
     description: "seed",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   const editor = page.getByLabel("Add a comment");
   await expect(editor).toBeVisible();

@@ -51,7 +51,7 @@ test("clearing the comment editor disables the Comment button", async ({ page, b
     description: "<p>seed</p>",
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
 
   const editor = page.getByLabel("Add a comment");
   const comment = page.getByRole("button", { name: "Comment", exact: true });

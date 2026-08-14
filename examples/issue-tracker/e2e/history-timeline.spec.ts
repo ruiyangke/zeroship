@@ -59,7 +59,7 @@ test("the history names who changed what, grouped per edit", async ({
     data: { json: { id: bug.id, severity: "major" } },
   });
 
-  await page.goto(`/#/bugs/${bug.id}`);
+  await page.goto(`/bugs/${bug.id}`);
   await page.getByRole("button", { name: /^History/ }).click();
 
   const events = page.locator(".history-event");

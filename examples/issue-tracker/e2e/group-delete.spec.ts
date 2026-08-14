@@ -60,7 +60,7 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
   const inUse = await rpc("groups.create", { name: inUseName, description: "restricts a bug" });
   await rpc("bugs.restrict", { bugId: bug.id, groupId: inUse.id });
 
-  await page.goto("/#/products");
+  await page.goto("/products");
   const admin = page.locator("section.groups-admin");
   const list = admin.locator("ul.group-list");
   await expect(list).toContainText(unusedName);
