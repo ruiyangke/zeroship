@@ -100,6 +100,11 @@ export default defineApp({
     "rpc:products.get": { auth: "user" },
     "rpc:products.resolve": { auth: "anon", publiclyAccessible: true },
     "rpc:products.create": { auth: "user" },
+    // Admin-only, unlike the rest of product structure. Creating a product a
+    // second user can file against is setup; removing one with its whole
+    // history is not, and the note above says to gate these with requireAdmin
+    // for real use -- this is the one that could not wait.
+    "rpc:products.delete": { auth: "user" },
     "rpc:products.update": { auth: "user" },
     "rpc:components.list": { auth: "user" },
     "rpc:components.create": { auth: "user" },

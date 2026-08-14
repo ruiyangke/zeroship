@@ -51,6 +51,7 @@ export {
   listProducts,
   getProduct,
   createProduct,
+  deleteProduct,
   updateProduct,
   listComponents,
   createComponent,

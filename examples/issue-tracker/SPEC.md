@@ -169,6 +169,8 @@ you also hear about bugs the watched user is involved in)
 
 ### Products and admin
 `products.list` `products.get` `products.create` `products.update`
+`products.delete` (admin only, and it refuses until you confirm the issue count
+it would take with it)
 `products.resolve` `users.resolve` (names for the ids a page is showing, so a
 bug table need not fetch every product and user to label its rows)
 `components.list` `components.create` `components.update`

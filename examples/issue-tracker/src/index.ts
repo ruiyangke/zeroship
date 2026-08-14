@@ -3954,6 +3954,104 @@ export const createGroup = mutation(
  * soft-deleted tombstone keeps the unique index occupied, so the name of a
  * deleted group could never be reused.
  */
+/**
+ * Delete a product, and everything filed against it.
+ *
+ * Bugzilla has this and so does any tracker someone actually administers: a
+ * product created by mistake, a prototype that never shipped, a team that
+ * merged into another. Products administration could CREATE and rename and
+ * never remove, so the only way to undo a typo was to leave it in the filing
+ * dropdown forever.
+ *
+ * REFUSES BY DEFAULT, like `groups.delete` above. A product almost always
+ * holds issues, and deleting it takes their comments, attachments and history
+ * with them -- so the count comes back in the refusal and the caller has to
+ * say `deleteIssues` to mean it. That mirrors Bugzilla, which shows you the
+ * bug count and makes you confirm; the difference is that here the
+ * confirmation is a parameter rather than a second page, so a script has to be
+ * as explicit as a person.
+ *
+ * The cascade is written out rather than left to the database. There are no ON
+ * DELETE CASCADE clauses in the migration, so anything not purged here becomes
+ * a row pointing at an id that no longer resolves -- and the app renders those
+ * as the raw id, which is the defect `useIssueLookups` exists to prevent.
+ */
+export const deleteProduct = mutation(
+  async ({ id, deleteIssues = false }: { id: string; deleteIssues?: boolean }) => {
+    await requireAdmin();
+    const productId = requireId(id, "id");
+    const product = must(await db.products.get(productId));
+    if (!product) notFound("product not found");
+
+    const issues = await readAll(db.issues, { productId });
+    if (issues.length > 0 && !deleteIssues) {
+      conflict(
+        `This product holds ${issues.length} issue${issues.length === 1 ? "" : "s"}. Deleting it ` +
+          `deletes them and their comments, attachments and history. Pass deleteIssues to confirm.`,
+      );
+    }
+
+    const issueIds = issues.map((issue) => issue.id);
+    for (const batch of chunks(issueIds)) {
+      const of = { issueId: { $in: batch } };
+      // Every table that names an issue, derived from the migration rather
+      // than remembered: leaving one out orphans rows against a dead id.
+      await db.issueGroups.purgeMany(of);
+      await db.comments.purgeMany(of);
+      await db.attachments.purgeMany(of);
+      await db.issueKeywords.purgeMany(of);
+      await db.issueCc.purgeMany(of);
+      await db.issueSeeAlso.purgeMany(of);
+      await db.votes.purgeMany(of);
+      await db.flags.purgeMany(of);
+      await db.activities.purgeMany(of);
+      await db.notifications.purgeMany(of);
+      // BOTH directions. A dependency row names two issues, and purging only
+      // the `issueId` side leaves rows whose `dependsOnId` points at an issue
+      // that is gone -- which the dependency graph would then render as a node
+      // with a raw id for a title.
+      await db.issueDependencies.purgeMany(of);
+      await db.issueDependencies.purgeMany({ dependsOnId: { $in: batch } });
+    }
+
+    // A duplicate marker can cross products, so an issue somewhere ELSE may
+    // point at one being deleted here. Clearing is not possible through
+    // `issues.update` (env.db cannot write SQL NULL, see
+    // rejectUnsupportedIssueNullClears), so this reports the count instead of
+    // silently leaving a dangling marker and calling the job done.
+    const danglingDuplicates =
+      issueIds.length === 0
+        ? []
+        : (
+            await Promise.all(
+              chunks(issueIds).map((batch) =>
+                readAll(db.issues, { duplicateOfId: { $in: batch } }),
+              ),
+            )
+          )
+            .flat()
+            .filter((issue) => !issueIds.includes(issue.id));
+
+    await db.issues.purgeMany({ productId });
+    await db.components.purgeMany({ productId });
+    await db.versions.purgeMany({ productId });
+    await db.milestones.purgeMany({ productId });
+    await db.productGroups.purgeMany({ productId });
+    // Product-scoped flag types only. A global type has a null productId and
+    // belongs to the tracker, not to this product.
+    await db.flagTypes.purgeMany({ productId });
+    await db.products.purge(productId);
+
+    return {
+      id: productId,
+      deleted: true,
+      issuesDeleted: issues.length,
+      danglingDuplicateMarkers: danglingDuplicates.length,
+    };
+  },
+  { id: "products.delete" },
+);
+
 export const deleteGroup = mutation(
   async ({ id }: { id: string }) => {
     await requireAdmin();
