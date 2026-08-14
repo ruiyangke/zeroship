@@ -174,7 +174,7 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 /// trace context at all. Joining those needs the edge id propagated through
 /// the worker into the runtime and into workflow runs, which is separate
 /// work; see the header of `is_public_error_code` for the shape of the gap.
-fn infrastructure_error_response(
+pub(crate) fn infrastructure_error_response(
     status: StatusCode,
     context: &'static str,
     detail: impl std::fmt::Display,
@@ -190,6 +190,81 @@ fn infrastructure_error_response(
         "error": "internal error",
         "trace_id": trace_id,
     }))
+}
+
+#[cfg(test)]
+pub(crate) mod infrastructure_error_test_support {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("trace event buffer mutex poisoned")
+                .push(visitor.fields);
+        }
+    }
+
+    pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<HashMap<String, String>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: Arc::clone(&events),
+        });
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let captured = events
+            .lock()
+            .expect("trace event buffer mutex poisoned")
+            .clone();
+        (result, captured)
+    }
+
+    pub(crate) fn assert_logged_trace_id(
+        events: &[HashMap<String, String>],
+        trace_id: &str,
+    ) {
+        assert_eq!(events.len(), 1, "expected one infrastructure error event");
+        assert_eq!(
+            events[0].get("trace_id").map(String::as_str),
+            Some(trace_id),
+            "log trace_id must match the response body"
+        );
+        assert!(
+            !events[0].contains_key("request_id"),
+            "infrastructure error event must use trace_id, not request_id"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2278,6 +2353,7 @@ where
 #[cfg(test)]
 mod error_response_tests {
     use super::*;
+    use super::infrastructure_error_test_support::{assert_logged_trace_id, capture};
     use ntex::http::StatusCode;
     use ntex::util::{stream_recv, BytesMut};
 
@@ -2301,10 +2377,6 @@ mod error_response_tests {
     ///    `infrastructure_error_response` for why a fourth id name was
     ///    not introduced.
     ///
-    /// WHAT THIS DOES NOT CATCH: that the id in the body is the SAME id
-    /// the `tracing::error!` recorded, nor that both use the same field
-    /// name. Both come from one local binding, so a divergence would need
-    /// someone to mint a second UUID; no test here reads the log line back.
     fn assert_sanitized_with_id(body: &serde_json::Value) -> String {
         assert_eq!(
             body.get("error").and_then(serde_json::Value::as_str),
@@ -2334,12 +2406,15 @@ mod error_response_tests {
 
     #[compio::test]
     async fn registry_database_error_response_is_sanitized() {
-        let resp = error_response(RegistryError::Database(
-            "db connect failed: postgres://internal/schema".into(),
-        ));
+        let (resp, events) = capture(|| {
+            error_response(RegistryError::Database(
+                "db connect failed: postgres://internal/schema".into(),
+            ))
+        });
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
-        assert_sanitized_with_id(&body);
+        let trace_id = assert_sanitized_with_id(&body);
+        assert_logged_trace_id(&events, &trace_id);
         assert!(
             !body.to_string().contains("postgres://"),
             "the DSN must not ride out: {body}"
