@@ -5539,18 +5539,38 @@ impl IrAuthor {
                         expect_definition: None,
                     });
                 }
-                let is_live_fk = live_schema
-                    .table_snapshots
-                    .get(table)
-                    .and_then(|snapshot| {
-                        snapshot
-                            .constraints
-                            .iter()
-                            .find(|constraint| constraint.name == *name)
-                    })
-                    .is_some_and(|constraint| constraint.kind == "FOREIGN KEY");
-                if is_live_fk {
+                let live_table = live_schema.table_snapshots.get(table);
+                let live_constraint = live_table.and_then(|snapshot| {
+                    snapshot
+                        .constraints
+                        .iter()
+                        .find(|constraint| constraint.name == *name)
+                });
+                if live_constraint.is_some_and(|constraint| constraint.kind == "FOREIGN KEY") {
                     vec![decl.lower_drop_fk(table, name)]
+                } else if live_constraint.is_none() {
+                    // A column's `.unique()` written inside `create({ columns })`
+                    // lowers to a separate `CREATE UNIQUE INDEX` rather than an
+                    // inline column `UNIQUE`, so no constraint of that name exists
+                    // to drop — even though the author declared one, and even
+                    // though the SAME facet via `column().add()` or table-level
+                    // `uniques` does produce a constraint. Fall back to a UNIQUE
+                    // INDEX of that name so the facet is removable however it was
+                    // authored, which also reaches tables that already exist.
+                    //
+                    // A name matching NEITHER still falls through to DROP
+                    // CONSTRAINT and fails there: tolerance is for an index of
+                    // that name, never for absence, or every mistyped name would
+                    // become a silent no-op.
+                    match live_table.and_then(|snapshot| {
+                        snapshot
+                            .indexes
+                            .iter()
+                            .find(|index| index.name == *name && index.unique)
+                    }) {
+                        Some(index) => vec![decl.lower_drop_index(Some(table), index)],
+                        None => vec![decl.lower_drop_constraint(table, name)],
+                    }
                 } else {
                     vec![decl.lower_drop_constraint(table, name)]
                 }
