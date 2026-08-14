@@ -7,13 +7,20 @@
 #   1. Stand up a fresh ephemeral Postgres + apply deploy/ops/postgres-init.sql +
 #      the full platform migration set (0001→0036). A migration failure here is
 #      a finding — the migration set must apply cleanly from scratch.
-#   2. Boot control + worker + gateway with generated signing and shared keys.
+#   2. Boot control + migrated + worker + gateway with generated signing and
+#      shared keys.
 #   3. Mint an admin PAT OFFLINE (control's `/api/apps` now requires a real
 #      PAT bearer or OAuth introspection — the old `--master-key` bearer is
 #      gone). We give control a STABLE ed25519 signing key via
 #      `--signing-key-file`, seed a matching `permission_tokens` row + admin
 #      role, and sign a `pat+jwt` with jose so the PatIssuer verifies it.
-#   4. Create an app + deploy the built `examples/db-todos` .zship.
+#   4. Create an app, deploy the built `examples/db-todos` .zship, and APPLY ITS
+#      MIGRATIONS with `zeroship migrate`. The migrate step was absent until
+#      2026-08-14 and its absence is what made stage 5's env.db arms red: the
+#      app was deployed against a schema that had never been created, so the
+#      per-app role the runtime `SET LOCAL ROLE`s to did not exist. The reds
+#      were the harness faithfully reporting an unmigrated app, and the arm
+#      below that blamed schema-init was reading the wrong cause.
 #   5. Exercise primitives THROUGH THE EDGE:
 #        a. anon SSR/HTML for a schema-less app  (proves dispatch+load+serve)
 #        b. db-todos RPC over the gateway          (env.db primitive)
@@ -74,6 +81,7 @@ STRICT="${STRICT:-0}"
 ZEROSHIP_CONTROL_PORT=9099
 ZEROSHIP_WORKER_PORT=8087
 ZEROSHIP_GATEWAY_PORT=8001
+ZEROSHIP_MIGRATED_PORT=9098
 PG_PORT=5443
 PG_CONTAINER="zs-e2e-pg"
 
@@ -117,7 +125,7 @@ echo "  zeroship E2E — app primitives over the edge (ISS-54/G1)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate zeroship-migrated; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
 done
 ZSHIP="$ROOT/examples/db-todos/dist/app.zship"
@@ -170,7 +178,7 @@ echo "=== Stage 2: boot authenticated stack ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
@@ -179,10 +187,25 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
+
+# The migration service. It was ABSENT from this harness, which is why stage 5's
+# env.db arms were red: the app was deployed and never migrated, so the per-app
+# role the runtime SET LOCAL ROLEs to had never been created. That is a missing
+# step in the harness, not a defect in the app or the runtime, and no amount of
+# re-reading the worker log was going to say so - the error it prints
+# (`role "app_..._role" does not exist`) names a role whose only producer is
+# this service. It shares control's signing key so a control-issued PAT verifies.
+"$BIN/zeroship-migrated" --port $ZEROSHIP_MIGRATED_PORT \
+  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+ > "$WORK/migrated.log" 2>&1 &
+PIDS+=($!)
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && pass "migrated healthy" || { fail "migrated unhealthy"; tail -20 "$WORK/migrated.log"; exit 1; }
 
 # worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern);
@@ -267,6 +290,32 @@ APP_ID="$(echo "$APP_JSON" | jget '.id')"
 
 DEP="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
 echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "deploy failed: $DEP"
+
+# APP OWNERSHIP, and this row is NOT redundant with the platform-admin grant
+# above. The two services differ: control's deploy handler stops at the Cedar
+# decision (crates/control/src/authz_guard.rs), which `admin.cedar` satisfies on
+# its own, while migrated ALSO requires a literal `role = 'owner'` row
+# (crates/migrated/src/auth.rs, `requires_app_owner`). A platform admin with no
+# membership row can therefore deploy an app and be refused when migrating it.
+docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP_ID', '$OWNER', 'owner')
+ON CONFLICT (app_id, user_id) DO UPDATE SET role = 'owner';
+SQL
+
+# THE STEP THIS HARNESS WAS MISSING. Deploy does not apply migrations, so
+# without this the app runs against a schema that does not exist and every
+# env.db arm below fails on the absent per-app role. Driven through the CLI and
+# the control plane, exactly as a creator drives it.
+IR_JSON="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
+[ -f "$IR_JSON" ] || { echo "missing $IR_JSON — run: pnpm gen-types"; exit 2; }
+MIG="$("$BIN/zeroship" migrate "$IR_JSON" --app="$APP_ID" \
+  --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+if grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG"; then
+  pass "zeroship migrate applied db-todos' schema through control ($(head -c 60 <<<"$MIG"))"
+else
+  fail "zeroship migrate failed: $MIG"
+  tail -20 "$WORK/migrated.log"
+fi
 sleep 4   # let route + version sync to gateway + worker
 
 # ---------------------------------------------------------------------------
@@ -370,9 +419,16 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else
-  ERR="$(grep -iEo "Cannot find module '[^']*'" "$WORK/worker.log" | tail -1)"
+  # Read the cause out of the log rather than asserting one. This arm used to
+  # be hard-labelled "schema-init fails", which was a diagnosis printed
+  # regardless of what actually happened - and for a long time the real cause
+  # was a missing migrate step, not schema init. Check the role first, because
+  # it is the failure a creator hits.
+  ERR="$(grep -iEo 'role "app_[^"]*" does not exist' "$WORK/worker.log" | tail -1)"
+  [ -n "$ERR" ] && ERR="$ERR (migrations were not applied to this app)"
+  [ -z "$ERR" ] && ERR="$(grep -iEo "Cannot find module '[^']*'" "$WORK/worker.log" | tail -1)"
   [ -z "$ERR" ] && ERR="$(grep -iE 'install-schema|Evaluate rejected' "$WORK/worker.log" | tail -1)"
-  fail "db-todos schema-init fails on worker ⇒ env.db unreachable. HTTP $WK_CODE; runtime error: ${ERR:-$WK_BODY}"
+  fail "db-todos env.db unreachable over the worker. HTTP $WK_CODE; runtime error: ${ERR:-$WK_BODY}"
 fi
 
 # ---------------------------------------------------------------------------
