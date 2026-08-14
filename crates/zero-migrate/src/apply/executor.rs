@@ -498,9 +498,18 @@ pub enum ApplyError {
     /// effective policy scope. Refused before the privileged catalog snapshot,
     /// so a directly constructed probe cannot turn the executor into a
     /// cross-schema reader.
+    // The wording carries the REMEDY because the common cause is not an exclusion.
+    // The scope is built only from `schema.cross_schema` grant includes
+    // (`owned_schemas_from_effective`), so a policy that never grants that key
+    // yields `SchemaScope::Single("")` and permits NO schema — including the
+    // project's own. "Does not permit" alone sends an operator hunting for an
+    // exclusion that was never authored.
     #[error(
         "existence-guard probe on migration {version} names schema {probe_schema:?}, \
-         which the effective policy schema scope does not permit"
+         which the effective policy schema scope does not permit. That scope is built \
+         only from `schema.cross_schema` grant includes, so a policy that never grants \
+         that key permits no schema at all, the project's own included. Grant \
+         `schema.cross_schema` with a scope that includes {probe_schema:?}"
     )]
     ExistenceGuardSchemaOutOfScope {
         /// The guarded migration's version.
