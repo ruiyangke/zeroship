@@ -91,10 +91,29 @@ pub fn cmd_login(args: &[String]) -> Result<(), String> {
                         crate::ZeroshipCliConsumer
                     )
                 })
+                .or_else(control_from_project_config)
                 .unwrap_or_else(|| DEFAULT_CONTROL_URL.into());
+            eprintln!("zeroship login: control = {control_url}");
             login_control_device_flow(&control_url, true)
         }
     }
+}
+
+/// `control` from a `zeroship.jsonc` in the working directory, if there is one.
+///
+/// `login` is the fifth reader of `control` and the softest: it takes the value
+/// but does NOT gain `--config` or `--env`, because a login is a per-machine
+/// credential operation rather than a per-environment one, and a token minted
+/// against the wrong control plane fails loudly on the next command instead of
+/// doing something irreversible. A failure here is silence, so it stays silent:
+/// an unreadable or invalid file leaves the old chain intact rather than making
+/// `zeroship login` refuse to run.
+fn control_from_project_config() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let path = crate::project_config::locate(&[], &cwd).ok().flatten()?;
+    let cfg = crate::project_config::ProjectConfig::load(&path).ok()?;
+    let resolved = cfg.resolve(None).ok()?;
+    resolved.str("control").map(str::to_owned)
 }
 
 pub fn cmd_logout() -> Result<(), String> {
