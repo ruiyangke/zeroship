@@ -1,6 +1,6 @@
 import { listNotifications, markNotificationRead } from "../api";
 import { Link } from "react-router-dom";
-import { Button } from "@zeroship/ui";
+import { Button, ListView } from "@zeroship/ui";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
 import { useAsync } from "./rpc";
@@ -12,6 +12,19 @@ import { useAsync } from "./rpc";
  * dashboard -- which had nowhere to read the notifications it was counting. It
  * showed a number and offered no way to act on it. (For most of that time the
  * count was also always zero, because nothing wrote notifications at all.)
+ *
+ * ONE row shape, which is the fix here. Every row used to lay itself out from
+ * whatever it happened to contain: unread rows drew a tinted box and read ones
+ * did not, "Mark read" sat inline after the title on a row with no body and
+ * dropped to its own line under one with a body, and a row whose title was not
+ * a link lost the only coloured thing on it. Four visual treatments for two
+ * states, so the thing worth seeing at a glance -- read or unread -- was the
+ * one thing you could not see at a glance.
+ *
+ * ListView gives every row the same lockup: a leading unread dot, the title and
+ * body in the content column, and the action in the trailing slot. Read and
+ * unread now differ by exactly two signals, the dot and the muting, and nothing
+ * else moves.
  */
 export function NotificationsPanel() {
   const { state, reload } = useAsync(() => listNotifications({ limit: 50 }), []);
@@ -46,35 +59,50 @@ export function NotificationsPanel() {
               {rows.filter((row) => !row.isRead).length} unread of {rows.length} shown
               {rows.length >= 50 ? " (most recent 50)" : ""}
             </p>
-            <ul className="notification-list">
-            {rows.map((row) => (
-              <li key={row.id} className={row.isRead ? "read" : "unread"}>
-                {row.issueId ? (
-                  <Link to={`/issues/${row.issueId}`}>{row.title}</Link>
-                ) : (
-                  <span>{row.title}</span>
-                )}
-                {/* Rendered, not printed. Comment bodies are markdown now, so
-                    this row was showing literal asterisks and backticks --
-                    the inbox was the surface that never got checked when the
-                    storage format changed. Through the same read-only
-                    renderer as the thread, so the same schema decides what a
-                    notification may contain. */}
-                {row.body ? (
+            <ListView
+              className="notification-list"
+              density="compact"
+              items={rows.map((row) => ({
+                id: row.id,
+                // The dot is the whole unread signal, in a column of its own so
+                // the titles below it stay aligned whether or not it is there.
+                leading: (
+                  <span
+                    className={row.isRead ? "notification-dot is-read" : "notification-dot"}
+                    aria-hidden="true"
+                  />
+                ),
+                title: (
+                  <span className={row.isRead ? "notification-title is-read" : "notification-title"}>
+                    {row.issueId ? (
+                      <Link to={`/issues/${row.issueId}`}>{row.title}</Link>
+                    ) : (
+                      row.title
+                    )}
+                  </span>
+                ),
+                // Rendered, not printed. Comment bodies are markdown now, so
+                // this row was showing literal asterisks and backticks --
+                // the inbox was the surface that never got checked when the
+                // storage format changed. Through the same read-only
+                // renderer as the thread, so the same schema decides what a
+                // notification may contain.
+                description: row.body ? (
                   <div className="notification-body">
                     <RichText markdown={row.body} />
                   </div>
-                ) : null}
-                {row.isRead ? null : (
-                  <Button variant="gray" size="small"
-                    onClick={() => void markRead(row.id)}
-                  >
+                ) : undefined,
+                // One place for the action, on every row that has one. It used
+                // to sit inline after the title on a row with no body and drop
+                // to a line of its own under a row with one, so the same
+                // control appeared in two places down a single list.
+                trailing: row.isRead ? undefined : (
+                  <Button variant="gray" size="small" onClick={() => void markRead(row.id)}>
                     Mark read
                   </Button>
-                )}
-              </li>
-              ))}
-            </ul>
+                ),
+              }))}
+            />
           </>
         )}
       </AsyncSection>

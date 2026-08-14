@@ -1,8 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { PageHeader } from "@zeroship/ui";
+import { Badge, Grid, PageHeader, Tabs } from "@zeroship/ui";
 import {
-  currentUser,
   getAttachment,
   getIssue,
   listFlagRequests,
@@ -13,26 +12,69 @@ import {
 import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { WatchingPanel } from "../components/WatchingPanel";
-import { AsyncSection, ErrorState } from "../components/StateViews";
-import { isUnauthenticated, toPromise, useAsync } from "../components/rpc";
+import { AsyncSection, SignInRequired } from "../components/StateViews";
+import { toPromise, useAsync, type AsyncState } from "../components/rpc";
+import { RequireSession, isSignedIn, useSession } from "../components/session";
 import type { Issue, IssueDetail, FlagRequestEntry } from "../components/types";
 
 type DashboardIssue = IssueDetail["issue"];
 
 const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
-function IssueSection({ title, issues }: { title: string; issues: Issue[] }) {
+/**
+ * One issue table, four ways in.
+ *
+ * The four account-scoped queries -- assigned, reported, CC'd, voted for -- were
+ * four stacked sections, each a full table of up to fifty rows. "Assigned to
+ * me" alone is a screen and a half, so in practice the page WAS "assigned to
+ * me": the other three existed, were fetched on every visit, and lived
+ * somewhere between two and eight screens below the fold. Tabs put all four
+ * counts on one line, which is the thing a personal work surface is actually
+ * being asked.
+ *
+ * They are counted in the tab rather than in a heading inside the panel,
+ * because the count is what makes the OTHER tabs worth clicking -- a tab that
+ * only tells you what it holds after you open it is a worse index than a list
+ * of headings.
+ */
+function WorkTab({ label, state }: { label: string; state: AsyncState<unknown[]> }) {
   return (
-    <section className="dashboard-section">
-      <h2>
-        {title} <span className="dim">({issues.length})</span>
-      </h2>
-      {issues.length === 0 ? (
-        <p className="state-hint small">Nothing here.</p>
-      ) : (
-        <IssueResultsTable issues={issues} columns={COLUMNS} />
-      )}
-    </section>
+    <>
+      <span>{label}</span>
+      {/* No count until there is one. A "(0)" while the query is in flight is
+          an answer we do not have yet, and the same wrong answer a signed-out
+          visitor used to get. */}
+      {state.status === "ready" ? (
+        <Badge intent="neutral" variant="soft" size="sm">
+          {state.data.length}
+        </Badge>
+      ) : null}
+    </>
+  );
+}
+
+function WorkPanel({
+  state,
+  reload,
+  loadingLabel,
+  emptyLabel,
+}: {
+  state: AsyncState<Issue[]>;
+  reload: () => void;
+  loadingLabel: string;
+  emptyLabel: string;
+}) {
+  return (
+    <AsyncSection
+      state={state}
+      onRetry={reload}
+      loadingLabel={loadingLabel}
+      isEmpty={(issues) => issues.length === 0}
+      emptyTitle={emptyLabel}
+      emptyTone="inline"
+    >
+      {(issues) => <IssueResultsTable issues={issues} columns={COLUMNS} />}
+    </AsyncSection>
   );
 }
 
@@ -72,6 +114,7 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
       loadingLabel="Loading flag requests..."
       isEmpty={(rows) => rows.length === 0}
       emptyTitle={emptyLabel}
+      emptyTone="inline"
     >
       {(rows) => (
         <ul className="flag-request-list">
@@ -93,9 +136,51 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
   );
 }
 
+/**
+ * The dashboard is all-or-nothing, so it is the page `RequireSession` was
+ * written for.
+ *
+ * Every query behind it -- `notifications.list`, `cc.listMine`,
+ * `votes.listMine`, `watchers.list`, `flags.listRequests` -- is `auth: "user"`,
+ * so without an identity there is no half of this page worth rendering. The
+ * `pending` slot is deliberately the header alone: showing either the page or
+ * the sign-in wall while `users.me` is still in flight is a claim about the
+ * visitor that has not been answered yet.
+ */
 export function DashboardPage() {
-  const { state: userState } = useAsync(() => currentUser({}), []);
-  const meId = userState.status === "ready" ? userState.data.id : null;
+  return (
+    <RequireSession
+      pending={
+        <div className="page dashboard-page">
+          <DashboardHeader />
+        </div>
+      }
+      fallback={
+        <div className="page dashboard-page">
+          <DashboardHeader />
+          <SignInRequired />
+        </div>
+      }
+    >
+      <DashboardBody />
+    </RequireSession>
+  );
+}
+
+function DashboardHeader() {
+  return (
+    <PageHeader>
+      <PageHeader.Title>My dashboard</PageHeader.Title>
+    </PageHeader>
+  );
+}
+
+function DashboardBody() {
+  const session = useSession();
+  // Inside RequireSession, so the server has answered and this is who. Read
+  // from the shared session rather than a sixth `currentUser({})` call.
+  const me = isSignedIn(session) ? session.user : null;
+  const meId = me?.id ?? null;
 
   const assignedQ = useAsync(
     () => (meId ? searchIssues({ assigneeId: meId, limit: 50 }) : Promise.resolve([])),
@@ -109,6 +194,18 @@ export function DashboardPage() {
   const ccQ = useAsync(() => listMyCc({}), []);
   const votesQ = useAsync(() => listMyVotes({}), []);
 
+  // Voting had a panel on every issue and nowhere to see what you had voted
+  // for, so the budget it enforces -- votesPerUser, per product -- was
+  // spendable and unauditable. Projected to the issue rows the shared table
+  // takes, so it is the same table as the other three tabs.
+  const votedIssues = useMemo<AsyncState<Issue[]>>(
+    () =>
+      votesQ.state.status === "ready"
+        ? { ...votesQ.state, data: votesQ.state.data.map((row) => row.issue) }
+        : votesQ.state,
+    [votesQ.state],
+  );
+
   const setByMe = useMemo(
     () => (flagRequestsQ.state.status === "ready" ? flagRequestsQ.state.data.setByMe : []),
     [flagRequestsQ.state],
@@ -118,83 +215,103 @@ export function DashboardPage() {
     [flagRequestsQ.state],
   );
 
-  // Signed out, the whole page is one answer: sign in. Without this the issue
-  // sections fell back to Promise.resolve([]) and rendered "Assigned to me (0)
-  // -- Nothing here", which tells a visitor they have no issues when the truth
-  // is that we do not know who they are. searchIssues is anonymous and returns
-  // an empty list rather than a 401, so nothing downstream could tell the two
-  // apart. StateViews says this in its own header: a 401 is a sign-in prompt,
-  // never an empty list.
-  if (userState.status === "error" && isUnauthenticated(userState.error)) {
-    return (
-      <div className="page dashboard-page">
-        <PageHeader>
-          <PageHeader.Title>My dashboard</PageHeader.Title>
-        </PageHeader>
-        <ErrorState error={userState.error} />
-      </div>
-    );
-  }
-
+  // The signed-out arm is RequireSession's job now, above. It used to live here
+  // as the same two-clause boolean five pages each wrote, which answers a
+  // four-state question with two answers -- so a slow `users.me` read as signed
+  // in and the page rendered "Assigned to me (0)", telling a visitor they have
+  // no issues when the truth is that we did not know who they were yet.
   return (
     <div className="page dashboard-page">
       <PageHeader>
         <PageHeader.Title>My dashboard</PageHeader.Title>
+        <PageHeader.Description>
+          What happened while you were away, and everything the tracker has connected you to.
+        </PageHeader.Description>
       </PageHeader>
 
       <NotificationsPanel />
 
-      {userState.status === "ready" && !userState.data.isProvisioned ? (
+      {me && !me.isProvisioned ? (
         <p className="state-hint">
           No app activity yet for this identity -- your profile is created the first time you
           file, comment, or otherwise write something.
         </p>
       ) : null}
 
-      <AsyncSection state={assignedQ.state} onRetry={assignedQ.reload} loadingLabel="Loading assigned issues...">
-        {(issues) => <IssueSection title="Assigned to me" issues={issues} />}
-      </AsyncSection>
-
-      <AsyncSection state={reportedQ.state} onRetry={reportedQ.reload} loadingLabel="Loading reported issues...">
-        {(issues) => <IssueSection title="Reported by me" issues={issues} />}
-      </AsyncSection>
-
-      <section className="dashboard-section">
-        <h2>Requests waiting on me</h2>
-        <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />
+      <section className="dashboard-section my-work">
+        <h2>My work</h2>
+        {/* keepMounted is deliberately NOT set: the panels hold issue tables of
+            up to fifty rows each, and mounting all four would put three
+            invisible tables in the document for every visit. The data is
+            already fetched here at the page level, so switching a tab is a
+            re-render and not a request. */}
+        <Tabs defaultValue="assigned" lazyMount>
+          <Tabs.List>
+            <Tabs.Tab value="assigned">
+              <WorkTab label="Assigned to me" state={assignedQ.state} />
+            </Tabs.Tab>
+            <Tabs.Tab value="reported">
+              <WorkTab label="Reported by me" state={reportedQ.state} />
+            </Tabs.Tab>
+            <Tabs.Tab value="cc">
+              <WorkTab label="CC'd on" state={ccQ.state} />
+            </Tabs.Tab>
+            <Tabs.Tab value="voted">
+              <WorkTab label="Voted for" state={votedIssues} />
+            </Tabs.Tab>
+            <Tabs.Indicator />
+          </Tabs.List>
+          <Tabs.Panel value="assigned">
+            <WorkPanel
+              state={assignedQ.state}
+              reload={assignedQ.reload}
+              loadingLabel="Loading assigned issues..."
+              emptyLabel="Nothing is assigned to you."
+            />
+          </Tabs.Panel>
+          <Tabs.Panel value="reported">
+            <WorkPanel
+              state={reportedQ.state}
+              reload={reportedQ.reload}
+              loadingLabel="Loading reported issues..."
+              emptyLabel="You have not reported an issue yet."
+            />
+          </Tabs.Panel>
+          <Tabs.Panel value="cc">
+            <WorkPanel
+              state={ccQ.state}
+              reload={ccQ.reload}
+              loadingLabel="Loading CC'd issues..."
+              emptyLabel="You are not on any CC list."
+            />
+          </Tabs.Panel>
+          <Tabs.Panel value="voted">
+            <WorkPanel
+              state={votedIssues}
+              reload={votesQ.reload}
+              loadingLabel="Loading votes..."
+              emptyLabel="You have not voted for any issue."
+            />
+          </Tabs.Panel>
+        </Tabs>
       </section>
 
-      <section className="dashboard-section">
-        <h2>My open flag requests</h2>
-        <FlagRequestList entries={setByMe} emptyLabel="You have not requested any flags." />
-      </section>
+      {/* Three short lists across the page rather than three more full-width
+          bands down it. None of them is ever more than a handful of lines, and
+          stacked they were what pushed the tables above them out of reach. */}
+      <Grid minColWidth="24rem" gap={4} className="dashboard-asides">
+        <section className="dashboard-section">
+          <h2>Requests waiting on me</h2>
+          <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />
+        </section>
 
-      {/* Was a hardcoded "(0)" with a note saying no reverse index existed.
-          The index did exist (issueCc.userId); what was missing was a procedure
-          reading it, which cc.listMine now is. */}
-      {/* Voting had a panel on every issue and nowhere to see what you had
-          voted for, so the budget it enforces -- votesPerUser, per product --
-          was spendable and unauditable. */}
-      <AsyncSection
-        state={votesQ.state}
-        onRetry={votesQ.reload}
-        loadingLabel="Loading votes..."
-        isEmpty={(rows) => rows.length === 0}
-        emptyTitle="You have not voted for any issue."
-      >
-        {(rows) => (
-          <IssueSection
-            title="Issues I voted for"
-            issues={rows.map((row) => row.issue)}
-          />
-        )}
-      </AsyncSection>
+        <section className="dashboard-section">
+          <h2>My open flag requests</h2>
+          <FlagRequestList entries={setByMe} emptyLabel="You have not requested any flags." />
+        </section>
 
-      <WatchingPanel />
-
-      <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd issues...">
-        {(issues) => <IssueSection title="Issues I'm CC'd on" issues={issues} />}
-      </AsyncSection>
+        <WatchingPanel />
+      </Grid>
     </div>
   );
 }

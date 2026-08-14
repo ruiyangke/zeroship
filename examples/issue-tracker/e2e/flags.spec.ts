@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
-import { openMorePanels } from "./more";
+import { openMorePanels, openProductsAdmin } from "./more";
 
 /**
  * Setting a flag on an issue, through the UI, end to end.
@@ -69,6 +69,7 @@ test("an admin defines a flag type, and it becomes settable on an issue", async 
 
   // Define one through the admin page, the way an operator would.
   await page.goto("/products");
+  await openProductsAdmin(page);
   const admin = page.locator("section.flag-types-admin");
   await expect(admin).toBeVisible();
   await admin.getByLabel("New flag type").fill(typeName);

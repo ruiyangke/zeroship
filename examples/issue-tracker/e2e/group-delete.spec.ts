@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { productKey } from "./keys";
+import { openProductsAdmin } from "./more";
 import { signIn } from "./session";
 
 /**
@@ -61,6 +62,7 @@ test("a group deletes when unused and refuses while it restricts an issue", asyn
   await rpc("issues.restrict", { issueId: issue.id, groupId: inUse.id });
 
   await page.goto("/products");
+  await openProductsAdmin(page);
   const admin = page.locator("section.groups-admin");
   const list = admin.locator("ul.group-list");
   await expect(list).toContainText(unusedName);

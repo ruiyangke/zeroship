@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { productKey } from "./keys";
+import { openProductsAdmin } from "./more";
 import { signIn } from "./session";
 
 /**
@@ -147,17 +148,29 @@ test("the products page reads publicly and administers privately", async ({
   // else on this page (`products.get`, the create/update writers, `groups.list`,
   // `flagTypes.list`) is `auth: "user"`.
   await page.goto("/products");
+  // Creating is a dialog behind this button now, not a form above the list.
+  // Asserted THROUGH to the form: a trigger that opens nothing would satisfy a
+  // check on the button alone, and the claim here is that a signed-in user can
+  // actually create a product.
+  await page.getByRole("button", { name: "New product" }).click();
   await expect(
     page.getByRole("button", { name: "Create product" }),
-    "a signed-in user can create a product",
+    "a signed-in user can reach the create form",
   ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  // Groups and flag types are the second tab -- see openProductsAdmin.
+  await openProductsAdmin(page);
   await expect(page.getByRole("heading", { name: "Groups", exact: true }).first()).toBeVisible();
 
   const anon = await browser.newContext();
   const visitor = await anon.newPage();
   await visitor.goto(`${baseURL}/products`);
 
-  // Public: the list itself.
+  // Public: the list itself. Searched for rather than scrolled to -- the list
+  // is paged at 25 and this fixture sorts under P in a database of 200-odd
+  // products, so it is on page seven. Which also exercises the search a
+  // visitor is offered.
+  await visitor.getByRole("searchbox").fill(name);
   await expect(
     visitor.getByText(name),
     "the product list is anonymous, so the names are readable",
@@ -168,12 +181,16 @@ test("the products page reads publicly and administers privately", async ({
   // procedures are authenticated -- they used to render as a heading over an
   // error, with a create form underneath.
   await expect(
-    visitor.getByRole("button", { name: "Create product" }),
+    visitor.getByRole("button", { name: "New product" }),
     "no create form without a session",
+  ).toHaveCount(0);
+  await expect(
+    visitor.getByRole("tab", { name: "Administration" }),
+    "and no tab leading to one",
   ).toHaveCount(0);
   await expect(visitor.getByRole("heading", { name: "Groups", exact: true })).toHaveCount(0);
   await expect(visitor.getByRole("heading", { name: "Flag types" })).toHaveCount(0);
-  // The product names are text, not buttons: pressing one opened the editor,
+  // The product names are text, not buttons: pressing one opens the editor,
   // whose first act is the authenticated `products.get`.
   await expect(
     visitor.getByRole("button", { name: new RegExp(`Public products ${RUN}`) }),
@@ -231,6 +248,19 @@ test("columns that need an identity are absent for a visitor and present with on
     await page.evaluate(() => window.localStorage.clear());
     await page.goto("/issues");
     await page.locator("table thead th").first().waitFor();
+    // WAIT FOR THE SESSION, not for the table. These are different moments and
+    // this spec used to conflate them: the header renders long before
+    // `users.me` answers, and the identity columns are deliberately absent
+    // during that window, so reading here caught the signed-in run mid-flight
+    // and saw no Assignee. It failed 3 times in 6 runs.
+    //
+    // The header is the honest signal because it is the one component that
+    // always modelled the third state -- `UserChip` shows this exact string
+    // while the request is open, then swaps to Sign in or the account menu.
+    await expect(
+      page.getByText("checking session..."),
+      "the session resolved, so the columns below reflect an answer rather than the wait",
+    ).toHaveCount(0);
     return page.locator("table thead th").allInnerTexts();
   };
 

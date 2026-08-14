@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
-import { openMorePanels, openRailGroup } from "./more";
+import { openMorePanels, openProductsAdmin, openRailGroup } from "./more";
 
 /**
  * The Bugzilla flow a real user walks, driven in a real browser: file an issue
@@ -184,14 +184,26 @@ test("an issue I am CC'd on appears on my dashboard", async ({ page, baseURL }) 
   // Before the CC exists the dashboard must NOT already show it -- otherwise a
   // section that lists everything would pass this test without cc.listMine
   // working at all.
+  //
+  // The four account queries are tabs of one table now rather than four stacked
+  // sections, so the panel has to be OPENED -- and it has to be opened before
+  // the negative assertion, or "the summary is not in the CC panel" would pass
+  // against a panel that was never rendered, which is the strongest way to make
+  // this test meaningless.
+  const openCcTab = async () => {
+    await page.getByRole("tab", { name: /CC'd on/ }).click();
+    await page.locator("section.my-work table").waitFor({ state: "visible" });
+  };
   await page.goto("/dashboard");
-  const ccSection = page.locator("section.dashboard-section", { hasText: "Issues I'm CC'd on" });
+  const ccSection = page.locator("section.my-work");
   await expect(ccSection).toBeVisible();
+  await openCcTab();
   await expect(ccSection.getByText(summary)).toHaveCount(0);
 
   await rpc("cc.add", { issueId: issue.id, userId: me.id });
 
   await page.reload();
+  await openCcTab();
   await expect(ccSection.getByText(summary)).toBeVisible();
 });
 
@@ -335,6 +347,7 @@ test("an admin can restrict an issue to a group through the UI", async ({ page, 
   // Create the group through the admin page, not over RPC: that surface is
   // the thing under test.
   await page.goto("/products");
+  await openProductsAdmin(page);
   const groups = page.locator("section.groups-admin");
   await expect(groups).toBeVisible();
   await groups.getByLabel("New group").fill(`sec-${RUN}`);

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { otherUser, signIn } from "./session";
 import { chooseOption } from "./select";
 import { productKey } from "./keys";
-import { openMorePanels } from "./more";
+import { openMorePanels, openProductsAdmin } from "./more";
 
 /**
  * The access-control model, driven in two real browsers.
@@ -95,6 +95,7 @@ test("an issue restricted to a group stops being visible to a non-member", async
 
   // ---- The one variable: Alice restricts it, through the UI. --------------
   await page.goto("/products");
+  await openProductsAdmin(page);
   const groups = page.locator("section.groups-admin");
   await expect(groups).toBeVisible();
   await groups.getByLabel("New group").fill(`vis-${RUN}`);

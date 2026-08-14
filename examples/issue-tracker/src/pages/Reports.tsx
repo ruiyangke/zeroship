@@ -51,6 +51,17 @@ function SummarySection({ productId }: { productId: string }) {
               <h3>By status</h3>
               <CountBars counts={summary.byStatus} />
             </div>
+            {/* Kind sits BESIDE severity, not folded into it. While a feature
+                request was `severity: enhancement`, "by severity" answered two
+                questions at once and neither cleanly -- the enhancement bar
+                counted things that have no severity, and every other bar was a
+                defect count wearing a general label. `reports.summary` split
+                them; this report kept reading three of the four breakdowns, so
+                it was silently wrong by omission about what the open work IS. */}
+            <div>
+              <h3>By kind</h3>
+              <CountBars counts={summary.byKind} />
+            </div>
             <div>
               <h3>By severity</h3>
               <CountBars counts={summary.bySeverity} />
@@ -245,21 +256,18 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
           </section>
         ) : (
           <section className="report-section">
-            <h2>Time to resolve</h2>
-            <div className="stat-row">
-              <div className="stat">
-                <span className="stat-value">{data.resolvedCount}</span>
-                <span className="stat-label">Resolved</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{humanMs(data.averageMs ?? 0)}</span>
-                <span className="stat-label">Average</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{humanMs(data.medianMs ?? 0)}</span>
-                <span className="stat-label">Median</span>
-              </div>
-            </div>
+            <h2>Time to resolve ({days}d)</h2>
+            {/* StatCards, like the summary above. These were the last three
+                hand-rolled `.stat` divs in the app: same three numbers, same
+                row, drawn by a second private copy of the treatment the
+                summary had already replaced. The heading also names its
+                window, because these three are the only numbers on the page
+                that are NOT all-time and nothing said so. */}
+            <Cluster gap={3}>
+              <StatCard label="Resolved" value={data.resolvedCount} />
+              <StatCard label="Average" value={humanMs(data.averageMs ?? 0)} />
+              <StatCard label="Median" value={humanMs(data.medianMs ?? 0)} />
+            </Cluster>
           </section>
         )
       }
@@ -319,10 +327,20 @@ export function ReportsPage() {
         </Field>
       </div>
       <SummarySection productId={productId} />
-      <ByComponentSection productId={productId} productNames={productNames} />
-      <ByAssigneeSection productId={productId} />
-      <TrendSection productId={productId} days={days} />
-      <TimeToResolveSection productId={productId} days={days} />
+      {/* Paired across the page rather than stacked down it. Every one of these
+          four is a narrow thing -- a two-column table, or three numbers -- and
+          full-width bands left most of a 1440px page empty while pushing the
+          later reports two screens down. The sidebar is gone; the page has the
+          width to show them together, and comparing "which component" against
+          "which person" side by side is the whole reason both exist. */}
+      <div className="report-pair">
+        <ByComponentSection productId={productId} productNames={productNames} />
+        <ByAssigneeSection productId={productId} />
+      </div>
+      <div className="report-pair">
+        <TrendSection productId={productId} days={days} />
+        <TimeToResolveSection productId={productId} days={days} />
+      </div>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { chooseOption } from "./select";
+import { openProductsAdmin } from "./more";
 import { otherUser, signIn } from "./session";
 import { productKey } from "./keys";
 
@@ -73,6 +74,7 @@ test("an admin can see who is in a group and remove them", async ({
 
   // Grant through the UI.
   await page.goto("/products");
+  await openProductsAdmin(page);
   const admin = page.locator("section.groups-admin");
   await chooseOption(page, admin, "Add member to", `mem-${RUN}`);
   await admin.getByLabel("Find user").fill(otherUser.email);

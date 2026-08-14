@@ -54,6 +54,26 @@ export function EmptyState({
   return <UiEmptyState title={title} description={hint} />;
 }
 
+/**
+ * "You need to be signed in", in one place.
+ *
+ * `ErrorState` derives this from a 401 it was handed, which serves every page
+ * that discovers the fact by making a request. It does NOT serve a page that
+ * knows it up front: `RequireSession` (components/session.tsx) has already
+ * narrowed the four-state session to "the server answered, and there is
+ * nobody", and holds no error object to hand over. Both need the same three
+ * strings, so they read them from here rather than each writing their own --
+ * two spellings of the sign-in wall is how the absence glyph ended up with
+ * four (see issue-detail/Absent.tsx).
+ */
+const SIGN_IN_TITLE = "Sign-in required";
+const SIGN_IN_DESCRIPTION =
+  "This needs a signed-in identity. Sign in through the platform and reload.";
+
+export function SignInRequired() {
+  return <UiErrorState intent="warning" title={SIGN_IN_TITLE} description={SIGN_IN_DESCRIPTION} />;
+}
+
 export function ErrorState({
   error,
   onRetry,
@@ -69,10 +89,10 @@ export function ErrorState({
   return (
     <UiErrorState
       intent={authRequired ? "warning" : "danger"}
-      title={authRequired ? "Sign-in required" : "Something went wrong"}
+      title={authRequired ? SIGN_IN_TITLE : "Something went wrong"}
       description={
         authRequired
-          ? "This needs a signed-in identity. Sign in through the platform and reload."
+          ? SIGN_IN_DESCRIPTION
           : `${errorCode(error) ?? "ERROR"}: ${errorMessage(error)}`
       }
     >
