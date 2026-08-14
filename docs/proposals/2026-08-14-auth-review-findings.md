@@ -384,14 +384,41 @@ sit under - renders exactly three sections: the profile, linked accounts, and
 mentioned. So `totp_challenge.html` is reachable only for an account somehow
 enrolled by other means.
 
-A security feature a user cannot switch on is, from that user's side, absent.
-
 Corrected to yellow ("Core works, but a documented sub-capability or wiring is
 incomplete") with the gap named in the Notes column. The status is what was
 fixed; BUILDING the enrolment UI is left open deliberately - it needs a QR or
 `otpauth://` render, a confirm step, and one-time backup-code display, and where
 that surface belongs (this page, or the console) is a product decision, not a
 review one.
+
+**A claim in the first version of this entry was too strong, and the correction
+is the more useful finding.** It said "a user cannot turn 2FA on". What was
+actually verified is narrower: no caller exists IN THIS REPOSITORY.
+
+Checking the neighbouring rows is what exposed the overreach. Two more green
+auth features have the same shape:
+
+- **IdP session management.** `GET /me/sessions` returns JSON
+  (`ui/sessions.rs:88`), `POST /me/sessions/{id}/revoke` is POST-only, and
+  `me.html` links to neither.
+- **GDPR deletion.** `POST /me/delete` and `/me/delete/cancel` are POST-only
+  with no template; `me.html` has no delete affordance.
+
+A JSON-returning `GET` is the shape of an API for a single-page console, not of
+a page a browser was meant to render. AGENTS.md documents a "Creator Dashboard
+(web UI)" living in the separate `zeroship-builder` repository, which is a
+plausible consumer for all three - and is not visible from here.
+
+So the honest statement for all three is "no in-repo caller", not "unreachable
+by users". The yellow status still stands on the map's own wording, since green
+requires "wired" and in-tree they are not, but the Notes now say what was
+measured rather than what it implied.
+
+**The general lesson, worth more than the row.** Three features share one
+explanation, and finding the third is what made the first one's story fall
+apart. A single instance invites the most alarming reading that fits it; the
+pattern across siblings is what bounds it. Checking whether a finding has
+neighbours should come BEFORE deciding what it means, not after.
 
 Two greps missed this before one found it, which is worth recording: the routes
 are `/me/2fa/*`, not the `/totp/*` the handler module name suggests. Searching
