@@ -103,7 +103,17 @@ pub async fn find_by_id(
 ///
 /// # Errors
 ///
-/// Returns `AuthError::Db` on conflict (e.g., duplicate email) or other PG failure.
+/// Returns `AuthError::DbCode` carrying the SQLSTATE whenever PostgreSQL
+/// supplied one, and `AuthError::Db` for a transport-level failure that has no
+/// code. The SQLSTATE is load-bearing, not diagnostics: `/signup` answers a
+/// duplicate email (23505) with the SAME redirect a fresh insert gets, and
+/// renders the generic error page for anything else. Flatten the code into a
+/// string and that arm becomes unreachable -- every duplicate then renders
+/// "contact support" while a fresh one redirects, which is an oracle for
+/// "is this address registered" and an unusable page for a returning user.
+/// That is not hypothetical: it is what this function did until 2026-08-13,
+/// after a merge silently reverted f18c123bc and left the (now unreachable)
+/// `db_code() == Some("23505")` arm in `ui/signup.rs` reading like a defense.
 pub async fn create(
     conn: &Client,
     email: &str,
@@ -121,9 +131,10 @@ pub async fn create(
         .await
         .map_err(|e| {
             if let Some(db_err) = e.as_db_error() {
-                if db_err.code().code() == "23505" {
-                    return AuthError::Db("email already registered".into());
-                }
+                return AuthError::DbCode {
+                    code: db_err.code().code().to_string(),
+                    message: format!("users create: {e}"),
+                };
             }
             AuthError::Db(format!("users create: {e}"))
         })?;
