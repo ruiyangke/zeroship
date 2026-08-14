@@ -224,7 +224,7 @@ scope = "all"
       `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("part_t").create({
       columns: { id: t.int().notNull(), ms: t.bigInt().notNull() },
       primaryKey: ["id", "ms"],

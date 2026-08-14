@@ -5,7 +5,7 @@ import { table, t, ids } from "zero-migrate";
 export const name = "create_positions";
 
 export default {
-  up() {
+  schema() {
     table("positions").create({
       columns: {
         id: ids.ulid().primaryKey(),

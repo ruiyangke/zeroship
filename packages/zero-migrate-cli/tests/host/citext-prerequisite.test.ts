@@ -55,7 +55,7 @@ function caseInsensitiveMigration(): NamedMigration {
   return {
     name: "case_insensitive_email",
     default: {
-      up() {
+      schema() {
         table("contacts").create({
           columns: { email: t.text({ caseSensitive: false }) },
         });

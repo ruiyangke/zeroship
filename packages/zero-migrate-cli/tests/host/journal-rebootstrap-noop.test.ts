@@ -52,7 +52,7 @@ const ADDON_PATH = resolve(
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "create_one";
 export default {
-  up() {
+  schema() {
     table("t1").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };

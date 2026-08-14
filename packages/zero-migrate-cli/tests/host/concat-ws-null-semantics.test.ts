@@ -117,12 +117,13 @@ export default {
     `import { table, concatWs } from "zero-migrate";
 export const name = "b";
 export default {
-  up() {
+  data() {
     table("${TABLE}").update({
       set: { out: (col) => concatWs("-", col("p"), col("q"), col("r")) },
       where: (col) => col("id").gt(0),
     });
   },
+  irreversible: "overwrites out for rows with positive ids; prior out values are not recorded",
 };
 `,
   );

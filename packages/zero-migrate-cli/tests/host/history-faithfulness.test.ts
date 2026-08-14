@@ -55,7 +55,7 @@ const migrationSource = (name: string, table: string): string =>
   `import { table, t } from "zero-migrate";
 export const name = ${JSON.stringify(name)};
 export default {
-  up() {
+  schema() {
     table(${JSON.stringify(table)}).create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],

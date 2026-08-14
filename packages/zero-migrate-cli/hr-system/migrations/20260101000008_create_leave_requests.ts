@@ -7,7 +7,7 @@ import { table, t, ids, uuidV4, now } from "zero-migrate";
 export const name = "create_leave_requests";
 
 export default {
-  up() {
+  schema() {
     table("leave_requests").create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),

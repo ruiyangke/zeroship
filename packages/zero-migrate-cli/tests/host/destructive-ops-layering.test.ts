@@ -71,7 +71,7 @@ scope = "all"
 const created = {
   name: "create_items",
   default: {
-    up() {
+    schema() {
       table("items").create({
         columns: { id: t.int().notNull(), doomed: t.int() },
         primaryKey: ["id"],
@@ -83,7 +83,7 @@ const created = {
 const dropped = {
   name: "drop_col",
   default: {
-    up() {
+    schema() {
       table("items").column("doomed").drop();
     },
   },

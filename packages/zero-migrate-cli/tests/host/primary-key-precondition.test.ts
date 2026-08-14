@@ -75,7 +75,7 @@ scope = "all"
 const created = {
   name: "create_items",
   default: {
-    up() {
+    schema() {
       table("items").create({
         columns: {
           tenant_id: t.int().notNull(),
@@ -97,7 +97,7 @@ function replaceWith(expected: readonly string[]): MigrationModule & { name: str
   return {
     name: "replace_pk",
     default: {
-      up() {
+      schema() {
         table("items").primaryKey().replace({
           expectedColumns: [...expected],
           columns: ["id"],

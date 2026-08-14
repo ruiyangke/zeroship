@@ -52,7 +52,7 @@ function migration(spelling: string): string {
   return `import { table, t } from "zero-migrate";
 export const name = "fk_by_${spelling}";
 export default {
-  up() {
+  schema() {
     table("parent").create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],
@@ -279,7 +279,7 @@ scope = "all"
       `import { table, t } from "zero-migrate";
 export const name = "guarded_create";
 export default {
-  up() {
+  schema() {
     table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"], ${spelling}: true });
   },
 };

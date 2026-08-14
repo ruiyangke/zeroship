@@ -198,7 +198,7 @@ function writeSimpleMigration(
     path,
     `import { table, t } from "zero-migrate";
 export const name = ${JSON.stringify(migrationName)};
-export function up() {
+export function schema() {
   table(${JSON.stringify(tableName)}).create({ columns: { id: t.int() } });
 }
 `,
@@ -980,7 +980,7 @@ test("lint reports preview failures as per-migration dialect verdicts", () => {
       join(dir, "20260715000000_rename_label.mjs"),
       `import { table, t } from "zero-migrate";
 export const name = "rename_label";
-export function up() {
+export function schema() {
   table("widgets").column("old_label").rename({
     to: "new_label",
     type: t.text(),
@@ -1044,7 +1044,7 @@ test("lint accepts a trusted ownership registry", () => {
       join(dir, "20260715000001_add_timezone.mjs"),
       `import { table, t } from "zero-migrate";
 export const name = "add_timezone";
-export function up() {
+export function schema() {
   table("users").column("timezone").add({ type: t.text() });
 }
 `,
@@ -1078,14 +1078,14 @@ test("lint and apply reject duplicate resolved migration names before applying",
     writeFileSync(
       join(dir, "20260715000000_first.mjs"),
       `export const name = "shared_identity";
-export function up() {}
+export function schema() {}
 `,
     );
     writeFileSync(
       join(dir, "20260715000001_second.mjs"),
       `export default {
   name: "shared_identity",
-  up() {},
+  schema() {},
 };
 `,
     );
@@ -1120,7 +1120,7 @@ test("lint reports schema-confinement failures as a migration verdict", () => {
       join(dir, "20260715000000_foreign_schema.mjs"),
       `import { table, t } from "zero-migrate";
 export const name = "foreign_schema";
-export function up() {
+export function schema() {
   table("widgets", { schema: "outside_project" }).create({
     columns: { id: t.int() },
   });

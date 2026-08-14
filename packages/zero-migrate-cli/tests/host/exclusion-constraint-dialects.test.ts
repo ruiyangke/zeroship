@@ -75,7 +75,7 @@ scope = ${scope}
  */
 const MIGRATION: MigrationModule = {
   default: {
-    up() {
+    schema() {
       table("bookings").create({
         columns: { id: t.int().notNull(), room: t.text(), during: t.text() },
         primaryKey: ["id"],

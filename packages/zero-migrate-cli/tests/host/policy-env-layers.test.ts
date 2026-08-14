@@ -107,7 +107,7 @@ function project(namespace: string | null): { work: string; root: string; narrow
     `import { table, t } from "zero-migrate";
 export const name = "make_layered";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };
@@ -121,7 +121,7 @@ function addDrop(work: string): void {
     join(work, "migrations", "20260102000000_drop.ts"),
     `import { table } from "zero-migrate";
 export const name = "drop_layered";
-export default { up() { table("${TABLE}").drop(); } };
+export default { schema() { table("${TABLE}").drop(); } };
 `,
   );
 }

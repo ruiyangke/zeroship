@@ -105,7 +105,7 @@ function project(namespace: string | null, posture: "allow" | null): string {
     `import { table, t } from "zero-migrate";
 export const name = "make_doomed";
 export default {
-  up() {
+  schema() {
     table("doomed").create({ columns: { id: t.int().notNull(), val: t.int().notNull() }, primaryKey: ["id"] });
   },
 };
@@ -124,9 +124,15 @@ function addUpdate(work: string): void {
     `import { table } from "zero-migrate";
 export const name = "bump_rows";
 export default {
-  up() {
+  data() {
     table("doomed").update({
       set: { val: (col) => col("val").add(1) },
+      where: (col) => col("id").gt(0),
+    });
+  },
+  inverse() {
+    table("doomed").update({
+      set: { val: (col) => col("val").sub(1) },
       where: (col) => col("id").gt(0),
     });
   },
@@ -140,7 +146,7 @@ function addDrop(work: string): void {
     join(work, "migrations", "20260102000000_drop.ts"),
     `import { table } from "zero-migrate";
 export const name = "drop_doomed";
-export default { up() { table("doomed").drop(); } };
+export default { schema() { table("doomed").drop(); } };
 `,
   );
 }

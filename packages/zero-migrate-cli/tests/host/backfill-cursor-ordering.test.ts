@@ -114,7 +114,7 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
       const bump = {
         name: "bump",
         default: {
-          up() {
+          data() {
             table("nums").backfill({
               set: { val: (col) => col("val").add(1) },
               where: (col) => col("id").gt(0),
@@ -123,6 +123,16 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
               // Two rows per batch, so an inverted pair shares a window.
               batchSize: 2,
               name: "bump_all",
+            });
+          },
+          inverse() {
+            table("nums").backfill({
+              set: { val: (col) => col("val").sub(1) },
+              where: (col) => col("id").gt(0),
+              cursorColumns: ["id"],
+              cursorStability: { mode: "externalInvariant", name: "nums_id_immutable" },
+              batchSize: 2,
+              name: "undo_bump_all",
             });
           },
         },
@@ -246,7 +256,7 @@ test("a composite cursor visits every row exactly once under the same inversions
       const bump = {
         name: "bump",
         default: {
-          up() {
+          data() {
             table("nums").backfill({
               set: { val: (col) => col("val").add(1) },
               where: (col) => col("id").gt(0),
@@ -254,6 +264,16 @@ test("a composite cursor visits every row exactly once under the same inversions
               cursorStability: { mode: "externalInvariant", name: "nums_key_immutable" },
               batchSize,
               name: "bump_all",
+            });
+          },
+          inverse() {
+            table("nums").backfill({
+              set: { val: (col) => col("val").sub(1) },
+              where: (col) => col("id").gt(0),
+              cursorColumns: ["tenant", "id"],
+              cursorStability: { mode: "externalInvariant", name: "nums_key_immutable" },
+              batchSize,
+              name: "undo_bump_all",
             });
           },
         },

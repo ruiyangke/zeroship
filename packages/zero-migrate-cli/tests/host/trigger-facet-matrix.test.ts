@@ -59,7 +59,7 @@ const body: TriggerArgs["body"] = (b) => [b.raise({ level: "ignore", message: "s
 function triggerMigration(facet: string, args: TriggerArgs): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("events").create({
           columns: { id: t.int().notNull(), note: t.string({ length: 32 }) },
           primaryKey: ["id"],
@@ -216,7 +216,7 @@ const mysqlBody: TriggerArgs["body"] = (b) => [b.update({ table: "audit", set: {
 function mysqlTriggerMigration(facet: string, args: TriggerArgs): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("audit").create({
           columns: { id: t.int().notNull(), seen: t.int().notNull() },
           primaryKey: ["id"],

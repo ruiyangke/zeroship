@@ -105,7 +105,7 @@ test("a backfill transforms every selected row and leaves every other row alone"
   const fill = {
     name: "fill",
     default: {
-      up() {
+      data() {
         table("items").backfill({
           set: { val: (col) => col("val").add(1) },
           // The selective predicate. Ten of twenty rows, every other one.
@@ -116,6 +116,16 @@ test("a backfill transforms every selected row and leaves every other row alone"
           // land at batch boundaries rather than filling batches.
           batchSize: 3,
           name: "fill_touch",
+        });
+      },
+      inverse() {
+        table("items").backfill({
+          set: { val: (col) => col("val").sub(1) },
+          where: (col) => col("grp").eq("touch"),
+          cursorColumns: ["id"],
+          cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
+          batchSize: 3,
+          name: "undo_fill_touch",
         });
       },
     },
@@ -227,7 +237,7 @@ test("a backfill whose predicate matches nothing completes and records nothing",
   const fill = {
     name: "fill",
     default: {
-      up() {
+      data() {
         table("items").backfill({
           set: { val: (col) => col("val").add(1) },
           where: (col) => col("grp").eq("absent"),
@@ -235,6 +245,16 @@ test("a backfill whose predicate matches nothing completes and records nothing",
           cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
           batchSize: 3,
           name: "fill_absent",
+        });
+      },
+      inverse() {
+        table("items").backfill({
+          set: { val: (col) => col("val").sub(1) },
+          where: (col) => col("grp").eq("absent"),
+          cursorColumns: ["id"],
+          cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
+          batchSize: 3,
+          name: "undo_fill_absent",
         });
       },
     },
@@ -324,7 +344,7 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
   const fill = {
     name: "fill",
     default: {
-      up() {
+      data() {
         table("items").backfill({
           set: { val: (col) => col("val").add(1) },
           where: (col) => col("grp").eq("touch"),
@@ -332,6 +352,16 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
           cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
           batchSize: 3,
           name: "fill_touch",
+        });
+      },
+      inverse() {
+        table("items").backfill({
+          set: { val: (col) => col("val").sub(1) },
+          where: (col) => col("grp").eq("touch"),
+          cursorColumns: ["id"],
+          cursorStability: { mode: "externalInvariant", name: "items_id_immutable" },
+          batchSize: 3,
+          name: "undo_fill_touch",
         });
       },
     },

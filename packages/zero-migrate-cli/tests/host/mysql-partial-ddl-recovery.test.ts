@@ -91,7 +91,7 @@ test("a half-applied MySQL migration refuses to replay, and the printed repair w
   const pair = {
     name: "create_pair",
     default: {
-      up() {
+      schema() {
         table("alpha").create({
           columns: { id: t.int().notNull() },
           primaryKey: ["id"],

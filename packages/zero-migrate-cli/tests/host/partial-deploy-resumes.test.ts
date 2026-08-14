@@ -72,7 +72,7 @@ export default {
 const FILE_B = `import { table, t } from "zero-migrate";
 export const name = "survivor_then_unique";
 export default {
-  up() {
+  schema() {
     table("survivor").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
     table("dupes").index("dupes_tag_key").add({ on: [{ column: "tag" }], unique: true });
   },

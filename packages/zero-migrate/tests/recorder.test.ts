@@ -283,18 +283,36 @@ test("the emitted IR envelope JSON retains exactly ir_version, name, and ops", (
   assert.deepEqual(Object.keys(json), ["ir_version", "name", "ops"]);
 });
 
-test("an async schema() is refused and resets the recorder", () => {
+test("an async schema() is refused and resets the recorder", async () => {
+  let resumed = false;
+  let lateAuthoringError: unknown;
   const error = captureError(() =>
     buildEnvelope(
       {
         async schema() {
+          table("before_async_rejection").create({ columns: { id: t.int() } });
           await Promise.resolve();
+          resumed = true;
+          try {
+            table("after_async_rejection").create({ columns: { id: t.int() } });
+          } catch (lateError: unknown) {
+            lateAuthoringError = lateError;
+          }
         },
       },
       { irVersion: 1 },
     ),
   );
   assert.match(error.message, /must be synchronous/);
+
+  // Let the rejected async authoring body resume after its await. A fresh
+  // buildEnvelope() would overwrite leaked ambient state and therefore cannot
+  // prove cleanup; the late operation must itself observe no active recorder.
+  await Promise.resolve();
+  assert.equal(resumed, true);
+  assert.ok(lateAuthoringError instanceof Error);
+  assert.ok("code" in lateAuthoringError);
+  assert.equal(lateAuthoringError.code, "OP_OUTSIDE_RECORDER");
 
   const outside = captureError(() =>
     table("outside_after_async_error").create({ columns: { id: t.int() } }),

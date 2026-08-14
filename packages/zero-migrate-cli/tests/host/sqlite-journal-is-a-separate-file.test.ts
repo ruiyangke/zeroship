@@ -69,7 +69,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };

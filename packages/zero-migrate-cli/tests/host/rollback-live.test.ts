@@ -68,9 +68,11 @@ function scaffold(schema: string): string {
     join(dir, "20260101000000_create_rollback_notes.ts"),
     `import { table, t } from "zero-migrate";
 export const name = "create_rollback_notes";
-export function up() {
-  table(${JSON.stringify(TABLE)}).create({ columns: { id: t.int(), title: t.string() } });
-}
+export default {
+  schema() {
+    table(${JSON.stringify(TABLE)}).create({ columns: { id: t.int(), title: t.string() } });
+  },
+};
 `,
   );
   writeFileSync(join(dir, "policy.toml"), noInjectPolicy(schema));
@@ -183,18 +185,22 @@ function scaffoldSequenceDrop(schema: string): string {
     join(dir, "20260101000000_create_counter.ts"),
     `import { sequence } from "zero-migrate";
 export const name = "create_counter";
-export function up() {
-  sequence(${JSON.stringify(SEQUENCE)}).create({});
-}
+export default {
+  schema() {
+    sequence(${JSON.stringify(SEQUENCE)}).create({});
+  },
+};
 `,
   );
   writeFileSync(
     join(dir, "20260101000001_drop_counter.ts"),
     `import { sequence } from "zero-migrate";
 export const name = "drop_counter";
-export function up() {
-  sequence(${JSON.stringify(SEQUENCE)}).drop({});
-}
+export default {
+  schema() {
+    sequence(${JSON.stringify(SEQUENCE)}).drop({});
+  },
+};
 `,
   );
   writeFileSync(join(dir, "policy.toml"), noInjectPolicy(schema));
@@ -262,18 +268,22 @@ function scaffoldSchemaDrop(projectSchema: string, authored: string): string {
     join(dir, "20260101000000_create_reporting.ts"),
     `import { schema } from "zero-migrate";
 export const name = "create_reporting";
-export function up() {
-  schema(${JSON.stringify(authored)}).create({});
-}
+export default {
+  schema() {
+    schema(${JSON.stringify(authored)}).create({});
+  },
+};
 `,
   );
   writeFileSync(
     join(dir, "20260101000001_drop_reporting.ts"),
     `import { schema } from "zero-migrate";
 export const name = "drop_reporting";
-export function up() {
-  schema(${JSON.stringify(authored)}).drop({});
-}
+export default {
+  schema() {
+    schema(${JSON.stringify(authored)}).drop({});
+  },
+};
 `,
   );
   writeFileSync(join(dir, "policy.toml"), createSchemaPolicy(projectSchema, authored));
@@ -350,18 +360,22 @@ function scaffoldExtensionDrop(projectSchema: string, extensionName: string): st
     join(dir, "20260101000000_create_ext.ts"),
     `import { extension } from "zero-migrate";
 export const name = "create_ext";
-export function up() {
-  extension(${JSON.stringify(extensionName)}).create({});
-}
+export default {
+  schema() {
+    extension(${JSON.stringify(extensionName)}).create({});
+  },
+};
 `,
   );
   writeFileSync(
     join(dir, "20260101000001_drop_ext.ts"),
     `import { extension } from "zero-migrate";
 export const name = "drop_ext";
-export function up() {
-  extension(${JSON.stringify(extensionName)}).drop({});
-}
+export default {
+  schema() {
+    extension(${JSON.stringify(extensionName)}).drop({});
+  },
+};
 `,
   );
   writeFileSync(join(dir, "policy.toml"), createExtensionPolicy(projectSchema, extensionName));
@@ -433,18 +447,22 @@ function scaffoldGuardedSchemaDrop(projectSchema: string, authored: string): str
     join(dir, "20260101000000_create_guarded.ts"),
     `import { schema } from "zero-migrate";
 export const name = "create_guarded";
-export function up() {
-  schema(${JSON.stringify(authored)}).create({ ifNotExists: true });
-}
+export default {
+  schema() {
+    schema(${JSON.stringify(authored)}).create({ ifNotExists: true });
+  },
+};
 `,
   );
   writeFileSync(
     join(dir, "20260101000001_drop_guarded.ts"),
     `import { schema } from "zero-migrate";
 export const name = "drop_guarded";
-export function up() {
-  schema(${JSON.stringify(authored)}).drop({});
-}
+export default {
+  schema() {
+    schema(${JSON.stringify(authored)}).drop({});
+  },
+};
 `,
   );
   writeFileSync(join(dir, "policy.toml"), createSchemaPolicy(projectSchema, authored));

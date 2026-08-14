@@ -204,7 +204,7 @@ test("authored MySQL feature migration renders the SQL sql_preview.rs pins", () 
 test("authored bounded string renders the per-dialect spellings sql_preview.rs pins", () => {
   const migration: MigrationModule = {
     name: "bounded",
-    up() {
+    schema() {
       table("widgets").create({
         columns: {
           id: t.int().notNull().identity({ always: false }),
@@ -241,7 +241,7 @@ test("authored bounded string renders the per-dialect spellings sql_preview.rs p
 test("authored guarded addColumn renders the bare DDL sql_preview.rs pins", () => {
   const migration: MigrationModule = {
     name: "g",
-    up() {
+    schema() {
       table("codes").column("flag").add({ type: t.boolean(), ifNotExists: true });
     },
   };

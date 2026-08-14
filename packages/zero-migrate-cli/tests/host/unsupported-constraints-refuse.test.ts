@@ -90,12 +90,12 @@ const checkShape = (): void => {
 
 function applyShape(
   name: string,
-  up: () => void,
+  schema: () => void,
   projectSchema: string,
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration: { name, default: { up } } as NamedMigration,
+    migration: { name, default: { schema } } as NamedMigration,
     ownerApp: OWNER_APP,
     projectSchema,
     driver,

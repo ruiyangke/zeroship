@@ -6,7 +6,7 @@ import { table, t, ids } from "zero-migrate";
 export const name = "create_payroll";
 
 export default {
-  up() {
+  schema() {
     table("payroll_runs").create({
       columns: {
         id: ids.ulid().primaryKey(),

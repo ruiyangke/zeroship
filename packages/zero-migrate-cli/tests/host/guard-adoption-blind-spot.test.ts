@@ -67,7 +67,7 @@ scope = ${scope}
 const declared = {
   name: "adopt_items",
   default: {
-    up() {
+    schema() {
       table("items").create({
         columns: { id: t.int().notNull(), name: t.string({ length: 255 }).notNull() },
         primaryKey: ["id"],

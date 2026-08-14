@@ -102,12 +102,23 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
   };
 
   const promote = (name: string) =>
-    authored(`promote_${name}`, () => {
-      table(name).update({
-        set: { stage: "ready" },
-        where: (column) => column("id").eq(1),
-      });
-    });
+    ({
+      name: `promote_${name}`,
+      default: {
+        data() {
+          table(name).update({
+            set: { stage: "ready" },
+            where: (column) => column("id").eq(1),
+          });
+        },
+        inverse() {
+          table(name).update({
+            set: { stage: "pending" },
+            where: (column) => column("id").eq(1),
+          });
+        },
+      },
+    }) as NamedMigration;
 
   const applyOne = (
     migration: NamedMigration,

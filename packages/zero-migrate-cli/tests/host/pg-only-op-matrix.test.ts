@@ -107,7 +107,7 @@ function applyShape(
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration: { default: { up: SHAPES[shape] } } as MigrationModule,
+    migration: { default: { schema: SHAPES[shape] } } as MigrationModule,
     ownerApp: OWNER_APP,
     projectSchema,
     driver,

@@ -49,13 +49,17 @@ function pgIdent(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-function authored(name: string, up: () => void): NamedMigration {
+function authoredMixed(name: string, up: () => void): NamedMigration {
   return { name, default: { up } } as NamedMigration;
+}
+
+function authoredSchema(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
 
 /** Seeds a table carrying one row, so every arm has data to lose. */
 function seedWithARow(): NamedMigration {
-  return authored("seed", () => {
+  return authoredMixed("seed", () => {
     table("acct").create({
       columns: { id: t.int().notNull(), secret: t.string({ length: 20 }) },
       primaryKey: ["id"],
@@ -72,7 +76,7 @@ test("a rollback removes what a migration added and keeps the rows it did not to
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
   const seed = seedWithARow();
-  const added = authored("add_extra", () => {
+  const added = authoredSchema("add_extra", () => {
     table("acct").column("extra").add({ type: t.string({ length: 10 }) });
   });
 
@@ -148,7 +152,7 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
   const seed = seedWithARow();
-  const dropped = authored("drop_secret", () => {
+  const dropped = authoredSchema("drop_secret", () => {
     table("acct").column("secret").drop();
   });
 
@@ -274,10 +278,10 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
     ],
   ];
 
-  for (const [label, up, reversible] of shapes) {
+  for (const [label, schema, reversible] of shapes) {
     const projectSchema = uniqueNamespace("rbsteps");
     const meta = `${projectSchema}_migrations`;
-    const migration = authored("m", up);
+    const migration = authoredSchema("m", schema);
     try {
       await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
       await apply({

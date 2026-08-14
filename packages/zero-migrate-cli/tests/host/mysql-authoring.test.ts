@@ -232,7 +232,7 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
   const migration = {
     name: "mysql_type_id_fixtures",
     default: {
-      up() {
+      schema() {
         table("type_id_samples").create({
           columns: {
             bare: ids.typeId({ prefix: "" }),
@@ -306,7 +306,7 @@ test("Live MySQL ULID CHECK enforces canonical uppercase spelling and bounds", a
   const migration = {
     name: "mysql_ulid_fixtures",
     default: {
-      up() {
+      schema() {
         table("ulid_samples").create({
           columns: {
             id: ids.ulid(),
@@ -374,7 +374,7 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
   const migration = {
     name: "mysql_uuid_v4_default",
     default: {
-      up() {
+      schema() {
         table("uuid_samples").create({
           columns: {
             id: t.uuid().notNull().default(uuidV4()),
@@ -701,7 +701,7 @@ test("Live MySQL applies an expression column default, with a literal default as
   const literalDefault = {
     name: "mysql_literal_default_control",
     default: {
-      up() {
+      schema() {
         table("literal_labels").create({
           columns: {
             label: t.string({ length: 64 }).notNull().default("plain"),
@@ -713,7 +713,7 @@ test("Live MySQL applies an expression column default, with a literal default as
   const expressionDefault = {
     name: "mysql_expression_default",
     default: {
-      up() {
+      schema() {
         table("expr_labels").create({
           columns: {
             label: t

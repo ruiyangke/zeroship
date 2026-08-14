@@ -94,7 +94,7 @@ scope = "all"
     `import { table, view, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${BYSTANDER}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), name: t.text() },

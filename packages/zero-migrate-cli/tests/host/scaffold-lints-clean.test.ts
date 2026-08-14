@@ -12,7 +12,7 @@
 // existing test green and every new user stuck.
 //
 // The assertions are deliberately about the CONTRACT rather than the wording:
-// the file must parse, export a `name` and a default object with an `up`, and
+// the file must parse, export a `name` and a default object with a `schema`, and
 // lint must accept it on every dialect. A test that pinned the comment text would
 // fail on any harmless copy edit while still missing a broken template.
 //
@@ -70,7 +70,7 @@ test("a freshly generated migration lints clean on every dialect", () => {
     const source = readFileSync(join(dir, files[0]), "utf8");
     assert.match(source, /export const name = "create_users"/, "it must export the migration name");
     assert.match(source, /export default \{/, "it must have a default export");
-    assert.match(source, /\bup\(\)/, "whose object provides up()");
+    assert.match(source, /\bschema\(\)/, "whose object provides schema()");
 
     // The tutorial's next command, verbatim.
     const linted = run(["lint", "--dir", dir, "--explain"]);

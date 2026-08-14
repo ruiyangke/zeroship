@@ -85,7 +85,7 @@ scope = "all"
     join(work, "migrations", "20260101000000_one.ts"),
     `import { table, t } from "zero-migrate";
 export const name = "one";
-export default { up() {
+export default { schema() {
   table("rbv_one").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
 } };
 `,
@@ -94,7 +94,7 @@ export default { up() {
     join(work, "migrations", "20260102000000_two.ts"),
     `import { table, t } from "zero-migrate";
 export const name = "two";
-export default { up() {
+export default { schema() {
   table("rbv_two").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
 } };
 `,

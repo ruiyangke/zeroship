@@ -78,7 +78,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "make_rows";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), val: t.int().notNull() },
       primaryKey: ["id"],

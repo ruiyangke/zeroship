@@ -72,7 +72,7 @@ scope = ${scope}
 /** Sequence plus a column defaulting from it - the whole feature. */
 const WITH_SEQUENCE: MigrationModule = {
   default: {
-    up() {
+    schema() {
       sequence("item_ids").create({ as: t.bigInt() });
       table("items").create({
         columns: { id: t.bigInt().notNull().default(nextval("item_ids")), label: t.text() },
@@ -85,7 +85,7 @@ const WITH_SEQUENCE: MigrationModule = {
 /** The default ALONE, so the default is what gets judged rather than op 0. */
 const DEFAULT_ONLY: MigrationModule = {
   default: {
-    up() {
+    schema() {
       table("items").create({
         columns: { id: t.bigInt().notNull().default(nextval("item_ids")), label: t.text() },
         primaryKey: ["id"],
@@ -97,7 +97,7 @@ const DEFAULT_ONLY: MigrationModule = {
 /** Just the sequence, for the message-distinction arm. */
 const SEQUENCE_ONLY: MigrationModule = {
   default: {
-    up() {
+    schema() {
       sequence("item_ids").create({ as: t.bigInt() });
     },
   },

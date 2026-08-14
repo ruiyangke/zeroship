@@ -54,7 +54,7 @@ const OWNER_APP = "app_journal";
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "creates_one_table";
 export default {
-  up() {
+  schema() {
     table("t1").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };

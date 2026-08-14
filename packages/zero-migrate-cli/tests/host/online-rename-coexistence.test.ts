@@ -43,8 +43,12 @@ const OWNER_APP = "app_rename_coexist";
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
-function authored(name: string, up: () => void): NamedMigration {
+function authoredMixedMigration(name: string, up: () => void): NamedMigration {
   return { name, default: { up } } as NamedMigration;
+}
+
+function authoredSchemaMigration(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
 
 function uniqueNamespace(prefix: string): string {
@@ -63,20 +67,20 @@ test("during an online rename both names stay aligned, and the destination wins 
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const created = authored("create_users", () => {
+  const created = authoredMixedMigration("create_users", () => {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.string({ length: 255 }) },
       primaryKey: ["id"],
     });
     table("users").insert({ rows: { id: 1, display_name: "original" } });
   });
-  const renamed = authored("rename_display_name", () => {
+  const renamed = authoredSchemaMigration("rename_display_name", () => {
     table("users").column("display_name").rename({
       to: "full_name",
       type: t.string({ length: 255 }),
     });
   });
-  const later = authored("add_extra", () => {
+  const later = authoredSchemaMigration("add_extra", () => {
     table("users").column("extra").add({ type: t.string({ length: 8 }) });
   });
 
@@ -203,7 +207,7 @@ test("during coexistence the source's constraints still bind writes made through
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const created = authored("create_users", () => {
+  const created = authoredMixedMigration("create_users", () => {
     table("users").create({
       columns: {
         id: t.int().notNull(),
@@ -214,7 +218,7 @@ test("during coexistence the source's constraints still bind writes made through
     });
     table("users").insert({ rows: { id: 1, display_name: "original" } });
   });
-  const renamed = authored("rename_display_name", () => {
+  const renamed = authoredSchemaMigration("rename_display_name", () => {
     table("users").column("display_name").rename({
       to: "full_name",
       type: t.string({ length: 255 }),

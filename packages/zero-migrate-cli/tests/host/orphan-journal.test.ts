@@ -61,7 +61,7 @@ function writeStep(dir: string, filename: string, name: string, tableName: strin
     path,
     `import { table, t } from "zero-migrate";
 export const name = ${JSON.stringify(name)};
-export function up() {
+export function schema() {
   table(${JSON.stringify(tableName)}).create({ columns: { id: t.int() } });
 }
 `,

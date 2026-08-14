@@ -61,7 +61,7 @@ export default {
 const RENAME_MIG = `import { table, t } from "zero-migrate";
 export const name = "${RENAME}";
 export default {
-  up() {
+  schema() {
     table("people").column("email").rename({ to: "email_address", type: t.text() });
   },
 };

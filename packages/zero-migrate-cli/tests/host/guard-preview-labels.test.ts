@@ -61,7 +61,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "guarded";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],${guarded ? "\n      ifNotExists: true," : ""}

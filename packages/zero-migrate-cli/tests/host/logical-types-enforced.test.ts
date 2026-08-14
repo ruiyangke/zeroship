@@ -55,7 +55,7 @@ function uniqueNamespace(prefix: string): string {
 const ENUM_MIGRATION = `import { enumType, table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     const state = enumType("logical_state").create({ values: ["invited", "active"] });
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), state: t.enum(state).notNull() },
@@ -68,7 +68,7 @@ export default {
 const DOMAIN_MIGRATION = `import { domain, table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     domain("logical_cents").create({ as: t.bigInt(), check: (value) => value.ge(0), notNull: true });
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), bal: t.domain("logical_cents") },

@@ -77,7 +77,7 @@ function writeMigration(work: string, index: number, table: string): void {
     `import { table, t } from "zero-migrate";
 export const name = "m${index}";
 export default {
-  up() {
+  schema() {
     table(${JSON.stringify(table)}).create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],

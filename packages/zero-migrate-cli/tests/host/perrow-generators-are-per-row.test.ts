@@ -114,7 +114,7 @@ export default {
     `import { table, perRow } from "zero-migrate";
 export const name = "b";
 export default {
-  up() {
+  data() {
     // Deliberately assigned to TWO columns: one intent, two destinations.
     const reused = perRow.uuidV7();
     table("${TABLE}").backfill({
@@ -129,6 +129,7 @@ export default {
       cursorStability: { mode: "guardUpdates" },
     });
   },
+  irreversible: "overwrites u4, u7, u7b, tid, and ul for existing ${TABLE} rows; prior values are not recorded",
 };
 `,
   );

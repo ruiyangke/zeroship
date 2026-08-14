@@ -5,7 +5,7 @@ import { table } from "zero-migrate";
 export const name = "adjust_compensation";
 
 export default {
-  up() {
+  data() {
     table("employees").update({
       set: { status: "terminated" },
       where: (col) => col("email").eq("grace@example.com"),
@@ -15,4 +15,6 @@ export default {
       where: (col) => col("status").eq("rejected"),
     });
   },
+  irreversible:
+    "overwrites status for grace@example.com and deletes all rejected leave requests; the prior status and deleted row values are not recorded",
 };

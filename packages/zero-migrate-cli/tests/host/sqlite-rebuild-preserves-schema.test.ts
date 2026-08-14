@@ -102,7 +102,7 @@ export default {
     join(work, "migrations", "20260102000000_drop.ts"),
     `import { table } from "zero-migrate";
 export const name = "drop_doomed";
-export default { up() { table("${TABLE}").column("doomed").drop(); } };
+export default { schema() { table("${TABLE}").column("doomed").drop(); } };
 `,
   );
   return work;
@@ -264,7 +264,7 @@ export default {
     join(work, "migrations", "20260102000000_rebuild.ts"),
     `import { table } from "zero-migrate";
 export const name = "rebuild";
-export default { up() { table("fk_${rebuild}").column("spare").drop(); } };
+export default { schema() { table("fk_${rebuild}").column("spare").drop(); } };
 `,
   );
   return work;
@@ -388,7 +388,7 @@ export default {
     join(work, "migrations", "20260102000000_drop.ts"),
     `import { table } from "zero-migrate";
 export const name = "drop_spare";
-export default { up() { table("partial_rows").column("spare").drop(); } };
+export default { schema() { table("partial_rows").column("spare").drop(); } };
 `,
   );
   try {

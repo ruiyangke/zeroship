@@ -86,7 +86,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "indexed";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull(), email: t.text(), rank: t.int() },
       primaryKey: ["id"],
@@ -259,7 +259,7 @@ scope = "all"
         `import { table, t } from "zero-migrate";
 export const name = "typed";
 export default {
-  up() {
+  schema() {
     table("things").create({
       columns: { id: t.int().notNull(), payload: ${column} },
       primaryKey: ["id"],

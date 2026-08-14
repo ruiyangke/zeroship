@@ -44,7 +44,7 @@ const ADDON_PATH = resolve(
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "create_notes";
 export default {
-  up() {
+  schema() {
     table("notes").create({
       columns: { id: t.int().notNull(), body: t.string({ length: 64 }) },
       primaryKey: ["id"],
@@ -59,7 +59,7 @@ export default {
 const SECOND_MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "create_more";
 export default {
-  up() {
+  schema() {
     table("more_notes").create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],

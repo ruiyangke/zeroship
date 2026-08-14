@@ -1,9 +1,9 @@
 // What a JavaScript migration module can and cannot declare.
 //
-// `MigrationModule` accepts `up`, `down`, `name`, and a `default` carrying the
-// same three. Two IR-level fields that the docs describe at length are NOT on
-// that surface, and this file pins the boundary so it stops being discoverable
-// only by reading `internal/recorder.ts`:
+// `MigrationModule` accepts `name` plus one of the migration protocol phase shapes,
+// either at the module root or under `default`. Two IR-level fields that the docs
+// describe at length are NOT on that surface, and this file pins the boundary so
+// it stops being discoverable only by reading `internal/recorder.ts`:
 //
 //   * `dependsOn` - described in nine documents, including `getting-started.md`
 //     and `README.md`. Three of them give a post-abort recovery instruction
@@ -54,7 +54,7 @@ function overreachingModule(): MigrationModule {
     default: {
       dependsOn: ["mig_CCCC"],
       repeatable: true,
-      up() {
+      schema() {
         table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
       },
     },
@@ -102,7 +102,7 @@ test("control: the fields a module CAN declare do reach the engine", () => {
     options({
       name: "plain",
       default: {
-        up() {
+        schema() {
           table("widgets").create({
             columns: { id: t.int().notNull() },
             primaryKey: ["id"],

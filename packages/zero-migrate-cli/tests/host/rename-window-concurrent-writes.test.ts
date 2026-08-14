@@ -55,7 +55,7 @@ function uniqueNamespace(prefix: string): string {
 const CREATE = `import { table, t } from "zero-migrate";
 export const name = "create_users";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.text() },
       primaryKey: ["id"],
@@ -67,7 +67,7 @@ export default {
 const RENAME = `import { table, t } from "zero-migrate";
 export const name = "rename_display_name";
 export default {
-  up() {
+  schema() {
     table("users").column("display_name").rename({ to: "full_name", type: t.text() });
   },
 };

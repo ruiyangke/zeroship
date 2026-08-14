@@ -6,7 +6,7 @@ import { table, t } from "zero-migrate";
 export const name = "rename_salary_column";
 
 export default {
-  up() {
+  schema() {
     table("employees")
       .column("base_salary")
       .rename({ to: "annual_base_salary", type: t.numeric({ precision: 12, scale: 2 }) });

@@ -108,10 +108,19 @@ export default {
     `import { table } from "zero-migrate";
 export const name = "b";
 export default {
-  up() {
+  data() {
     // batchSize 1: a cursor save and reload between every single row.
     table("${TABLE}").backfill({
       set: { n: (col) => col("n").add(1) },
+      where: (col) => col("id").gt(0),
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+      batchSize: 1,
+    });
+  },
+  inverse() {
+    table("${TABLE}").backfill({
+      set: { n: (col) => col("n").sub(1) },
       where: (col) => col("id").gt(0),
       cursorColumns: ["id"],
       cursorStability: { mode: "guardUpdates" },

@@ -53,7 +53,7 @@ const DEAD_DSN = "postgres://nobody:nobody@127.0.0.1:59999/nope";
 const INVALID_ON_MYSQL = `import { table, t } from "zero-migrate";
 export const name = "keys_a_text_column";
 export default {
-  up() {
+  schema() {
     table("docs").create({
       columns: { id: t.int().notNull(), body: t.text().notNull() },
       primaryKey: ["id"],
@@ -66,7 +66,7 @@ export default {
 const VALID_EVERYWHERE = `import { table, t } from "zero-migrate";
 export const name = "plain_table";
 export default {
-  up() {
+  schema() {
     table("widgets").create({
       columns: { id: t.int().notNull(), label: t.string({ length: 64 }) },
       primaryKey: ["id"],

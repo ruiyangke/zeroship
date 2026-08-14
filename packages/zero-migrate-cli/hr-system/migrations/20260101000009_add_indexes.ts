@@ -7,7 +7,7 @@ import { table } from "zero-migrate";
 export const name = "add_indexes";
 
 export default {
-  up() {
+  schema() {
     table("departments").index("uq_departments_code").add({ on: ["code"], unique: true });
     table("job_grades").index("uq_job_grades_code").add({ on: ["grade_code"], unique: true });
     table("employees").index("uq_employees_email").add({ on: ["email"], unique: true });

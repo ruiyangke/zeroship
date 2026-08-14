@@ -50,7 +50,7 @@ function migrationDeclaring(name: string, column: () => unknown): NamedMigration
   return {
     name,
     default: {
-      up() {
+      schema() {
         table("contacts").create({
           columns: { email: column() as never },
         });

@@ -105,10 +105,16 @@ export default {
     `import { table } from "zero-migrate";
 export const name = "b";
 export default {
-  up() {
+  data() {
     // Non-idempotent on purpose: running it twice is observable.
     table("${TABLE}").update({
       set: { n: (col) => col("n").add(10) },
+      where: (col) => col("id").gt(0),
+    });
+  },
+  inverse() {
+    table("${TABLE}").update({
+      set: { n: (col) => col("n").sub(10) },
       where: (col) => col("id").gt(0),
     });
   },

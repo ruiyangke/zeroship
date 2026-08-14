@@ -7,7 +7,7 @@ import { table, t, ids, now } from "zero-migrate";
 export const name = "create_departments";
 
 export default {
-  up() {
+  schema() {
     table("departments").create({
       columns: {
         id: ids.typeId({ prefix: "dept" }).primaryKey(),

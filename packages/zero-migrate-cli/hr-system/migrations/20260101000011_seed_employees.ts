@@ -6,7 +6,7 @@ import { table, decimal, int64 } from "zero-migrate";
 export const name = "seed_employees";
 
 export default {
-  up() {
+  data() {
     table("employees").insert({
       rows: [
         {
@@ -80,6 +80,21 @@ export default {
         { employee_id: "emp_01arz3ndektsv4rrffq69g6004", position_id: "01ARZ3NDEKTSV4RRFFQ69G7004", effective_from: "2021-09-01", effective_to: null },
         { employee_id: "emp_01arz3ndektsv4rrffq69g6005", position_id: "01ARZ3NDEKTSV4RRFFQ69G7002", effective_from: "2022-02-01", effective_to: null },
       ],
+    });
+  },
+  inverse() {
+    const employeeIds = [
+      "emp_01arz3ndektsv4rrffq69g6001",
+      "emp_01arz3ndektsv4rrffq69g6002",
+      "emp_01arz3ndektsv4rrffq69g6003",
+      "emp_01arz3ndektsv4rrffq69g6004",
+      "emp_01arz3ndektsv4rrffq69g6005",
+    ];
+    table("employee_position_history").delete({
+      where: (col) => col("employee_id").in(employeeIds),
+    });
+    table("employees").delete({
+      where: (col) => col("id").in(employeeIds),
     });
   },
 };

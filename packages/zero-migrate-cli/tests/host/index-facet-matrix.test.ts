@@ -93,7 +93,7 @@ scope = ${scope}
 function facetMigration(facet: string, options: IndexOptions): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("accounts").create({
           columns: {
             id: t.int().notNull(),

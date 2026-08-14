@@ -71,7 +71,7 @@ const OWNER_APP = "app_unrelated";
 const CREATE = `import { table, t } from "zero-migrate";
 export const name = "create_people";
 export default {
-  up() {
+  schema() {
     table("people").create({
       columns: { id: t.int().notNull(), email: t.text() },
       primaryKey: ["id"],
@@ -83,7 +83,7 @@ export default {
 const RENAME_MIG = `import { table, t } from "zero-migrate";
 export const name = "rename_email";
 export default {
-  up() {
+  schema() {
     table("people").column("email").rename({ to: "email_address", type: t.text() });
   },
 };
@@ -92,7 +92,7 @@ export default {
 const UNRELATED = `import { table, t } from "zero-migrate";
 export const name = "create_widgets";
 export default {
-  up() { table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
+  schema() { table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
 };
 `;
 

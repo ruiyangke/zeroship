@@ -68,7 +68,7 @@ scope = "all"
 /** A backfill cursored on `k`, whichever kind of column the fixture made it. */
 const bump = {
   default: {
-    up() {
+    data() {
       table("rows_t").backfill({
         set: { val: (col) => col("val").add(1) },
         where: (col) => col("id").gt(0),
@@ -76,6 +76,16 @@ const bump = {
         cursorStability: { mode: "externalInvariant", name: "rows_k_immutable" },
         batchSize: 2,
         name: "bump_all",
+      });
+    },
+    inverse() {
+      table("rows_t").backfill({
+        set: { val: (col) => col("val").sub(1) },
+        where: (col) => col("id").gt(0),
+        cursorColumns: ["k"],
+        cursorStability: { mode: "externalInvariant", name: "rows_k_immutable" },
+        batchSize: 2,
+        name: "undo_bump_all",
       });
     },
   },

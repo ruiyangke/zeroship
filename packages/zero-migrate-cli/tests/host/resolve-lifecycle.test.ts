@@ -71,7 +71,7 @@ export default {
 const RENAME = `import { table, t } from "zero-migrate";
 export const name = "rename_display_name";
 export default {
-  up() {
+  schema() {
     table("users").column("display_name").rename({ to: "full_name", type: t.text() });
   },
 };

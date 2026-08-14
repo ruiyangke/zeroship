@@ -87,7 +87,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), val: t.int().notNull() },
       primaryKey: ["id"],
@@ -103,14 +103,14 @@ export default {
 
 const ADD_UNIQUE = `import { table } from "zero-migrate";
 export const name = "add_uq";
-export default { up() { table("${TABLE}").unique("${TABLE}_added_uq").add({ columns: ["id", "val"] }); } };
+export default { schema() { table("${TABLE}").unique("${TABLE}_added_uq").add({ columns: ["id", "val"] }); } };
 `;
 
 /** Drops the constraint the BASE migration created inline, so this arm stands on
  *  its own instead of depending on the add arm succeeding first. */
 const DROP_CONSTRAINT = `import { table } from "zero-migrate";
 export const name = "drop_ct";
-export default { up() { table("${TABLE}").constraint("${TABLE}_inline_uq").drop(); } };
+export default { schema() { table("${TABLE}").constraint("${TABLE}_inline_uq").drop(); } };
 `;
 
 function apply(work: string, url: string, namespace: string) {

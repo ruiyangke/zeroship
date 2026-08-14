@@ -57,7 +57,7 @@ const APP_B = "app_b";
 function migration(name: string, body: string): string {
   return `import { table, t } from "zero-migrate";
 export const name = "${name}";
-export default { up() { ${body} } };
+export default { schema() { ${body} } };
 `;
 }
 

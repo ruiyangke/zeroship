@@ -66,7 +66,7 @@ columns = [
 const migration = {
   name: "create_items",
   default: {
-    up() {
+    schema() {
       table("items").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
     },
   },

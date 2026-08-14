@@ -53,7 +53,7 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_pgexpr";
 const TABLE = "pgx_t";
 
-interface Case {
+interface CaseBase {
   readonly what: string;
   readonly imports: string;
   readonly body: string;
@@ -61,23 +61,32 @@ interface Case {
   readonly appliesOnPg: boolean;
 }
 
+type Case = CaseBase &
+  (
+    | { readonly inverseBody: string; readonly irreversible?: never }
+    | { readonly inverseBody?: never; readonly irreversible: string }
+  );
+
 const CASES: readonly Case[] = [
   {
     what: "interval",
     imports: `import { table, interval } from "zero-migrate";`,
     body: `table("${TABLE}").update({ set: { ts: (col) => col("ts").add(interval({ minutes: 1 })) }, where: (col) => col("id").gt(0) });`,
+    inverseBody: `table("${TABLE}").update({ set: { ts: (col) => col("ts").sub(interval({ minutes: 1 })) }, where: (col) => col("id").gt(0) });`,
     appliesOnPg: true,
   },
   {
     what: "currentUser",
     imports: `import { table, currentUser } from "zero-migrate";`,
     body: `table("${TABLE}").update({ set: { note: () => currentUser() }, where: (col) => col("id").gt(0) });`,
+    irreversible: `overwrites note with the applying database user for existing ${TABLE} rows; prior note values are not recorded`,
     appliesOnPg: true,
   },
   {
     what: "currentSetting",
     imports: `import { table, currentSetting } from "zero-migrate";`,
     body: `table("${TABLE}").update({ set: { note: () => currentSetting("app.tenant") }, where: (col) => col("id").gt(0) });`,
+    irreversible: `overwrites note with app.tenant for existing ${TABLE} rows; prior note values are not recorded`,
     appliesOnPg: false,
   },
 ];
@@ -129,7 +138,14 @@ export default {
     join(work, "migrations", "20260102000000_b.ts"),
     `${testCase.imports}
 export const name = "b";
-export default { up() { ${testCase.body} } };
+export default {
+  data() { ${testCase.body} },
+  ${
+    testCase.inverseBody === undefined
+      ? `irreversible: ${JSON.stringify(testCase.irreversible)},`
+      : `inverse() { ${testCase.inverseBody} },`
+  }
+};
 `,
   );
   return work;

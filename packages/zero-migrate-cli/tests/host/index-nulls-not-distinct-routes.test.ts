@@ -66,7 +66,7 @@ const SOURCE = `import { table, t } from "zero-migrate";
 export const name = "a";
 const cols = { id: t.int().notNull(), c: t.text() };
 export default {
-  up() {
+  schema() {
     table("nd_inline").create({
       columns: cols,
       primaryKey: ["id"],

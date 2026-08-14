@@ -15,9 +15,10 @@
 //
 // Migration discovery: `*.{ts,mts,cts,js,mjs,cjs}` under `dir` (default `./migrations`),
 // excluding `.d.ts`, sorted by filename (the migration order contract). Each is
-// dynamically `import()`ed; the module must export `up()` (or `default.up`). Plain
-// Node cannot import `.ts` — run the CLI under a `.ts` loader (e.g. `tsx`/`bun`) or
-// point it at pre-built `.js`/`.mjs`.
+// dynamically `import()`ed; the module must export `schema()` for DDL, or `data()`
+// with exactly one of `inverse()` / `irreversible` for DML. Plain Node cannot
+// import `.ts` — run the CLI under a `.ts` loader (e.g. `tsx`/`bun`) or point it at
+// pre-built `.js`/`.mjs`.
 
 import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -827,7 +828,7 @@ async function importMigration(path: string): Promise<MigrationModule> {
   return (await import(url)) as MigrationModule;
 }
 
-/** Import the complete ordered migration set without executing any `up()` body. */
+/** Import the complete ordered migration set without executing any authoring phase. */
 async function importMigrations(files: readonly MigrationFile[]): Promise<LoadedMigration[]> {
   const loaded: LoadedMigration[] = [];
   for (const file of files) {
@@ -902,7 +903,7 @@ function scaffold(name: string): string {
 export const name = ${JSON.stringify(name)};
 
 export default {
-  up() {
+  schema() {
     // Author your schema change with the fluent op DSL, e.g.:
     // table("widgets").create({
     //   columns: {

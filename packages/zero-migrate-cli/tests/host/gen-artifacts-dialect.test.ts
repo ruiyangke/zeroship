@@ -66,7 +66,7 @@ function uniqueName(prefix: string): string {
  *  table differs between targets. */
 const migration = {
   name: "widgets_dialectal",
-  up() {
+  schema() {
     table("widgets").create({ columns: { label: t.text() } });
     dialect({
       pg: () => table("widgets").column("pg_only").add({ type: t.text() }),

@@ -79,7 +79,7 @@ scope = { include = [${JSON.stringify(schema)}] }
     `import { table, t } from "zero-migrate";
 export const name = "create_t1";
 export default {
-  up() {
+  schema() {
     table("t1").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };

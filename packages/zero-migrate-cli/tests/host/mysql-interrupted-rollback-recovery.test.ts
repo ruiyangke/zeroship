@@ -53,7 +53,7 @@ const OWNER_APP = "app_unwind";
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "create_parent";
 export default {
-  up() {
+  schema() {
     table("parent").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
   },
 };

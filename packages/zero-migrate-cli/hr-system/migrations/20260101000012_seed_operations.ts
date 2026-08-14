@@ -5,7 +5,7 @@ import { table, decimal } from "zero-migrate";
 export const name = "seed_operations";
 
 export default {
-  up() {
+  data() {
     table("payroll_runs").insert({
       rows: [
         { id: "01ARZ3NDEKTSV4RRFFQ69G8001", period_label: "2026-01", run_date: "2026-01-31", status: "approved" },
@@ -31,4 +31,6 @@ export default {
       ],
     });
   },
+  irreversible:
+    "inserts leave requests with database-generated UUIDs that are not recorded, so those rows cannot be identified for exact rollback",
 };

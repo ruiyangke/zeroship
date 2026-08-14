@@ -94,7 +94,7 @@ scope = "all"
     join(work, "migrations", "20260101000000_a.ts"),
     `import { table, t } from "zero-migrate";
 export const name = "a";
-export default { up() { ${body} } };
+export default { schema() { ${body} } };
 `,
   );
   return work;

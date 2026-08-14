@@ -90,7 +90,7 @@ const fkCols = { id: t.int().notNull(), pid: t.int() };
 const uqCols = { id: t.int().notNull(), a: t.int().notNull(), b: t.int().notNull() };
 const exCols = { id: t.int().notNull(), room: t.int().notNull() };
 export default {
-  up() {
+  schema() {
     table("cr_parent").create({
       columns: { id: t.int().notNull() },
       primaryKey: ["id"],

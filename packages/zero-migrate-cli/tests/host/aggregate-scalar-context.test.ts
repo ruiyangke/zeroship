@@ -51,40 +51,48 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_aggscalar";
 
 /** The six positions the documentation forbids, in its own order. */
-const FORBIDDEN: ReadonlyArray<readonly [string, string, string]> = [
+const FORBIDDEN: ReadonlyArray<
+  readonly [string, string, string, "schema" | "data"]
+> = [
   [
     "default",
     `import { table, t, countStar } from "zero-migrate";`,
     `table("agg_x").create({ columns: { id: t.int().notNull(), n: t.int().default(countStar()) }, primaryKey: ["id"] });`,
+    "schema",
   ],
   [
     "check",
     `import { table, countStar } from "zero-migrate";`,
     `table("agg_t").check("agg_ck").add({ expr: () => countStar().gt(0) });`,
+    "schema",
   ],
   [
     "generated column",
     `import { table, t, countStar } from "zero-migrate";`,
     `table("agg_y").create({ columns: { id: t.int().notNull(), g: t.int().generated(() => countStar()) }, primaryKey: ["id"] });`,
+    "schema",
   ],
   [
     "index expression",
     `import { table, countStar } from "zero-migrate";`,
     `table("agg_t").index("agg_ix").add({ on: [{ expr: () => countStar() }] });`,
+    "schema",
   ],
   [
     "assignment",
     `import { table, countStar } from "zero-migrate";`,
     `table("agg_t").update({ set: { n: () => countStar() }, where: (col) => col("id").gt(0) });`,
+    "data",
   ],
   [
     "where predicate",
     `import { table, countStar } from "zero-migrate";`,
     `table("agg_t").update({ set: { n: () => 1 }, where: () => countStar().gt(0) });`,
+    "data",
   ],
 ];
 
-function project(imports: string, body: string): string {
+function project(imports: string, body: string, phase: "schema" | "data" = "schema"): string {
   const work = mkdtempSync(join(HERE, "aggscalar-"));
   mkdirSync(join(work, "migrations"));
   writeFileSync(
@@ -116,7 +124,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("agg_t").create({
       columns: { id: t.int().notNull(), n: t.int() },
       primaryKey: ["id"],
@@ -129,7 +137,7 @@ export default {
     join(work, "migrations", "20260102000000_b.ts"),
     `${imports}
 export const name = "b";
-export default { up() { ${body} } };
+export default { ${phase}() { ${body} }${phase === "data" ? `, irreversible: "overwrites n for matching agg_t rows; prior n values are not recorded"` : ""} };
 `,
   );
   return work;
@@ -158,8 +166,8 @@ function lint(work: string): { code: number | null; text: string } {
 }
 
 test("an aggregate is refused in all six documented scalar positions", () => {
-  for (const [what, imports, body] of FORBIDDEN) {
-    const work = project(imports, body);
+  for (const [what, imports, body, phase] of FORBIDDEN) {
+    const work = project(imports, body, phase);
     try {
       const linted = lint(work);
       assert.equal(linted.code, 1, `${what}: must be refused; ${linted.text}`);

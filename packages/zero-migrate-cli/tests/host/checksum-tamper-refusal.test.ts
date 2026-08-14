@@ -77,7 +77,7 @@ function body(extraColumn: string, tableName = "things"): string {
   return `import { table, t } from "zero-migrate";
 export const name = "create_things";
 export default {
-  up() {
+  schema() {
     table("${tableName}").create({
       columns: { id: t.int().notNull()${extraColumn} },
       primaryKey: ["id"],

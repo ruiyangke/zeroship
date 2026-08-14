@@ -10,7 +10,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "create_gadgets";
 export default {
-  up() {
+  schema() {
     // 1. createTable — author columns (system shape folded in the addon lower).
     table("gadgets").create({
       columns: {

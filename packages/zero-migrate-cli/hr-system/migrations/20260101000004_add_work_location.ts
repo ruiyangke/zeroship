@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 export const name = "add_work_location";
 
 export default {
-  up() {
+  schema() {
     table("employees").column("work_location").add({ type: t.string({ length: 255 }) });
   },
 };

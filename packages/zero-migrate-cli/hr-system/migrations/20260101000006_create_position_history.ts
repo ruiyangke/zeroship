@@ -5,7 +5,7 @@ import { table, t, ids } from "zero-migrate";
 export const name = "create_position_history";
 
 export default {
-  up() {
+  schema() {
     table("employee_position_history").create({
       columns: {
         employee_id: ids

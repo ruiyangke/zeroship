@@ -103,7 +103,7 @@ const P = [
   ["ck_not_arch", (col) => col("kind").eq("arch'ived").not()],
 ];
 export default {
-  up() {
+  schema() {
     // 1: the standalone helper
     table("c_helper").create({
       columns: cols, primaryKey: ["id"],
@@ -125,7 +125,7 @@ export default {
 const CREATE_TIME_ONLY = `import { table, t, check } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("c_helper").create({
       columns: { id: t.int().notNull(), n: t.int().notNull() },
       primaryKey: ["id"],
@@ -139,7 +139,7 @@ export default {
 const ADD_OP_ONLY = `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("c_addop").create({
       columns: { id: t.int().notNull(), n: t.int().notNull() },
       primaryKey: ["id"],

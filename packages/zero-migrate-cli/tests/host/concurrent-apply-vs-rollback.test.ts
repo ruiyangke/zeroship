@@ -76,14 +76,14 @@ const OWNER_APP = "app_race";
 const FIRST = `import { table, t } from "zero-migrate";
 export const name = "create_alpha";
 export default {
-  up() { table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
+  schema() { table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
 };
 `;
 
 const SECOND = `import { table, t } from "zero-migrate";
 export const name = "create_beta";
 export default {
-  up() { table("beta").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
+  schema() { table("beta").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
 };
 `;
 

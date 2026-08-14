@@ -87,7 +87,7 @@ function writeMigration(work: string, helper: string, extraColumn = false): void
     `import { table, t, ${helper} } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: {
         id: t.int().notNull(),

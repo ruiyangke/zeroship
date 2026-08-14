@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 export const name = "add_audit_columns";
 
 export default {
-  up() {
+  schema() {
     table("departments").column("updated_at").add({ type: t.timestamp() });
     table("employees").column("updated_at").add({ type: t.timestamp() });
   },

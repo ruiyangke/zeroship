@@ -72,7 +72,7 @@ test("a migration cannot reach outside its project schema unless the root charte
       migration: {
         name: "create_items",
         default: {
-          up() {
+          schema() {
             const handle = into ? table("items", { schema: into }) : table("items");
             handle.create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
           },

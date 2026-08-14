@@ -63,8 +63,8 @@ scope = "all"
 `;
 }
 
-function authored(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
+function authored(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
 
 test("MySQL: a key over a t.text() column declared in the SAME migration is refused before the deploy", async (ctx) => {
@@ -130,9 +130,9 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
       ],
     ];
 
-    for (const [label, up] of shapes) {
+    for (const [label, schema] of shapes) {
       await assert.rejects(
-        applyOne(authored(label.replaceAll(" ", "_"), up)),
+        applyOne(authored(label.replaceAll(" ", "_"), schema)),
         /MySQL refuses a key over a TEXT or BLOB column with no prefix length/,
         `${label}: must be refused at validate, naming the rule`,
       );

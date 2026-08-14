@@ -48,20 +48,42 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_approval_scope";
 
 /** Every case, with whether the gate must stop it. */
-const CASES: ReadonlyArray<readonly [string, string, boolean]> = [
-  ["dropTable", `table("items").drop();`, true],
-  ["dropColumn", `table("items").column("val").drop();`, true],
-  ["delete", `table("items").delete({ where: (c) => c("id").eq(1) });`, true],
+const CASES: ReadonlyArray<
+  readonly [string, string, boolean, "schema" | "data", string?]
+> = [
+  ["dropTable", `table("items").drop();`, true, "schema"],
+  ["dropColumn", `table("items").column("val").drop();`, true, "schema"],
+  [
+    "delete",
+    `table("items").delete({ where: (c) => c("id").eq(1) });`,
+    true,
+    "data",
+    `inverse() { table("items").insert({ rows: { id: 1, grp: "a", val: 1 } }); }`,
+  ],
   [
     "backfill",
     `table("items").backfill({ set: { val: (c) => c("val").add(1) }, where: (c) => c("id").gt(0), cursorColumns: ["id"], cursorStability: { mode: "externalInvariant", name: "items_id" }, batchSize: 2, name: "bf" });`,
     true,
+    "data",
+    `inverse() { table("items").backfill({ set: { val: (c) => c("val").sub(1) }, where: (c) => c("id").gt(0), cursorColumns: ["id"], cursorStability: { mode: "externalInvariant", name: "items_id" }, batchSize: 2, name: "undo_bf" }); }`,
   ],
   // Documented as needing review, documented as NOT gated. Both forms.
-  ["update (filtered)", `table("items").update({ set: { val: 9 }, where: (c) => c("id").eq(1) });`, false],
-  ["update (all rows)", `table("items").update({ set: { val: 9 } });`, false],
+  [
+    "update (filtered)",
+    `table("items").update({ set: { val: 9 }, where: (c) => c("id").eq(1) });`,
+    false,
+    "data",
+    `inverse() { table("items").update({ set: { val: 1 }, where: (c) => c("id").eq(1) }); }`,
+  ],
+  [
+    "update (all rows)",
+    `table("items").update({ set: { val: 9 } });`,
+    false,
+    "data",
+    `inverse() { table("items").update({ set: { val: 1 }, where: (c) => c("id").eq(1) }); table("items").update({ set: { val: 2 }, where: (c) => c("id").eq(2) }); }`,
+  ],
   // The control: a plainly additive change must not need approval.
-  ["addColumn", `table("items").column("extra").add({ type: t.text() });`, false],
+  ["addColumn", `table("items").column("extra").add({ type: t.text() });`, false, "schema"],
 ];
 
 function uniqueNamespace(prefix: string): string {
@@ -136,7 +158,7 @@ test("the approval gate covers exactly the operations the documentation names", 
   const gatedButRan: string[] = [];
   const ungatedButRefused: string[] = [];
   try {
-    for (const [label, body, mustBeGated] of CASES) {
+    for (const [label, body, mustBeGated, phase, reverse] of CASES) {
       const schema = uniqueNamespace("apprscope");
       const work = project(schema);
       try {
@@ -153,7 +175,7 @@ test("the approval gate covers exactly the operations the documentation names", 
           join(work, "migrations", "20260102000000_op.ts"),
           `import { table, t } from "zero-migrate";
 export const name = "op";
-export default { up() { ${body} } };
+export default { ${phase}() { ${body} }${reverse === undefined ? "" : `, ${reverse}`} };
 `,
         );
         const unapproved = run(work, schema, ["apply"]);

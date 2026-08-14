@@ -253,7 +253,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     //     detected structurally in the checksum, not just at DDL time.
     const modified = {
       name: "create_gadgets",
-      up() {
+      schema() {
         table("gadgets").create({
           columns: {
             sku: t.text().notNull(),

@@ -9,7 +9,8 @@
 //
 // The flow for `apply`:
 //   1. the pure-JS RECORDER (`zero-migrate/internal/recorder`, from the DSL package)
-//      drains the migration's `up()` into a `{ ir_version, name, ops }` ENVELOPE —
+//      drains the migration's explicit `schema()` or `data()` phase into a
+//      `{ ir_version, name, ops }` ENVELOPE —
 //      `ir_version` sourced from the addon's `irVersion()` (single source of truth);
 //      NO `owner_app`, NO checksum;
 //   2. the addon's `applyIr` LOWERS the envelope in Rust (stamps `owner_app`, folds
@@ -109,8 +110,9 @@ async function openSession(
 
 /** Common inputs to the host verbs. */
 export interface HostApplyOptions {
-  /** The migration module (an imported `.ts`/`.js` exporting `up()` or
-   *  `default.up`). Resolved to an envelope by the recorder. */
+  /** The migration module (an imported `.ts`/`.js` exporting `schema()` for DDL
+   *  or `data()` plus its rollback declaration for DML). Resolved to an envelope
+   *  by the recorder. */
   migration: MigrationModule;
   /** Ordered authored migrations that precede `migration`. Their declarations
    *  may seed logical schema contracts only when the addon proves every plan is
@@ -404,7 +406,7 @@ export function validate(opts: HostPlanOptions): LoadVerifyReply {
   return validateEnvelope(addon, envelope, opts);
 }
 
-/** Validate an already-authored envelope so planning never executes up() twice. */
+/** Validate an already-authored envelope so planning never executes its authoring phase twice. */
 function validateEnvelope(
   addon: MigrateAddon,
   envelope: IrEnvelope,

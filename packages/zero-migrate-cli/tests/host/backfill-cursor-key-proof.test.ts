@@ -80,7 +80,7 @@ scope = "all"
 function bump(cursorColumns: string[]): MigrationModule {
   return {
     default: {
-      up() {
+      data() {
         table("rows_t").backfill({
           set: { val: (col) => col("val").add(1) },
           where: (col) => col("val").ge(0),
@@ -88,6 +88,16 @@ function bump(cursorColumns: string[]): MigrationModule {
           cursorStability: { mode: "externalInvariant", name: "rows_cursor_immutable" },
           batchSize: 2,
           name: "bump_all",
+        });
+      },
+      inverse() {
+        table("rows_t").backfill({
+          set: { val: (col) => col("val").sub(1) },
+          where: (col) => col("val").gt(0),
+          cursorColumns,
+          cursorStability: { mode: "externalInvariant", name: "rows_cursor_immutable" },
+          batchSize: 2,
+          name: "undo_bump_all",
         });
       },
     },

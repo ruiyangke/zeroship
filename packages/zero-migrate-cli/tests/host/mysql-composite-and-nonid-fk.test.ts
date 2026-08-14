@@ -52,7 +52,7 @@ const OWNER_APP = "app_fkm";
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "fk_shapes";
 export default {
-  up() {
+  schema() {
     table("parent").create({
       columns: {
         id: t.int().notNull(),

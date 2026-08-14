@@ -69,7 +69,7 @@ scope = "all"
 const migration = {
   name: "create_widgets",
   default: {
-    up() {
+    schema() {
       table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
     },
   },
@@ -194,7 +194,7 @@ test("an authored down() is refused, not silently ignored", async () => {
         migration: {
           name: "with_down",
           default: {
-            up() {
+            schema() {
               table("widgets").create({
                 columns: { id: t.int().notNull() },
                 primaryKey: ["id"],

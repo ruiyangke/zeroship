@@ -115,7 +115,7 @@ export default {
     `import { table, perRow } from "zero-migrate";
 export const name = "b";
 export default {
-  up() {
+  data() {
     // Refused: a generic text column declares no value format for a TypeID.
     table("${TABLE}").backfill({
       set: { tid: perRow.typeId({ prefix: "order" }) },
@@ -123,6 +123,7 @@ export default {
       cursorStability: { mode: "guardUpdates" },
     });
   },
+  irreversible: "overwrites tid for existing ${TABLE} rows; prior values are not recorded",
 };
 `,
   );

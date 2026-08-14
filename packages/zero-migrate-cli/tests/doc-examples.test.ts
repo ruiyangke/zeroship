@@ -69,7 +69,7 @@ function rewriteForGate(block: string, srcIndex: string): string {
   body = body.replace(
     /^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s+["']\.[^"']*["'];?\s*$/gm,
     (_match, binding: string) =>
-      `const ${binding}: import(${JSON.stringify(srcIndex)}).MigrationModule = { up() {} };`,
+      `const ${binding}: import(${JSON.stringify(srcIndex)}).MigrationModule = { schema() {} };`,
   );
   return body;
 }
@@ -199,4 +199,3 @@ test("doc-gate REGRESSION WITNESS: a rotted engine snippet IS rejected", () => {
     `expected a 'no exported member' diagnostic for the rotted verb; got:\n${diagnostics}`,
   );
 });
-

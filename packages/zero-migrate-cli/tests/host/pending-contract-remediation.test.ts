@@ -50,7 +50,7 @@ const RENAME_MIGRATION = "rename_display_name";
 const CREATE = `import { table, t } from "zero-migrate";
 export const name = "create_users";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.text() },
       primaryKey: ["id"],
@@ -62,7 +62,7 @@ export default {
 const RENAME = `import { table, t } from "zero-migrate";
 export const name = "${RENAME_MIGRATION}";
 export default {
-  up() {
+  schema() {
     table("users").column("display_name").rename({ to: "full_name", type: t.text() });
   },
 };
@@ -72,7 +72,7 @@ export default {
 const TOUCH = `import { table, t } from "zero-migrate";
 export const name = "add_nickname";
 export default {
-  up() {
+  schema() {
     table("users").column("nickname").add({ type: t.text() });
   },
 };

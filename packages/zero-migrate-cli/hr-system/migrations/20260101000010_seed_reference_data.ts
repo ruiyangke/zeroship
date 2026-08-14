@@ -5,7 +5,7 @@ import { table, decimal, int64 } from "zero-migrate";
 export const name = "seed_reference_data";
 
 export default {
-  up() {
+  data() {
     table("departments").insert({
       rows: [
         { id: "dept_01arz3ndektsv4rrffq69g5001", code: "HQ", name: "Headquarters" },
@@ -31,6 +31,29 @@ export default {
         { id: "01ARZ3NDEKTSV4RRFFQ69G7003", title: "Account Executive", department_scope: "SALES", is_leadership: false },
         { id: "01ARZ3NDEKTSV4RRFFQ69G7004", title: "People Manager", department_scope: "HR", is_leadership: false },
       ],
+    });
+  },
+  inverse() {
+    table("positions").delete({
+      where: (col) =>
+        col("id").in([
+          "01ARZ3NDEKTSV4RRFFQ69G7001",
+          "01ARZ3NDEKTSV4RRFFQ69G7002",
+          "01ARZ3NDEKTSV4RRFFQ69G7003",
+          "01ARZ3NDEKTSV4RRFFQ69G7004",
+        ]),
+    });
+    table("job_grades").delete({
+      where: (col) => col("id").in([int64("1"), int64("2"), int64("3"), int64("4")]),
+    });
+    table("departments").delete({
+      where: (col) =>
+        col("id").in([
+          "dept_01arz3ndektsv4rrffq69g5001",
+          "dept_01arz3ndektsv4rrffq69g5002",
+          "dept_01arz3ndektsv4rrffq69g5003",
+          "dept_01arz3ndektsv4rrffq69g5004",
+        ]),
     });
   },
 };

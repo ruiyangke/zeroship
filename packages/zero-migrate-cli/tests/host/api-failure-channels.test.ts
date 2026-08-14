@@ -5,13 +5,13 @@
 // caller gets wrong in a way that only shows up in production.
 //
 // THE TWO CHANNELS. "Invalid migration structure returns `{ ok: false, error }`.
-// A missing `up()`, an exception thrown by `up()`, or a runtime setup failure
+// A missing phase, an exception thrown by `schema()`, or a runtime setup failure
 // throws normally." So a caller who writes only
 //
 //     const report = validate(opts);
 //     if (!report.ok) throw new Error(report.error);
 //
-// crashes on a migration file that forgot to export `up()` - an ordinary
+// crashes on a migration file that forgot to export `schema()` or `data()` - an ordinary
 // authoring mistake - because that arrives as a thrown exception, not as
 // `ok: false`. A caller who writes only `try { validate(opts) } catch {}` sails
 // past a genuinely invalid migration, because that one returns rather than
@@ -87,12 +87,13 @@ test("an invalid migration RETURNS ok:false rather than throwing", () => {
     validateOptions({
       name: "m",
       default: {
-        up() {
+        data() {
           table("events").update({
             set: { tag: 1 },
             where: (col) => col("tag").count().gt(0),
           });
         },
+        irreversible: "overwrites tag for matching events; prior tag values are not recorded",
       },
     } as MigrationModule),
   );
@@ -105,12 +106,12 @@ test("an invalid migration RETURNS ok:false rather than throwing", () => {
   );
 });
 
-test("a missing up() and a throwing up() THROW rather than returning ok:false", () => {
+test("a missing phase and a throwing schema() THROW rather than returning ok:false", () => {
   assert.throws(
     () =>
       validate(validateOptions({ name: "m", default: {} } as MigrationModule)),
-    /exports no `up\(\)` function/,
-    "a module with no up() must throw, which is the channel a caller must also handle",
+    /exports neither schema\(\) nor data\(\)/,
+    "a module with no migration phase must throw, which is the channel a caller must also handle",
   );
 
   assert.throws(
@@ -119,14 +120,14 @@ test("a missing up() and a throwing up() THROW rather than returning ok:false", 
         validateOptions({
           name: "m",
           default: {
-            up() {
-              throw new Error("boom from up");
+            schema() {
+              throw new Error("boom from schema");
             },
           },
         } as MigrationModule),
       ),
-    /boom from up/,
-    "an exception from up() must propagate unchanged",
+    /boom from schema/,
+    "an exception from schema() must propagate unchanged",
   );
 });
 
@@ -137,7 +138,7 @@ test("control: a valid migration returns ok:true, so neither channel fires by de
     validateOptions({
       name: "m",
       default: {
-        up() {
+        schema() {
           table("t").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
         },
       },
@@ -161,7 +162,7 @@ test("history() returns bigint eventSeq, so plain JSON.stringify throws", async 
       migration: {
         name: "create_t",
         default: {
-          up() {
+          schema() {
             table("t").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
           },
         },

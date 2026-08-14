@@ -2,7 +2,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "create_widgets";
 export default {
-  up() {
+  schema() {
     table("widgets").create({
       columns: {
         label: t.text().notNull(),

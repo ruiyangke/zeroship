@@ -71,7 +71,7 @@ scope = ${scope}
 function migrationNaming(column: string): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("items").create({
           columns: { id: t.int().notNull(), [column]: t.int() },
           primaryKey: ["id"],

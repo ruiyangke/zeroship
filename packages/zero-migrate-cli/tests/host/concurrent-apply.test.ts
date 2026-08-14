@@ -71,7 +71,7 @@ const ADDON_PATH = resolve(
 const MIGRATION = `import { table, t } from "zero-migrate";
 export const name = "create_many";
 export default {
-  up() {
+  schema() {
     for (const n of [1,2,3,4,5,6,7,8,9,10,11,12]) {
       table("t" + n).create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
     }

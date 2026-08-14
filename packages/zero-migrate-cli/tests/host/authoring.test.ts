@@ -48,7 +48,7 @@ test("programmatic executor verbs require explicit policy bytes", async () => {
   };
   await assert.rejects(
     apply({
-      migration: { up() {} },
+      migration: { schema() {} },
       ownerApp: "app_policy_required",
       projectSchema: "policy_required",
       driver,
@@ -60,7 +60,7 @@ test("programmatic executor verbs require explicit policy bytes", async () => {
       ownerApp: "app_policy_required",
       projectSchema: "policy_required",
       driver,
-      migrations: [{ up() {} }],
+      migrations: [{ schema() {} }],
     } as never),
     /status requires an explicit policy/,
   );
@@ -142,7 +142,7 @@ test("Node-native authoring: pure-JS recorder drains the DSL into an op-IR envel
 test("plan authors once and validates the envelope it returns", () => {
   let calls = 0;
   const migration = {
-    up() {
+    schema() {
       calls += 1;
       table("single_pass").create({
         columns: {
@@ -261,7 +261,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
     `);
 
     const dropUnique = {
-      up() {
+      schema() {
         table("accounts").index("accounts_email_key").drop();
       },
     };
@@ -299,7 +299,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
 
     await apply({
       migration: {
-        up() {
+        schema() {
           table("accounts").column("status").setDefault("ready");
         },
       },
@@ -320,7 +320,7 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
     assert.match(defaultValue.rows[0].column_default, /ready/);
 
     const renameMigration = {
-      up() {
+      schema() {
         table("rename_items")
           .column("old_label")
           .rename({ to: "label", type: t.text() });

@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 export const name = "create_job_grades";
 
 export default {
-  up() {
+  schema() {
     table("job_grades").create({
       columns: {
         id: t.bigInt().notNull(),
