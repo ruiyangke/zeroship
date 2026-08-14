@@ -46,6 +46,29 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The SDK dist files BEFORE any cargo command, and this is not stylistic.
+      # zeroship-runtime `include_str!`s sdks/bootstrap/dist/runtime-entry.js,
+      # sdks/bootstrap/dist/install-schema.js and sdks/db/dist/internal.js
+      # (crates/runtime/src/core/init.rs:391 and
+      # crates/runtime/src/core/bootstrap_modules.rs:59,65). Those three are
+      # build outputs, gitignored, and have never been tracked in any ref, so a
+      # fresh checkout does not have them. There is no build.rs and no cache
+      # that supplies them. Measured 2026-08-13 on a clean worktree:
+      # `cargo check -p zeroship-runtime` fails with three
+      # `couldn't read ...: No such file or directory` errors.
+      #
+      # `cargo check --workspace` compiles zeroship-runtime because it is a
+      # plain `crates/*` member with no `default-members` narrowing, so this job
+      # could not have passed a fresh checkout without these steps.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      # The vendored engine ships no dist/ and the vite-plugin imports it, so it
+      # is built before the SDKs. Same ordering as the `sdk` job.
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
       - run: cargo check --workspace
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
@@ -331,7 +354,8 @@ jobs:
       # comments, and its rename guard first passed on the very breakage it
       # exists for, then failed on a healthy host. Both were caught by hand.
       # Drives the pure functions against fixture compose files; runs no ssh, no
-      # docker, no network. 30 assertions, floor 29.
+      # docker, no network. MEASURED 2026-08-13: 64 assertions, floor 63. (This
+      # line said "30 assertions, floor 29" while the script's floor was 53.)
       - name: deploy scripts extraction, rename pairing and arguments
         run: tests/deploy_scripts_gate.sh
       # A COUPLING TRIPWIRE, not a style rule. Measured 2026-08-12 by running
@@ -595,6 +619,16 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Same reason as the `rust` job: run_billing_suite.sh builds
+      # zeroship-control, which depends on zeroship-runtime, which
+      # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       # Real Kafka-wire broker so run_billing_suite.sh exercises the real stream
@@ -689,6 +723,16 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Same reason as the `rust` job: run_plugin_db_live_suite.sh builds
+      # zeroship-plugin-db, which depends on zeroship-runtime, which
+      # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
       # pgvector because two tests build vector columns, and the extension has
       # to be CREATED in the target database, not merely available: a fresh
       # database with it available still fails `type "vector" does not exist`.
