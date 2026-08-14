@@ -25,7 +25,11 @@
       <span><strong>{{ i.provider }}</strong> &mdash; {{ i.email_at_link }}</span>
       <form method="POST" action="/me/unlink/{{ i.provider }}">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button type="submit" class="small">Unlink</button>
+        {# The visible text stays "Unlink" - the row already says which account
+           it belongs to. The label is what a screen reader reads when tabbing
+           between buttons, where every one of them would otherwise be an
+           identical "Unlink". #}
+        <button type="submit" class="small" aria-label="Unlink {{ i.provider }}">Unlink</button>
       </form>
     </li>
   {% endfor %}
