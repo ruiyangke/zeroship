@@ -104,22 +104,35 @@ used by `@zeroship/auth`.
 
 ## Cookies
 
-All auth cookies are `HttpOnly`, `SameSite=Lax`, and `Path=/`. `Secure` is
-always set, in every environment: there is no mode that drops it. Local runs
-work because browsers treat `localhost` and `*.localhost` as trustworthy
-origins, so a `Secure` cookie is accepted over plain `http` there. The `__Host-`
-prefix is used where RFC 6265bis allows it.
+All auth cookies are `HttpOnly` and `Path=/`. No JavaScript ever needs to read
+one: where a value has to reach a form, the server renders it into both the
+cookie and the hidden field in the same response. `Secure` is always set, in
+every environment: there is no mode that drops it. Local runs work because
+browsers treat `localhost` and `*.localhost` as trustworthy origins, so a
+`Secure` cookie is accepted over plain `http` there. The `__Host-` prefix is
+used where RFC 6265bis allows it.
 
-| Cookie | Set by | Host | Max-Age |
-|---|---|---|---|
-| `__Host-zsidp_session` | auth | `auth.zeroship.ai` | 12 h hard / 30 min idle |
-| `__Host-zsidp_csrf` | auth | `auth.zeroship.ai` | per form |
-| `__Host-zsidp_google_stash` | auth | `auth.zeroship.ai` | 10 min |
-| `__Host-zsidp_github_stash` | auth | `auth.zeroship.ai` | 10 min |
-| `__Host-zsidp_magic_csrf` | auth | `auth.zeroship.ai` | 15 min |
-| `__Host-zeroship_app_session` | gateway | each hosted app origin | 12 h |
-| `__Host-zeroship_app_anchor` | gateway | each hosted app origin | 30 d |
-| `__Host-zs_oidc_stash` | gateway | each hosted app origin | 10 min |
+`SameSite` is `Lax` for the cookies that must survive a top-level redirect back
+from an external identity provider or an emailed link, and `Strict` for those
+that are only ever presented by a form on an auth page the user is already
+looking at.
+
+| Cookie | Set by | Host | SameSite | Max-Age |
+|---|---|---|---|---|
+| `__Host-zsidp_session` | auth | `auth.zeroship.ai` | Lax | 12 h hard / 30 min idle |
+| `__Host-zsidp_csrf` | auth | `auth.zeroship.ai` | Strict | per form |
+| `__Host-zsidp_google_stash` | auth | `auth.zeroship.ai` | Lax | 10 min |
+| `__Host-zsidp_github_stash` | auth | `auth.zeroship.ai` | Lax | 10 min |
+| `__Host-zsidp_magic_csrf` | auth | `auth.zeroship.ai` | Lax | 15 min |
+| `__Host-zeroship_app_session` | gateway | each hosted app origin | Lax | 15 min |
+| `__Host-zeroship_app_anchor` | gateway | each hosted app origin | Strict | 30 d |
+| `__Host-zs_oidc_stash` | gateway | each hosted app origin | Lax | 10 min |
+
+`__Host-zeroship_app_session` is a gateway-signed `zeroship-sess+jwt` identity
+assertion, not an opaque session id, so its lifetime is the token's own 15-minute
+`exp`. The durable credential is the 30-day server-held
+`__Host-zeroship_app_anchor`, which silently re-signs a fresh session cookie via
+`GET /__zeroship/auth/session` once the short one lapses.
 
 The app-origin stash cookies carry HMAC-signed PKCE verifier, state, nonce, and
 return path. They are cleared on successful callback. The federation stash names

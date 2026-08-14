@@ -1,8 +1,21 @@
 //! Double-submit CSRF token. The `IdP`'s own login/signup/consent forms
 //! carry a `csrf` form field that MUST match the CSRF cookie.
 //!
-//! Cookie is **NOT** `HttpOnly` — the inline `<script nonce>` reads it for
-//! the hidden form field (that's the "double-submit" pattern).
+//! Both halves are written by the SERVER in one handler: `generate_token()`
+//! feeds the template's `{{ csrf }}` and [`set_cookie`] in the same response
+//! (see `ui::login::render_challenge`). No client script is involved, so the
+//! cookie is `HttpOnly` - double-submit needs the cookie to be sent, not to be
+//! readable.
+//!
+//! This doc used to say the opposite: that the cookie was deliberately NOT
+//! `HttpOnly` because "the inline `<script nonce>` reads it for the hidden form
+//! field". No such script has ever existed here - the three templates that
+//! carry an inline script (`reset`, `token_redeem_interstitial`,
+//! `device_supabase`) scrub history and submit a form, and none touches
+//! `document.cookie`. The claim read as a justified trade-off, so it stopped
+//! anyone asking, and the DEV tier ended up strictly harder than production:
+//! `sdks/bootstrap/src/dev-auth.ts` keeps its dev CSRF cookie `HttpOnly` and
+//! cites this very sentence as the reason prod cannot.
 //!
 //! The cookie always uses the `__Host-` prefix and `Secure`. The local browser
 //! topology uses `.localhost`, which browsers treat as potentially trustworthy;
@@ -29,7 +42,9 @@ pub fn generate_token() -> String {
 ///
 #[must_use]
 pub fn set_cookie(token: &str) -> String {
-    format!("{COOKIE_NAME}={token}; Path=/; SameSite=Strict; Secure; Max-Age={MAX_AGE_SECS}")
+    format!(
+        "{COOKIE_NAME}={token}; Path=/; SameSite=Strict; Secure; HttpOnly; Max-Age={MAX_AGE_SECS}"
+    )
 }
 
 /// Parse the CSRF token from a request's `Cookie` header value.
@@ -91,6 +106,28 @@ mod tests {
         let c = set_cookie("tok");
         assert!(c.starts_with("__Host-zsidp_csrf=tok"), "cookie: {c}");
         assert!(c.contains("; Secure"));
+    }
+
+    /// The CSRF cookie must be `HttpOnly`.
+    ///
+    /// Double-submit only needs the cookie to be UNREADABLE-BUT-SENT: the
+    /// server compares the `Cookie` header against the form field. It needs a
+    /// script-readable cookie ONLY in the variant where client JS copies the
+    /// value into the field. This crate is not that variant - every form field
+    /// is `{{ csrf }}`, rendered from the same `generate_token()` that produced
+    /// the cookie in the same handler (see `login.rs` `render_challenge`), and
+    /// every read is `parse_cookie` on the server. So `HttpOnly` costs nothing
+    /// and denies an injected script the token.
+    ///
+    /// WHAT THIS DOES NOT CATCH: a future template that adds a script reading
+    /// `document.cookie` for the token would keep this test green and be broken
+    /// at runtime instead. The guard against that direction is that no such
+    /// script exists to regress - grep `document.cookie` under
+    /// `crates/auth/src/ui/templates/` before adding one.
+    #[test]
+    fn set_cookie_is_http_only() {
+        let c = set_cookie("tok");
+        assert!(c.contains("; HttpOnly"), "cookie: {c}");
     }
 
     #[test]
