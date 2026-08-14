@@ -43,8 +43,12 @@ const OWNER_APP = "app_rename_coexist";
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
-function authoredMixedMigration(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
+function authoredDataMigration(
+  name: string,
+  data: () => void,
+  inverse: () => void,
+): NamedMigration {
+  return { name, default: { data, inverse } } as NamedMigration;
 }
 
 function authoredSchemaMigration(name: string, schema: () => void): NamedMigration {
@@ -67,13 +71,23 @@ test("during an online rename both names stay aligned, and the destination wins 
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const created = authoredMixedMigration("create_users", () => {
+  const created = authoredSchemaMigration("create_users", () => {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.string({ length: 255 }) },
       primaryKey: ["id"],
     });
-    table("users").insert({ rows: { id: 1, display_name: "original" } });
   });
+  // The row the rename has to carry across. It predates the rename, so it is
+  // authored against the SOURCE name and reversed by deleting exactly itself.
+  const seeded = authoredDataMigration(
+    "seed_users",
+    () => {
+      table("users").insert({ rows: { id: 1, display_name: "original" } });
+    },
+    () => {
+      table("users").delete({ where: (column) => column("id").eq(1) });
+    },
+  );
   const renamed = authoredSchemaMigration("rename_display_name", () => {
     table("users").column("display_name").rename({
       to: "full_name",
@@ -111,7 +125,8 @@ test("during an online rename both names stay aligned, and the destination wins 
   try {
     await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
     await applyOne(created, []);
-    await applyOne(renamed, [created], { users: OWNER_APP });
+    await applyOne(seeded, [created], { users: OWNER_APP });
+    await applyOne(renamed, [created, seeded], { users: OWNER_APP });
 
     // 1. The destination starts out carrying the source's values.
     assert.deepEqual(
@@ -158,7 +173,7 @@ test("during an online rename both names stay aligned, and the destination wins 
     //    until the rename resolves, so a later schema change cannot race the
     //    application's cutover.
     await assert.rejects(
-      applyOne(later, [created, renamed], { users: OWNER_APP }),
+      applyOne(later, [created, seeded, renamed], { users: OWNER_APP }),
       /is not fully applied \(state: partial\)/,
       "a later migration touching the renamed table must be blocked until resolution",
     );
@@ -207,7 +222,7 @@ test("during coexistence the source's constraints still bind writes made through
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const created = authoredMixedMigration("create_users", () => {
+  const created = authoredSchemaMigration("create_users", () => {
     table("users").create({
       columns: {
         id: t.int().notNull(),
@@ -216,8 +231,16 @@ test("during coexistence the source's constraints still bind writes made through
       primaryKey: ["id"],
       uniques: [{ name: "users_display_name_key", columns: ["display_name"] }],
     });
-    table("users").insert({ rows: { id: 1, display_name: "original" } });
   });
+  const seeded = authoredDataMigration(
+    "seed_users",
+    () => {
+      table("users").insert({ rows: { id: 1, display_name: "original" } });
+    },
+    () => {
+      table("users").delete({ where: (column) => column("id").eq(1) });
+    },
+  );
   const renamed = authoredSchemaMigration("rename_display_name", () => {
     table("users").column("display_name").rename({
       to: "full_name",
@@ -243,7 +266,8 @@ test("during coexistence the source's constraints still bind writes made through
   try {
     await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
     await applyOne(created, []);
-    await applyOne(renamed, [created], { users: OWNER_APP });
+    await applyOne(seeded, [created], { users: OWNER_APP });
+    await applyOne(renamed, [created, seeded], { users: OWNER_APP });
 
     // 1. The documented half: the destination inherits none of it.
     const { rows } = await admin.query(
