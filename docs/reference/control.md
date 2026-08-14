@@ -134,7 +134,10 @@ try {
 ```
 
 `ControlError` carries `status`, `statusText`, parsed `body`, optional `code`,
-and the original `response`. Branch on status/code, not message text.
+optional `trace_id`, and the original `response`. Quote `trace_id` to an
+operator: the control plane logged the real cause under the same key. It is
+`undefined` when the server did not send one and is never invented by the SDK.
+Branch on status/code, not message text.
 
 ## Design rules
 
