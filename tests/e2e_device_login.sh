@@ -539,7 +539,12 @@ echo "  token: sub=$TOKEN_SUB scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
 # the POST went to the CONFIGURED address, and the token it returned is trusted
 # because its `iss` is the PUBLIC issuer. Changing where we post must not change
 # what we trust.
-MINT_HITS="$(grep -c 'POST /internal/platform-token' "$MINT_LOG" 2>/dev/null || echo 0)"
+# `grep -c` prints the count AND exits 1 on zero matches, so a `|| echo 0`
+# fallback appends a SECOND line and the comparison below dies with "integer
+# expected" instead of reporting the count it found. Let grep's own 0 stand;
+# the default only covers a missing file.
+MINT_HITS="$(grep -c 'POST /internal/platform-token' "$MINT_LOG" 2>/dev/null || true)"
+MINT_HITS="${MINT_HITS:-0}"
 echo "  mint proxy recorded: $(tr '\n' '|' < "$MINT_LOG")"
 [ "$MINT_HITS" -ge 1 ] \
   && pass "the mint was POSTed to the configured mint URL ($MINT_HITS hit(s) on :$MINT_PROXY_PORT)" \
