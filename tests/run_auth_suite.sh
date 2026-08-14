@@ -111,27 +111,37 @@ echo "------------------------------------------------------------------"
 # it does not. That script invokes zeroship-control and zeroship-migrated and
 # never touches the gateway crate, so oidc_rp_e2e is covered by nothing.
 #
-# TWO BINARIES IN THE LIST BELOW ARE NOT ACTUALLY COVERED EITHER.
-# `auth_token_anchors_test` gates on GATEWAY_ANCHORS_DB_URL, which is set
-# nowhere in this repo - not here, not in ci.yml, not in deploy/. Measured on a
-# full gate run: 13 lines reading "[anchors] skip <name> (no
-# GATEWAY_ANCHORS_DB_URL)" sat in this script's own log while it reported "0
-# skipped". `browser_auth_test` gates on the same unset variable.
+# GATEWAY_ANCHORS_DB_URL used to be set nowhere in this repo, so the 13 gated
+# tests in `auth_token_anchors_test` and the 1 in `browser_auth_test` announced
+# a skip into this script's own log and never ran. Pointing it at this
+# script's database ran 23 tests of which 11 FAILED, the first on "initial
+# login must succeed, left: 400", so the deferral was recorded here rather
+# than taken.
 #
-# Exporting it is not the fix and that is measured too: with the variable
-# pointed at this script's database the suite runs 23 tests and 11 FAIL, the
-# first on "initial login must succeed, left: 400". So the coverage was never
-# merely switched off - the tests need work, and turning them on turns this gate
-# red. Whether to fix them or delete them is an operator decision, filed rather
-# than taken here. The skip check below now SEES those 13 lines; it tolerates
-# them by an explicit allowlist that names them, so the deferral is stated
-# rather than smuggled in as a gap in the search.
+# It is taken now. The 11 failures were one stale fixture, not 11 defects: the
+# mock OP minted its ID token and its access token independently and never
+# carried `at_hash`, while `session_post` requests access-token binding, which
+# makes the claim mandatory. The gateway log named it exactly - "at_hash
+# missing while access token binding was requested". The REAL OP does mint it
+# (crates/auth/src/oidc/issuer.rs, unconditional in the single mint path), so
+# the handler was right and the fixture was wrong. Binding the mock's ID tokens
+# to the access token they ship with took it to 23 passed / 0 failed, and
+# surfaced a second, real defect on the way (the gateway declined to verify
+# at_hash on a ROTATED id_token while holding the access token; see
+# crates/gateway/src/auth_token.rs).
+#
+# So the variable is exported below and both binaries are in the list. This is
+# the SAME database the auth tests use: these tests seed their own users and
+# key off per-test UUIDs, and TEST_THREADS serializes the run.
+export GATEWAY_ANCHORS_DB_URL="$DSN"
+
 echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
 for spec in \
   "zeroship-authz:" \
   "zeroship-mailer:" \
   "zeroship-gateway:backchannel_logout_test" \
   "zeroship-gateway:auth_token_anchors_test" \
+  "zeroship-gateway:browser_auth_test" \
   "zeroship-gateway:identities_relay_test" \
   "zeroship-gateway:sessions_test" \
 ; do
@@ -163,18 +173,19 @@ echo "------------------------------------------------------------------"
 # Skips this gate reports but does not fail on. Each entry names a backend this
 # script does not provision, and the decision to leave it unprovisioned:
 #
-#   GATEWAY_ANCHORS_DB_URL - auth_token_anchors_test (13 tests) and
-#     browser_auth_test. Pointing this at the gate's own database runs 23 tests
-#     of which 11 fail; see the comment above the binary list. Fixing or
-#     deleting them is an open operator decision, so the skips stay visible and
-#     tolerated rather than silently undetectable.
+#   GATEWAY_ANCHORS_DB_URL is NO LONGER HERE, deliberately. This script now
+#     exports it (see above), so a skip announcing it means the export broke or
+#     a test stopped seeing it - a regression, not a tolerated gap. Leaving the
+#     entry in place after provisioning the backend would make exactly that
+#     regression undetectable, which is the failure this whole allowlist exists
+#     to avoid.
 #   AUTH_TEST_SMTP_SINK - one zeroship-mailer test
 #     (smtp_plaintext_sink_delivers_relay_forward) wants a live SMTP sink at a
 #     host:port this script has no way to stand up. Its two siblings in the same
 #     binary gate only on AUTH_DB_URL and ARE covered; the allowlist matches on
 #     the reason rather than the binary precisely so exempting this one does not
 #     blind the gate to the rest of the file.
-SKIP_ALLOWLIST='GATEWAY_ANCHORS_DB_URL|AUTH_TEST_SMTP_SINK'
+SKIP_ALLOWLIST='AUTH_TEST_SMTP_SINK'
 
 if ! zs_skip_census "$LOG" "$SKIP_ALLOWLIST"; then
   echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
