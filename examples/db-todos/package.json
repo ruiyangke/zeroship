@@ -6,6 +6,7 @@
     "dev": "vite",
     "migrate": "zeroship-dev-migrate",
     "build": "vite build",
+    "deploy": "zeroship deploy",
     "smoke": "bash scripts/smoke.sh",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -58,6 +58,30 @@ const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 pkg.name = projectName;
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
+// Rewrite `zeroship.jsonc` the same way, by SPLICING the two scalars rather
+// than re-serialising. That file is JSONC and its comments are half of what it
+// is for; a JSON.parse + stringify round trip would silently delete every one
+// of them. The template values are unique literals, so a plain replace is safe
+// and the result is byte-identical everywhere else.
+const cfgPath = join(targetDir, "zeroship.jsonc");
+if (existsSync(cfgPath)) {
+  const today = new Date().toISOString().slice(0, 10);
+  const before = readFileSync(cfgPath, "utf-8");
+  const after = before
+    .replace('"name": "zeroship-app"', `"name": ${JSON.stringify(projectName)}`)
+    .replace(/"runtime_date": "\d{4}-\d{2}-\d{2}"/, `"runtime_date": "${today}"`);
+  // A template whose literals moved must fail loudly. Writing the file back
+  // unchanged would scaffold every project under the name "zeroship-app" and
+  // the failure would only show up as two creators' apps colliding.
+  if (after === before) {
+    console.error(
+      "error: zeroship.jsonc no longer contains the template's name/runtime_date literals",
+    );
+    process.exit(1);
+  }
+  writeFileSync(cfgPath, after);
+}
+
 console.log(`✓ scaffolded ${basename(targetDir)}`);
 console.log("");
 console.log("next steps:");

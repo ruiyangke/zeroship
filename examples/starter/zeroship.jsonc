@@ -1,0 +1,34 @@
+// zeroship.jsonc - tooling configuration for examples/starter. COMMITTED.
+//
+// Read by the `zeroship` CLI and by the build; never by the runtime, never
+// packed into the .zship. No secrets: names only, values in .env or
+// `zeroship secret set`.
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+
+  "name": "zeroship-starter",
+
+  // The local stack `zeroship dev init` plus docker compose bring up. A real
+  // creator app points at the hosted control plane, which is what the scaffold
+  // template (sdks/create-zeroship-app/template/zeroship.jsonc) ships.
+  //
+  // `app` is absent: the first `zeroship deploy` auto-creates and prints the
+  // id to paste here.
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-08-14",
+
+  "build": {
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+
+  // Explicit, not defaulted. The CLI has no fallback for these; that is what
+  // stops it and the build from disagreeing about where the fold is written.
+  "migrations": {
+    "dir": "migrations",
+    "out": "generated/zeroship"
+  },
+
+  "secrets": []
+}
