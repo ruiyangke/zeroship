@@ -174,8 +174,14 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
         {searchable ? (
           <Input
             type="search"
+            // wrapperClassName, NOT className. `Input` routes `className` to the
+            // inner <input>, and the FLEX ITEM here is the bordered wrapper --
+            // so the grow/min/max below landed on an element that is not sized
+            // by them and the search field spanned the whole bar. Measured in
+            // an app: a 480px control inside a 1392px field, which pushed a
+            // three-control toolbar onto two lines.
             data-slot="filter-bar-search"
-            className="zs-filter-bar__search"
+            wrapperClassName="zs-filter-bar__search"
             value={search}
             onChange={(event) => onSearchChange?.(event.target.value)}
             placeholder={searchPlaceholder}

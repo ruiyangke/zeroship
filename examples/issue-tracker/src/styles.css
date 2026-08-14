@@ -464,22 +464,13 @@ tbody tr:hover { background: var(--surface-2); }
    searched and paged, so its height is bounded by construction rather than by
    clipping. Nothing here sets a height. */
 .product-browser { display: flex; flex-direction: column; gap: 0.8rem; }
-/* The search field is CAPPED so the toolbar is one row.
-   FilterBar already intends this -- its own stylesheet caps the search at 24rem
-   -- but the cap lands on the wrong element. Input puts the caller's className
-   and data-slot on the inner <input>, while the visible field is the wrapper
-   around it, so the wrapper grew to the full 1392px with a 480px control inside
-   it. Measured: control 480px, wrapper 1392px. The search took the whole first
-   line and pushed the sort picker and "New product" onto a second, which is a
-   two-line toolbar built from three controls that fit on one.
-
-   Selected through the published `data-slot` and the DOM shape, NOT through a
-   `.zs-*` class -- this file was cleaned of those once and the rule stands. If
-   the wrapper ever stops being the search's parent this stops applying and the
-   toolbar goes back to two lines; it cannot break anything else. */
-.product-browser [data-slot="filter-bar"] > div:has(> [data-slot="filter-bar-search"]) {
-  max-inline-size: 30rem;
-}
+/* The search cap is the DESIGN SYSTEM's job again.
+   A local override lived here because FilterBar's own 24rem cap landed on the
+   wrong element: it passed its class to Input as `className`, which Input
+   routes to the inner <input>, while the flex item is the bordered wrapper.
+   Measured then: a 480px control inside a 1392px wrapper, so a three-control
+   toolbar wrapped onto two lines. Fixed at the source -- FilterBar now passes
+   `wrapperClassName` -- and this override is gone with the cause. */
 .product-browser > .state-hint { margin: 0; }
 /* Card chrome, like every other list surface in this app (.table-wrap,
    .dashboard-section, .report-section). ListView paints its own rows and

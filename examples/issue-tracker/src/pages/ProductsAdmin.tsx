@@ -301,7 +301,11 @@ function ProductBrowser({
           setSearch(next);
           setPage(1);
         }}
-        searchPlaceholder="Search products by name, key or classification"
+        // Short enough to READ inside the design system 24rem cap. The longer
+        // "Search products by name, key or classification" clipped mid-word
+        // once the cap started applying, which looks like a broken field
+        // rather than a deliberate width.
+        searchPlaceholder="Search products"
         actions={signedIn ? <NewProductDialog /> : null}
       >
         {/* No visible label, matching the search box beside it. The reports
