@@ -86,7 +86,10 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #       real debt from that change.
 #   +1  distributed_live, now listed above.
 # Net -2 removed +1 added against the previous 111.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-110}"
+# The two `missing_role` tests cover `from_pg` classification and the fixed wire
+# message. Counting them in the floor ensures both run in CI rather than only
+# when invoked by hand.
+PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-112}"
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
@@ -111,11 +114,12 @@ echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 suite_rc=0
 : > "$SUITE_LOG"
 # `live-db-tests` NOT `test-helpers`: it is a superset
-# (live-db-tests = ["test-helpers"]), and `distributed_live` declares
-# `required-features = ["live-db-tests"]`. Passing the narrower feature makes
-# cargo REFUSE that target with "requires the features", which contributes zero
-# tests - caught here only because the floor noticed the shortfall.
-for target in integration native_transaction distributed_live; do
+# (live-db-tests = ["test-helpers"]), `distributed_live` declares
+# `required-features = ["live-db-tests"]`, and `missing_role` declares
+# `required-features = ["test-helpers"]`. Passing the narrower feature makes
+# cargo REFUSE the distributed target with "requires the features", while the
+# superset lets all four targets build.
+for target in integration native_transaction distributed_live missing_role; do
   echo "--- cargo test --test ${target} ---" | tee -a "$SUITE_LOG"
   cargo test -p zeroship-plugin-db --features live-db-tests --test "$target" \
     -- --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
