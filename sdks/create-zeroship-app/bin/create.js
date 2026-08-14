@@ -58,25 +58,33 @@ const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 pkg.name = projectName;
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
-// Rewrite `zeroship.jsonc` the same way, by SPLICING the two scalars rather
-// than re-serialising. That file is JSONC and its comments are half of what it
-// is for; a JSON.parse + stringify round trip would silently delete every one
-// of them. The template values are unique literals, so a plain replace is safe
-// and the result is byte-identical everywhere else.
+// Rewrite `zeroship.jsonc`'s `name` by SPLICING that one scalar rather than
+// re-serialising. The file is JSONC and its comments are half of what it is
+// for; a JSON.parse + stringify round trip would delete every one of them. The
+// template value is a unique literal, so a plain replace is safe and the result
+// is byte-identical everywhere else.
+//
+// `runtime_date` is NOT stamped with today's date, and that is a decision.
+// Stamping it would make two creators who scaffold on different days receive
+// different files, and `tests/golden_path.sh` step 10a - which re-runs THIS
+// scaffolder and requires byte equality against `examples/scaffold-app` -
+// could then never hold. The date buys nothing that pays for that: nothing
+// reads `runtime_date`, and its whole stated value is that projects are in the
+// habit of carrying one. The template's date does that. When a dated behaviour
+// gate actually exists, setting it becomes a deliberate act rather than a
+// silent side effect of `npm create`.
 const cfgPath = join(targetDir, "zeroship.jsonc");
 if (existsSync(cfgPath)) {
-  const today = new Date().toISOString().slice(0, 10);
   const before = readFileSync(cfgPath, "utf-8");
-  const after = before
-    .replace('"name": "zeroship-app"', `"name": ${JSON.stringify(projectName)}`)
-    .replace(/"runtime_date": "\d{4}-\d{2}-\d{2}"/, `"runtime_date": "${today}"`);
-  // A template whose literals moved must fail loudly. Writing the file back
-  // unchanged would scaffold every project under the name "zeroship-app" and
-  // the failure would only show up as two creators' apps colliding.
+  const after = before.replace(
+    '"name": "zeroship-app"',
+    `"name": ${JSON.stringify(projectName)}`,
+  );
+  // A template whose literal moved must fail loudly. Writing the file back
+  // unchanged would scaffold every project under the name "zeroship-app", and
+  // the failure would only surface as two creators' apps colliding.
   if (after === before) {
-    console.error(
-      "error: zeroship.jsonc no longer contains the template's name/runtime_date literals",
-    );
+    console.error('error: zeroship.jsonc no longer contains the template\'s "zeroship-app" name');
     process.exit(1);
   }
   writeFileSync(cfgPath, after);
