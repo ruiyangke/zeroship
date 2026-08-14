@@ -6,7 +6,7 @@
 // -- the same orphan QuickSearchBox became. Navigation lives in Shell.tsx.
 import { useEffect, useState } from "react";
 import { useAuth } from "@zeroship/auth/react";
-import { Button } from "@zeroship/ui";
+import { Button, Menu } from "@zeroship/ui";
 import { unreadNotificationCount } from "../api";
 import { errorMessage, isUnauthenticated, toPromise, type AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
@@ -57,11 +57,71 @@ export function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) 
     );
   }
   const { data } = userState;
+  return <AccountMenu name={data.name} email={data.email ?? null} provisioned={data.isProvisioned} />;
+}
+
+/**
+ * Who you are, and the way back out.
+ *
+ * The name was a <span>. Signing in was added and signing out was not, so
+ * the app could take an identity and never put one down -- on a shared
+ * machine the only way out was clearing the cookie by hand.
+ *
+ * A menu rather than a second header button: sign-out is not something you
+ * want one mis-click away from, and the name is the natural thing to press
+ * when you want to act on your account.
+ */
+function AccountMenu({
+  name,
+  email,
+  provisioned,
+}: {
+  name: string;
+  email: string | null;
+  provisioned: boolean;
+}) {
+  const { signOut } = useAuth();
   return (
-    <span className="user-chip" title={data.email ?? undefined}>
-      {data.name}
-      {!data.isProvisioned ? <em> (no activity yet)</em> : null}
-    </span>
+    <Menu>
+      {/* render, not a nested button: Menu.Trigger renders a bare <button>,
+          which with no app rule for buttons is the browser's grey box -- next
+          to the filled "New bug" it looked like a disabled control. Base UI
+          lets the trigger BE the design system's button instead. Plain, so
+          the name reads as text you can press rather than a second action
+          competing with the primary one. */}
+      <Menu.Trigger render={<Button variant="plain" size="small" />}>
+        <span className="user-chip" title={email ?? undefined}>
+          {name}
+          {!provisioned ? <em> (no activity yet)</em> : null}
+        </span>
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Popup>
+          {/* Group wraps BOTH, because GroupLabel outside a Group throws and
+              takes the whole page with it -- the header rendered nothing at
+              all until this was composed the way the component documents.
+
+              The email had no home but a title attribute, discoverable by
+              hovering and by nothing else. Here it says WHICH account you
+              are about to sign out of. */}
+          <Menu.Group>
+            {email ? <Menu.GroupLabel>{email}</Menu.GroupLabel> : null}
+            <Menu.Item
+              onClick={() => {
+                // Not awaited, for the same reason sign-in is not: the
+                // client may open a window inside the gesture. The session
+                // change publishes and App refetches users.me from it.
+                signOut().catch((err: unknown) => {
+                  window.alert(`Sign out failed: ${err instanceof Error ? err.message : String(err)}`);
+                });
+              }}
+            >
+              Sign out
+            </Menu.Item>
+          </Menu.Group>
+        </Menu.Popup>
+      </Menu.Portal>
+    </Menu>
   );
 }
 
