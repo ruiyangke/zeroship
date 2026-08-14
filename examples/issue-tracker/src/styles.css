@@ -1281,3 +1281,41 @@ fieldset.bug-detail-extras { display: grid; }
   border-color: var(--accent);
   box-shadow: 0 0 0 0.1875rem var(--accent-soft);
 }
+
+/* The rail stays put while the conversation scrolls.
+   ==================================================
+   Measured on a 1440x800 laptop with a twelve-comment thread: the scrollport
+   is 751px and the rail is 1071px, so scrolling to the end of the thread put
+   the rail's top at -608px -- status, resolution, severity, priority and
+   assignee all gone. State that is anchored at the top of the page is only
+   anchored until you read anything.
+
+   The page does not scroll; the shell's <main> does. Sticky resolves against
+   that scrollport, which is what we want, but a grid item stretches by
+   default and a stretched item cannot stick -- hence align-self.
+
+   The max-height is deliberately SHORTER than the scrollport (751px measured;
+   100dvh - 4rem is 736px at this size). Too short only ends the rail early and
+   its own scrollbar still reaches everything; too tall would push its bottom
+   under the fold where nothing could reach it. Erring small is the safe
+   direction. */
+@media (min-width: 901px) {
+  .bug-detail-side {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-block-size: calc(100dvh - 4rem);
+    overflow-y: auto;
+    /* A flick over the rail scrolls the rail, not the thread behind it. */
+    overscroll-behavior: contain;
+    /* Room for the last group to clear the bottom edge. */
+    padding-block-end: 1rem;
+  }
+}
+/* Children keep their own height; the RAIL scrolls, not its contents.
+   A flex item defaults to flex-shrink:1, so capping the rail's height
+   squeezed each group below its content -- which then overflowed its box and
+   painted over the group beneath it. The measurements all read fine (the rail
+   was "on screen", the right height); only the screenshot showed LINKS drawn
+   through WHERE. */
+.bug-detail-side > * { flex-shrink: 0; }
