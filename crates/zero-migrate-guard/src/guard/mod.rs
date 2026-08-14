@@ -3174,6 +3174,39 @@ pub fn check_ir_data_security_policy(
         push_policy_ops(cfg, op_index, op, &mut policy_ops);
     }
 
+    // The destructive posture is a property of the OPERATION, not of any SQL text,
+    // so it is enforced here, where every dialect can see it.
+    //
+    // PostgreSQL reads the same knob in its SQL-text guard and refuses there with
+    // its own rendered statement, so this pass skips it: a second, earlier denial
+    // would change a refusal that existing assertions pin, for no behavioural gain.
+    //
+    // MySQL and SQLite are served by `SqliteDescriptorGuard`, which `guard_for`
+    // constructs WITHOUT the policy and which therefore cannot read this knob at
+    // all. Before this pass the posture was silently inert on both: a `DROP TABLE`
+    // applied under the default `forbid`, while the registry classified the knob
+    // `Enforcement::Enforced` ("a guard, executor or validator path reads them and
+    // they do what they say"). `Enforcement` has no dialect dimension, so the
+    // load-time refusal that protects `DeclaredOnly` knobs could not fire either.
+    //
+    // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
+    // the leg THIS dialect will actually run.
+    if !matches!(cfg.dialect(), SqlDialect::Postgres)
+        && matches!(cfg.destructive_ops(), DestructiveOps::Forbid)
+    {
+        if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| op.is_destructive()) {
+            return Err(IrDataSecurityError {
+                op_index,
+                source: GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    statement: "destructive operation denied while \
+                                data_security.destructive_ops=forbid"
+                        .to_string(),
+                },
+            });
+        }
+    }
+
     let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
     for (op_index, op) in policy_ops {
         match op {
