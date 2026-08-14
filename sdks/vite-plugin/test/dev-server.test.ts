@@ -13,6 +13,7 @@ import {
   MODULE_FETCH_PATH,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -456,20 +457,14 @@ async function startHarness(options: {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
   };
+  // The build shape now comes from the project config, not from plugin
+  // options. There is no zeroship.jsonc in these fixtures, so the holder
+  // serves schema defaults and the `config` escape hatch supplies the entry -
+  // which is the same path a creator with a computed value takes.
   const plugins = devServerPlugin(
-    {
-      devServerPort: options.devServerPort ?? 3901,
-      serverEntry,
-      ...(options.migrations
-        ? {
-            migrations: {
-              dir: "migrations",
-              genTypesOut: "generated/zeroship",
-            },
-          }
-        : {}),
-    },
+    { devServerPort: options.devServerPort ?? 3901 },
     state,
+    createProjectConfigHolder({ override: { build: { serverEntry } } as never }),
   );
   const devServerPluginImpl = plugins.find((plugin) => plugin.name === "zeroship:dev-server");
   assert.ok(devServerPluginImpl?.hotUpdate, "expected dev-server plugin with hotUpdate hook");

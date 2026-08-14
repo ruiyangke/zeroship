@@ -51,7 +51,7 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
 describe("unmigrated server modules", () => {
   test("legacy path, no directive, no wrappers → 0 discovered + migration warning", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -86,7 +86,7 @@ addTodo.config = { id: "addTodo" };
 
   test("directive present, no wrappers → 0 discovered (wrappers required)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -114,7 +114,7 @@ export const arrowHelper = async () => null;
 
   test("legacy path WITH directive but no wrappers → 0 discovered, no warning", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");

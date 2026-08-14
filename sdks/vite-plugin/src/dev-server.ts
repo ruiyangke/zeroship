@@ -34,10 +34,14 @@ import {
   createZeroshipEnvironmentOptions,
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
+import {
+  defaultProjectConfig,
+  type ProjectConfigHolder,
+  type ResolvedProjectConfig,
+} from "./project-config/index.js";
 import type { TransformState } from "./transform.js";
 import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 import {
-  GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
   genTypesFromMigrations,
   isMigrationSourceError,
@@ -57,18 +61,22 @@ import {
 
 export interface DevServerOptions {
   devServerPort?: number;
-  serverEntry?: string;
   /**
    * Dev-tier auth config. `undefined` defaults to ON with the built-in dev
    * user; `false` disables. See `ZeroshipOptions.devAuth`.
    */
   devAuth?: DevAuthOption;
-  /** Migration-first gen-types. See `ZeroshipOptions.migrations`. */
-  migrations?: {
-    dir?: string;
-    genTypesOut?: string;
-  };
 }
+
+/**
+ * The migration paths, resolved from `zeroship.jsonc` (or its schema defaults).
+ *
+ * Both members are REQUIRED here rather than optional-with-a-fallback. Four
+ * places in this file used to spell `?? GEN_TYPES_OUT_DEFAULT`, and a fifth
+ * spelling of the same fallback lived in the Rust CLI where it could not agree
+ * with any of them. The type is what stops a sixth.
+ */
+type MigrationPaths = { dir: string; out: string };
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 
@@ -302,20 +310,18 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
  */
 function readGeneratedRuntimeDescriptor(
   root: string,
-  migrations: DevServerOptions["migrations"],
+  migrations: MigrationPaths,
 ): string | undefined {
-  return readGeneratedRuntimeDescriptorAt(
-    resolve(root, migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT),
-  );
+  return readGeneratedRuntimeDescriptorAt(resolve(root, migrations.out));
 }
 
 async function regenTypesDev(
   root: string,
-  migrations: DevServerOptions["migrations"],
+  migrations: MigrationPaths,
   fatal: boolean,
 ): Promise<string | undefined> {
-  const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
-  const outDir = resolve(root, migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
+  const migrationsDir = resolve(root, migrations.dir);
+  const outDir = resolve(root, migrations.out);
   try {
     await genTypesFromMigrations(migrationsDir, outDir, { check: false });
     console.log(
@@ -384,11 +390,11 @@ async function regenTypesDev(
  */
 function reportDevSchemaState(
   root: string,
-  migrations: DevServerOptions["migrations"],
+  migrations: MigrationPaths,
   descriptorJson: string | undefined,
   databaseUrl: string,
 ): void {
-  const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
+  const migrationsDir = resolve(root, migrations.dir);
   if (!existsSync(migrationsDir)) return; // not a migration-first app
 
   // The collections the app expects to exist, from the descriptor gen-types
@@ -522,9 +528,11 @@ function parseFetchInvoke(body: string): FetchInvokePayload {
 
 export function devServerPlugin(
   options: DevServerOptions,
-  state: TransformState
+  state: TransformState,
+  project: ProjectConfigHolder,
 ): Plugin[] {
   const devPort = options.devServerPort ?? DEFAULT_DEV_PORT;
+  let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
 
   // Resolve the dev-tier auth env pair ONCE per dev-server lifetime. The secret
   // is stable across child restarts (the crash-restart handler re-spawns the
@@ -568,8 +576,9 @@ export function devServerPlugin(
       // as modules import, which causes re-optimization mid-request and
       // "file does not exist" errors from the ModuleRunner on stale URLs.
       const detectedRoot = resolve(userConfig.root ?? process.cwd());
+      projectConfig = project.load(detectedRoot);
       const entry =
-        options.serverEntry ?? findServerEntry(detectedRoot) ?? undefined;
+        projectConfig.build.serverEntry ?? findServerEntry(detectedRoot) ?? undefined;
       return {
         environments: {
           zeroship: createZeroshipEnvironmentOptions(entry),
@@ -580,6 +589,7 @@ export function devServerPlugin(
     configResolved(config) {
       root = config.root;
       isDev = config.command === "serve";
+      projectConfig = project.load(root);
     },
   };
 
@@ -606,12 +616,12 @@ export function devServerPlugin(
       //    root by default; a migrations dir holding `.ts` sources not imported
       //    by app code may not be covered). The `hotUpdate` branch below
       //    regenerates `env.db.ts` on a change.
-      migrationsAbs = resolve(root, options.migrations?.dir ?? "migrations");
+      migrationsAbs = resolve(root, projectConfig.migrations.dir);
       if (existsSync(migrationsAbs)) {
         server.watcher.add(migrationsAbs);
         // Seed the descriptor from the committed artifact so the very first
         // request has it even before the async regen lands.
-        runtimeDescriptorJson = readGeneratedRuntimeDescriptor(root, options.migrations);
+        runtimeDescriptorJson = readGeneratedRuntimeDescriptor(root, projectConfig.migrations);
         // Initial regen on boot: migrations may have changed while the dev server
         // was down (`hotUpdate` only fires on a *subsequent* change, so without
         // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
@@ -619,7 +629,7 @@ export function devServerPlugin(
         // `regenTypesDev` never throws: a malformed migration is logged and
         // survived, a PLATFORM fault exits the process here (`fatal: true`)
         // rather than serving a stale descriptor for the rest of the session.
-        bootRegenDone = regenTypesDev(root, options.migrations, true).then(async (json) => {
+        bootRegenDone = regenTypesDev(root, projectConfig.migrations, true).then(async (json) => {
           runtimeDescriptorJson = json;
           // Report — do NOT apply. Migrating is `pnpm migrate`, a separate step
           // run ahead of `pnpm dev`; see `reportDevSchemaState`.
@@ -636,7 +646,7 @@ export function devServerPlugin(
             parseDotenvVars(root),
             devDb.databaseUrl,
           );
-          reportDevSchemaState(root, options.migrations, json, databaseUrl);
+          reportDevSchemaState(root, projectConfig.migrations, json, databaseUrl);
         });
       }
 
@@ -775,7 +785,7 @@ export function devServerPlugin(
         || (existsSync(binPath) ? binPath : "zeroship");
 
       const serverEntry =
-        options.serverEntry ?? findServerEntry(root) ?? undefined;
+        projectConfig.build.serverEntry ?? findServerEntry(root) ?? undefined;
 
       if (!existsSync(bootstrapPath)) {
         console.warn(
@@ -1118,7 +1128,7 @@ export function devServerPlugin(
       // platform fault leaves a live session whose in-memory descriptor was
       // serving a moment ago.
       if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        const json = await regenTypesDev(root, options.migrations, false);
+        const json = await regenTypesDev(root, projectConfig.migrations, false);
         runtimeDescriptorJson = json;
         pendingRuntimeDescriptorJson = json ?? null;
         // Don't return — a migration `.ts` is still a `.ts`; fall through to the

@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 
 import { GEN_TYPES_OUT_DEFAULT } from "../src/gen-types/index.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
 /** A real op.* migration `.ts` (the recorder resolves `@zeroship/migrate`). */
@@ -95,10 +96,7 @@ function bootDevServer(root: string) {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
   };
-  const plugins = devServerPlugin(
-    { migrations: { dir: "migrations", genTypesOut: "generated/zeroship" } } as any,
-    state,
-  );
+  const plugins = devServerPlugin({}, state, createProjectConfigHolder({}));
   const [envPlugin, devPlugin] = plugins as any[];
   hook(envPlugin, "configResolved")({ root, command: "serve" });
   hook(devPlugin, "configureServer")(makeServerStub(root));

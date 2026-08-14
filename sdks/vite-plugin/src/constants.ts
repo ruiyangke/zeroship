@@ -77,5 +77,3 @@ export const RUNTIME_RESTART_MAX_MS = 8_000;
 /** Lines of the child runtime's own output retained to explain a failure. */
 export const RUNTIME_LOG_TAIL_LINES = 20;
 
-/** Default RPC endpoint path. */
-export const DEFAULT_RPC_ENDPOINT = "/_rpc";

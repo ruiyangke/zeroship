@@ -95,7 +95,7 @@ async function installRpcClientStub(baseDir: string): Promise<void> {
 describe("client-environment transform — branded stubs", () => {
   test("imports the public procedure factory from @zeroship/rpc/client", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -115,7 +115,7 @@ export const add = mutation(async (input) => input);
 
   test("stub carries id, kind, wire metadata through the public factory", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -134,7 +134,7 @@ export const remove = mutation(async (id) => id, { id: "todos.remove" });
 
   test("stub uses a public mutation factory for non-stream procedures", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -149,7 +149,7 @@ export const send = mutation(async (input) => input);
 
   test("stream stub uses the public stream factory", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -164,7 +164,7 @@ export const drip = stream(async function* () { yield 1; });
 
   test("subscription stub preserves subscription metadata instead of using stream transport", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -183,7 +183,7 @@ export const feed = subscription(async function* () { yield 1; }, { id: "feed.ev
 
   test("idempotent metadata reaches generated direct-call stubs", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -207,7 +207,7 @@ export const save = mutation(async (input) => input, { id: "todos.save", idempot
     // tmpdir outside the workspace tree won't resolve the import — and
     // a `data:` URL has no base path at all.
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
