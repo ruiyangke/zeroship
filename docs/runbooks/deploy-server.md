@@ -318,18 +318,65 @@ deploy/scripts/deploy-remote.sh --host root@<host> \
   --registry ghcr.io/<owner>/zeroship-platform
 
 deploy/scripts/deploy-remote.sh --host root@<host> --registry ... --dry-run
+deploy/scripts/deploy-remote.sh --host root@<host> --list-backups
 deploy/scripts/deploy-remote.sh --host root@<host> --rollback
+deploy/scripts/deploy-remote.sh --host root@<host> --rollback-to <stamp>
 ```
 
-It backs up `.env`, `docker-compose.yml` and the `Caddyfile` before touching
-them, generates only the secrets the host is MISSING (an existing value is
-never rotated, because rotating invalidates issued tokens), and refuses to
-proceed when a variable the host sets looks like the old name of one the new
-compose wants. That last case is why the script exists: `ZEROSHIP_SCHEME` was
-renamed to `ZEROSHIP_ORIGIN_SCHEME`, the new name defaults to `http`, and
-taking the default silently rewrites every public URL and the OIDC issuer to
-`http://` -- compose renders, the stack boots, and the only symptom is a login
-loop with a clean log.
+### What it snapshots
+
+Before the first mutation it snapshots every input a deploy touches, all under
+one stamp:
+
+```
+compose/.env   compose/docker-compose.yml   ops/Caddyfile   ops/zeroship.toml
+secrets.tar    (a tar -cpP of the whole ZEROSHIP_SECRETS_DIR)
+```
+
+`--rollback` restores a COMPLETE generation or refuses. It never assembles one
+member from one stamp and another from a different stamp: that is how a `.env`
+from one moment ends up against a compose file from another, which is the
+silent mis-render the whole script exists to prevent. `--list-backups` shows
+which generations are complete; `--rollback-to <stamp>` names one explicitly.
+
+Restoring the secrets archive never DELETES a file. A secret created after the
+snapshot is left in place, because an inert extra file is cheaper than losing
+key material something has already started signing with.
+
+### What it refuses, and why each refusal exists
+
+Every one of these is a failure that happened, not a hypothetical:
+
+- **A renamed variable.** `ZEROSHIP_SCHEME` became `ZEROSHIP_ORIGIN_SCHEME`,
+  the new name defaults to `http`, and taking the default silently rewrites
+  every public URL and the OIDC issuer to `http://` -- compose renders, the
+  stack boots, and the only symptom is a login loop with a clean log.
+- **A renamed GENERATED secret.** The same shape, one step worse. Provisioning
+  keeps a value only under the name it already has, so a renamed generated
+  secret is created fresh and the old one is orphaned. A new signing key
+  invalidates every issued token; a new `ZEROSHIP_CONTROL_MASTER_KEY` means
+  existing encrypted data can never be decrypted.
+- **A missing secret FILE.** The compose file hands each binary an absolute
+  path under `/etc/zeroship/secrets`. The script reads that list out of the
+  compose file it is about to ship and requires every one to exist and be
+  non-empty after provisioning.
+- **A configuration no server accepts.** After the sync and before the roll it
+  runs `--check-config` for control, migrated, gateway, worker and auth against
+  the new image, the new environment and the mounted overlay. This is `nginx -t`
+  parity: `docker compose config -q` proves the YAML renders, which says nothing
+  about whether the binaries accept it. A host overlay carrying a field the new
+  servers deleted renders perfectly and then makes all five exit at parse time.
+  If any server refuses, nothing is restarted and the old stack keeps serving.
+
+### What provisioning does
+
+It runs the DEPLOYED IMAGE's own `zeroship dev init` against the host's
+secrets directory and `.env`. That is deliberate: the provisioner owns both the
+env-variable list and the secret-file list, and running the copy inside the
+image makes it impossible for the script to describe a different version of the
+platform than the binaries do. It is additive -- existing material is validated
+and kept byte-for-byte, never rotated -- and it refuses rather than overwriting
+when existing material disagrees with itself.
 
 `--image <ref>` pins an existing tag instead of building, for redeploying a
 known-good image or rolling back to a prior one.
