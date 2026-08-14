@@ -20,6 +20,7 @@ mod auth;
 mod dev;
 mod migrate;
 mod parent_death;
+mod project_config;
 mod secrets;
 
 zeroship_core::declare_env_consumer!(
@@ -53,6 +54,7 @@ fn main() {
         "serve" => cmd_serve(&args),
         "deploy" => cmd_deploy(&args),
         "migrate" => exit_on_error("migrate", migrate::cmd_migrate(&args)),
+        "config" => exit_on_error("config", project_config::cmd_config(&args)),
         "login" => exit_on_error("login", auth::cmd_login(&args)),
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
@@ -350,28 +352,27 @@ fn cmd_serve(args: &[String]) {
 // A raw `.js` deploy with database tables needs committed migrations plus the
 // generated descriptor before it can install typed `env.db`.
 fn cmd_deploy(args: &[String]) {
-    let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>] [--no-create]",
-    );
     // Before ANY flag is read, so a typo is reported as a typo rather than as
     // the downstream symptom of its default. Mirrors cmd_serve.
     if let Err(e) = check_unknown_deploy_flags(args) {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     }
-    let app = flag_str(args, "--app=").expect("--app=<name> is required");
-    let control_url = flag_str(args, "--control=")
-        .or_else(|| {
-            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
-        })
-        .unwrap_or_else(|| "http://localhost:9090".into());
+    let (config, resolved, app, control_url, input) =
+        deploy_target(args).unwrap_or_else(|e| {
+            eprintln!("zeroship deploy: {e}");
+            std::process::exit(1);
+        });
     let token = resolve_bearer_token(args).unwrap_or_else(|e| {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     });
     let auto_create = deploy_auto_create(args);
 
-    let input_path = PathBuf::from(input);
+    project_config::print_provenance("deploy", &[("app", &app), ("control", &control_url)]);
+    let (app, control_url) = (app.value, control_url.value);
+
+    let input_path = PathBuf::from(&input);
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", input_path.display());
         eprintln!("Run `vite build` (with @zeroship/vite-plugin) to produce a .zship archive.");
@@ -389,17 +390,111 @@ fn cmd_deploy(args: &[String]) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id);
+                record_created_app(config.as_ref(), &created.id);
             }
             eprintln!("Deployed successfully!");
             if let Some(hash) = outcome.deploy_hash {
                 eprintln!("  deploy_hash: {hash}");
             }
-            print_migrate_reminder(&app, &control_url);
+            print_migrate_reminder(&app, &control_url, resolved.as_ref());
         }
         Err(e) => {
             eprintln!("zeroship deploy: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+type DeployTarget = (
+    Option<project_config::ProjectConfig>,
+    Option<project_config::Resolved>,
+    project_config::Sourced,
+    project_config::Sourced,
+    String,
+);
+
+/// Resolve the deploy target and the artifact to upload.
+///
+/// The positional `.zship` path becomes OPTIONAL here: with a config file the
+/// packer's own output path is already written down, so `zeroship deploy` with
+/// zero arguments is the whole point. Without one, nothing changes.
+fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let file = project_config::locate(args, &cwd)?;
+    let config = file
+        .as_deref()
+        .map(project_config::ProjectConfig::load)
+        .transpose()?;
+    let resolved = match (&config, flag_str(args, "--env=")) {
+        (Some(cfg), env) => Some(cfg.resolve(env.as_deref())?),
+        (None, Some(env)) => {
+            return Err(format!(
+                "--env={env} needs a {} in this directory to read the environment from",
+                project_config::CONFIG_FILENAME
+            ))
+        }
+        (None, None) => None,
+    };
+
+    let app = project_config::resolve_value(args, "--app", None, None, resolved.as_ref(), "app", None)?;
+    let control_url = project_config::resolve_value(
+        args,
+        "--control",
+        Some("ZEROSHIP_CONTROL_URL"),
+        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
+        resolved.as_ref(),
+        "control",
+        Some("http://localhost:9090"),
+    )?;
+
+    let input = match args.get(2).filter(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
+        None => match resolved.as_ref() {
+            Some(cfg) => cfg.require("build.output")?.to_string(),
+            None => {
+                return Err(
+                    "Usage: zeroship deploy <path-to-.zship> --app=<name> \
+                     [--control=<url>] [--token=<PAT>] [--no-create]\n\
+                     With a zeroship.jsonc the path, app and control all come from the file \
+                     and `zeroship deploy` takes no arguments."
+                        .to_string(),
+                )
+            }
+        },
+    };
+    Ok((config, resolved, app, control_url, input))
+}
+
+/// Put the freshly minted app id where the next command will find it.
+///
+/// WRITEBACK IS DELIBERATELY TINY (proposal 5.2): one field, one code path, a
+/// splice rather than a re-serialise. Not `control` - a `--control=` typo
+/// becoming permanent is worse than typing it twice. Not on a normal deploy -
+/// if `app` already resolved, the file is never opened for writing.
+///
+/// When the member is absent the CLI REFUSES to insert it and prints the line
+/// to paste. Inserting into arbitrary JSONC means guessing which comment the
+/// new member belongs under and at what indentation, which is where
+/// round-trip libraries get ugly; a splice is provably byte-safe and a printed
+/// line is honest about the rest.
+fn record_created_app(config: Option<&project_config::ProjectConfig>, id: &str) {
+    let Some(config) = config else {
+        eprintln!("  record it with --app={id} on the next command, or in a {} (see docs/reference/project-config.md)",
+            project_config::CONFIG_FILENAME);
+        return;
+    };
+    match config.write_app(id) {
+        Ok(project_config::WriteOutcome::Spliced) => {
+            eprintln!("  wrote app id into {}", config.path.display());
+        }
+        Ok(project_config::WriteOutcome::PrintInstead) => {
+            eprintln!(
+                "  add this to {} so the next command finds it:\n    \"app\": \"{id}\",",
+                config.path.display()
+            );
+        }
+        Err(e) => eprintln!("  could not record the app id ({e}); add it by hand: \"app\": \"{id}\","),
     }
 }
 
@@ -419,8 +514,18 @@ fn cmd_deploy(args: &[String]) {
 /// That is the right place for it and it is not built. This is the cheap half,
 /// and it is here because the expensive half not existing is what let a deploy
 /// answer 200 over an app that could not serve a single database call.
-fn print_migrate_reminder(app: &str, control_url: &str) {
-    let ir = PathBuf::from(migrate::DEFAULT_IR_PATH);
+fn print_migrate_reminder(
+    app: &str,
+    control_url: &str,
+    resolved: Option<&project_config::Resolved>,
+) {
+    // The reminder now reads the SAME `migrations.out` the build wrote to.
+    // Before this it read a hardcoded const, so a project that moved its
+    // generated dir got silence from the one hint it had.
+    let Some(out) = resolved.and_then(|r| r.str("migrations.out")) else {
+        return;
+    };
+    let ir = PathBuf::from(out).join(migrate::IR_FILENAME);
     if !ir.is_file() {
         return;
     }
@@ -864,7 +969,14 @@ pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
 /// checks shipped deploy instructions (`tests/deploy_instructions_gate.sh`)
 /// already reads THAT - so if this list ever drifts, it should drift against
 /// the parser, not against the prose.
-const DEPLOY_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token", "--no-create"];
+const DEPLOY_KNOWN_FLAGS: &[&str] = &[
+    "--app",
+    "--control",
+    "--token",
+    "--no-create",
+    "--config",
+    "--env",
+];
 
 /// Return `Err` if any `--flag` argument in `args[3..]` is not a known `deploy`
 /// flag. Positional args (no leading `--`) are left unchecked.
@@ -875,8 +987,11 @@ const DEPLOY_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token", "--no-cre
 /// `--token` are equals-only and `--no-create` takes no value - so skipping a
 /// token after a bare flag would swallow whatever followed `--no-create`.
 pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> {
-    // args[0] = binary, args[1] = "deploy", args[2] = <path>; flags start at 3.
-    for arg in args.iter().skip(3) {
+    // args[0] = binary, args[1] = "deploy", args[2] = the OPTIONAL <path>.
+    // Scanning from 2 rather than 3 is what makes `zeroship deploy --app=x`
+    // (no positional, path from the config file) still get its typo check;
+    // positional args are skipped by the `--` test below either way.
+    for arg in args.iter().skip(2) {
         if !arg.starts_with("--") {
             continue;
         }

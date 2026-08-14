@@ -26,6 +26,7 @@ use std::process::{Command, Stdio};
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
+use crate::project_config;
 use crate::{flag_str, resolve_bearer_token};
 
 const KEY_RULE: &str = "KEY must be 1-64 bytes, start with an ASCII uppercase letter, and contain only ASCII uppercase letters, digits, or underscores";
@@ -136,21 +137,82 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
+/// Known flags accepted by `secret` and `var` (bare names, no `=`).
+///
+/// THESE TWO COMMANDS HAD NO GATE AT ALL until this change, and the gap became
+/// load-bearing the moment they started reading a config file: an unrecognised
+/// `--contrl=` was silently ignored, which used to mean "fall back to
+/// localhost" and would now mean "silently use whatever the file says". Adding
+/// a config layer to a command that swallows typos makes a wrong target MORE
+/// reachable, not less (proposal 2.4), so the gate lands with the layer.
+const ENV_KNOWN_FLAGS: &[&str] = &[
+    "--app", "--control", "--token", "--expose", "--config", "--env",
+];
+
+fn check_unknown_flags(resource: &str, args: &[String]) -> Result<(), String> {
+    // args[0] = binary, args[1] = secret|var, args[2] = subcommand.
+    for arg in args.iter().skip(3) {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        let name = match arg.find('=') {
+            Some(i) => &arg[..i],
+            None => arg.as_str(),
+        };
+        if !ENV_KNOWN_FLAGS.contains(&name) {
+            return Err(format!(
+                "unknown flag `{name}`; it would have been ignored in silence. \
+                 Known flags: {}. Run `zeroship {}` with no subcommand for usage.",
+                ENV_KNOWN_FLAGS.join(" "),
+                if resource == "secrets" { "secret" } else { "var" }
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn common(resource: &str, args: &[String]) -> (String, String, String) {
-    let app = flag_str(args, "--app=").expect("--app=<uuid> is required");
-    let control_url = flag_str(args, "--control=")
-        .or_else(|| {
-            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
-        })
-        .unwrap_or_else(|| "http://localhost:9090".into());
-    let token = resolve_bearer_token(args).unwrap_or_else(|e| {
-        eprintln!(
-            "zeroship {}: {e}",
-            if resource == "secrets" { "secret" } else { "var" }
-        );
+    let label = if resource == "secrets" { "secret" } else { "var" };
+    let die = |e: String| -> ! {
+        eprintln!("zeroship {label}: {e}");
         std::process::exit(1);
-    });
-    (app, control_url, token)
+    };
+    if let Err(e) = check_unknown_flags(resource, args) {
+        die(e);
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|e| die(format!("cannot read the working directory: {e}")));
+    let file = project_config::locate(args, &cwd).unwrap_or_else(|e| die(e));
+    let config = file
+        .as_deref()
+        .map(project_config::ProjectConfig::load)
+        .transpose()
+        .unwrap_or_else(|e| die(e));
+    let resolved = match (&config, flag_str(args, "--env=")) {
+        (Some(cfg), env) => Some(cfg.resolve(env.as_deref()).unwrap_or_else(|e| die(e))),
+        (None, Some(env)) => die(format!(
+            "--env={env} needs a {} in this directory to read the environment from",
+            project_config::CONFIG_FILENAME
+        )),
+        (None, None) => None,
+    };
+
+    let app = project_config::resolve_value(args, "--app", None, None, resolved.as_ref(), "app", None)
+        .unwrap_or_else(|e| die(e));
+    let control_url = project_config::resolve_value(
+        args,
+        "--control",
+        Some("ZEROSHIP_CONTROL_URL"),
+        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
+        resolved.as_ref(),
+        "control",
+        Some("http://localhost:9090"),
+    )
+    .unwrap_or_else(|e| die(e));
+    let token = resolve_bearer_token(args).unwrap_or_else(|e| die(e));
+
+    project_config::print_provenance(label, &[("app", &app), ("control", &control_url)]);
+    (app.value, control_url.value, token)
 }
 
 fn cmd_set(resource: &str, args: &[String]) {

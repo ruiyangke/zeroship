@@ -134,7 +134,7 @@ crates/
 ├── worker/           V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-+-- cli/              CLI: serve, deploy, migrate, login, logout, whoami, secret, var, dev
++-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
 ```
 
