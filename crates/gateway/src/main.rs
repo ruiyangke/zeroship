@@ -28,6 +28,16 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// Operator-facing spelling of the worker dispatch key.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
+/// Operator-facing spelling of the gateway stash signing key. Auth reads a
+/// DIFFERENT variable behind the same validator, which is why the validator
+/// takes the name as a parameter rather than spelling one itself. Derived from
+/// `#[config(name = "gateway.stash_signing_key")]` in `config.rs`.
+const STASH_SIGNING_KEY_LABEL: &str =
+    "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY / --stash-signing-key-file";
+/// Operator-facing spelling of the shared pairwise salt, whose identity is
+/// declared in `crates/config-macros/src/shared.rs` as `canonical:
+/// "pairwise_salt"`.
+const PAIRWISE_SALT_LABEL: &str = "ZEROSHIP_PAIRWISE_SALT / --pairwise-salt-file";
 /// Operator-facing spelling of the platform broker master secret file.
 /// Substituted into the shared validator's message, which names auth's.
 const BROKER_SECRET_LABEL: &str =
@@ -66,7 +76,10 @@ fn validate_gateway_secrets(settings: &GateSettings) -> Result<(), (&'static str
     })
     .map_err(|message| ("gateway: refusing to start without control key", message))?;
 
-    validate_secret_material(&settings.stash_signing_key, validate_stash_key).map_err(|message| {
+    validate_secret_material(&settings.stash_signing_key, |value| {
+        validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
+    })
+    .map_err(|message| {
         (
             "gateway: refusing to start with unsafe stash signing key",
             message,
@@ -75,14 +88,22 @@ fn validate_gateway_secrets(settings: &GateSettings) -> Result<(), (&'static str
 
     // A missing or weak salt aborts boot: the per-app `pws_` anchor must be a
     // strong, stable, operator-set secret.
-    validate_secret_material(&settings.pairwise_salt, validate_pairwise_salt)
-        .map_err(|message| ("gateway: refusing to start with unsafe pairwise salt", message))?;
+    validate_secret_material(&settings.pairwise_salt, |value| {
+        validate_pairwise_salt(PAIRWISE_SALT_LABEL, value)
+    })
+    .map_err(|message| ("gateway: refusing to start with unsafe pairwise salt", message))?;
 
-    // S3 - symmetric WORKER_KEY enforcement. The worker refuses a non-loopback
-    // bind without a key; the gateway is the caller of those worker admin
-    // endpoints, so it must fail just as hard rather than shipping
+    // S3 - the gateway is the caller of the worker admin endpoints, so it must
+    // refuse to start without a worker key rather than ship
     // `Authorization: Bearer ` (empty) into a cluster that believes dispatch is
     // authenticated.
+    //
+    // NOT symmetric with the worker, which this comment claimed until
+    // 2026-08-13: the worker and control run `validate_worker_key` and enforce a
+    // >=32-byte floor, while the gateway only requires non-empty. A short shared
+    // key is therefore refused on three binaries and accepted here. Presence is
+    // what closes the empty-bearer hole; the strength floor is enforced by the
+    // peers that also key the ZeroShip-User HMAC with it.
     validate_secret_material(&settings.worker_key, |value| {
         require_nonempty(WORKER_KEY_LABEL, value)
     })
@@ -354,7 +375,7 @@ fn main() -> std::io::Result<()> {
     // serializes gateway DB work.
     let db: Option<zeroship_gateway::db::DbConfig> = if pg_dsn.is_empty() {
         tracing::warn!(
-            "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
+            "ZEROSHIP_GATEWAY_DATABASE_URL / --database-url-file not set; gateway session validation disabled (all auth-gated requests will 401)"
         );
         None
     } else {
@@ -800,14 +821,17 @@ mod tests {
 
     #[test]
     fn gateway_stash_key_rejects_missing() {
-        let err = validate_stash_key("").unwrap_err();
+        let err = validate_stash_key(STASH_SIGNING_KEY_LABEL, "").unwrap_err();
         assert!(err.contains("required"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_rejects_missing() {
         let err = require_nonempty(CONTROL_KEY_LABEL, "").unwrap_err();
-        assert!(err.contains("CONTROL_KEY"), "{err}");
+        // The FULL canonical name. The bare `CONTROL_KEY` this asserted before
+        // is a SUBSTRING of the live one, so it passed while naming a variable
+        // the gateway does not read.
+        assert!(err.contains("ZEROSHIP_CONTROL_KEY"), "{err}");
     }
 
     #[test]
@@ -840,14 +864,14 @@ mod tests {
 
     #[test]
     fn gateway_stash_key_rejects_short() {
-        let err = validate_stash_key("short").unwrap_err();
+        let err = validate_stash_key(STASH_SIGNING_KEY_LABEL, "short").unwrap_err();
         assert!(err.contains("too short"), "{err}");
     }
 
     #[test]
     fn gateway_stash_key_accepts_strong() {
         let key = "0123456789abcdef0123456789abcdef";
-        assert!(validate_stash_key(key).is_ok());
+        assert!(validate_stash_key(STASH_SIGNING_KEY_LABEL, key).is_ok());
     }
 
     // --- Secret<T> conversion: the guards still run on the resolved material ---
@@ -949,7 +973,10 @@ mod tests {
             "--check-config must not have read the file"
         );
         assert!(
-            validate_secret_material(&settings.stash_signing_key, validate_stash_key).is_ok(),
+            validate_secret_material(&settings.stash_signing_key, |value| {
+                validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
+            })
+            .is_ok(),
             "an unread secret must not be judged"
         );
 

@@ -13,6 +13,14 @@ use zeroship_core::config::{
 };
 use zeroship_core::oidc_verify::JwksCache;
 
+/// Operator-facing spelling of auth's stash signing key.
+///
+/// The gateway reads a DIFFERENT variable behind the same validator
+/// (`gateway.stash_signing_key`), which is why the validator takes the name as
+/// a parameter rather than spelling one itself. Derived from the declaration at
+/// `crates/auth/src/config.rs` (`#[config(name = "auth.stash_signing_key")]`).
+const STASH_SIGNING_KEY_LABEL: &str = "ZEROSHIP_AUTH_STASH_SIGNING_KEY / --stash-signing-key-file";
+
 use zeroship_auth::config::{AuthCli, AuthConfig, AuthSettings};
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
@@ -307,7 +315,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Propagates the first validator's message unchanged.
 fn validate_startup_secrets(cfg: &AuthConfig) -> Result<(), String> {
-    validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key)?;
+    validate_secret_material(&cfg.settings.stash_signing_key, |value| {
+        validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
+    })?;
     // TOTP at-rest key (ISS-11). Decodes (hex or base64url) to >=32 bytes,
     // identical to the bundle/master key posture.
     validate_secret_material(&cfg.settings.totp_enc_key, |material| {
@@ -425,7 +435,14 @@ mod tests {
         // Nothing supplied it: the validator runs on "" and says so itself.
         cfg.settings.stash_signing_key = Secret::absent();
         let message = validate_startup_secrets(&cfg).expect_err("an unset stash key is rejected");
-        assert!(message.contains("STASH_SIGNING_KEY"), "{message}");
+        // The FULL canonical name, not the bare `STASH_SIGNING_KEY` this
+        // asserted before: that spelling is a SUBSTRING of the live name, so it
+        // kept passing while naming a variable auth does not read, and no
+        // rename could ever break it.
+        assert!(
+            message.contains("ZEROSHIP_AUTH_STASH_SIGNING_KEY"),
+            "{message}"
+        );
         assert!(message.contains("required"), "{message}");
 
         // Supplied but too short: a DIFFERENT message, so the guard is reading

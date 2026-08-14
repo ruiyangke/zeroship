@@ -138,7 +138,7 @@ impl fmt::Debug for SupabaseVerification {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SupabaseConfigError {
-    #[error("SUPABASE_URL is required")]
+    #[error("ZEROSHIP_AUTH_SUPABASE_URL is required")]
     EmptyUrl,
 
     #[error("configure exactly one Supabase verification mode; both HS256 and JWKS were set")]
@@ -147,13 +147,13 @@ pub enum SupabaseConfigError {
     #[error("configure exactly one Supabase verification mode; neither HS256 nor JWKS was set")]
     NoVerificationMode,
 
-    #[error("SUPABASE_JWT_ISSUER is required")]
+    #[error("ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER is required")]
     EmptyIssuer,
 
-    #[error("SUPABASE_JWT_SECRET must be non-empty and at least 32 bytes for HS256 verification")]
+    #[error("ZEROSHIP_AUTH_SUPABASE_JWT_SECRET must be non-empty and at least 32 bytes for HS256 verification")]
     EmptyJwtSecret,
 
-    #[error("SUPABASE_JWKS_URL is required for asymmetric verification")]
+    #[error("ZEROSHIP_CONTROL_SUPABASE_JWKS_URL is required for asymmetric verification")]
     EmptyJwksUrl,
 }
 

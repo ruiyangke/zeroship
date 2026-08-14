@@ -315,9 +315,9 @@ impl WalConsumer {
                 code: "not_provisioned",
                 message: "wal consumer: db_url not configured".to_string(),
                 hint: Some(
-                    "replication requires a connected runtime context — set \
-                     DATABASE_URL or pass --db-url so the runtime can mint a \
-                     replication=database connection"
+                    "replication requires a connected runtime context; set the worker's \
+                     ZEROSHIP_WORKER_DATABASE_URL (or --database-url-file) so the \
+                     runtime can mint a replication=database connection"
                         .to_string(),
                 ),
             });

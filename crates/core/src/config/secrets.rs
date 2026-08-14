@@ -46,19 +46,26 @@ pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
 /// The single stash validator across every binary: non-empty, raw UTF-8 length
 /// of at least 32 bytes.
 ///
+/// `label` is the caller's operator-facing spelling. It is a PARAMETER because
+/// this validator is shared by two binaries that read two DIFFERENT variables -
+/// gateway reads `gateway.stash_signing_key` and auth reads
+/// `auth.stash_signing_key` - so no single name baked in here can be right for
+/// both. It previously interpolated a bare `STASH_SIGNING_KEY`, which was right
+/// for neither and named nothing a binary reads.
+///
 /// # Errors
 ///
 /// Returns an explanatory error when `value` is a known public development
 /// value, empty, or shorter than 32 bytes.
-pub fn validate_stash_key(value: &str) -> Result<(), String> {
-    reject_known_weak("STASH_SIGNING_KEY", value, KNOWN_WEAK_STASH_KEYS)?;
+pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
+    reject_known_weak(label, value, KNOWN_WEAK_STASH_KEYS)?;
     if value.is_empty() {
-        return Err("STASH_SIGNING_KEY is required; set a strong (>=32 byte) value".to_owned());
+        return Err(format!("{label} is required; set a strong (>=32 byte) value"));
     }
 
     if value.len() < 32 {
         return Err(format!(
-            "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum 32 bytes",
             value.len()
         ));
     }
@@ -72,23 +79,28 @@ pub fn validate_stash_key(value: &str) -> Result<(), String> {
 /// stresses the never-rotate contract so an operator does not treat it like a
 /// rotatable operational key.
 ///
+/// `label` is the caller's operator-facing spelling, for the same reason as
+/// [`validate_stash_key`]: this module must not bake in a name, because a name
+/// baked in here is invisible to the config contract and rots the moment the
+/// declaration is renamed. The bare `PAIRWISE_SALT` it used to interpolate had
+/// already stopped being settable.
+///
 /// # Errors
 ///
 /// Returns an explanatory error when `value` is a known public development
 /// value, empty, or shorter than 32 bytes.
-pub fn validate_pairwise_salt(value: &str) -> Result<(), String> {
-    reject_known_weak("PAIRWISE_SALT", value, KNOWN_WEAK_PAIRWISE_SALTS)?;
+pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
+    reject_known_weak(label, value, KNOWN_WEAK_PAIRWISE_SALTS)?;
     if value.is_empty() {
-        return Err(
-            "PAIRWISE_SALT is required; set a strong (>=32 byte) value \
+        return Err(format!(
+            "{label} is required; set a strong (>=32 byte) value \
              (identical on gateway + control, never rotated without a migration)"
-                .to_owned(),
-        );
+        ));
     }
 
     if value.len() < 32 {
         return Err(format!(
-            "PAIRWISE_SALT is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum 32 bytes",
             value.len()
         ));
     }
@@ -104,19 +116,24 @@ pub fn validate_pairwise_salt(value: &str) -> Result<(), String> {
 /// HMAC forgeable, so it carries the same strength posture as the stash key and
 /// pairwise salt: non-empty, raw UTF-8 length of at least 32 bytes.
 ///
+/// `label` is the caller's operator-facing spelling, for the same reason as
+/// [`validate_stash_key`]. The bare `WORKER_KEY` it used to interpolate is not
+/// settable: the identity is declared in `crates/config-macros/src/shared.rs`
+/// and projects to `ZEROSHIP_WORKER_KEY`.
+///
 /// # Errors
 ///
 /// Returns an explanatory error when `value` is a known public development
 /// value, empty, or shorter than 32 bytes.
-pub fn validate_worker_key(value: &str) -> Result<(), String> {
-    reject_known_weak("WORKER_KEY", value, KNOWN_WEAK_WORKER_KEYS)?;
+pub fn validate_worker_key(label: &str, value: &str) -> Result<(), String> {
+    reject_known_weak(label, value, KNOWN_WEAK_WORKER_KEYS)?;
     if value.is_empty() {
-        return Err("WORKER_KEY is required; set a strong (>=32 byte) value".to_owned());
+        return Err(format!("{label} is required; set a strong (>=32 byte) value"));
     }
 
     if value.len() < 32 {
         return Err(format!(
-            "WORKER_KEY is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum 32 bytes",
             value.len()
         ));
     }
@@ -394,30 +411,97 @@ mod tests {
         require_nonempty("CONTROL_KEY / --control-key", "secret").expect("present");
     }
 
+    /// A label no declaration could ever produce, so a message that carries it
+    /// can only have got it from the caller.
+    const SENTINEL: &str = "ZEROSHIP_SENTINEL_LABEL";
+
     // S4: one unified stash validator. Empty and short keys are rejected and
     // values of at least 32 bytes are accepted.
     #[test]
     fn validate_stash_key_unified() {
         for weak in KNOWN_WEAK_STASH_KEYS {
             assert!(
-                validate_stash_key(weak)
+                validate_stash_key(SENTINEL, weak)
                     .expect_err("known public stash key")
                     .contains("known public")
             );
         }
 
         // empty rejected
-        assert!(validate_stash_key("")
+        assert!(validate_stash_key(SENTINEL, "")
             .expect_err("empty key")
             .contains("required"));
 
         // short (<32) rejected
-        assert!(validate_stash_key("short")
+        assert!(validate_stash_key(SENTINEL, "short")
             .expect_err("short key")
             .contains("too short"));
 
         // exactly 32 ok
-        validate_stash_key("0123456789abcdef0123456789abcdef").expect("strong key");
+        validate_stash_key(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong key");
+    }
+
+    /// THE DEFECT. Three validators interpolated a bare `STASH_SIGNING_KEY`,
+    /// `PAIRWISE_SALT` and `WORKER_KEY` into their refusals. None of those is a
+    /// variable any binary reads: the shared identities in
+    /// `crates/config-macros/src/shared.rs` project to `ZEROSHIP_WORKER_KEY`
+    /// and `ZEROSHIP_PAIRWISE_SALT`, and the stash key is not shared at all -
+    /// it is `gateway.stash_signing_key` and `auth.stash_signing_key`, two
+    /// different variables behind one validator. An operator who followed any
+    /// of these refusals set a variable the binary does not read.
+    ///
+    /// The fix is that this module names NOTHING. Every refusal carries only
+    /// the caller's label, so the operator-facing spelling lives next to the
+    /// declaration it must agree with, where each binary's own diagnostic test
+    /// checks it against the set of names that binary really reads.
+    #[test]
+    fn every_refusal_names_the_callers_label_and_invents_no_name_of_its_own() {
+        // Drive every message-producing arm of every labelled validator.
+        let messages: Vec<String> = [
+            validate_stash_key(SENTINEL, KNOWN_WEAK_STASH_KEYS[0]),
+            validate_stash_key(SENTINEL, ""),
+            validate_stash_key(SENTINEL, "short"),
+            validate_pairwise_salt(SENTINEL, KNOWN_WEAK_PAIRWISE_SALTS[0]),
+            validate_pairwise_salt(SENTINEL, ""),
+            validate_pairwise_salt(SENTINEL, "short"),
+            validate_worker_key(SENTINEL, KNOWN_WEAK_WORKER_KEYS[0]),
+            validate_worker_key(SENTINEL, ""),
+            validate_worker_key(SENTINEL, "short"),
+            validate_master_key_material(SENTINEL, KNOWN_WEAK_MASTER_KEYS[0]),
+            validate_master_key_material(SENTINEL, "YWJj"),
+            validate_master_key_material(SENTINEL, "not!base64!"),
+            require_nonempty(SENTINEL, ""),
+        ]
+        .into_iter()
+        .map(|result| result.expect_err("each input above must be refused"))
+        .collect();
+
+        for message in &messages {
+            let tokens = crate::config::env_like_tokens(message);
+            assert_eq!(
+                tokens,
+                vec![SENTINEL.to_owned()],
+                "refusal {message:?} must name the caller's label and nothing else; \
+                 a name spelled inside this module is invisible to the config \
+                 contract and rots when the declaration is renamed"
+            );
+        }
+
+        // The one-variable partner. Same scanner, same messages, only the label
+        // changes - and a DIFFERENT label must show through, so the assertion
+        // above cannot be passing because the scanner sees nothing or because
+        // the messages are constant.
+        let other = "ZEROSHIP_OTHER_LABEL";
+        assert_eq!(
+            crate::config::env_like_tokens(
+                &validate_worker_key(other, "short").expect_err("short key")
+            ),
+            vec![other.to_owned()]
+        );
+
+        // Does NOT cover whether the label a given binary passes is a name that
+        // binary actually reads. That is per-binary wiring, asserted by each
+        // binary's own `every_startup_diagnostic_names_a_variable_*_reads` test.
     }
 
     /// MAJOR fix (pairwise_salt secret lifecycle) — the dedicated pairwise-salt
@@ -427,20 +511,20 @@ mod tests {
     fn validate_pairwise_salt_enforces_strength() {
         for weak in KNOWN_WEAK_PAIRWISE_SALTS {
             assert!(
-                validate_pairwise_salt(weak)
+                validate_pairwise_salt(SENTINEL, weak)
                     .expect_err("known public pairwise salt")
                     .contains("known public")
             );
         }
 
         // empty rejected, short rejected, exactly 32 ok
-        assert!(validate_pairwise_salt("")
+        assert!(validate_pairwise_salt(SENTINEL, "")
             .expect_err("empty")
             .contains("required"));
-        assert!(validate_pairwise_salt("short")
+        assert!(validate_pairwise_salt(SENTINEL, "short")
             .expect_err("short")
             .contains("too short"));
-        validate_pairwise_salt("0123456789abcdef0123456789abcdef").expect("strong salt");
+        validate_pairwise_salt(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong salt");
     }
 
     // L6: the worker_key gates BOTH the dispatch bearer check and the
@@ -452,7 +536,7 @@ mod tests {
     fn validate_worker_key_enforces_min_len() {
         for weak in KNOWN_WEAK_WORKER_KEYS {
             assert!(
-                validate_worker_key(weak)
+                validate_worker_key(SENTINEL, weak)
                     .expect_err("known public worker key")
                     .contains("known public")
             );
@@ -460,17 +544,17 @@ mod tests {
 
         // empty rejected (an empty key would HMAC-verify against a zero-length
         // key any party can compute)
-        assert!(validate_worker_key("")
+        assert!(validate_worker_key(SENTINEL, "")
             .expect_err("empty key")
             .contains("required"));
 
         // short (<32) rejected
-        assert!(validate_worker_key("short")
+        assert!(validate_worker_key(SENTINEL, "short")
             .expect_err("short key")
             .contains("too short"));
 
         // exactly 32 ok
-        validate_worker_key("0123456789abcdef0123456789abcdef").expect("strong key");
+        validate_worker_key(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong key");
     }
 
     #[test]

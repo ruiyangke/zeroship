@@ -134,7 +134,7 @@ pub async fn onboard(
     }
 
     if state.stripe_secret_key.expose_secret().is_empty() {
-        tracing::error!("stripe: onboard called with no STRIPE_SECRET_KEY configured");
+        tracing::error!("stripe: onboard called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
         return err_json(500, "stripe not configured");
     }
     let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
@@ -233,7 +233,7 @@ pub async fn billing_setup(
     }
 
     if state.stripe_secret_key.is_empty() {
-        tracing::error!("stripe: billing_setup called with no STRIPE_SECRET_KEY configured");
+        tracing::error!("stripe: billing_setup called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
         return err_json(500, "stripe not configured");
     }
     let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
@@ -340,7 +340,7 @@ pub async fn callback(
     }
 
     if state.stripe_secret_key.expose_secret().is_empty() {
-        tracing::error!("stripe: callback called with no STRIPE_SECRET_KEY configured");
+        tracing::error!("stripe: callback called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
         return err_json(500, "stripe not configured");
     }
 
@@ -485,7 +485,7 @@ pub async fn connect_checkout(
         return err_json(400, "cart_id is required");
     }
     if state.stripe_secret_key.is_empty() {
-        tracing::error!("stripe: connect_checkout called with no STRIPE_SECRET_KEY configured");
+        tracing::error!("stripe: connect_checkout called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
         return err_json(500, "stripe not configured");
     }
 

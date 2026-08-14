@@ -27,6 +27,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Operator-facing spelling of the control key, for a diagnostic that has to
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+/// Operator-facing spelling of the worker dispatch key. The shared identity in
+/// `crates/config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
+/// this environment name; the flag comes from the same declaration.
+const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 
 /// Every secret-strength guard the worker applies, returning the log context and
 /// the validator's own message rather than exiting - so a test can drive the
@@ -54,10 +58,12 @@ fn validate_worker_secrets(
         )
     })?;
 
-    // WORKER_KEY authenticates dispatch and the ZeroShip-User HMAC, so every
+    // The worker key authenticates dispatch and the ZeroShip-User HMAC, so every
     // worker requires the same 32-byte floor regardless of bind address.
-    validate_secret_material(&settings.worker_key, validate_worker_key)
-        .map_err(|message| ("worker: refusing to start with unsafe WORKER_KEY", message))?;
+    validate_secret_material(&settings.worker_key, |value| {
+        validate_worker_key(WORKER_KEY_LABEL, value)
+    })
+    .map_err(|message| ("worker: refusing to start with unsafe worker key", message))?;
 
     Ok(())
 }
@@ -251,8 +257,8 @@ fn main() -> std::io::Result<()> {
     // empty string, which is not SQLite, so a dry run never false-positives.
     if worker_rejects_db_url(&db_url) {
         tracing::error!(
-            "worker: refusing to start with a SQLite DATABASE_URL — SQLite is the dev tier only \
-             (single-process `zeroship serve`); a multi-replica worker MUST use a postgres:// DSN"
+            "worker: refusing to start with a SQLite ZEROSHIP_WORKER_DATABASE_URL; SQLite is the dev tier \
+             only (single-process `zeroship serve`); a multi-replica worker MUST use a postgres:// DSN"
         );
         std::process::exit(1);
     }
@@ -790,7 +796,7 @@ mod tests {
         assert_eq!(settings.worker_key.source(), Some(SourceKind::CliFile));
         let (context, message) =
             validate_worker_secrets(&settings).expect_err("a short worker key must be rejected");
-        assert_eq!(context, "worker: refusing to start with unsafe WORKER_KEY");
+        assert_eq!(context, "worker: refusing to start with unsafe worker key");
         assert!(message.contains("too short"), "{message}");
 
         // 1b. The one-variable partner: same flags, a strong key at the path.
@@ -808,7 +814,7 @@ mod tests {
         assert!(!settings.worker_key.is_configured());
         let (context, message) =
             validate_worker_secrets(&settings).expect_err("an unset worker key must be rejected");
-        assert_eq!(context, "worker: refusing to start with unsafe WORKER_KEY");
+        assert_eq!(context, "worker: refusing to start with unsafe worker key");
         assert!(message.contains("required"), "{message}");
 
         // 3. The CONTROL key guard is a separate refusal with its own context,
@@ -846,7 +852,10 @@ mod tests {
             "--check-config must not have read the file"
         );
         assert!(
-            validate_secret_material(&dry.worker_key, validate_worker_key).is_ok(),
+            validate_secret_material(&dry.worker_key, |value| {
+                validate_worker_key(WORKER_KEY_LABEL, value)
+            })
+            .is_ok(),
             "an unread secret must not be judged"
         );
 
