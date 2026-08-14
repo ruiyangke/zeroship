@@ -36,6 +36,26 @@ use std::path::Path;
 /// The banner shape every template must use.
 const REQUIRED: [&str; 2] = [r#"role="alert""#, r#"id="form-error""#];
 
+/// Templates whose error is ABOUT a field the user just filled in, so the field
+/// must point back at the banner.
+///
+/// An announced banner alone leaves a screen-reader user hearing that something
+/// is wrong and then tabbing into a control that claims to be fine. Every form
+/// here failed a submission the user can retry in place; the ones deliberately
+/// absent are pages where the banner is about the page rather than an input:
+/// `me.html` (an action on another row), `logout.html`, `consent.html`,
+/// `device_supabase.html` (its status text is written by script, not rendered
+/// from `error`).
+const FIELD_ERROR_FORMS: [&str; 7] = [
+    "login.html",
+    "signup.html",
+    "forgot.html",
+    "reset.html",
+    "totp_challenge.html",
+    "link.html",
+    "device.html",
+];
+
 #[test]
 fn every_error_banner_is_an_addressable_alert() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/templates");
@@ -69,5 +89,40 @@ fn every_error_banner_is_an_addressable_alert() {
         "expected to scan at least 10 templates carrying an error banner, found {}: {checked:?}",
         checked.len()
     );
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// A form whose error is about one of its fields must say so on the field.
+///
+/// This is the half that was missed first time round: all eleven banners got
+/// `role="alert"`, but only four of the seven retryable forms wired their
+/// inputs to it, so 2FA, account-link and device-code failures announced a
+/// problem and then handed the user a control reporting no problem.
+///
+/// WHAT THIS DOES NOT CATCH: that the attributes are CONDITIONAL. A template
+/// hardcoding `aria-invalid="true"` passes here while telling every first-time
+/// visitor their untouched form is wrong. The render tests
+/// (`ui::login::tests::login_page_error_is_announced_and_describes_the_fields`)
+/// are what hold the conditional, because only a render can show the clean case.
+#[test]
+fn forms_whose_error_is_about_a_field_point_the_field_at_it() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/templates");
+    let mut offenders = Vec::new();
+
+    for name in FIELD_ERROR_FORMS {
+        let body = fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        // Guard the premise: these are listed BECAUSE they render an error
+        // banner. If one stops doing so, the entry is stale, not satisfied.
+        assert!(
+            body.contains(r#"class="error""#),
+            "{name} is listed as a field-error form but renders no error banner"
+        );
+        for needle in [r#"aria-invalid="true""#, r#"aria-describedby="form-error""#] {
+            if !body.contains(needle) {
+                offenders.push(format!("{name} is missing {needle}"));
+            }
+        }
+    }
+
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
