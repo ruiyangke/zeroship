@@ -14,6 +14,8 @@ import {
   type IssueResolution,
   type IssueStatus,
 } from "../../lib/workflow";
+import { invalidatedBy } from "../../lib/query-keys";
+import { useAppMutation } from "../../lib/queries";
 import { ResolutionBadge } from "../Badges";
 import { errorMessage } from "../rpc";
 import type { IssueDetail } from "../types";
@@ -23,14 +25,7 @@ const NON_DUPLICATE_RESOLUTIONS = ISSUE_RESOLUTIONS.filter(
   (r): r is NonDuplicateResolution => r !== "DUPLICATE",
 );
 
-export function StatusControl({
-  issue,
-  onUpdated,
-}: {
-  issue: IssueDetail["issue"];
-  onUpdated: (issue: IssueDetail["issue"]) => void;
-}) {
-  const [busy, setBusy] = useState(false);
+export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
   const [error, setError] = useState<string | null>(null);
   const [resolution, setResolution] = useState<NonDuplicateResolution>("FIXED");
   const [showResolve, setShowResolve] = useState(false);
@@ -41,17 +36,36 @@ export function StatusControl({
   const targets = currentStatus ? STATUS_TRANSITIONS[currentStatus] : [];
   const openTargets = targets.filter((t) => t !== "RESOLVED");
 
-  const run = async (action: () => IssueDetail["issue"] | Promise<IssueDetail["issue"]>) => {
-    setBusy(true);
+  const changeStatus = useAppMutation(
+    (status: IssueStatus) => changeIssueStatus({ id: issue.id, status }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const reopen = useAppMutation(
+    () => reopenIssue({ id: issue.id }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const resolve = useAppMutation(
+    (nextResolution: NonDuplicateResolution) =>
+      resolveIssue({ id: issue.id, resolution: nextResolution }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const markDuplicate = useAppMutation(
+    (duplicateOfId: string) => markIssueDuplicate({ id: issue.id, duplicateOfId }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy =
+    changeStatus.isPending || reopen.isPending || resolve.isPending || markDuplicate.isPending;
+
+  const run = async (action: () => Promise<unknown>) => {
     setError(null);
     try {
-      onUpdated(await action());
+      await action();
+      // Closing these forms is local UI state, so it stays here. The mutation
+      // owns refreshing the issue and every report derived from it.
       setShowResolve(false);
       setShowDuplicate(false);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -66,7 +80,7 @@ export function StatusControl({
             aria-label="Status"
             onValueChange={(next) => {
               if (!next || next === issue.status || !isIssueStatus(next)) return;
-              void run(() => changeIssueStatus({ id: issue.id, status: next }));
+              void run(() => changeStatus.mutateAsync(next));
             }}
           >
             {/* The current status is listed first so the control can show it,
@@ -102,7 +116,7 @@ export function StatusControl({
           </Button>
         ) : null}
         {currentStatus && !isOpenIssueStatus(currentStatus) ? (
-          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopenIssue({ id: issue.id }))}>
+          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopen.mutateAsync(undefined))}>
             Reopen
           </Button>
         ) : null}
@@ -129,7 +143,7 @@ export function StatusControl({
           </Field>
           <Button variant="filled" size="small"
             disabled={busy}
-            onClick={() => void run(() => resolveIssue({ id: issue.id, resolution }))}
+            onClick={() => void run(() => resolve.mutateAsync(resolution))}
           >
             Confirm resolve
           </Button>
@@ -148,7 +162,7 @@ export function StatusControl({
           </Field>
           <Button variant="filled" size="small"
             disabled={busy || !duplicateOf.trim()}
-            onClick={() => void run(() => markIssueDuplicate({ id: issue.id, duplicateOfId: duplicateOf.trim() }))}
+            onClick={() => void run(() => markDuplicate.mutateAsync(duplicateOf.trim()))}
           >
             Confirm duplicate
           </Button>

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Banner, Button, Card, Cluster, Input, Stack } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { getProduct, updateIssue } from "../api";
+import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
-import { useAppMutation, useInvalidate, useIssue, useProduct, useProducts } from "../lib/queries";
+import { useAppMutation, useIssue, useProduct, useProducts } from "../lib/queries";
 import { ErrorState, Loading } from "../components/StateViews";
 import { AttachmentsPanel } from "../components/issue-detail/AttachmentsPanel";
 import { CcPanel } from "../components/issue-detail/CcPanel";
@@ -16,7 +16,7 @@ import { VotesPanel } from "../components/issue-detail/VotesPanel";
 import { HistoryPanel } from "../components/issue-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/issue-detail/RelationsPanel";
 import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
-import { errorMessage, toPromise } from "../components/rpc";
+import { errorMessage } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
 
 type Tab = "details" | "history";
@@ -142,17 +142,6 @@ export function IssueDetailPage({
   // different key.
   const productQ = useProduct(productId);
   const productDetail = productQ.data ?? null;
-
-  /**
-   * The one refresh callback this page still hands down.
-   *
-   * Flags, votes and security are not migrated yet, so they still take an
-   * `onChanged`. It invalidates rather than refetching one query: setting a
-   * flag or casting a vote can move the issue's status, which the list and the
-   * report totals are derived from -- `issueChanged` names all three.
-   */
-  const invalidate = useInvalidate();
-  const issueChanged = () => void invalidate(invalidatedBy.issueChanged(id));
 
   if (issueQ.isPending) return <Loading label="Loading issue..." />;
   if (issueQ.isError) {
@@ -335,19 +324,21 @@ export function IssueDetailPage({
               <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
               {/* No `activities` prop: the panel reads real flags from
                   flags.list instead of replaying the issue's history. */}
+              {/* No `onChanged` props: each panel's mutation declares
+                  `issueChanged` itself. That invalidates the issue, its list
+                  and every report total, including when a flag or vote changes
+                  status as a side effect. */}
               <FlagsPanel
                 issueId={id}
                 flagTypes={productDetail?.flagTypes ?? null}
-                onChanged={issueChanged}
               />
               <VotesPanel
                 issueId={id}
                 voteCount={detail.issue.voteCount}
                 maxVotesPerIssue={productDetail?.product.maxVotesPerIssue ?? 0}
                 votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
-                onChanged={issueChanged}
               />
-              <SecurityPanel issueId={id} onChanged={issueChanged} />
+              <SecurityPanel issueId={id} />
               </fieldset>
               ) : null}
             </div>
@@ -360,13 +351,9 @@ export function IssueDetailPage({
               component={component}
               productDetail={productDetail}
               products={productsQ.data?.map((p) => ({ id: p.id, name: p.name })) ?? []}
-              // Two seams left standing because FieldsPanel is not this
-              // agent's file: `fetchProductDetail` is the last direct
-              // procedure call on this page, and `onUpdated` the last refresh
-              // callback it hands down. Both go when the panel reads
-              // `useProduct` and writes through `useAppMutation`.
-              fetchProductDetail={(pid) => toPromise(getProduct({ id: pid }))}
-              onUpdated={issueChanged}
+              // No `fetchProductDetail` / `onUpdated` seams: the move control
+              // reads its target through `useProduct`, and every field write
+              // invalidates `issueChanged` at the mutation that made it stale.
               readOnly={signedOut}
             />
             {/* State and relations, not narrative -- so their position must

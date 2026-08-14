@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Cluster, DescriptionList, Field, Input, Select } from "@zeroship/ui";
+import { Button, DescriptionList, Field, Input, Select } from "@zeroship/ui";
 import {
   moveIssue,
   reassignIssue,
@@ -16,11 +16,13 @@ import {
   type IssuePriority,
   type IssueSeverity,
 } from "../../lib/quicksearch";
+import { invalidatedBy } from "../../lib/query-keys";
+import { useAppMutation, useProduct } from "../../lib/queries";
 
 import { KindBadge, PriorityBadge, SeverityBadge } from "../Badges";
 import { RailChoice } from "./RailChoice";
 import { RailProperty } from "./RailProperty";
-import { errorMessage, toPromise } from "../rpc";
+import { errorMessage } from "../rpc";
 import type { IssueDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
 import { personName, type PeopleMap } from "./people";
@@ -39,9 +41,21 @@ type IssueComponent = NonNullable<IssueDetail["component"]>;
  * row was or how much it hurt, never both -- a critical feature request had
  * to pick one. These are three independent lines now.
  */
-function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Issue) => void }) {
-  const [busy, setBusy] = useState<"kind" | "severity" | "priority" | null>(null);
+function Classification({ issue }: { issue: Issue }) {
   const [error, setError] = useState<string | null>(null);
+  const changeKind = useAppMutation(
+    (kind: IssueKind) => setIssueKind({ id: issue.id, kind }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const changeSeverity = useAppMutation(
+    (severity: IssueSeverity) => setIssueSeverity({ id: issue.id, severity }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const changePriority = useAppMutation(
+    (priority: IssuePriority) => setIssuePriority({ id: issue.id, priority }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy = changeKind.isPending || changeSeverity.isPending || changePriority.isPending;
 
   return (
     <>
@@ -49,17 +63,14 @@ function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Iss
         label="Kind"
         value={issue.kind}
         display={<KindBadge kind={issue.kind} />}
-        disabled={busy !== null}
+        disabled={busy}
         options={ISSUE_KINDS.map((value) => ({ value, label: value }))}
         onChange={async (next) => {
-          setBusy("kind");
           setError(null);
           try {
-            onUpdated(await setIssueKind({ id: issue.id, kind: next as IssueKind }));
+            await changeKind.mutateAsync(next as IssueKind);
           } catch (err) {
             setError(errorMessage(err));
-          } finally {
-            setBusy(null);
           }
         }}
       />
@@ -67,17 +78,14 @@ function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Iss
         label="Severity"
         value={issue.severity}
         display={<SeverityBadge severity={issue.severity} />}
-        disabled={busy !== null}
+        disabled={busy}
         options={ISSUE_SEVERITIES.map((value) => ({ value, label: value }))}
         onChange={async (next) => {
-          setBusy("severity");
           setError(null);
           try {
-            onUpdated(await setIssueSeverity({ id: issue.id, severity: next as IssueSeverity }));
+            await changeSeverity.mutateAsync(next as IssueSeverity);
           } catch (err) {
             setError(errorMessage(err));
-          } finally {
-            setBusy(null);
           }
         }}
       />
@@ -85,17 +93,14 @@ function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Iss
         label="Priority"
         value={issue.priority}
         display={<PriorityBadge priority={issue.priority} />}
-        disabled={busy !== null}
+        disabled={busy}
         options={ISSUE_PRIORITIES.map((value) => ({ value, label: value }))}
         onChange={async (next) => {
-          setBusy("priority");
           setError(null);
           try {
-            onUpdated(await setIssuePriority({ id: issue.id, priority: next as IssuePriority }));
+            await changePriority.mutateAsync(next as IssuePriority);
           } catch (err) {
             setError(errorMessage(err));
-          } finally {
-            setBusy(null);
           }
         }}
       />
@@ -107,27 +112,28 @@ function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Iss
 function AssigneeControl({
   issue,
   people,
-  onUpdated,
 }: {
   issue: Issue;
   people: PeopleMap;
-  onUpdated: (b: Issue) => void;
 }) {
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reassign = useAppMutation(
+    (assigneeId: string) => reassignIssue({ id: issue.id, assigneeId }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy = reassign.isPending;
 
   const assign = async (assigneeId: string, done: () => void) => {
-    setBusy(true);
     setError(null);
     try {
-      onUpdated(await reassignIssue({ id: issue.id, assigneeId }));
+      await reassign.mutateAsync(assigneeId);
+      // Closing the picker is a UI decision this control still owns. Only
+      // the refresh moved into the mutation's invalidation.
       done();
     } catch (err) {
       // Deliberately stays open on failure: closing would discard the choice
       // and leave the old name showing, which reads as a refusal nobody made.
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -149,44 +155,40 @@ function AssigneeControl({
 function MoveControl({
   issue,
   products,
-  onUpdated,
-  fetchProductDetail,
 }: {
   issue: Issue;
   products: { id: string; name: string }[];
-  onUpdated: (b: Issue) => void;
-  fetchProductDetail: (id: string) => Promise<ProductDetail>;
 }) {
   const [open, setOpen] = useState(false);
   const [targetProductId, setTargetProductId] = useState("");
-  const [components, setComponents] = useState<ProductDetail["components"] | null>(null);
   const [targetComponentId, setTargetComponentId] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const targetProductQ = useProduct(targetProductId || null);
+  const components = targetProductQ.data?.components ?? null;
+  const moveIssueToProduct = useAppMutation(
+    ({ productId, componentId }: { productId: string; componentId: string }) =>
+      moveIssue({ id: issue.id, productId, componentId }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy = moveIssueToProduct.isPending;
 
-  const pickProduct = async (id: string) => {
+  const pickProduct = (id: string) => {
     setTargetProductId(id);
     setTargetComponentId("");
-    setComponents(null);
-    if (!id) return;
-    try {
-      const detail = await fetchProductDetail(id);
-      setComponents(detail.components);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
   };
 
   const move = async () => {
-    setBusy(true);
     setError(null);
     try {
-      onUpdated(await moveIssue({ id: issue.id, productId: targetProductId, componentId: targetComponentId }));
+      await moveIssueToProduct.mutateAsync({
+        productId: targetProductId,
+        componentId: targetComponentId,
+      });
+      // The dialog still closes here because that is local UI state. The
+      // issue and report refreshes are owned by the mutation above.
       setOpen(false);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -210,7 +212,7 @@ function MoveControl({
             <Field.Label>Target product</Field.Label>
             <Select
               value={targetProductId}
-              onValueChange={(next) => void pickProduct(next ?? "")}
+              onValueChange={(next) => pickProduct(next ?? "")}
               placeholder="Select a product"
               aria-label="Target product"
               renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
@@ -251,7 +253,11 @@ function MoveControl({
           </p>
         </div>
       ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {error || targetProductQ.isError ? (
+        <p className="field-error">
+          {error ?? errorMessage(targetProductQ.error)}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -272,29 +278,30 @@ function GeneralField({
   field,
   label,
   value,
-  onUpdated,
 }: {
   issue: Issue;
   field: "summary" | "whiteboard" | "opSys" | "platform" | "url";
   label: string;
   value: string;
-  onUpdated: (b: Issue) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const update = useAppMutation(
+    (next: string) => updateIssue({ id: issue.id, changes: { [field]: next } }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy = update.isPending;
 
   const save = async () => {
-    setBusy(true);
     setError(null);
     try {
-      onUpdated(await updateIssue({ id: issue.id, changes: { [field]: draft } }));
+      await update.mutateAsync(draft);
+      // Leaving edit mode is local UI state; cache invalidation owns the
+      // refreshed value shown after it closes.
       setEditing(false);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -358,8 +365,6 @@ export function FieldsPanel({
   component,
   productDetail,
   products,
-  fetchProductDetail,
-  onUpdated,
   readOnly = false,
 }: {
   issue: Issue;
@@ -368,8 +373,6 @@ export function FieldsPanel({
   component: IssueComponent;
   productDetail: ProductDetail | null;
   products: { id: string; name: string }[];
-  fetchProductDetail: (id: string) => Promise<ProductDetail>;
-  onUpdated: (b: Issue) => void;
   /**
    * No identity: every control here would 401 on use, so none is offered.
    *
@@ -383,6 +386,24 @@ export function FieldsPanel({
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
   const [showOther, setShowOther] = useState(false);
+  const updateVersionOrMilestone = useAppMutation(
+    (changes: { versionId?: string; milestoneId?: string }) =>
+      updateIssue({ id: issue.id, changes }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+
+  const changeVersionOrMilestone = async (changes: {
+    versionId?: string;
+    milestoneId?: string;
+  }) => {
+    setVersionMilestoneError(null);
+    try {
+      await updateVersionOrMilestone.mutateAsync(changes);
+    } catch (err) {
+      setVersionMilestoneError(errorMessage(err));
+    }
+  };
+
   // "Unspecified" is the server's default for opSys and platform, so an issue
   // that has never been touched reads as unset rather than as configured.
   const hasOther = Boolean(
@@ -401,10 +422,10 @@ export function FieldsPanel({
       {/* Not a permanent text box. The page heading already states the
           summary in full; a second copy in a 22rem rail truncated it and
           invited edits nobody came to make. Editing is a deliberate act. */}
-      <StatusControl issue={issue} onUpdated={onUpdated} />
+      <StatusControl issue={issue} />
       <RailSection title="Classification" />
-      <Classification issue={issue} onUpdated={onUpdated} />
-      <AssigneeControl issue={issue} people={people} onUpdated={onUpdated} />
+      <Classification issue={issue} />
+      <AssigneeControl issue={issue} people={people} />
 
       {/* The facts you read rather than change, as a description list. They
           were four spans in a row with hand-rolled "Label: value" strings and
@@ -446,10 +467,7 @@ export function FieldsPanel({
             }
             options={productDetail.versions.map((v) => ({ value: v.id, label: v.name }))}
             onChange={(next) => {
-              setVersionMilestoneError(null);
-              toPromise(updateIssue({ id: issue.id, changes: { versionId: next } }))
-                .then(onUpdated)
-                .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
+              void changeVersionOrMilestone({ versionId: next });
             }}
           />
           <RailChoice
@@ -462,10 +480,7 @@ export function FieldsPanel({
             }
             options={productDetail.milestones.map((m) => ({ value: m.id, label: m.name }))}
             onChange={(next) => {
-              setVersionMilestoneError(null);
-              toPromise(updateIssue({ id: issue.id, changes: { milestoneId: next } }))
-                .then(onUpdated)
-                .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
+              void changeVersionOrMilestone({ milestoneId: next });
             }}
           />
         </>
@@ -479,7 +494,7 @@ export function FieldsPanel({
           by a lone button and the reader lost the rhythm mid-scan. Moving a
           issue changes product AND component, so it belongs to the whole group
           rather than to any one line in it. */}
-      <MoveControl issue={issue} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
+      <MoveControl issue={issue} products={products} />
 
       {/* Four rows that usually say nothing.
           Whiteboard, OS, platform and URL are unset on most issues, so the rail
@@ -491,12 +506,12 @@ export function FieldsPanel({
       <RailSection title="Other" />
       {hasOther || showOther ? (
         <>
-          <GeneralField issue={issue} field="whiteboard" label="Whiteboard" value={issue.whiteboard ?? ""} onUpdated={onUpdated} />
+          <GeneralField issue={issue} field="whiteboard" label="Whiteboard" value={issue.whiteboard ?? ""} />
           <div className="field-row">
-            <GeneralField issue={issue} field="opSys" label="OS" value={issue.opSys} onUpdated={onUpdated} />
-            <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} onUpdated={onUpdated} />
+            <GeneralField issue={issue} field="opSys" label="OS" value={issue.opSys} />
+            <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} />
           </div>
-          <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} onUpdated={onUpdated} />
+          <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} />
         </>
       ) : (
         <Button variant="plain" size="small" onClick={() => setShowOther(true)}>

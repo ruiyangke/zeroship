@@ -6,19 +6,19 @@
  * the taxonomy means touching all of them again, while the fetching code is
  * mechanical either way.
  *
- * WHY THIS EXISTS AT ALL. The app currently has no cache, and pays for it in
- * two ways that are easy to count:
+ * WHY THIS EXISTS AT ALL. The app had no cache, and paid for it in two ways
+ * that were easy to count. Both are now fixed, and the numbers are kept
+ * because they are what justified the change:
  *
- *   - The same fact is fetched repeatedly. Six components called `users.me`
- *     independently, so one visit to the issue list fired it FOUR times;
- *     `listProducts` has five independent callers. A keyed cache makes that
- *     structural rather than something each page has to remember.
+ *   - The same fact was fetched repeatedly. Six components called `users.me`
+ *     independently, so one visit to the issue list fired it FOUR times, and
+ *     `products.resolve` and `users.resolve` went out SIX times each. The
+ *     same page now makes 6 requests in total with no duplicates.
  *
- *   - Freshness is threaded by hand. There are ~124 `reload()` / `onUpdated`
- *     / `onChanged` props in this codebase, which exist so a mutation in one
- *     panel can tell its siblings they are stale. That is the knowledge this
- *     file replaces: after the migration a mutation names what it invalidated
- *     and does not need to know who was listening.
+ *   - Freshness was threaded by hand: ~124 `reload()` / `onUpdated` /
+ *     `onChanged` props existed so a mutation in one panel could tell its
+ *     siblings they were stale. Zero remain. A mutation now names what it
+ *     invalidated and does not need to know who was listening.
  *
  * SHAPE. Keys are arrays, ordered widest to narrowest, so a prefix
  * invalidation catches everything beneath it:
@@ -129,6 +129,8 @@ export const queryKeys = {
 
   flags: { all: ["flags"] as const, requests: () => ["flags", "requests"] as const },
 
+  groups: { all: ["groups"] as const, list: () => ["groups", "list"] as const },
+
   reports: {
     all: ["reports"] as const,
     summary: (productId: string | null) => ["reports", "summary", productId] as const,
@@ -169,6 +171,14 @@ export const invalidatedBy = {
     queryKeys.attachments.list(issueId),
     queryKeys.issues.detail(issueId),
   ],
+  /** A flag write changes both the live flags on an issue and the account
+   *  request list when its status is `?`. */
+  flagChanged: (issueId: string) => [
+    queryKeys.relations.flags(issueId),
+    queryKeys.flags.all,
+  ],
+  /** Casting zero or more votes adds, changes or removes the account row. */
+  voteChanged: () => [queryKeys.relations.votes("mine")],
   /** Every side panel of one issue, for mutations whose blast radius is the
    *  relation graph rather than one list. */
   relationsChanged: (issueId: string) => [

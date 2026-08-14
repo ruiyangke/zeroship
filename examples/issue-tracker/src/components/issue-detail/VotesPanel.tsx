@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Button, Field, NumberField } from "@zeroship/ui";
 
 import { castVote } from "../../api";
+import { invalidatedBy } from "../../lib/query-keys";
+import { useAppMutation } from "../../lib/queries";
 import { errorMessage } from "../rpc";
 
 /**
@@ -17,33 +19,35 @@ export function VotesPanel({
   voteCount,
   maxVotesPerIssue,
   votingEnabled,
-  onChanged,
 }: {
   issueId: string;
   voteCount: number;
   maxVotesPerIssue: number;
   votingEnabled: boolean;
-  onChanged: () => void;
 }) {
   const [count, setCount] = useState(1);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  // A vote moves both this issue and the signed-in account's vote list. The
+  // issue prefix also reaches every report total derived from it.
+  const vote = useAppMutation(
+    (nextCount: number) => castVote({ issueId, count: nextCount }),
+    () => [
+      ...invalidatedBy.issueChanged(issueId),
+      ...invalidatedBy.voteChanged(),
+    ],
+  );
 
   const submit = async () => {
-    setBusy(true);
     setError(null);
     try {
-      const result = await castVote({ issueId, count });
+      const result = await vote.mutateAsync(count);
       // The server reports whether this vote crossed votesToConfirm. Surfacing
       // it matters: the issue's status changed as a side effect of voting, and a
       // silent status change is the kind of thing users file bugs about.
       setConfirmed(result.confirmed);
-      onChanged();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -76,8 +80,8 @@ export function VotesPanel({
               onValueChange={(next) => setCount(Math.max(0, next ?? 0))}
             />
           </Field>
-          <Button variant="gray" size="small" disabled={busy} onClick={() => void submit()}>
-            {busy ? "Voting..." : "Vote"}
+          <Button variant="gray" size="small" disabled={vote.isPending} onClick={() => void submit()}>
+            {vote.isPending ? "Voting..." : "Vote"}
           </Button>
           {maxVotesPerIssue > 0 ? (
             <p className="state-hint small">At most {maxVotesPerIssue} on this issue.</p>

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Field, Select } from "@zeroship/ui";
 
-import { listGroups, restrictIssue, unrestrictIssue } from "../../api";
+import { restrictIssue, unrestrictIssue } from "../../api";
+import { useAppMutation, useGroups } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import { errorMessage } from "../rpc";
 
 /**
@@ -17,56 +19,48 @@ import { errorMessage } from "../rpc";
  * empty picker -- an empty control would read as "there are no groups" when
  * the truth is "you cannot see them".
  */
-export function SecurityPanel({ issueId, onChanged }: { issueId: string; onChanged: () => void }) {
-  const [groups, setGroups] = useState<Awaited<ReturnType<typeof listGroups>> | null>(null);
-  const [denied, setDenied] = useState(false);
+export function SecurityPanel({ issueId }: { issueId: string }) {
+  const groupsQ = useGroups();
+  const groups = groupsQ.data ?? null;
   const [selected, setSelected] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setGroups(await listGroups({}));
-      setDenied(false);
-    } catch (err) {
-      // A 403 here is the ordinary case for a non-admin, not a failure worth
-      // shouting about; anything else is.
-      if (errorMessage(err).toLowerCase().includes("admin")) setDenied(true);
-      else setError(errorMessage(err));
-    }
-  }, []);
+  const changeRestriction = useAppMutation(
+    ({ action, groupId }: { action: "restrict" | "unrestrict"; groupId: string }) =>
+      action === "restrict"
+        ? restrictIssue({ issueId, groupId })
+        : unrestrictIssue({ issueId, groupId }),
+    () => invalidatedBy.issueChanged(issueId),
+  );
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // A 403 here is the ordinary case for a non-admin, not a failure worth
+  // shouting about. Other failures still leave the loading line in place,
+  // matching the panel's existing behavior; that unreachable error display is
+  // a separate bug rather than part of this state-layer substitution.
+  const denied = groupsQ.isError && errorMessage(groupsQ.error).toLowerCase().includes("admin");
 
   const apply = async (action: "restrict" | "unrestrict") => {
     if (!selected) return;
-    setBusy(true);
     setError(null);
     setNote(null);
     try {
-      if (action === "restrict") await restrictIssue({ issueId, groupId: selected });
-      else await unrestrictIssue({ issueId, groupId: selected });
+      await changeRestriction.mutateAsync({ action, groupId: selected });
       setNote(
         action === "restrict"
           ? "Restricted. Only members of that group can now see this issue."
           : "Restriction removed.",
       );
-      // Deliberately NOT calling onChanged().
+      // Invalidation deliberately happens through the cache instead of a
+      // parent callback.
       //
-      // The parent's reload puts the page back into its loading state, which
-      // unmounts the whole detail tree -- so this panel remounts, `note` and
-      // `selected` reset, and the confirmation the user needs to see is
-      // destroyed by the act of succeeding. Nothing on this page reflects a
-      // group restriction anyway: the issue row is unchanged, and the viewer
-      // making the change can still see it either way.
-      void onChanged;
+      // The old callback put the page back into its loading state, which
+      // unmounted the whole detail tree -- so this panel remounted, `note` and
+      // `selected` reset, and the confirmation the user needs to see was
+      // destroyed by the act of succeeding. A query refetch keeps the cached
+      // detail mounted while it refreshes, so both local values survive.
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -107,13 +101,13 @@ export function SecurityPanel({ issueId, onChanged }: { issueId: string; onChang
             </Select>
           </Field>
           <Button variant="gray" size="small"
-            disabled={busy || !selected}
+            disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("restrict")}
           >
             Restrict
           </Button>
           <Button variant="gray" size="small"
-            disabled={busy || !selected}
+            disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("unrestrict")}
           >
             Remove

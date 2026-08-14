@@ -8,10 +8,12 @@
 // cleared at all. flags.list now returns the real rows, ids included, so both
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, Badge, Select } from "@zeroship/ui";
 
-import { clearFlag, listFlags, setFlag } from "../../api";
+import { clearFlag, setFlag } from "../../api";
+import { invalidatedBy } from "../../lib/query-keys";
+import { useAppMutation, useFlags } from "../../lib/queries";
 import { errorMessage } from "../rpc";
 import type { FlagType } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -20,57 +22,73 @@ import { Absent } from "./Absent";
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];
 
-type LiveFlag = Awaited<ReturnType<typeof listFlags>>["onIssue"][number];
+type LiveFlag = NonNullable<ReturnType<typeof useFlags>["data"]>["onIssue"][number];
 
 function FlagRow({
   issueId,
   flagType,
   live,
-  onChanged,
 }: {
   issueId: string;
   flagType: FlagType;
   live: readonly LiveFlag[];
-  onChanged: () => void;
 }) {
   const [status, setStatus] = useState<FlagStatus>("+");
   const [requesteeId, setRequesteeId] = useState<string | null>(null);
   const [pickingRequestee, setPickingRequestee] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Flags have three observable effects: the live flag relation changes, a
+  // `?` flag moves the account request list, and the issue and report totals
+  // can change with it. The cache owns those refreshes now, so neither this
+  // row nor its parent needs a callback.
+  const applyFlag = useAppMutation(
+    ({ nextStatus, nextRequesteeId }: {
+      nextStatus: FlagStatus;
+      nextRequesteeId: string | undefined;
+    }) =>
+      setFlag({
+        flagTypeId: flagType.id,
+        issueId,
+        status: nextStatus,
+        requesteeId: nextRequesteeId,
+      }),
+    () => [
+      ...invalidatedBy.issueChanged(issueId),
+      ...invalidatedBy.flagChanged(issueId),
+    ],
+  );
+  const clearLiveFlag = useAppMutation(
+    (id: string) => clearFlag({ id }),
+    () => [
+      ...invalidatedBy.issueChanged(issueId),
+      ...invalidatedBy.flagChanged(issueId),
+    ],
+  );
+  const busy = applyFlag.isPending || clearLiveFlag.isPending;
 
   // Every live flag of this type, not just the last one. A multiplicable type
   // legitimately has several at once, and collapsing them was the old bug.
   const mine = live.filter((entry) => entry.flag.flagTypeId === flagType.id);
 
   const apply = async () => {
-    setBusy(true);
     setError(null);
     try {
-      await setFlag({
-        flagTypeId: flagType.id,
-        issueId,
-        status,
-        requesteeId: requesteeId ?? undefined,
+      await applyFlag.mutateAsync({
+        nextStatus: status,
+        nextRequesteeId: requesteeId ?? undefined,
       });
-      onChanged();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const clear = async (id: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await clearFlag({ id });
-      onChanged();
+      await clearLiveFlag.mutateAsync(id);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -156,35 +174,12 @@ function FlagRow({
 export function FlagsPanel({
   issueId,
   flagTypes,
-  onChanged,
 }: {
   issueId: string;
   flagTypes: readonly FlagType[] | null;
-  onChanged: () => void;
 }) {
-  const [live, setLive] = useState<readonly LiveFlag[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const reload = useCallback(async () => {
-    try {
-      const result = await listFlags({ issueId });
-      setLive(result.onIssue);
-      setLoadError(null);
-    } catch (err) {
-      // Surfaced rather than swallowed: an unreadable flag list rendering as
-      // "not set" would claim, wrongly, that the issue carries no flags.
-      setLoadError(errorMessage(err));
-    }
-  }, [issueId]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
-
-  const refresh = () => {
-    void reload();
-    onChanged();
-  };
+  const flagsQ = useFlags(issueId);
+  const live = flagsQ.data?.onIssue ?? [];
 
   const issueFlagTypes = flagTypes?.filter((t) => t.targetType === "issue") ?? [];
   return (
@@ -202,12 +197,15 @@ export function FlagsPanel({
               issueId={issueId}
               flagType={flagType}
               live={live}
-              onChanged={refresh}
             />
           ))}
         </ul>
       )}
-      {loadError ? <p className="field-error">Could not load flags: {loadError}</p> : null}
+      {/* Surfaced rather than swallowed: an unreadable flag list rendering as
+          "not set" would claim, wrongly, that the issue carries no flags. */}
+      {flagsQ.isError ? (
+        <p className="field-error">Could not load flags: {errorMessage(flagsQ.error)}</p>
+      ) : null}
     </section>
   );
 }

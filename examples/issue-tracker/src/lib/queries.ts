@@ -10,7 +10,9 @@ import {
   listCc,
   listComments,
   listDuplicates,
+  listFlags,
   listFlagRequests,
+  listGroups,
   listKeywords,
   listMyCc,
   listMyVotes,
@@ -45,8 +47,9 @@ import { queryKeys } from "./query-keys";
  *     `users.resolve` x6, `products.list` x4.
  *   - Freshness was threaded by hand. ~124 `reload()` / `onUpdated` /
  *     `onChanged` props existed so a mutating panel could tell its siblings
- *     they were stale, which means every new panel had to be wired in by
- *     someone who remembered.
+ *     they were stale, which meant every new panel had to be wired in by
+ *     someone who remembered. None remain: the last four panels
+ *     (fields, flags, votes, security) were the final holdouts.
  *
  * Both are properties of having no shared cache, so both are fixed by having
  * one. Keeping the hooks together is what stops the second cache appearing:
@@ -147,6 +150,14 @@ export function useDuplicates(issueId: string) {
   });
 }
 
+export function useFlags(issueId: string) {
+  return useQuery({
+    queryKey: queryKeys.relations.flags(issueId),
+    queryFn: () => listFlags({ issueId }),
+    enabled: Boolean(issueId),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Account-scoped lists
 // ---------------------------------------------------------------------------
@@ -161,6 +172,10 @@ export function useMyVotes() {
 
 export function useFlagRequests() {
   return useQuery({ queryKey: queryKeys.flags.requests(), queryFn: () => listFlagRequests({}) });
+}
+
+export function useGroups() {
+  return useQuery({ queryKey: queryKeys.groups.list(), queryFn: () => listGroups({}) });
 }
 
 /** One flag request row, once the issue behind it is known. */
