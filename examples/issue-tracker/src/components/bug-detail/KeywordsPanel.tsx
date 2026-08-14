@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, Checkbox, Tag } from "@zeroship/ui";
+import { Button, Checkbox, Tag, Input } from "@zeroship/ui";
 import { attachKeyword, createKeyword, detachKeyword, listKeywords } from "../../api";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
@@ -122,7 +122,7 @@ export function KeywordsPanel({
         )}
       </AsyncSection>
       <div className="inline-form">
-        <input
+        <Input
           aria-label="New keyword name" placeholder="New keyword name"
           value={newKeyword}
           onChange={(e) => setNewKeyword(e.target.value)}

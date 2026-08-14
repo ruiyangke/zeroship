@@ -59,10 +59,18 @@ export function Shell({
           <Cluster align="center" gap={2}>
             {/* asChild, not render: this library composes onto the child element,
                 so the button styling lands on a real anchor and "New bug"
-                stays a link you can middle-click. */}
-            <Button variant="filled" size="small" asChild>
-              <a href="#/bugs/new">New bug</a>
-            </Button>
+                stays a link you can middle-click.
+
+                Only when there is someone to file as. The new-bug page
+                refuses without an identity -- it says so and stops -- so
+                signed out this was a primary button leading to a dead end,
+                sitting beside the Sign in button in the same blue and
+                competing with it for the one action that actually works. */}
+            {signedIn ? (
+              <Button variant="filled" size="small" asChild>
+                <a href="#/bugs/new">New bug</a>
+              </Button>
+            ) : null}
             <UserChip userState={userState} />
           </Cluster>
         </Cluster>

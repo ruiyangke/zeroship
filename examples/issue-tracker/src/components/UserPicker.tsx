@@ -2,7 +2,7 @@
 // from the matches. There is no dedicated typeahead RPC, so this just calls
 // users.list({text}) -- which is exactly what it is for.
 import { useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Input } from "@zeroship/ui";
 import { listUsers } from "../api";
 import { errorMessage } from "./rpc";
 import type { UserRow } from "./types";
@@ -41,7 +41,7 @@ export function UserPicker({
   return (
     <div className="user-picker">
       <div className="user-picker-row">
-        <input
+        <Input
           value={text}
           placeholder={placeholder}
           onChange={(e) => setText(e.target.value)}

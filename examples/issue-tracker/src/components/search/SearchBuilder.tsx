@@ -143,7 +143,7 @@ export function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }
             ))}
           </Select>
           {condition.operator !== "exists" ? (
-            <input
+            <Input
               value={condition.value}
               onChange={(e) =>
                 setConditions((cs) => cs.map((c) => (c.id === condition.id ? { ...c, value: e.target.value } : c)))

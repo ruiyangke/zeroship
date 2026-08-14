@@ -51,15 +51,46 @@ code {
   padding: 0.1em 0.36em;
   border-radius: 5px;
 }
-input, select, textarea, button { font-family: inherit; font-size: 0.88rem; }
-input, select, textarea {
+button { font-family: inherit; font-size: 0.88rem; }
+
+/* NO bare input/select/textarea rules.
+   =====================================
+   These used to style every field in the app:
+
+     input, select, textarea { border: 1px solid ...; border-radius: 7px }
+     input:focus, ...        { outline: 2px solid ...; border-color: ... }
+
+   An element selector matches the design system's controls too. The DS
+   draws the field as a wrapper with a 1px inset ring and leaves the inner
+   control bare, so at rest its class beat this rule and you saw one ring.
+   On FOCUS there was nothing to beat: the DS sets no outline on the
+   control, so this outline landed on top of the DS ring and every input in
+   the app grew a second border -- an inner ring and an outer one, in two
+   different greens.
+
+   The app CSS was cleaned of .zs-* selectors once before. This is the same
+   trespass wearing a different hat: reaching into DS internals by ELEMENT
+   name rather than by class name. The app's own fields are DS <Input> now,
+   so nothing here needs to style a field at all.
+
+   The one exception is the description <textarea>, which the DS has no
+   component for. It is styled by its own class, matched to the DS look
+   deliberately rather than by a rule that sprays every field on the page. */
+.app-textarea {
+  font: inherit;
+  font-size: 0.88rem;
+  inline-size: 100%;
   background: var(--surface);
   border: 1px solid var(--line-2);
-  border-radius: 7px;
-  padding: 0.4rem 0.55rem;
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
   color: var(--ink);
 }
-input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.app-textarea:focus-visible {
+  /* ONE ring. A border plus an outline is what this block is a monument to. */
+  outline: none;
+  border-color: var(--accent);
+}
 fieldset { border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 0.9rem; margin: 0.6rem 0; }
 fieldset[disabled] { opacity: 0.5; }
 legend { padding: 0 0.4rem; color: var(--ink-2); font-weight: 600; font-size: 0.85rem; }
@@ -1220,3 +1251,21 @@ fieldset.bug-detail-extras { display: grid; }
    the menu resolved `top: 110%` against the page and opened below the fold. */
 .column-picker { position: relative; }
 .column-picker > .column-picker-menu { top: calc(100% + 0.35rem); }
+
+/* ONE focus ring, and the app has to supply it.
+   Measured 2026-08-13: the design system's Input changes nothing on focus --
+   with a real keyboard Tab the control matches :focus-visible, yet the
+   wrapper's box-shadow is byte-identical to its resting value and the control
+   carries no outline. Keyboard users had no focus indication on any field.
+
+   So the ring here is not decoration, it is the only one there is. What made
+   the old rule look doubled was pairing an outline WITH a border-colour change
+   at offset 0, so it sat directly against the wrapper's own 1px ring in a
+   near-identical green. This sits clearly outside the field instead, which is
+   what a focus ring is supposed to look like.
+
+   :where() keeps specificity at zero, so the design system can still win. */
+:where(input, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

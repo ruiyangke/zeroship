@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button, Input } from "@zeroship/ui";
 import { addDependency, dependencyGraph, listDuplicates, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
 import { AsyncSection } from "../StateViews";
@@ -125,7 +125,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       </AsyncSection>
       {state.status !== "error" ? (
         <div className="inline-form">
-          <input aria-label="Bug this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
+          <Input aria-label="Bug this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
           <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
           </Button>
