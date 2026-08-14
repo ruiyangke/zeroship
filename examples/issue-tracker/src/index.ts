@@ -43,282 +43,43 @@ import {
   type BugStatus,
 } from "./lib/workflow";
 
-type EmptyInput = Record<string, never>;
-type DbFilter = Record<string, unknown>;
-type DbPatch = Record<string, unknown>;
-type DbResult<T> =
-  | { data: T; error: null }
-  | { data: null; error: Error };
-
-type SystemRow = {
-  id: string;
-  created_at: number;
-  updated_at: number;
-  created_by: string | null;
-  updated_by: string | null;
-  version: number;
-  deleted_at: number | null;
-};
-
-type UserRow = SystemRow & {
-  email: string;
-  handle: string;
-  name: string;
-  timezone: string;
-  isAdmin: boolean;
-  isDisabled: boolean;
-  // Free-form user preferences. Bugzilla keeps login + realname and nothing
-  // else on the account row; everything else it calls a "preference" lives in
-  // a bag, which is what this is. `users.updatePrefs` had no storage at all
-  // before this column existed.
-  prefs?: Record<string, unknown> | null;
-};
-
-type ProductRow = SystemRow & {
-  name: string;
-  key: string;
-  description?: string | null;
-  classification: string;
-  defaultMilestone?: string | null;
-  allowsUnconfirmed: boolean;
-  isActive: boolean;
-  // Bugzilla voting limits. Present in the schema since the rework and
-  // absent from this view, which is why nothing could read them.
-  votesPerUser: number;
-  maxVotesPerBug: number;
-  votesToConfirm: number;
-};
-
-type ComponentRow = SystemRow & {
-  productId: string;
-  name: string;
-  description?: string | null;
-  defaultAssigneeId?: string | null;
-  defaultQaContactId?: string | null;
-  isActive: boolean;
-};
-
-type VersionRow = SystemRow & {
-  productId: string;
-  name: string;
-  sortKey: number;
-  isActive: boolean;
-};
-
-type MilestoneRow = VersionRow;
-
-type BugRow = SystemRow & {
-  productId: string;
-  number: number;
-  componentId: string;
-  versionId?: string | null;
-  milestoneId?: string | null;
-  summary: string;
-  status: string;
-  resolution?: string | null;
-  severity: string;
-  priority: string;
-  reporterId: string;
-  assigneeId?: string | null;
-  qaContactId?: string | null;
-  duplicateOfId?: string | null;
-  whiteboard?: string | null;
-  opSys: string;
-  platform: string;
-  url?: string | null;
-  isConfirmed: boolean;
-  voteCount: number;
-  commentCount: number;
-  deadline?: number | null;
-  // Stamped by bugs.resolve / bugs.markDuplicate and cleared by bugs.reopen.
-  // reports.timeToResolve reads this instead of mining the activities table
-  // for status->RESOLVED transitions, which was a scan plus string matching.
-  resolvedAt?: number | null;
-};
-
-type CommentRow = SystemRow & {
-  bugId: string;
-  authorId: string;
-  body: string;
-  commentNumber: number;
-  isPrivate: boolean;
-};
-
-type AttachmentRow = SystemRow & {
-  bugId: string;
-  commentId?: string | null;
-  uploaderId: string;
-  filename: string;
-  contentType: string;
-  sizeBytes: number;
-  storageKey: string;
-  description?: string | null;
-  isPatch: boolean;
-  isObsolete: boolean;
-};
-
-type KeywordRow = SystemRow & {
-  name: string;
-  description?: string | null;
-};
-
-type BugKeywordRow = SystemRow & { bugId: string; keywordId: string };
-type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
-type CcRow = SystemRow & { bugId: string; userId: string };
-type SeeAlsoRow = SystemRow & { bugId: string; url: string };
-type WatcherRow = SystemRow & { watcherId: string; watchedId: string };
-type VoteRow = SystemRow & { bugId: string; userId: string; count: number };
-type ProductGroupRow = SystemRow & { productId: string; groupId: string };
-type GroupMemberRow = SystemRow & { groupId: string; userId: string };
-type GroupRow = SystemRow & {
-  name: string;
-  description?: string | null;
-  isBugGroup: boolean;
-};
-type BugGroupRow = SystemRow & { bugId: string; groupId: string };
-
-type FlagTypeRow = SystemRow & {
-  name: string;
-  description?: string | null;
-  targetType: string;
-  isRequestable: boolean;
-  isMultiplicable: boolean;
-  productId?: string | null;
-};
-
-type FlagRow = SystemRow & {
-  flagTypeId: string;
-  bugId?: string | null;
-  attachmentId?: string | null;
-  setterId: string;
-  requesteeId?: string | null;
-  status: string;
-};
-
-type ActivityRow = SystemRow & {
-  bugId: string;
-  actorId: string;
-  fieldName: string;
-  oldValue?: string | null;
-  newValue?: string | null;
-};
-
-type SavedSearchRow = SystemRow & {
-  ownerId: string;
-  name: string;
-  queryJson: unknown;
-  isShared: boolean;
-};
-
-type NotificationRow = SystemRow & {
-  userId: string;
-  bugId?: string | null;
-  kind: string;
-  title: string;
-  body?: string | null;
-  isRead: boolean;
-};
-
-interface ReadQuery<Row> extends PromiseLike<DbResult<Row[]>> {
-  sort(order: Record<string, 1 | -1>): ReadQuery<Row>;
-  limit(count: number): ReadQuery<Row>;
-  skip(count: number): ReadQuery<Row>;
-  after(id: string): ReadQuery<Row>;
-  first(): Promise<DbResult<Row | null>>;
-}
-
-interface Collection<Row> {
-  get(idOrFilter: string | DbFilter): Promise<DbResult<Row | null>>;
-  find(filter?: DbFilter): ReadQuery<Row>;
-  insert(row: Record<string, unknown>): Promise<DbResult<Row>>;
-  insertMany(rows: Record<string, unknown>[]): Promise<DbResult<Row[]>>;
-  update(idOrFilter: string | DbFilter, patch: DbPatch): Promise<DbResult<Row | null>>;
-  delete(idOrFilter: string | DbFilter): Promise<DbResult<Row | null>>;
-  deleteMany(filter: DbFilter): Promise<DbResult<{ deletedCount: number }>>;
-  // HARD delete. `delete` stamps deleted_at and leaves the row, which a
-  // unique index still counts -- so a join row removed with `delete` can
-  // never be recreated. This interface is a hand-written mirror of the SDK
-  // Collection and omitted purge entirely, so the method the runtime has read
-  // as one that does not exist.
-  purge(idOrFilter: string | DbFilter): Promise<DbResult<Row | null>>;
-  purgeMany(filter: DbFilter): Promise<DbResult<{ deletedCount: number }>>;
-  count(filter?: DbFilter): Promise<DbResult<number>>;
-}
-
-interface TxQuery<Row> extends PromiseLike<Row[]> {
-  sort(order: Record<string, 1 | -1>): TxQuery<Row>;
-  limit(count: number): TxQuery<Row>;
-  skip(count: number): TxQuery<Row>;
-  after(id: string): TxQuery<Row>;
-  first(): Promise<Row | null>;
-}
-
-interface TxCollection<Row> {
-  get(idOrFilter: string | DbFilter): Promise<Row | null>;
-  find(filter?: DbFilter): TxQuery<Row>;
-  insert(row: Record<string, unknown>): Promise<Row>;
-  insertMany(rows: Record<string, unknown>[]): Promise<Row[]>;
-  update(idOrFilter: string | DbFilter, patch: DbPatch): Promise<Row | null>;
-  delete(idOrFilter: string | DbFilter): Promise<Row | null>;
-  deleteMany(filter: DbFilter): Promise<{ deletedCount: number }>;
-  count(filter?: DbFilter): Promise<number>;
-}
-
-type TxDb = {
-  users: TxCollection<UserRow>;
-  products: TxCollection<ProductRow>;
-  components: TxCollection<ComponentRow>;
-  versions: TxCollection<VersionRow>;
-  milestones: TxCollection<MilestoneRow>;
-  bugs: TxCollection<BugRow>;
-  comments: TxCollection<CommentRow>;
-  attachments: TxCollection<AttachmentRow>;
-  keywords: TxCollection<KeywordRow>;
-  bugKeywords: TxCollection<BugKeywordRow>;
-  bugDependencies: TxCollection<DependencyRow>;
-  bugCc: TxCollection<CcRow>;
-  votes: TxCollection<VoteRow>;
-  bugSeeAlso: TxCollection<SeeAlsoRow>;
-  bugGroups: TxCollection<BugGroupRow>;
-  flags: TxCollection<FlagRow>;
-  activities: TxCollection<ActivityRow>;
-  savedSearches: TxCollection<SavedSearchRow>;
-  notifications: TxCollection<NotificationRow>;
-};
-
-type AppDb = {
-  users: Collection<UserRow>;
-  products: Collection<ProductRow>;
-  components: Collection<ComponentRow>;
-  versions: Collection<VersionRow>;
-  milestones: Collection<MilestoneRow>;
-  groups: Collection<GroupRow>;
-  productGroups: Collection<ProductGroupRow>;
-  groupMembers: Collection<GroupMemberRow>;
-  bugGroups: Collection<BugGroupRow>;
-  bugs: Collection<BugRow>;
-  // Every table the migration creates is now listed here. This comment used to
-  // say bugSeeAlso, votes and watchers were absent and their features
-  // unimplemented; all three are listed above and implemented.
-  comments: Collection<CommentRow>;
-  attachments: Collection<AttachmentRow>;
-  keywords: Collection<KeywordRow>;
-  bugKeywords: Collection<BugKeywordRow>;
-  bugDependencies: Collection<DependencyRow>;
-  bugCc: Collection<CcRow>;
-  votes: Collection<VoteRow>;
-  watchers: Collection<WatcherRow>;
-  bugSeeAlso: Collection<SeeAlsoRow>;
-  flagTypes: Collection<FlagTypeRow>;
-  flags: Collection<FlagRow>;
-  activities: Collection<ActivityRow>;
-  savedSearches: Collection<SavedSearchRow>;
-  notifications: Collection<NotificationRow>;
-  transaction<R>(
-    callback: (tx: TxDb) => Promise<R>,
-    options?: { isolationLevel?: "serializable" },
-  ): Promise<DbResult<R>>;
-};
+import type {
+  ActivityRow,
+  AppDb,
+  AttachmentRow,
+  BugGroupRow,
+  BugKeywordRow,
+  BugRow,
+  CcRow,
+  Collection,
+  CommentRow,
+  ComponentRow,
+  DbFilter,
+  DbPatch,
+  DbResult,
+  DependencyRow,
+  EmptyInput,
+  FlagRow,
+  FlagTypeRow,
+  GroupMemberRow,
+  GroupRow,
+  KeywordRow,
+  MilestoneRow,
+  NotificationRow,
+  ProductGroupRow,
+  ProductRow,
+  ReadQuery,
+  SavedSearchRow,
+  SeeAlsoRow,
+  SystemRow,
+  TxCollection,
+  TxDb,
+  TxQuery,
+  UserRow,
+  VersionRow,
+  VoteRow,
+  WatcherRow,
+} from "./server/rows";
 
 // This is only a structural view over the migration-installed handle. It does
 // not register or declare a schema; the generated runtime descriptor remains
