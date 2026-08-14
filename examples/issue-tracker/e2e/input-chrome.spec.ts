@@ -3,32 +3,44 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 
 /**
- * A field draws ONE ring, not two.
+ * The design system owns a field's edges. The app adds none.
  *
- * Reported as "for all the inputs, there are dual borders". The app styled
- * fields with bare element selectors:
+ * Reported twice as "dual borders on all the inputs", the second time worse
+ * than the first, and both times the extra edge came from this app.
  *
- *   input, select, textarea       { border: 1px solid ...; border-radius: 7px }
- *   input:focus, select:focus, .. { outline: 2px solid ...; border-color: ... }
+ * Round one: bare element selectors.
  *
- * An element selector matches the design system's controls too. The DS draws
- * the field as a wrapper with a 1px inset ring and leaves the inner control
- * bare, so at rest its class beat the app rule and one ring showed. On focus
- * there was nothing to beat -- the DS sets no outline on the control -- so the
- * app's outline landed on top of the wrapper's ring: two rings, two greens.
+ *   input, select, textarea { border: 1px solid ... }
+ *   input:focus, ...        { outline: 2px solid ...; border-color: ... }
  *
- * The app CSS had been cleaned of `.zs-*` selectors once. This was the same
- * trespass by ELEMENT name rather than class name, which that cleanup could
- * not see.
+ * An element selector matches the DS control too. At rest its class won, so
+ * one ring showed; on focus the outline had nothing to beat and landed on top
+ * of the wrapper's ring.
  *
- * Asserts the rule, not the pixels: no app stylesheet may style a bare field
- * element. A screenshot test would pass again the moment someone reintroduced
- * the selector with a different colour.
+ * Round two was mine. Removing those rules, I measured whether the DS had a
+ * focus ring of its own by printing the wrapper's box-shadow at rest and at
+ * focus -- truncated to 120 characters. The halo is the LAST component of that
+ * shadow list, so the truncation removed exactly the part that differed. Two
+ * clipped strings compared equal, I concluded the DS drew nothing on focus,
+ * and I added an outline back. That made three edges.
+ *
+ * What the DS actually draws on `.zs-input[data-focused]`:
+ *
+ *   inset 0 0 0 0.0625rem var(--zs-input-border-focus)   accent hairline
+ *   0 0 0 0.1875rem var(--zs-input-focus-ring-color)     soft 16% halo
+ *
+ * and `.zs-input__control { outline: none }`, deliberately, so the wrapper
+ * owns the ring and the control and slots share it.
+ *
+ * THE INVARIANT, and note it is the OPPOSITE of what this spec asserted after
+ * round one. That version required `outline > 0` on the focused control -- it
+ * encoded the regression as a requirement and passed the whole time it was
+ * broken. A test can hold a bug in place.
  */
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
-test("no stylesheet gives a design-system field its own border", async ({ page, baseURL }) => {
+test("the app adds no edge of its own to a design-system field", async ({ page, baseURL }) => {
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/#/bugs");
@@ -36,80 +48,55 @@ test("no stylesheet gives a design-system field its own border", async ({ page, 
   const control = page.locator("input.zs-input__control").first();
   await expect(control).toBeVisible();
 
-  // At rest the design system owns the field entirely.
-  const rest = await control.evaluate((el) => {
-    const cs = getComputedStyle(el);
-    return { border: parseFloat(cs.borderTopWidth) || 0, outline: parseFloat(cs.outlineWidth) || 0 };
-  });
-  expect(rest.border, "the control carries no border of its own").toBe(0);
-  expect(rest.outline, "and no outline at rest").toBe(0);
-
-  // THE RULE, read out of the live stylesheets.
-  //
-  // Checking the computed style of a DS control cannot catch this: its class
-  // beats a bare element selector, so `border` reads 0 whether or not the bad
-  // rule exists. An earlier version of this spec did exactly that and passed
-  // happily with the offending CSS pasted back in. What has to be asserted is
-  // that no sheet TRIES.
-  const offenders = await page.evaluate(() => {
-    const bad: string[] = [];
-    const bareField = /(^|[\s,>+~(])(input|textarea|select)(\b)(?![-\w])/i;
-    for (const sheet of Array.from(document.styleSheets)) {
-      let rules: CSSRule[];
-      try {
-        rules = Array.from(sheet.cssRules ?? []);
-      } catch {
-        continue; // cross-origin sheet; not ours
-      }
-      const walk = (list: CSSRule[]) => {
-        for (const rule of list) {
-          if ((rule as CSSGroupingRule).cssRules) walk(Array.from((rule as CSSGroupingRule).cssRules));
-          const style = (rule as CSSStyleRule).style;
-          const selector = (rule as CSSStyleRule).selectorText;
-          if (!style || !selector) continue;
-          if (!bareField.test(selector)) continue;
-          // A border on a bare field element is the doubling: the design
-          // system already draws the field, so this can only be a second edge.
-          const border =
-            style.getPropertyValue("border") ||
-            style.getPropertyValue("border-width") ||
-            style.getPropertyValue("border-color") ||
-            style.getPropertyValue("border-top-width");
-          if (border && border !== "0" && border !== "0px" && border !== "none") {
-            bad.push(`${selector} { border: ${border} }`);
-          }
-        }
+  const read = () =>
+    page.evaluate(() => {
+      const el = document.querySelector("input.zs-input__control") as HTMLElement;
+      const wrapper = el.closest(".zs-input") as HTMLElement;
+      const cs = getComputedStyle(el);
+      const ws = getComputedStyle(wrapper);
+      return {
+        focused: wrapper.hasAttribute("data-focused"),
+        controlBorder: parseFloat(cs.borderTopWidth) || 0,
+        controlOutline: parseFloat(cs.outlineWidth) || 0,
+        // FULL string. Truncating this is what caused round two.
+        wrapperShadow: ws.boxShadow,
       };
-      walk(rules);
-    }
-    return bad;
-  });
-  expect(
-    offenders,
-    `a stylesheet gives bare field elements a border, which the design system already draws:\n${offenders.join("\n")}`,
-  ).toEqual([]);
+    });
 
-  // And there IS still a visible focus ring, standing off the field.
-  for (let i = 0; i < 12; i++) {
-    await page.keyboard.press("Tab");
-    if (
-      await page.evaluate(() =>
-        document.activeElement?.classList.contains("zs-input__control") ?? false,
-      )
-    ) {
-      break;
-    }
-  }
-  const focused = await page.evaluate(() => {
-    const el = document.activeElement!;
-    const cs = getComputedStyle(el);
-    return {
-      isField: el.classList.contains("zs-input__control"),
-      outline: parseFloat(cs.outlineWidth) || 0,
-      offset: parseFloat(cs.outlineOffset) || 0,
-    };
-  });
-  expect(focused.isField, "a field took keyboard focus").toBe(true);
-  expect(focused.outline, "there IS a visible focus ring (the DS supplies none)").toBeGreaterThan(0);
-  expect(focused.offset, "and it stands off the field rather than doubling its edge").toBeGreaterThan(0);
+  const rest = await read();
+  expect(rest.controlBorder, "the control carries no border; the wrapper draws it").toBe(0);
+  expect(rest.controlOutline, "and no outline at rest").toBe(0);
+
+  // Focus it the way a person does. Tabbing was unreliable here -- an earlier
+  // probe "focused" nothing and reported data-focused=false, which is the kind
+  // of reading that invents a missing focus ring out of thin air.
+  await control.click();
+  await page.waitForTimeout(300);
+  const focused = await read();
+
+  // The control stays bare. Anything here is a SECOND edge over the wrapper's.
+  expect(
+    focused.controlOutline,
+    "the control draws no outline -- the wrapper owns the ring, and an outline here is the extra edge reported twice",
+  ).toBe(0);
+  expect(focused.controlBorder, "and still no border").toBe(0);
+
+  // ...and focus IS visible, on the WHOLE shadow string. Comparing slices is
+  // what produced the second regression: the halo is the last component, so a
+  // truncation drops exactly the part that differs and two clipped strings
+  // compare equal.
+  expect(
+    focused.wrapperShadow,
+    "the wrapper's ring changes on focus, so a keyboard user can see where they are",
+  ).not.toBe(rest.wrapperShadow);
+
+  // Specifically the accent ring, not merely the hover tint. The hover
+  // selectors carry five class-level components and outrank the focus rules,
+  // so with a pointer still over the field a broken guard leaves the hover
+  // colour in place and "something changed" would pass while the ring is
+  // absent.
+  expect(
+    focused.wrapperShadow,
+    "the ring is the focus ring (a 3px halo), not the hover hairline",
+  ).toMatch(/0px 0px 0px 3px/);
 });

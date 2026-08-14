@@ -117,22 +117,29 @@
 }
 
 /* ─── hover (hover-capable pointers only) ────────────────────────────── */
+/* The guard excludes :focus-within as well as [data-focused], and it has
+   to. These selectors carry five class-level components, so they outrank
+   the focus rules below, which carry two -- and after a click the pointer
+   is still over the field. With the guard keyed on [data-focused] alone a
+   standalone <Input> (no Field.Root, so no data-focused; see the focused
+   section) kept its hover tint while focused and the ring never showed.
+   Measured 2026-08-13. */
 @media (hover: hover) {
-  .zs-input:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+  .zs-input:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
     background: var(--zs-input-bg-hover);
     box-shadow:
       var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
       inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-hover),
       0 0 0 0 transparent;
   }
-  .zs-input--filled:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+  .zs-input--filled:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
     background: var(--zs-input-bg-filled-hover);
     box-shadow:
       var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
       inset 0 0 0 0.0625rem transparent,
       0 0 0 0 transparent;
   }
-  .zs-input--plain:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+  .zs-input--plain:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
     background: transparent;
     box-shadow:
       inset 0 -0.0625rem 0 0 var(--zs-separator-strong),
@@ -144,15 +151,30 @@
    Visual-polish item 7: use --zs-input-focus-ring-color (alpha 0.25)
    instead of the heavier --zs-focus-ring-color (0.35) so the input
    focus halo reads quieter — a softer form-control focus.
-   Button keeps the heavier ring via its own selectors. */
-.zs-input[data-focused] {
+   Button keeps the heavier ring via its own selectors.
+
+   TWO HOOKS, not one. `data-focused` comes from Base UI's Field.Control
+   state, which only exists under a Field.Root, so an <Input> used on its
+   own -- a search box, a filter, a toolbar field -- never received it and
+   drew no focus ring at all. Measured 2026-08-13 with one variable changed:
+   inside a Field, data-focused=true and the ring appears; standalone it
+   stays false and nothing changes on focus.
+
+   :focus-within covers the standalone case and agrees with the first line
+   here -- the wrapper owns the ring, so it lights up whenever focus is
+   anywhere inside it, slots included. Consumers were papering over the gap
+   with their own outline on the control, which stacks a second edge on top
+   of the wrapper's: exactly what wrapper-owns-the-ring exists to prevent. */
+.zs-input[data-focused],
+.zs-input:focus-within {
   background: var(--zs-input-bg-focus);
   box-shadow:
     var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
-.zs-input--filled[data-focused] {
+.zs-input--filled[data-focused],
+.zs-input--filled:focus-within {
   background: var(--zs-input-bg-filled);
   box-shadow:
     var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
@@ -161,7 +183,8 @@
 }
 /* Plain on focus: intensify the baseline to the accent and keep the
    quieter input ring as the halo. Visual-polish items 4 + 7. */
-.zs-input--plain[data-focused] {
+.zs-input--plain[data-focused],
+.zs-input--plain:focus-within {
   background: transparent;
   box-shadow:
     inset 0 -0.0625rem 0 0 var(--zs-accent),
@@ -175,7 +198,8 @@
     inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
     0 0 0 0 transparent;
 }
-.zs-input[data-invalid][data-focused] {
+.zs-input[data-invalid][data-focused],
+.zs-input[data-invalid]:focus-within {
   box-shadow:
     var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
@@ -381,21 +405,21 @@
      hover hairline lifts to `Highlight` so a hover-capable pointer
      still sees an affordance change in high-contrast mode. */
   @media (hover: hover) {
-    .zs-input:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    .zs-input:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
       background: Field;
       color: FieldText;
       box-shadow:
         inset 0 0 0 0.0625rem CanvasText,
         0 0 0 0 transparent;
     }
-    .zs-input--filled:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    .zs-input--filled:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
       background: Field;
       color: FieldText;
       box-shadow:
         inset 0 0 0 0.0625rem CanvasText,
         0 0 0 0 transparent;
     }
-    .zs-input--plain:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    .zs-input--plain:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
       background: transparent;
       color: FieldText;
       box-shadow:
@@ -403,7 +427,8 @@
         0 0 0 0 transparent;
     }
   }
-  .zs-input[data-focused] {
+  .zs-input[data-focused],
+  .zs-input:focus-within {
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight;
@@ -413,7 +438,8 @@
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0 transparent;
   }
-  .zs-input[data-invalid][data-focused] {
+  .zs-input[data-invalid][data-focused],
+  .zs-input[data-invalid]:focus-within {
     box-shadow:
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0.125rem Highlight;

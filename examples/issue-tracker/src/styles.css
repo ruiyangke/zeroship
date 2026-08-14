@@ -1252,20 +1252,32 @@ fieldset.bug-detail-extras { display: grid; }
 .column-picker { position: relative; }
 .column-picker > .column-picker-menu { top: calc(100% + 0.35rem); }
 
-/* ONE focus ring, and the app has to supply it.
-   Measured 2026-08-13: the design system's Input changes nothing on focus --
-   with a real keyboard Tab the control matches :focus-visible, yet the
-   wrapper's box-shadow is byte-identical to its resting value and the control
-   carries no outline. Keyboard users had no focus indication on any field.
+/* NO focus styling here. The design system already draws it.
+   ==========================================================
+   .zs-input[data-focused] sets TWO shadow layers on the wrapper:
 
-   So the ring here is not decoration, it is the only one there is. What made
-   the old rule look doubled was pairing an outline WITH a border-colour change
-   at offset 0, so it sat directly against the wrapper's own 1px ring in a
-   near-identical green. This sits clearly outside the field instead, which is
-   what a focus ring is supposed to look like.
+     inset 0 0 0 0.0625rem var(--zs-input-border-focus)   <- accent hairline
+     0 0 0 0.1875rem var(--zs-input-focus-ring-color)     <- soft 16% halo
 
-   :where() keeps specificity at zero, so the design system can still win. */
-:where(input, textarea):focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+   and .zs-input__control sets outline:none deliberately, so the wrapper
+   owns the ring and the slots and the control share it.
+
+   A rule here that put an outline back on the control produced a THIRD
+   edge: a hard opaque line sitting on top of that halo. It was added on a
+   measurement that said the DS changed nothing on focus -- the measurement
+   printed the wrapper's box-shadow truncated to 120 characters, and the
+   halo is the LAST component in the list, so the truncation removed exactly
+   the part that differed. Two clipped strings compared equal.
+
+   If a field here ever needs focus styling again: check what the wrapper
+   already draws, untruncated, before adding anything. */
+
+/* The description textarea is not a DS component, so it draws its own.
+   Shaped like the DS treatment on purpose -- one border that takes the
+   accent, plus a soft halo -- so it does not read as a different species
+   of field next to the real ones. */
+.app-textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 0.1875rem var(--accent-soft);
 }
