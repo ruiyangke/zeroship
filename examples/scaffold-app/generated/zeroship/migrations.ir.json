@@ -1,0 +1,46 @@
+{
+  "kind": "ir",
+  "documents": [
+    {
+      "filename": "20260628000000_initial_schema.ir.json",
+      "body": {
+        "ir_version": 1,
+        "name": "initial_schema",
+        "ops": [
+          {
+            "op": "createTable",
+            "name": "users",
+            "columns": [
+              {
+                "name": "email",
+                "type": "text",
+                "nullable": false,
+                "unique": true
+              },
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "notes",
+            "columns": [
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "body",
+                "type": "text"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

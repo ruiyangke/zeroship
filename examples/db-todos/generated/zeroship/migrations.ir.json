@@ -1,0 +1,102 @@
+{
+  "kind": "ir",
+  "documents": [
+    {
+      "filename": "20260101000000_create_todos.ir.json",
+      "body": {
+        "ir_version": 1,
+        "name": "create_todos",
+        "ops": [
+          {
+            "op": "createTable",
+            "name": "users",
+            "columns": [
+              {
+                "name": "email",
+                "type": "text",
+                "nullable": false,
+                "unique": true
+              },
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "handle",
+                "type": "text",
+                "nullable": false,
+                "unique": true
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "todos",
+            "columns": [
+              {
+                "name": "userId",
+                "type": "text",
+                "nullable": false,
+                "references": {
+                  "table": "users",
+                  "column": "id"
+                }
+              },
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "priority",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "medium"
+                  }
+                }
+              },
+              {
+                "name": "tags",
+                "type": "json"
+              },
+              {
+                "name": "done",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              },
+              {
+                "name": "archived",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              }
+            ],
+            "indexes": [
+              {
+                "name": "todos_user_idx",
+                "columns": [
+                  {
+                    "kind": "column",
+                    "name": "userId"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "kind": "ir",
+  "documents": [
+    {
+      "filename": "20260808000000_create_notes.ir.json",
+      "body": {
+        "ir_version": 1,
+        "name": "create_notes",
+        "ops": [
+          {
+            "op": "createTable",
+            "name": "notes",
+            "columns": [
+              {
+                "name": "owner_id",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "body",
+                "type": "text",
+                "nullable": false
+              }
+            ],
+            "indexes": [
+              {
+                "name": "notes_owner_id_idx",
+                "columns": [
+                  {
+                    "kind": "column",
+                    "name": "owner_id"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

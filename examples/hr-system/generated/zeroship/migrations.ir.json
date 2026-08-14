@@ -1,0 +1,1271 @@
+{
+  "kind": "ir",
+  "documents": [
+    {
+      "filename": "20260101000000_create_hr_system.ir.json",
+      "body": {
+        "ir_version": 1,
+        "name": "create_hr_system",
+        "ops": [
+          {
+            "op": "createTable",
+            "name": "departments",
+            "columns": [
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "code",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "managerId",
+                "type": "double"
+              },
+              {
+                "name": "budget",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "headcount",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "parentDepartmentId",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "positions",
+            "columns": [
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "departmentId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "level",
+                "type": "text"
+              },
+              {
+                "name": "salaryMin",
+                "type": "double"
+              },
+              {
+                "name": "salaryMax",
+                "type": "double"
+              },
+              {
+                "name": "isOpen",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": true
+                  }
+                }
+              },
+              {
+                "name": "description",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "employees",
+            "columns": [
+              {
+                "name": "firstName",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "lastName",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "email",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "phone",
+                "type": "text"
+              },
+              {
+                "name": "departmentId",
+                "type": "double"
+              },
+              {
+                "name": "positionId",
+                "type": "double"
+              },
+              {
+                "name": "managerId",
+                "type": "double"
+              },
+              {
+                "name": "hireDate",
+                "type": "double"
+              },
+              {
+                "name": "salary",
+                "type": "double"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "active"
+                  }
+                }
+              },
+              {
+                "name": "skills",
+                "type": "json"
+              },
+              {
+                "name": "avatarUrl",
+                "type": "text"
+              },
+              {
+                "name": "emergencyContactName",
+                "type": "text"
+              },
+              {
+                "name": "emergencyContactPhone",
+                "type": "text"
+              },
+              {
+                "name": "address",
+                "type": "text"
+              },
+              {
+                "name": "dateOfBirth",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "jobPostings",
+            "columns": [
+              {
+                "name": "positionId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "description",
+                "type": "text"
+              },
+              {
+                "name": "requirements",
+                "type": "text"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "draft"
+                  }
+                }
+              },
+              {
+                "name": "postedDate",
+                "type": "double"
+              },
+              {
+                "name": "closingDate",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "applicants",
+            "columns": [
+              {
+                "name": "jobPostingId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "email",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "phone",
+                "type": "text"
+              },
+              {
+                "name": "resumeUrl",
+                "type": "text"
+              },
+              {
+                "name": "stage",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "applied"
+                  }
+                }
+              },
+              {
+                "name": "rating",
+                "type": "double"
+              },
+              {
+                "name": "notes",
+                "type": "text"
+              },
+              {
+                "name": "appliedDate",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "interviews",
+            "columns": [
+              {
+                "name": "applicantId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "interviewerId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "scheduledAt",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "durationMinutes",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 60
+                  }
+                }
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "video"
+                  }
+                }
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "scheduled"
+                  }
+                }
+              },
+              {
+                "name": "feedback",
+                "type": "text"
+              },
+              {
+                "name": "rating",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "timesheets",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "date",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "clockIn",
+                "type": "double"
+              },
+              {
+                "name": "clockOut",
+                "type": "double"
+              },
+              {
+                "name": "hoursWorked",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "overtimeHours",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "draft"
+                  }
+                }
+              },
+              {
+                "name": "notes",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "workSchedules",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "dayOfWeek",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "startTime",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "endTime",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "isRemote",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "leaveRequests",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "startDate",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "endDate",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "days",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "reason",
+                "type": "text"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "pending"
+                  }
+                }
+              },
+              {
+                "name": "approvedBy",
+                "type": "double"
+              },
+              {
+                "name": "approvedAt",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "leaveBalances",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "year",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "vacationTotal",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 20
+                  }
+                }
+              },
+              {
+                "name": "vacationUsed",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "sickTotal",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 10
+                  }
+                }
+              },
+              {
+                "name": "sickUsed",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "personalTotal",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 5
+                  }
+                }
+              },
+              {
+                "name": "personalUsed",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "holidays",
+            "columns": [
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "date",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "isRecurring",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "payrollRuns",
+            "columns": [
+              {
+                "name": "period",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "runDate",
+                "type": "double"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "draft"
+                  }
+                }
+              },
+              {
+                "name": "totalGross",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "totalNet",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "totalDeductions",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "processedBy",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "payslips",
+            "columns": [
+              {
+                "name": "payrollRunId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "baseSalary",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "overtimePay",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "bonus",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "deductionsTax",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "deductionsBenefits",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "deductionsOther",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "netPay",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "pending"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "reviews",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "reviewerId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "period",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "cycle",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "annual"
+                  }
+                }
+              },
+              {
+                "name": "rating",
+                "type": "double"
+              },
+              {
+                "name": "strengths",
+                "type": "text"
+              },
+              {
+                "name": "improvements",
+                "type": "text"
+              },
+              {
+                "name": "goals",
+                "type": "text"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "draft"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "goals",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "description",
+                "type": "text"
+              },
+              {
+                "name": "targetDate",
+                "type": "double"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "active"
+                  }
+                }
+              },
+              {
+                "name": "progress",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "category",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "performance"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "feedback",
+            "columns": [
+              {
+                "name": "fromEmployeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "toEmployeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "message",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "isAnonymous",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "courses",
+            "columns": [
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "description",
+                "type": "text"
+              },
+              {
+                "name": "category",
+                "type": "text"
+              },
+              {
+                "name": "durationHours",
+                "type": "double"
+              },
+              {
+                "name": "isMandatory",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              },
+              {
+                "name": "maxParticipants",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "enrollments",
+            "columns": [
+              {
+                "name": "courseId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "enrolled"
+                  }
+                }
+              },
+              {
+                "name": "enrolledAt",
+                "type": "double"
+              },
+              {
+                "name": "completedAt",
+                "type": "double"
+              },
+              {
+                "name": "score",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "certifications",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "issuer",
+                "type": "text"
+              },
+              {
+                "name": "issueDate",
+                "type": "double"
+              },
+              {
+                "name": "expiryDate",
+                "type": "double"
+              },
+              {
+                "name": "credentialUrl",
+                "type": "text"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "compensationHistory",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "effectiveDate",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "salary",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "changeType",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "changeReason",
+                "type": "text"
+              },
+              {
+                "name": "approvedBy",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "benefitsPlans",
+            "columns": [
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "provider",
+                "type": "text"
+              },
+              {
+                "name": "monthlyCostEmployee",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              },
+              {
+                "name": "monthlyCostEmployer",
+                "type": "double",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": 0
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "benefitsEnrollments",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "planId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "startDate",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "endDate",
+                "type": "double"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "active"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "expenseClaims",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "description",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "amount",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "category",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "receiptUrl",
+                "type": "text"
+              },
+              {
+                "name": "status",
+                "type": "text",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": "submitted"
+                  }
+                }
+              },
+              {
+                "name": "submittedAt",
+                "type": "double"
+              },
+              {
+                "name": "approvedBy",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "documents",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "name",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "fileUrl",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "uploadedAt",
+                "type": "double"
+              },
+              {
+                "name": "expiresAt",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "auditLog",
+            "columns": [
+              {
+                "name": "actorId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "action",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "entityType",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "entityId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "changesJson",
+                "type": "text"
+              },
+              {
+                "name": "timestamp",
+                "type": "double"
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "policies",
+            "columns": [
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "content",
+                "type": "text"
+              },
+              {
+                "name": "policyVersion",
+                "type": "text"
+              },
+              {
+                "name": "effectiveDate",
+                "type": "double"
+              },
+              {
+                "name": "category",
+                "type": "text",
+                "nullable": false
+              }
+            ]
+          },
+          {
+            "op": "createTable",
+            "name": "notifications",
+            "columns": [
+              {
+                "name": "employeeId",
+                "type": "double",
+                "nullable": false
+              },
+              {
+                "name": "type",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "title",
+                "type": "text",
+                "nullable": false
+              },
+              {
+                "name": "message",
+                "type": "text"
+              },
+              {
+                "name": "isRead",
+                "type": "boolean",
+                "nullable": false,
+                "default": {
+                  "literal": {
+                    "value": false
+                  }
+                }
+              },
+              {
+                "name": "link",
+                "type": "text"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

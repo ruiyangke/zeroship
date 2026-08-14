@@ -30,12 +30,26 @@ import { dirname, relative, resolve } from "node:path";
 
 import { loadMigrateAddon, type GenArtifactsReply } from "./addon.js";
 import { CONFINED_SCHEMA_EMIT_CEILING_TOML } from "./confined-ceiling.js";
-import { recordMigrationsDir } from "./recorder.js";
+import { discoverMigrations, recordMigration } from "./recorder.js";
 import { evaluateSchemaModule, schemaModuleToDescriptors } from "./manual.js";
 import { renderGeneratedEnvDb, type RuntimeDescriptor } from "./render-env-db.js";
 
 /** The two committed artifact filenames gen-types emits. */
 export const RUNTIME_DESCRIPTOR_FILE = "schema.runtime.json";
+/**
+ * The recorded migration set, as the migration service's apply-request body.
+ *
+ * Emitted ONLY by the generated (migrations-authored) source - a manual
+ * `schema.ts` app has no migrations to record. `zeroship migrate` posts this
+ * file verbatim; keeping the whole envelope (`{ kind, documents }`) rather than
+ * a bare array means the CLI never has to know the wire shape, so a change to
+ * `ApplyMigrationsRequest` moves this emitter and nothing else.
+ *
+ * It is emitted here, beside the other two, rather than into `dist/`, because
+ * all three are the SAME fold of the SAME `migrations/*.ts`. Splitting them
+ * across two output dirs is how they drift.
+ */
+export const MIGRATIONS_IR_FILE = "migrations.ir.json";
 /** The generated `env.db` typings module. A real `.ts` (NOT a `.d.ts`): the
  *  generated variant carries `const schema = <builder calls> as const`, which is
  *  illegal in a `.d.ts` ambient context. */
@@ -163,8 +177,14 @@ export function isMigrationSourceError(e: unknown): boolean {
 export interface GenTypesResult {
   /** `"written"` (regenerated) or `"checked"` (drift gate passed, no write). */
   status: "written" | "checked";
-  /** The two artifact filenames relative to the out dir. */
-  files: readonly [typeof ENV_DB_FILE, typeof RUNTIME_DESCRIPTOR_FILE];
+  /**
+   * The artifact filenames relative to the out dir, in emit order.
+   *
+   * Always the two schema artifacts; plus `migrations.ir.json` when the source
+   * was migrations (the manual `schema.ts` source has none to record), which is
+   * why this is no longer a fixed-length tuple.
+   */
+  files: readonly string[];
 }
 
 /**
@@ -269,8 +289,21 @@ export async function genTypesFromMigrations(
   // their source: an unresolvable import, a syntax error, a DSL guard. Tagged
   // so the dev server can keep serving through it — see `MigrationSourceError`.
   let envelopes;
+  // Recorded with their filename stems, not through `recordMigrationsDir`: the
+  // apply request identifies each document by `<stem>.ir.json`, and the stem is
+  // what the migration service journals a version under. Dropping it here would
+  // mean re-deriving it later from something that is not the filename.
+  let documents: Array<{
+    filename: string;
+    body: Awaited<ReturnType<typeof recordMigration>>;
+  }>;
   try {
-    envelopes = await recordMigrationsDir(migrationsDir);
+    const discovered = await discoverMigrations(migrationsDir);
+    documents = [];
+    for (const m of discovered) {
+      documents.push({ filename: `${m.stem}.ir.json`, body: await recordMigration(m.path) });
+    }
+    envelopes = documents.map((d) => d.body);
   } catch (cause) {
     throw new MigrationSourceError(
       `gen-types: a migration under ${migrationsDir} failed to load — ${(cause as Error)?.message ?? String(cause)}`,
@@ -296,7 +329,10 @@ export async function genTypesFromMigrations(
   // own `envDbTs` re-authors the fold in the migration DSL, which a deployed app
   // neither depends on nor gets `env.db` typing from.
   const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson));
-  return emit(outDir, envDbTs, runtimeJson, opts.check ?? false);
+  // Two-space JSON, trailing newline: this file is committed and reviewed, and
+  // a one-line 200 KB blob is not.
+  const migrationsIr = `${JSON.stringify({ kind: "ir", documents }, null, 2)}\n`;
+  return emit(outDir, envDbTs, runtimeJson, opts.check ?? false, migrationsIr);
 }
 
 /** Unwrap a `genArtifacts` reply, turning the soft `{ ok:false, error }` arm into
@@ -371,20 +407,35 @@ async function emit(
   envDbTs: string,
   runtimeJson: string,
   check: boolean,
+  // Absent on the MANUAL source, which has no migrations to record. It is
+  // optional rather than an empty string so a manual app does not emit an
+  // apply body with zero documents - the migration service rejects that
+  // outright ("at least one .ir.json document is required"), and shipping a
+  // file that can only ever 422 is worse than shipping none.
+  migrationsIr?: string,
 ): Promise<GenTypesResult> {
   const envPath = resolve(outDir, ENV_DB_FILE);
   const jsonPath = resolve(outDir, RUNTIME_DESCRIPTOR_FILE);
+  const irPath = resolve(outDir, MIGRATIONS_IR_FILE);
+  const files = [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE];
+  if (migrationsIr !== undefined) files.push(MIGRATIONS_IR_FILE);
 
   if (check) {
     await assertNoDrift(envPath, envDbTs, ENV_DB_FILE);
     await assertNoDrift(jsonPath, runtimeJson, RUNTIME_DESCRIPTOR_FILE);
-    return { status: "checked", files: [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE] };
+    if (migrationsIr !== undefined) {
+      await assertNoDrift(irPath, migrationsIr, MIGRATIONS_IR_FILE);
+    }
+    return { status: "checked", files };
   }
 
   await fs.mkdir(outDir, { recursive: true });
   await fs.writeFile(envPath, envDbTs, "utf8");
   await fs.writeFile(jsonPath, runtimeJson, "utf8");
-  return { status: "written", files: [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE] };
+  if (migrationsIr !== undefined) {
+    await fs.writeFile(irPath, migrationsIr, "utf8");
+  }
+  return { status: "written", files };
 }
 
 /** Assert the committed artifact byte-matches the freshly-generated one. */
