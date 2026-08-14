@@ -200,3 +200,63 @@ test("the reports page is public in full", async ({ browser, baseURL }) => {
 
   await anon.close();
 });
+
+/**
+ * A column whose content is authenticated is not shown to a visitor.
+ *
+ * `issues.search` is anonymous but `users.resolve` is not, so a signed-out
+ * reader gets every row and no names: Assignee and Reporter rendered a full
+ * column of "--". `useIssueLookups` documents that fallback as intended
+ * degradation, and for a single cell it is -- a deleted user still leaves an
+ * id worth showing. A whole column of it answers nothing and was taking width
+ * from Summary.
+ *
+ * The control is the point here. Asserting only that a visitor lacks the
+ * column would pass just as well if the column had been deleted outright, so
+ * the same page is read with a session and must still have it.
+ *
+ * WHAT THIS DOES NOT CATCH: it reads the DEFAULT column set. A reader who had
+ * previously enabled Reporter has it in localStorage; this spec clears that
+ * first, so it says nothing about the stored-preference path.
+ */
+test("columns that need an identity are absent for a visitor and present with one", async ({
+  browser,
+  baseURL,
+}) => {
+  const headersFor = async (context: Awaited<ReturnType<typeof browser.newContext>>) => {
+    const page = await context.newPage();
+    // Clear first: a stored column choice would decide this instead of the
+    // session, and the failure would look like the gate not working.
+    await page.goto("/issues");
+    await page.evaluate(() => window.localStorage.clear());
+    await page.goto("/issues");
+    await page.locator("table thead th").first().waitFor();
+    return page.locator("table thead th").allInnerTexts();
+  };
+
+  const visitor = await browser.newContext({ baseURL });
+  const anonymous = await headersFor(visitor);
+  await visitor.close();
+
+  const member = await browser.newContext({ baseURL });
+  await signIn(member, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
+  const authenticated = await headersFor(member);
+  await member.close();
+
+  expect(
+    anonymous.map((h) => h.trim()),
+    "a visitor is not offered a column that can only render dashes",
+  ).not.toContain("Assignee");
+  expect(
+    authenticated.map((h) => h.trim()),
+    "and the column is genuinely still there with a session -- otherwise this passes against a deleted column",
+  ).toContain("Assignee");
+
+  // Everything else is identical, so the gate is about identity and not a
+  // second, accidental difference between the two views.
+  const withoutPeople = authenticated.filter((h) => !["Assignee", "Reporter"].includes(h.trim()));
+  expect(
+    anonymous.map((h) => h.trim()),
+    "the two views differ ONLY by the identity columns",
+  ).toEqual(withoutPeople.map((h) => h.trim()));
+});

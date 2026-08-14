@@ -191,6 +191,28 @@ export function IssueListPage() {
   );
 
 
+  /**
+   * Columns whose CONTENT is authenticated, dropped for a visitor.
+   *
+   * `users.resolve` is `auth: "user"` while `issues.search` is not, so a
+   * signed-out reader gets the rows but no names, and Assignee and Reporter
+   * render a full column of "--". `useIssueLookups` documents that fallback as
+   * intended degradation and it is -- for a cell. A whole column of it is not
+   * degradation, it is a column that answers nothing, and it was still taking
+   * width away from Summary.
+   *
+   * Dropped from the PICKER too, not just the table. Offering a checkbox that
+   * turns on a column of dashes is the same false affordance as the "New issue"
+   * button this page used to show a visitor.
+   */
+  const identityColumns: IssueColumnKey[] = ["assignee", "reporter"];
+  const availableColumns = signedOut
+    ? ALL_ISSUE_COLUMNS.filter((col) => !identityColumns.includes(col.key))
+    : ALL_ISSUE_COLUMNS;
+  const visibleColumns = signedOut
+    ? columns.filter((key) => !identityColumns.includes(key))
+    : columns;
+
   const toggleColumn = (key: IssueColumnKey) => {
     setColumns((prev) => {
       const next = prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key];
@@ -322,7 +344,7 @@ export function IssueListPage() {
               {pickerOpen ? (
                 <Card className="column-picker-menu">
                   <Cluster gap={3}>
-                    {ALL_ISSUE_COLUMNS.map((col) => (
+                    {availableColumns.map((col) => (
                       <Checkbox
                         key={col.key}
                         checked={columns.includes(col.key)}
@@ -448,7 +470,7 @@ export function IssueListPage() {
               Back to filters
             </Button>
           </Cluster>
-          <IssueResultsTable issues={advanced} columns={columns} caption="Advanced search results" />
+          <IssueResultsTable issues={advanced} columns={visibleColumns} caption="Advanced search results" />
         </>
       ) : (
       <AsyncSection
@@ -463,7 +485,7 @@ export function IssueListPage() {
         renderLoading={() => (
           <IssueResultsTable
             issues={[]}
-            columns={columns}
+            columns={visibleColumns}
             loading
             sort={{
               key: SORT_COLUMN[sortBy] ?? "updated",
@@ -488,7 +510,7 @@ export function IssueListPage() {
           <>
             <IssueResultsTable
               issues={issues}
-              columns={columns}
+              columns={visibleColumns}
               loading={refreshing}
               sort={{ key: SORT_COLUMN[sortBy] ?? "updated", direction: sortDirection === 1 ? "asc" : "desc" }}
               onSortChange={(next) => {
