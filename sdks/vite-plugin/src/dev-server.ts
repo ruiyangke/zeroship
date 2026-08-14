@@ -22,6 +22,7 @@ import {
   ENV_DEV_AUTH_SECRET,
   ENV_DIE_WITH_PARENT,
   DEFAULT_DEV_PORT,
+  ENV_DEV_PORT,
   RUNTIME_HEALTHY_MS,
   MAX_RAPID_RESTARTS,
   RUNTIME_RESTART_BASE_MS,
@@ -531,7 +532,10 @@ export function devServerPlugin(
   state: TransformState,
   project: ProjectConfigHolder,
 ): Plugin[] {
-  const devPort = options.devServerPort ?? DEFAULT_DEV_PORT;
+  const devPort =
+    options.devServerPort ??
+    (Number(process.env[ENV_DEV_PORT]) || undefined) ??
+    DEFAULT_DEV_PORT;
   let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
 
   // Resolve the dev-tier auth env pair ONCE per dev-server lifetime. The secret

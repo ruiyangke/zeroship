@@ -49,6 +49,20 @@ export const ENV_DIE_WITH_PARENT = "ZEROSHIP_DIE_WITH_PARENT";
 export const DEFAULT_DEV_PORT = 3001;
 
 /**
+ * Per-machine override for the dev runtime port.
+ *
+ * The port is the clearest thing in this repo that varies per developer AND
+ * per concurrently-running example, which is why it stayed a plugin option
+ * rather than moving into `zeroship.jsonc`. But 17 examples pass
+ * `devServerPort` and eight of them compute it from a bespoke
+ * `process.env.<NAME>_API_PORT` - eight undeclared names doing one job. This
+ * is the declared one. It is read ONLY when the plugin option is absent, so
+ * every existing example keeps its own variable and nothing has to move at
+ * once.
+ */
+export const ENV_DEV_PORT = "ZEROSHIP_DEV_PORT";
+
+/**
  * Dev-runtime supervisor thresholds (`dev-server.ts`).
  *
  * The dev server re-spawns the `zeroship serve` child when it exits
