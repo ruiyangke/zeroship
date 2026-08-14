@@ -445,6 +445,19 @@ function parseArgs(argv: string[]): Args {
       "flag --json is only valid with lint, plan, status, rollback, history, or version",
     );
   }
+  // `--approve` authorises destructive work, and only `apply`, `rollback` and
+  // `resolve` consume it. `new`, `lint`, `plan`, `status` and `history` took it
+  // and did nothing, which is the worst member of this class to leave silent:
+  // `zero-migrate plan --approve` reads like pre-approving the plan it prints, and
+  // approves nothing. Refused for the same reason as `--json` above.
+  if (
+    args.approved &&
+    args.command !== "apply" &&
+    args.command !== "rollback" &&
+    args.command !== "resolve"
+  ) {
+    throw new CliError("flag --approve is only valid with apply, rollback, or resolve");
+  }
   if (
     args.registryPath !== undefined &&
     args.command !== "lint" &&
