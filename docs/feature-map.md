@@ -729,7 +729,7 @@ Gateway, control, and worker all read from a shared `LocalDiskBlobStore`; **no S
 dev and build time. It handles server-procedure discovery via `"use server"` transforms,
 synthetic SSR-entry generation, Node.js compat shims (unenv@2), a Vite Environment API bridge
 to the real V8 runtime in dev, and `.zship` archive emission. There are no separate CSR/SSR/SSG
-plugins — the `mode` option selects the build posture.
+plugins. The `build.mode` field in `zeroship.jsonc` selects the build posture.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |

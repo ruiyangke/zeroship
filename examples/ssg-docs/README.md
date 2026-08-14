@@ -26,7 +26,7 @@ dist/
 └── app.zship               (the deploy artifact)
 ```
 
-`mode: "static"` in `vite.config.ts` skips the SSR sub-build entirely and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
+`"build": { "mode": "static" }` in `zeroship.jsonc` skips the SSR sub-build entirely and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
 
 ## Inspect the manifest
 
