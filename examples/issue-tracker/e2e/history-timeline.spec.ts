@@ -60,7 +60,7 @@ test("the history names who changed what, grouped per edit", async ({
   });
 
   await page.goto(`/issues/${issue.id}`);
-  await page.getByRole("button", { name: /^History/ }).click();
+  await page.getByRole("tab", { name: /^History/ }).click();
 
   const events = page.locator(".history-event");
   await expect(events.first(), "the log renders as timeline events").toBeVisible();

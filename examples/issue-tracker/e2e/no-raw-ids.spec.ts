@@ -149,7 +149,7 @@ test("no page renders a raw typed id as visible text", async ({ page, baseURL, c
   await check("folded panels");
   // The history tab renders activity rows whose values are ids for several
   // fields, which is the most likely place for one to surface.
-  await page.getByRole("button", { name: /^History/ }).click();
+  await page.getByRole("tab", { name: /^History/ }).click();
   await page.waitForTimeout(800);
   await check("issue history");
 

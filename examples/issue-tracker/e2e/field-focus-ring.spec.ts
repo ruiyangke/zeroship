@@ -53,6 +53,19 @@ async function shadows(page: Page, shell: string, target: string): Promise<Shado
 
   const before = await read();
   await page.click(target);
+  // ASSERT THE FOCUS LANDED before measuring what focus looks like.
+  //
+  // Without this the spec compared shadows whether or not the click took, and
+  // a miss produced a wall of oklab-versus-oklch colour text that reads as a
+  // ring regression. It failed exactly that way once in a full suite run while
+  // passing 6/6 in isolation: under load the form can still be settling, and a
+  // re-render after the click drops focus. The distinction matters -- "the
+  // ring is wrong" and "nothing was focused" need different fixes, and only
+  // this line tells them apart.
+  await expect(
+    page.locator(target),
+    "the click actually focused the field, so the measurement below is of a focused control",
+  ).toBeFocused();
   await page.waitForTimeout(350);
   const after = await read();
   return { rest: before.shadow, focus: after.shadow, radius: before.radius };

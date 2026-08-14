@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Banner, Button, Card, Cluster, Input, Stack } from "@zeroship/ui";
+import { Badge, Banner, Button, Card, Cluster, Input, Stack, Tabs } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -239,27 +239,26 @@ export function IssueDetailPage({
           of its fields.
         </Banner>
       ) : null}
-      <div className="tabs">
-        <button
-          type="button"
-          className={tab === "details" ? "active" : undefined}
-          onClick={() => setTab("details")}
-        >
-          Details
-        </button>
-        <button
-          type="button"
-          className={tab === "history" ? "active" : undefined}
-          onClick={() => setTab("history")}
-        >
-          History ({detail.activities.length})
-        </button>
-      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (value === "details" || value === "history") setTab(value);
+        }}
+        lazyMount
+      >
+        <Tabs.List>
+          <Tabs.Tab value="details">Details</Tabs.Tab>
+          <Tabs.Tab value="history">
+            <span>History</span>
+            <Badge intent="neutral" variant="soft" size="sm">
+              {detail.activities.length}
+            </Badge>
+          </Tabs.Tab>
+          <Tabs.Indicator />
+        </Tabs.List>
 
-      {tab === "history" ? (
-        <HistoryPanel activities={detail.activities} labels={historyLabels} people={detail.people} />
-      ) : (
-        <div className="issue-detail-grid">
+        <Tabs.Panel value="details">
+          <div className="issue-detail-grid">
           {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
@@ -387,8 +386,16 @@ export function IssueDetailPage({
               <SeeAlsoPanel issueId={id} />
             </fieldset>
           </Stack>
-        </div>
-      )}
+          </div>
+        </Tabs.Panel>
+        <Tabs.Panel value="history">
+          <HistoryPanel
+            activities={detail.activities}
+            labels={historyLabels}
+            people={detail.people}
+          />
+        </Tabs.Panel>
+      </Tabs>
     </div>
   );
 }
