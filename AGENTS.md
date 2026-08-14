@@ -44,6 +44,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/plugin-workflow/` · `crates/control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
+| **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/metering/provider/` · `crates/stream/` · `crates/control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
@@ -269,6 +270,10 @@ Stable contracts, live in `docs/reference/`:
 - `websocket-design.md` — WebSocketPair, RFC 6455
 - `plugin-system.md` — how to add an `env.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
+- `project-config.md` - `zeroship.jsonc`: the creator project file the CLI and the
+  build both read (app, control, build shape, migration paths, environments,
+  secret names); its two precedence orders, the `config` escape hatch, and the
+  scope invariant that keeps it out of the `.zship`
 - `vite-plugin.md` — `@zeroship/vite-plugin`: node-compat shims, server-procedure discovery, the synthetic server entry, dev runtime + `.zship` build
 - `vite-environment-api.md` — Vite dev server inside the V8 runtime
 - `runtime-limits.md` — per-app `AppRuntimeLimits` vs runtime-side `RuntimeLimits` (CPU, wall timeout, heap), plus idle-GC knobs

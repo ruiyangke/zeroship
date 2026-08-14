@@ -98,7 +98,17 @@ dist/app.zship
 
 ```bash
 zeroship login
-zeroship deploy ./dist/app.zship --app=<id> --control=<url> --token=<PAT>
+zeroship deploy
 ```
 
-The deploy command ships the pre-built artifact. Keep app changes local, rebuild to produce a new `dist/app.zship`, then deploy that artifact.
+The deploy command ships the pre-built artifact. The artifact path, the app and
+the control plane come from `zeroship.jsonc` in this directory, and `deploy`
+prints each resolved value and its source before it uploads. `--app=<id>`,
+`--control=<url>` and a positional `.zship` path still override the file, and
+`--token=<PAT>` (or `ZEROSHIP_TOKEN`) replaces `zeroship login`.
+
+This directory's `zeroship.jsonc` has no `app` key yet. The first deploy falls
+back to the project `name`, creates that app, and prints the id for you to paste
+in as `"app": "..."`; `migrate`, `secret` and `var` do not take that fallback and
+ask for it until you do. Keep app changes local, rebuild to produce a new
+`dist/app.zship`, then deploy that artifact.

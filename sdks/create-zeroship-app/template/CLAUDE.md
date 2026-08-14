@@ -87,10 +87,20 @@ drift from the migrations — regenerate with `vite build --mode development`.
 ## Deploy
 
 ```bash
-zeroship login                                   # one-time (OAuth)
-zeroship deploy  ./dist/app.zship --app=<id>     # ship the built artifact
-zeroship migrate --app=<id>                      # apply the schema (env.db apps)
+zeroship login       # one-time (OAuth)
+zeroship deploy      # ship the built artifact
+zeroship migrate     # apply the schema (env.db apps)
 ```
+
+Neither command takes a target: the artifact path, the app and the control
+plane come from `zeroship.jsonc` in this directory, and each command prints
+what it resolved and from where before it acts. `--app=<id>` and
+`--control=<url>` still override the file.
+
+`zeroship.jsonc` ships with no `app` key: on the first push `deploy` falls back
+to the project `name`, creates that app, and prints the id. Paste the id into
+the file as `"app": "..."` - `migrate`, `secret` and `var` do NOT take that
+fallback and will ask for it by name until you do.
 
 **Both steps, in that order, every time the migrations change.** The `.zship`
 carries the app's *code* and the generated schema *typing*; it does not carry
