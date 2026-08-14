@@ -438,8 +438,11 @@ tbody tr:hover { background: var(--surface-2); }
 .user-picker-results { list-style: none; margin: 0.3rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; }
 
 /* ── new bug ─────────────────────────────────────────────────────────── */
-.new-issue-form { display: flex; flex-direction: column; gap: 0.8rem; max-width: 640px; }
 .new-issue-form fieldset { display: flex; flex-direction: column; gap: 0.7rem; }
+.new-issue-page {
+  max-inline-size: 40rem;
+  margin-inline: auto;
+}
 
 /* ── search ──────────────────────────────────────────────────────────── */
 .quicksearch, .field-builder { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; margin-bottom: 1.2rem; }
@@ -894,8 +897,12 @@ tbody tr:hover { background: var(--surface-2); }
   border-color: var(--accent);
   color: var(--accent);
 }
-/* Card chrome, matching every other grouped surface in the app. */
+/* Card chrome, matching every other grouped surface in the app. This block
+   absorbed an earlier duplicate definition that set the layout properties. */
 .new-issue-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
