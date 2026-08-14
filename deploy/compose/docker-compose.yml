@@ -229,7 +229,6 @@ services:
         --blob-store /data/bundles
         --allow-unsupported-billing
         --app-base-domain ${ZEROSHIP_DOMAIN:-zeroship.localhost}
-        --signing-key-file /etc/zeroship/secrets/control-signing.pem
     # READINESS, not liveness: /readyz answers 200 only once Postgres answers,
     # so `service_healthy` on this service means "can serve API calls", not
     # "the process bound a port". `curl` is present in the runtime image
@@ -259,6 +258,21 @@ services:
       # service used to carry it and nothing consumed it.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
+      # The PAT signing key, under its canonical env name rather than the
+      # `--signing-key-file` flag it used to be. Three reasons, and the third is
+      # the one that cost a deploy:
+      #   - migrated, gateway and auth all name their key files this way. One
+      #     service spelling it differently is the split this file keeps closing.
+      #   - the comment above says no secret is passed as a flag. This was the
+      #     exception, and an exception nobody remembers is just a bug waiting.
+      #   - `docker compose run --entrypoint zeroship-control control
+      #     --check-config` replaces the service COMMAND, so a dry run could not
+      #     see a path supplied as a flag and reported the key missing. As an
+      #     env var the dry run is faithful, which is what lets deploy-remote.sh
+      #     validate this service before it restarts anything.
+      # migrated verifies against this SAME file: that is what lets a
+      # control-issued creator PAT authorize a migration apply.
+      ZEROSHIP_CONTROL_SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
       # control ALSO needs the worker key: it refuses to start without one,
       # because it calls the worker's admin endpoints. MUST match the worker's
       # value - it is ONE setting with several consumers, which is why it has
