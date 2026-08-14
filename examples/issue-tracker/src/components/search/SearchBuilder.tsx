@@ -14,7 +14,7 @@ import {
   saveSavedSearch,
   structuredSearch,
 } from "../../api";
-import { queryKeys } from "../../lib/query-keys";
+import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation, useSavedSearches } from "../../lib/queries";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable, type IssueColumnKey } from "../IssueResultsTable";
 import { AsyncSection, ErrorState, Loading } from "../StateViews";
@@ -187,11 +187,11 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
   // covered without editing both writers.
   const save = useAppMutation(
     (args: { name: string; queryJson: WhereNode }) => saveSavedSearch(args),
-    () => [queryKeys.savedSearches.all],
+    () => invalidatedBy.savedSearchChanged(),
   );
   const remove = useAppMutation(
     (id: string) => deleteSavedSearch({ id }),
-    () => [queryKeys.savedSearches.all],
+    () => invalidatedBy.savedSearchChanged(),
   );
   const busy = save.isPending || remove.isPending;
   const error = save.error ?? remove.error;

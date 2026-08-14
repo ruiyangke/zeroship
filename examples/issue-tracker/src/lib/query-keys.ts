@@ -186,5 +186,20 @@ export const invalidatedBy = {
     queryKeys.issues.detail(issueId),
   ],
   productStructureChanged: () => [queryKeys.products.all, queryKeys.reports.all],
+  /**
+   * Creating a keyword changes the tracker-wide VOCABULARY, not just this
+   * issue, so it drops the keyword list as well as the issue's relations.
+   *
+   * Named here because two separate agents independently composed this same
+   * pair at their call sites when the entry was missing. That is the signal
+   * that a shape belongs in the map: if the answer has to be re-derived, it
+   * will eventually be re-derived differently.
+   */
+  keywordCreated: (issueId: string) => [
+    queryKeys.relations.keywords(issueId),
+    queryKeys.issues.detail(issueId),
+    queryKeys.keywords.all,
+  ],
+  savedSearchChanged: () => [queryKeys.savedSearches.all],
   notificationsChanged: () => [queryKeys.notifications.all],
 } as const;

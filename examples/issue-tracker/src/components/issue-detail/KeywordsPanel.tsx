@@ -41,7 +41,7 @@ export function KeywordsPanel({
       const keyword = await createKeyword({ name });
       await attachKeyword({ issueId, keywordId: keyword.id });
     },
-    () => [...invalidatedBy.relationsChanged(issueId), queryKeys.keywords.all],
+    () => invalidatedBy.keywordCreated(issueId),
   );
   const busy = toggleKeyword.isPending || createAndAttachKeyword.isPending;
 

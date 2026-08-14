@@ -420,9 +420,26 @@ export function useAppMutation<TArgs, TResult>(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (args: TArgs) => await run(args),
-    onSuccess: async (result, args) => {
+    /**
+     * `onSettled`, NOT `onSuccess`.
+     *
+     * A mutation that throws may still have changed the server. The clearest
+     * case in this app is posting a comment with a file: `addComment`
+     * succeeds, `uploadAttachment` then fails, and the mutation rejects -- so
+     * with `onSuccess` nothing is invalidated and the comment sits on the
+     * server while the thread and the count both keep showing the old world
+     * until something unrelated moves. The old callback chain had the same
+     * hole for the same reason (`onAdded()` was never reached).
+     *
+     * Refetching after a failure costs one request and cannot show anything
+     * false; skipping it can leave the screen disagreeing with the database,
+     * which is the failure this whole layer exists to prevent.
+     */
+    onSettled: async (result, _error, args) => {
       await Promise.all(
-        invalidates(args, result).map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+        invalidates(args, result as TResult).map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
       );
     },
   });
