@@ -74,6 +74,15 @@ pub async fn apply_migrations(
     state: State<Arc<AppState>>,
     body: String,
 ) -> web::HttpResponse {
+    // Per-IP throttle FIRST, sharing the `admin` bucket with the other mutating
+    // creator surfaces. This one earns it more than most: each accepted request
+    // holds a control task for up to APPLY_TIMEOUT and opens a DDL session on
+    // the provisioning DSN downstream, so an unthrottled loop here costs far
+    // more than an unthrottled loop against a read endpoint.
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
+
     let Ok(uid) = id.parse::<Uuid>() else {
         return web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": "invalid uuid"}));
