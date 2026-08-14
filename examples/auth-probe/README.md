@@ -42,7 +42,12 @@ pnpm --filter ./examples/auth-probe build     # -> dist/app.zship
 ./tests/e2e_dev_vs_deployed_auth.sh           # both sides + the diff
 ```
 
-The dev users, their passwords and the `AUTH_PROBE_API_PORT` default live in
-`vite.config.ts`. The harness re-derives them from that file on every run, so the
-dev config and the claims it mints for the deployed session cannot drift apart
-silently.
+The dev users and the `AUTH_PROBE_API_PORT` default live in `vite.config.ts`.
+The harness re-derives them from that file on every run, so the dev config and
+the claims it mints for the deployed session cannot drift apart silently.
+
+The sign-in passwords are not in that file: the dev tier derives one per user
+from the id (`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts` -- `"dev-"`
+plus the first 8 characters after `pws_`), so alpha signs in with
+`dev-probealp` and beta with `dev-probebet`. The harness derives them the same
+way, and fails if a `password:` field reappears in the config.

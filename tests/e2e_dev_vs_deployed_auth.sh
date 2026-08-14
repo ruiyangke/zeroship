@@ -137,7 +137,14 @@ ALPHA_AVATAR="https://probe.zeroship.test/a.png"
 BETA_ID="pws_probebeta00000000000"
 BETA_EMAIL="beta@probe.zeroship.test"
 BETA_NAME="Probe Beta"
-DEV_PASSWORD="probe-pw"
+# The dev password is DERIVED from the id, not declared in the vite config:
+# `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts -- the authority) returns
+# "dev-" + the first 8 characters of the id after "pws_". Derived here the same
+# way from the ids above, so it tracks an id change automatically and the two
+# users get DIFFERENT passwords (they used to share one literal).
+dev_password_for() { printf 'dev-%.8s' "${1#pws_}"; }
+ALPHA_PASSWORD="$(dev_password_for "$ALPHA_ID")"
+BETA_PASSWORD="$(dev_password_for "$BETA_ID")"
 SCOPES_JSON='["openid","profile","email"]'
 
 PASS=0; FAIL=0; PIDS=()
@@ -332,12 +339,23 @@ pass "manifest postures match src/server/config.ts"
 assert_identity_pair() {
   local cfg="$APP/vite.config.ts" v ok=1
   for v in "$ALPHA_ID" "$ALPHA_EMAIL" "$ALPHA_NAME" "$ALPHA_AVATAR" \
-           "$BETA_ID" "$BETA_EMAIL" "$BETA_NAME" "$DEV_PASSWORD"; do
+           "$BETA_ID" "$BETA_EMAIL" "$BETA_NAME"; do
     grep -qF -- "$v" "$cfg" || { fail "identity drift: '$v' is not in $cfg"; ok=0; }
   done
   [ "$ok" = "1" ] && pass "dev users and minted deployed claims carry the same identity"
 }
 assert_identity_pair
+
+# The credential half of the same drift check. The password is no longer a
+# literal in the config, so grepping for it would prove nothing; what CAN drift
+# is somebody re-introducing a per-user `password:` field, which the dev tier no
+# longer reads -- the derivation below would then disagree with what dev
+# actually accepts and every authenticated row would fail as "login broken".
+if grep -qE '^[[:space:]]*password:' "$APP/vite.config.ts"; then
+  fail "credential drift: $APP/vite.config.ts declares a 'password:' field, which the dev tier ignores (it derives the password from the id -- sdks/bootstrap/src/dev-auth.ts devPasswordFor)"
+else
+  pass "dev passwords are derived from the ids (alpha=$ALPHA_PASSWORD beta=$BETA_PASSWORD), not declared in vite.config.ts"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Dev side. `pnpm dev` spawns `zeroship serve`; the dev-auth provider lives in
@@ -395,12 +413,16 @@ dev_submit() {  # dev_submit <email> <password> <jar> -> "<status> <redirect_url
     --data-urlencode "redirect_uri=$redirect" \
     --data-urlencode "email=$email" --data-urlencode "password=$password"
 }
-dev_login() {  # dev_login <email> -> echoes the __zeroship_dev_session value
+# Takes the password explicitly: the two probe users no longer share one. Each
+# is `devPasswordFor(<that user's id>)`, so passing the wrong one would fail the
+# credential check rather than silently logging the other user in.
+dev_login() {  # dev_login <email> <password> -> echoes the __zeroship_dev_session value
   local email="$1"
+  local password="$2"
   local jar="$WORK/jar-$email.txt"
   local base="http://localhost:$DEV_PORT"
   local res
-  res="$(dev_submit "$email" "$DEV_PASSWORD" "$jar")"
+  res="$(dev_submit "$email" "$password" "$jar")"
   local code
   code="$(printf '%s' "$res" | sed -nE 's/.*[?&]code=([^&]*).*/\1/p')"
   [ -n "$code" ] || { echo "DEVLOGIN-NO-CODE($res)"; return 1; }
@@ -409,8 +431,8 @@ dev_login() {  # dev_login <email> -> echoes the __zeroship_dev_session value
     -d "{\"code\":\"$code\"}"
   awk '$6 == "__zeroship_dev_session" { print $7 }' "$jar"
 }
-CRED_dev_alpha="$(dev_login "$ALPHA_EMAIL")"
-CRED_dev_beta="$(dev_login "$BETA_EMAIL")"
+CRED_dev_alpha="$(dev_login "$ALPHA_EMAIL" "$ALPHA_PASSWORD")"
+CRED_dev_beta="$(dev_login "$BETA_EMAIL" "$BETA_PASSWORD")"
 [ "${CRED_dev_alpha%%.*}" != "$CRED_dev_alpha" ] \
   && pass "dev login (real form + CSRF + credential check + code exchange) minted a session" \
   || { fail "dev login failed: $CRED_dev_alpha"; tail -30 "$WORK/dev.log"; exit 1; }
@@ -657,9 +679,15 @@ fi
 # own sensitivity control into a floor failure - the same shape as the
 # unreachable expectations I have been correcting elsewhere, authored by me.
 #
-# Measured, both modes, this HEAD:
+# Measured, both modes, at the HEAD those runs were made on:
 #     MUTATE=none               22 passed, 1 failed   20 of 48 divergent
 #     MUTATE=declare-defaulted  21 passed, 1 failed   17 of 48 divergent
+#
+# SINCE THOSE RUNS, one unconditional `pass()` was added ("dev passwords are
+# derived from the ids ..."), so both modes should now score one higher (23 /
+# 22). The floor is deliberately NOT bumped: it is a `-lt` guard, the extra row
+# keeps satisfying it, and raising it to a number nobody has re-measured would
+# put an unverified count in the gate. Re-measure and bump together.
 if [ "${MUTATE:-none}" = "none" ]; then
   AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-22}"
 else
