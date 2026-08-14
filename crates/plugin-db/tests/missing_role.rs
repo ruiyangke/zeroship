@@ -43,6 +43,16 @@ fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 
+/// Wait for a dropped direct client to finish closing its socket while this
+/// test's compio runtime is still alive.
+async fn drain_pg() {
+    assert!(
+        compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await,
+        "direct Postgres client did not close; {} connection(s) remain",
+        compio_postgres::live_connections()
+    );
+}
+
 /// Drive a real `SET LOCAL ROLE` against a role that does not exist and
 /// hand the resulting server error to the classifier.
 async fn classify_missing_role(role: &str) -> DbError {
@@ -63,7 +73,10 @@ async fn classify_missing_role(role: &str) -> DbError {
         .await
         .expect_err("SET LOCAL ROLE to a nonexistent role must fail");
 
-    DbError::from_pg(&err)
+    let classified = DbError::from_pg(&err);
+    drop(client);
+    drain_pg().await;
+    classified
 }
 
 #[compio::test]
@@ -163,6 +176,8 @@ async fn a_real_internal_pg_failure_is_still_internal() {
     );
 
     let op = DbError::from_pg(&err).to_op_error();
+    drop(client);
+    drain_pg().await;
     match &op.kind {
         zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
             assert_eq!(
