@@ -3479,7 +3479,7 @@ fn build_table_snapshot_impl(
         // the data plane caps at 60, so the two agree only below 61 bytes.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
-                indexes.push(fold_ann_index_for_dialect(spec, dialect));
+                indexes.extend(fold_ann_index_for_dialect(spec, dialect));
             }
         }
         // - a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
@@ -3491,7 +3491,7 @@ fn build_table_snapshot_impl(
         // `non_unique_index_name`.
         if f.ty == "geoPoint" {
             if let Some(spec) = geo_index_snapshot(&d.name, f) {
-                indexes.push(fold_ann_index_for_dialect(spec, dialect));
+                indexes.extend(fold_ann_index_for_dialect(spec, dialect));
             }
         }
         // A reference facet declares a FOREIGN KEY constraint independently of
@@ -4318,13 +4318,38 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
 /// the vector and geoPoint sites alone - the FTS snapshot never reaches it, so the
 /// sentinel cannot be folded away. This is the rule the `.fts()` fold below already
 /// follows, applied to the two facets that had not learned it.
-fn fold_ann_index_for_dialect(mut idx: IndexSnapshot, dialect: SqlDialect) -> IndexSnapshot {
+fn fold_ann_index_for_dialect(
+    mut idx: IndexSnapshot,
+    dialect: SqlDialect,
+) -> Option<IndexSnapshot> {
     if dialect == SqlDialect::Postgres {
-        return idx;
+        return Some(idx);
+    }
+    // MySQL cannot build this index at all, so it is not emitted there.
+    //
+    // The author never asked for it: it is derived from the column type, to model
+    // what the PostgreSQL data plane creates. On MySQL the two types land as a
+    // `blob`, and a plain index over one is rejected outright -- `BLOB/TEXT column
+    // used in key specification without a key length` for a vector, and `All parts
+    // of a SPATIAL index must be NOT NULL` for a nullable geoPoint. Both refusals
+    // arrive at APPLY, after `lint --dialect mysql` has already reported the
+    // migration clean, so the cost was a green CI followed by a broken deploy.
+    //
+    // Dropping the index rather than the column keeps the declaration usable: the
+    // column is still created and still stores what the author writes to it. What
+    // is lost is an index the author never wrote and MySQL could not have had.
+    //
+    // SQLite KEEPS its index. `blob` is indexable there, both cases apply cleanly
+    // and the index is present in `sqlite_master` -- measured, not assumed, because
+    // "emit only where buildable" is a claim about each target rather than a
+    // shorthand for "PostgreSQL only". Removing a working index would be a
+    // gratuitous loss.
+    if dialect == SqlDialect::Mysql {
+        return None;
     }
     idx.access_method = "btree".to_string();
     idx.opclass = None;
-    idx
+    Some(idx)
 }
 
 /// The fixed name of the composite full-text tsvector column + its GIN index,
@@ -10503,6 +10528,50 @@ mod derived_index_alias_tests {
             .collect();
         methods.sort_unstable();
         assert_eq!(methods, vec!["btree", "gist", "ivfflat"]);
+    }
+
+    /// The derived vector/geoPoint index is emitted only where the target can build
+    /// it, and "can build it" is per-target rather than a synonym for PostgreSQL.
+    ///
+    /// MySQL lands both types as `blob` and refuses a plain index over one -- `BLOB/
+    /// TEXT column used in key specification without a key length` for a vector,
+    /// `All parts of a SPATIAL index must be NOT NULL` for a nullable geoPoint.
+    /// Both arrive at apply, after `lint` has already passed the migration, so the
+    /// cost was a green CI and a broken deploy. SQLite indexes a `blob` happily and
+    /// keeps its index.
+    ///
+    /// Asserted at the snapshot layer because the live-database arms need pgvector
+    /// and PostGIS installed, and this behaviour should stay pinned on a server
+    /// that has neither.
+    #[test]
+    fn derived_ann_index_is_emitted_only_where_the_dialect_can_build_it() {
+        let d = descriptor_with_derived_indexes(8);
+        let derived_over_payload = |dialect: SqlDialect| -> Vec<String> {
+            let snap = build_table_snapshot("app", &d, dialect, &effective())
+                .expect("build_table_snapshot");
+            let mut methods: Vec<String> = snap
+                .indexes
+                .iter()
+                .map(|i| i.access_method.clone())
+                .collect();
+            methods.sort();
+            methods
+        };
+
+        // PostgreSQL keeps both native methods (plus the unique field's btree).
+        assert_eq!(
+            derived_over_payload(SqlDialect::Postgres),
+            vec!["btree", "gist", "ivfflat"],
+        );
+        // SQLite folds them to a plain index it can actually create, and keeps all
+        // three.
+        assert_eq!(
+            derived_over_payload(SqlDialect::Sqlite),
+            vec!["btree", "btree", "btree"],
+        );
+        // MySQL keeps ONLY the unique field's index: the two it cannot build are
+        // gone. If this ever reads as three entries again, the false green is back.
+        assert_eq!(derived_over_payload(SqlDialect::Mysql), vec!["btree"]);
     }
 
     /// Below the disagreement window there is nothing to alias, so no provenance is
