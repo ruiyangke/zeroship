@@ -577,6 +577,14 @@ pub trait MigrationBackend {
     /// `kind='squash'`; a SQLite impl writes the same row+edges atomically through
     /// its actor. The connection / `pg_advisory_lock` never cross this surface.
     ///
+    /// **MySQL implements this method as a refusal**, and that is narrower than it
+    /// sounds: it is the records-not-run primitive that is unwired there (it shares
+    /// the baseline machinery, which MySQL also refuses). The FRESH-path squash —
+    /// where the squash's own `up` DOES run — is handled inline by the MySQL
+    /// two-phase apply for a non-empty `supersedes`, edges included, so squashing a
+    /// history forward works on all three targets and only adopting an
+    /// already-applied history without running it does not.
+    ///
     /// # Errors
     /// [`ApplyError::Db`] on a structured driver/write failure, or
     /// [`ApplyError::Backend`] for an intentionally textual dialect-level
