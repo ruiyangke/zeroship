@@ -235,7 +235,17 @@ pub fn build_error_body(
 /// 1. `capability_violation` — the gateway/dispatch capability gate's own
 ///    refusal (P9).
 ///
-/// 2. The **developer-facing DB validation / CAS guardrail** family
+/// 2. The **creator-facing provisioning refusal** `schema_not_provisioned`
+///    (`crates/plugin-db/src/error.rs`). The app's per-app Postgres role does
+///    not exist, so `zeroship migrate` was never run for it. It is on this
+///    list because the message is platform-authored, fixed, and interpolates
+///    nothing -- the server text and the role name (which embeds the app id)
+///    stay in the operator log. Blanking it is what produced the failure this
+///    list exists to prevent: a condition with a documented one-command fix
+///    arriving as `{"message":"internal error"}`, diagnosable only from a
+///    worker log the creator cannot read.
+///
+/// 3. The **developer-facing DB validation / CAS guardrail** family
 ///    (`crates/plugin-db/src/error.rs`). These are `DbError::ValidationFailed`
 ///    (and `QueryError`-derived) refusals: the plugin rejected the *shape* of
 ///    a request before touching any row. They are platform-owned static
@@ -277,6 +287,9 @@ fn is_public_error_code(code: &str) -> bool {
     matches!(
         code,
         "capability_violation"
+            // The app's DB was never provisioned -- plugin-db error.rs.
+            // Message is a platform-owned constant; fix is `zeroship migrate`.
+            | "schema_not_provisioned"
             // Optimistic-concurrency (CAS) guardrails — plugin-db error.rs
             | "version_mismatch"
             | "version_filter_must_be_top_level"
@@ -292,6 +305,7 @@ fn is_public_error_code(code: &str) -> bool {
             // `version_mismatch` becomes `OPTIMISTIC_CONCURRENCY`, not
             // `VERSION_MISMATCH` — the mapping is a table, not a transform.
             | "CAPABILITY_VIOLATION"
+            | "SCHEMA_NOT_PROVISIONED"
             | "OPTIMISTIC_CONCURRENCY"
             | "VERSION_FILTER_MUST_BE_TOP_LEVEL"
             | "MULTI_ROW_VERSION_FILTER_UNSUPPORTED"
@@ -757,6 +771,79 @@ mod tests {
                     "constraint code {code:?} must keep its message blanked, got: {body}"
                 );
             }
+        }
+    }
+
+    /// THE ANCHOR REGRESSION. A creator who deployed an `env.db` app and
+    /// skipped `zeroship migrate` got `{"message":"internal error"}` while
+    /// the worker logged `role "app_<uuid>_role" does not exist`. The
+    /// sanitiser was right; the classifier was wrong. Now that plugin-db
+    /// stamps `schema_not_provisioned`, this rail must let the message
+    /// through so the response itself names the command.
+    ///
+    /// Both spellings, for the reason the sibling test above documents:
+    /// `@zeroship/db` re-stamps native codes through `canonicalErrorCode`
+    /// inside the isolate, so a creator using the SDK arrives here with the
+    /// upper-snake form and a creator calling `env.db` directly with the
+    /// native one. Listing only one makes the exemption inert on whichever
+    /// path is not listed.
+    ///
+    /// PAIRED with `genuinely_internal_db_failure_is_still_blanked` below,
+    /// which differs in ONE variable: the code. Same status, same message,
+    /// same extras. Without that partner this test would only show the rail
+    /// emits things, not that it DISCRIMINATES.
+    ///
+    /// WHAT THIS TEST DOES NOT CATCH: that plugin-db actually produces this
+    /// code for a missing role (that is `zeroship-plugin-db`'s
+    /// `tests/missing_role.rs`), and that the message plugin-db pairs with
+    /// it names `zeroship migrate` (that is `error.rs`'s own unit test).
+    /// This test would pass if the code were stamped on an empty string.
+    #[test]
+    fn schema_not_provisioned_survives_the_5xx_rail_in_both_spellings() {
+        for code in ["schema_not_provisioned", "SCHEMA_NOT_PROVISIONED"] {
+            let body = build_error_body(
+                500,
+                1,
+                "this app's database is not provisioned: its per-app Postgres role \
+                 does not exist. Run `zeroship migrate` for this app, then retry.",
+                "Error",
+                extras_with_code(code),
+            );
+            assert!(
+                body.contains(&format!(r#""code":"{code}""#)),
+                "code {code:?} must survive the 5xx rail, got: {body}"
+            );
+            assert!(
+                body.contains("zeroship migrate"),
+                "the creator must learn the fix from the RESPONSE, not a worker \
+                 log they cannot see; got: {body}"
+            );
+            assert!(
+                !body.contains(r#""message":"internal error""#),
+                "verbatim body expected for {code:?}, got sanitized: {body}"
+            );
+        }
+    }
+
+    /// THE ONE-VARIABLE CONTROL for the test above. Identical status,
+    /// identical message text, identical extras -- only the code differs,
+    /// and it is one that is NOT on the allow-list. A genuinely-internal
+    /// failure must still be blanked.
+    ///
+    /// If widening the list for `schema_not_provisioned` had made
+    /// everything creator-facing, this fails. That is the whole point of
+    /// running it: the sibling test alone cannot tell "the rail passes the
+    /// new code" from "the rail stopped blanking anything".
+    #[test]
+    fn genuinely_internal_db_failure_is_still_blanked() {
+        let leaky = "this app's database is not provisioned: its per-app Postgres role \
+                     does not exist. Run `zeroship migrate` for this app, then retry.";
+        for code in ["internal", "transient", "schema_not_provisioned_typo"] {
+            let body = build_error_body(500, 1, leaky, "Error", extras_with_code(code));
+            assert_eq!(
+                body, r#"{"message":"internal error","name":"Error","request_id":"1"}"#,
+                "code {code:?} is not allow-listed and must be blanked, got: {body}"
+            );
         }
     }
 
