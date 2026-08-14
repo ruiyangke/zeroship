@@ -3,6 +3,7 @@ import { useAuth } from "@zeroship/auth/react";
 import { Link, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
+import { SessionProvider, toSession } from "./components/session";
 import { useAsync } from "./components/rpc";
 import { EmptyState } from "./components/StateViews";
 import { IssueDetailPage } from "./pages/IssueDetail";
@@ -104,7 +105,12 @@ export function App() {
   // cheap because it happens twice a session.
   const sessionKey = user?.id ?? "anon";
 
+  // ONE ask, shared. Six components used to call currentUser() independently
+  // and a single visit to the issue list fired users.me four times.
+  const session = toSession(userState);
+
   return (
+    <SessionProvider session={session}>
     <Shell userState={userState}>
       <Fragment key={sessionKey}>
         <Routes>
@@ -122,5 +128,6 @@ export function App() {
         </Routes>
       </Fragment>
     </Shell>
+    </SessionProvider>
   );
 }

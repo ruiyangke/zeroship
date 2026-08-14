@@ -16,6 +16,7 @@ import { HistoryPanel } from "../components/issue-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/issue-detail/RelationsPanel";
 import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
 import { errorMessage, toPromise, useAsync } from "../components/rpc";
+import { isVisitor, useSession } from "../components/session";
 import type { ProductDetail } from "../components/types";
 
 type Tab = "details" | "history";
@@ -132,11 +133,11 @@ export function IssueDetailPage({
   const productsQ = useAsync(() => listProducts({}), []);
   // Issues are public, so unlike the dashboard this page stays READABLE without
   // an identity -- what it must not do is offer controls that cannot work.
-  const { state: userState } = useAsync(() => currentUser({}), []);
+  const session = useSession();
   // The page owns the file list because two children render it: the thread
   // shows each comment's files, and the roll-up shows every file on the issue.
   const attachmentsQ = useAsync(() => listAttachments({ issueId: id }), [id]);
-  const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
+  const signedOut = isVisitor(session);
 
   const productId = state.status === "ready" ? state.data.product?.id ?? null : null;
 

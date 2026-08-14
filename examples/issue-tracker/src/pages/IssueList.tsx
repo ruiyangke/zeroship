@@ -9,7 +9,8 @@ import {
 } from "../components/IssueResultsTable";
 import { FieldBuilder } from "../components/search/SearchBuilder";
 import { AsyncSection } from "../components/StateViews";
-import { isUnauthenticated, useAsync } from "../components/rpc";
+import { useAsync } from "../components/rpc";
+import { isVisitor, useSession } from "../components/session";
 import type { Issue } from "../components/types";
 import { ISSUE_STATUSES, type IssueStatus } from "../lib/workflow";
 import { ISSUE_KINDS, ISSUE_PRIORITIES, ISSUE_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
@@ -140,8 +141,11 @@ export function IssueListPage() {
   // both `auth: "user"`. Same shape as the issue page (`signedOut` from
   // `users.me` + `isUnauthenticated`), so there is one way to ask this
   // question in the app rather than two.
-  const { state: userState } = useAsync(() => currentUser({}), []);
-  const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
+  const session = useSession();
+  const signedOut = isVisitor(session);
+  // NOT `!signedIn`. While the answer is in flight both are false, which is
+  // the point: the page commits to neither reading until the server has said.
+  const identityUnknown = session.status !== "in";
 
   /**
    * The search box speaks Bugzilla QuickSearch.
@@ -206,10 +210,10 @@ export function IssueListPage() {
    * button this page used to show a visitor.
    */
   const identityColumns: IssueColumnKey[] = ["assignee", "reporter"];
-  const availableColumns = signedOut
+  const availableColumns = identityUnknown
     ? ALL_ISSUE_COLUMNS.filter((col) => !identityColumns.includes(col.key))
     : ALL_ISSUE_COLUMNS;
-  const visibleColumns = signedOut
+  const visibleColumns = identityUnknown
     ? columns.filter((key) => !identityColumns.includes(key))
     : columns;
 
