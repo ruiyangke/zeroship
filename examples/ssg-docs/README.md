@@ -74,12 +74,17 @@ not silently rewritten — only a lone trailing slash is normalized.
 | `content/index.html` | Home — served at `/` |
 | `content/about.html` | About — served at `/about` |
 | `content/docs/intro.html` | Doc page — served at `/docs/intro` |
-| `vite.config.ts` | `ssgContentPlugin` copies `content/**` into `dist/`; `zeroship({ mode: "static" })` packs the result |
+| `vite.config.ts` | `ssgContentPlugin` copies `content/**` into `dist/`; `zeroship()` packs the result |
+| `zeroship.jsonc` | `"build": { "mode": "static" }` - the SSR sub-build is skipped and no worker is emitted; also the deploy target and paths |
 
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --token=<PAT>
+zeroship deploy --token=<PAT>
 ```
+
+The archive path, the app and the control plane come from `zeroship.jsonc`
+(see [`docs/reference/project-config.md`](../../docs/reference/project-config.md));
+`--app=<uuid>` and `--control=<url>` still override it.
 
 Cold start: instant. Per-request work: one blob fetch from the gateway's content-addressed cache. No V8.

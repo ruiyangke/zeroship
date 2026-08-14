@@ -16,27 +16,70 @@ import { defineConfig } from "vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
 export default defineConfig({
-  plugins: [zeroship({ mode: "full" })],
+  plugins: [zeroship()],
 });
 ```
 
-## Live options
+## Options
 
-| Option | Default | Current behavior |
+The option bag is small on purpose. The build shape - `mode`, the server entry,
+the dist dir, the `.zship` path, and where migrations are authored and folded -
+lives in [`zeroship.jsonc`](project-config.md), because the `zeroship` CLI needs
+those same facts and cannot read `vite.config.ts`. What is left is what varies
+per developer machine, plus the three levers that point at the file.
+
+| Option | Default | Behavior |
 | --- | --- | --- |
-| `serverEntry` | auto-detected | Overrides server-entry discovery for dev and build. |
 | `devServerPort` | `3001` | Port for the zeroship dev runtime. |
-| `mode` | `"full"` | `"full"` builds client + SSR worker; `"static"` skips the SSR sub-build and omits `manifest.worker`. |
-| `migrations.dir` | `"migrations"` | The op.* migration source dir. The gen-types step reads it to fold migrations into the generated `env.db` artifacts; `.zship` packing does not carry or read migration documents. |
-| `migrations.genTypesOut` | `"generated/zeroship"` | Where the gen-types step writes `env.db.ts` + `schema.runtime.json`. Commit this dir and include `generated/zeroship/env.db.ts` in the app tsconfig. |
+| `devAuth` | `true` in dev | Dev-tier auth. See below. |
+| `configPath` | auto-discovery | Path to `zeroship.jsonc`, absolute or relative to the Vite root. Step 1 of the file precedence; the others are `ZEROSHIP_CONFIG` and `zeroship.jsonc` in the app root. A path that does not exist throws. |
+| `env` | none | Selects a named entry from the file's `environments` block - the plugin's equivalent of the CLI's `--env=`. There is no implicit environment and no `ZEROSHIP_ENV`. |
+| `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `app`, `control`, `runtime_date`, `build.output`, `migrations.dir` or `migrations.out`; attempting to is an error naming the field. |
+
+With no `zeroship.jsonc` anywhere, the plugin runs on the schema defaults
+(`build.mode: "full"`, `build.dist: "dist"`, `build.output: "dist/app.zship"`,
+`migrations.dir: "migrations"`, `migrations.out: "generated/zeroship"`), which
+is what keeps `zeroship()` working in a scratch directory.
+
+### `devAuth`
+
+The `pnpm dev` implementation of the platform auth contract - the peer of
+`env.db` to SQLite and `env.kv` to redb. When enabled, the dev runtime serves
+the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
+drives and supplies a logged-in identity to `env.auth.getUser()` server-side,
+with no gateway, no external auth service and no control plane.
+
+| Value | Effect |
+| --- | --- |
+| `true` (the dev default) | One built-in dev user (`pws_dev...`, `dev@localhost`, scopes `openid profile email`). |
+| `{ id?, email?, ... }` or `{ user: {...} }` | One configured dev user. |
+| `{ users: [...], defaultUserId? }` | Several users; `/authorize` renders a dev picker so you can switch identity or scope set. |
+| `false` | Disabled. `/__zeroship/auth/*` falls through to the user module and `env.auth.getUser()` returns `null`. |
+
+A configured user is `{ id?, email?, name?, avatar?, scopes? }`. **There is no
+`password` field.** The dev login form prefills and validates a password derived
+from the id (`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`): `"dev-"`
+plus the first eight characters of the id with any leading `pws_` stripped
+(fewer if the remainder is shorter), so `pws_alice000000000000000` gives
+`dev-alice000`. It is not a secret; it exists
+so the credential check and its failure path are real, and it is deliberately
+short enough that the deployed platform's signup policy refuses it.
+
+The provider lives in the dev runtime (`@zeroship/bootstrap/dev`) and is
+structurally absent from any production `.zship`. Full contract:
+[`auth-dev-tier.md`](auth-dev-tier.md).
 
 ## Migration-first type generation (`gen-types`)
 
-The plugin records `migrations/*.ts` in-process through its pure-JS recorder,
-then passes the resulting IR envelopes to `zero-migrate-node`'s `genArtifacts`
-renderer. It emits the typed `env.db` surface as two artifacts: `env.db.ts` (a
-generated `@zeroship/db` `t.*()` schema module) and `schema.runtime.json` (the
-`RuntimeSchemaDescriptor`). There is no CLI subprocess.
+The plugin records the migrations under `migrations.dir` in-process through its
+pure-JS recorder, then passes the resulting IR envelopes to `zero-migrate-node`'s
+`genArtifacts` renderer. It writes into `migrations.out` (both keys come from
+[`zeroship.jsonc`](project-config.md), defaults `migrations` and
+`generated/zeroship`): `env.db.ts` (a generated `@zeroship/db` `t.*()` schema
+module), `schema.runtime.json` (the `RuntimeSchemaDescriptor`), and
+`migrations.ir.json` (the recorded migration set `zeroship migrate` posts).
+Commit that directory. There is no CLI subprocess, and `.zship` packing does not
+carry or read migration documents.
 
 When it runs:
 
@@ -58,15 +101,10 @@ The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include i
 }
 ```
 
+That path is `<migrations.out>/env.db.ts`; if the project moves `migrations.out`,
+the `include` moves with it.
+
 Do not also add `@zeroship/db/env` or a `zeroship-schema` path alias. That declared-schema alias path is retired; the generated file is the single source of strong `env.db` typing.
-
-## Exposed but not currently effectful
-
-These fields exist on `ZeroshipOptions`, but the current `zeroship()` pipeline does not use them to change emitted behavior:
-
-| Option | Current reality |
-| --- | --- |
-| `rpcEndpoint` | The transform receives it, but generated client stubs and the shared RPC client use the shipped `/__zeroship/v1/<wireId>` path. |
 
 ## Procedure discovery in the active build path
 
