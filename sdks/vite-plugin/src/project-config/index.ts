@@ -352,6 +352,7 @@ export function applyProjectConfigOverride(
   override: ProjectConfigOverride | undefined,
 ): ResolvedProjectConfig {
   if (override == null) return resolved;
+  const baseline = structuredClone(resolved);
   const partial = typeof override === "function" ? override(resolved) : override;
   const next: Json = { ...(resolved as unknown as Json) };
   for (const [k, v] of Object.entries(partial as Json)) {
@@ -359,7 +360,7 @@ export function applyProjectConfigOverride(
   }
 
   for (const field of CLI_READ_FIELDS) {
-    const before = at(resolved, field);
+    const before = at(baseline, field);
     const after = at(next, field);
     if (JSON.stringify(before) !== JSON.stringify(after)) {
       throw new Error(
@@ -369,7 +370,7 @@ export function applyProjectConfigOverride(
           `run a JavaScript function. Overriding it here would make the two disagree - which is the ` +
           `drift ${CONFIG_FILENAME} exists to remove. Change it in ${CONFIG_FILENAME}, or use an ` +
           `\`environments\` entry and \`--env=\`.\n` +
-          `Fields the build alone reads (build.mode, build.serverEntry, build.dist, name, secrets) ` +
+          `Fields the build alone reads (build.mode, build.serverEntry, build.dist, secrets) ` +
           `are overridable here.`,
       );
     }

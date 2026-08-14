@@ -102,7 +102,7 @@ Unknown keys are refused at every level, with the known set in the message.
 
 ### The keys the CLI reads
 
-`app`, `control`, `runtime_date`, `build.output`, `migrations.dir` and
+`name`, `app`, `control`, `runtime_date`, `build.output`, `migrations.dir` and
 `migrations.out` are marked `x-cli-read` in the schema. That marking means two
 things: the CLI has no compiled default for them, and the plugin's `config`
 escape hatch may not change them. The deny-list is generated from the schema, so
@@ -264,7 +264,7 @@ zeroship({
 })
 ```
 
-**It may not change any field the CLI also reads** - `app`, `control`,
+**It may not change any field the CLI also reads** - `name`, `app`, `control`,
 `runtime_date`, `build.output`, `migrations.dir`, `migrations.out`. Trying to is
 an error naming the field. The reason is structural: a `config` function runs
 inside Vite, and the Rust CLI cannot execute JavaScript and never will, so an
@@ -272,7 +272,7 @@ override there would put the two tools back into the disagreement this file
 removes. Change those in `zeroship.jsonc`, or use an `environments` entry and
 `--env=`.
 
-Overridable: `name`, `secrets`, `build.mode`, `build.serverEntry`, `build.dist`.
+Overridable: `secrets`, `build.mode`, `build.serverEntry`, `build.dist`.
 The denial is on **change**, not on presence, because the idiom above spreads
 `app` and `control` into its own result every time.
 
