@@ -311,7 +311,7 @@ async fn start_platform_op(
     pg_client: Arc<Client>,
     issuer: Arc<Issuer>,
 ) -> test::TestServer {
-    let mut cfg = test_auth_config(db_url);
+    let (mut cfg, _auth_secret_files) = test_auth_config(db_url);
     let key_dir = std::env::temp_dir().join(format!("gateway-op-refresh-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&key_dir).expect("refresh key dir");
     let hash_key_file = key_dir.join("refresh-hmac.keys");
@@ -437,24 +437,50 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
         .expect("exchange code for token set")
 }
 
-fn test_auth_config(db_url: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+/// Build an `AuthConfig` the way a real boot does.
+///
+/// The three secrets go through `-file` PATH flags because that is the only
+/// shape auth accepts: `--db-url`, `--stash-signing-key` and `--totp-enc-key`
+/// were value flags, and `crates/auth/src/config.rs` now asserts clap REJECTS
+/// all three. `parse_from` panics on an unknown argument, so this helper was a
+/// hard failure waiting for the first run with a database - it is skipped
+/// today only because `db_url()` returns `None` without `AUTH_DB_URL`.
+///
+/// The tempdir is returned, not dropped here: deleting it before the caller is
+/// done would be harmless for the already-resolved config but makes the
+/// lifetime obvious rather than accidental.
+fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir for auth secrets");
+    let write = |name: &str, contents: &str| -> String {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).expect("write auth secret file");
+        path.to_str().expect("utf8 temp path").to_owned()
+    };
+    let db_file = write("database-url", db_url);
+    let stash_file = write("stash-signing-key", "test-stash-key-not-for-prod-32bytes!");
+    let totp_file = write(
+        "totp-enc-key",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    );
+
+    let config = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
-        "--db-url",
-        db_url,
-        "--stash-signing-key",
-        "test-stash-key-not-for-prod-32bytes!",
-        "--totp-enc-key",
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "--database-url-file",
+        &db_file,
+        "--stash-signing-key-file",
+        &stash_file,
+        "--totp-enc-key-file",
+        &totp_file,
         "--mail-from-email",
         "test@zeroship.test",
         "--mail-from-name",
         "Test",
         "--public-url",
         "http://localhost:0",
-    ])
+    ]);
+    (config, dir)
 }
 
 async fn seed_user_client(
@@ -720,7 +746,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let email = format!("gw-op-{}@zeroship.test", Uuid::new_v4().simple());
     seed_user_client(&pg_client, user_id, app_id, &client_id, &email).await;
 
-    let mut cfg = test_auth_config(&db_url);
+    let (mut cfg, _auth_secret_files) = test_auth_config(&db_url);
     let key_dir = std::env::temp_dir().join(format!("gateway-op-refresh-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&key_dir).expect("refresh key dir");
     let hash_key_file = key_dir.join("refresh-hmac.keys");
