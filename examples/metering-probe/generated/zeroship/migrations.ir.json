@@ -1,0 +1,25 @@
+{
+  "kind": "ir",
+  "documents": [
+    {
+      "filename": "20260811000000_create_hits.ir.json",
+      "body": {
+        "ir_version": 1,
+        "name": "create_hits",
+        "ops": [
+          {
+            "op": "createTable",
+            "name": "hits",
+            "columns": [
+              {
+                "name": "path",
+                "type": "text",
+                "nullable": false
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
