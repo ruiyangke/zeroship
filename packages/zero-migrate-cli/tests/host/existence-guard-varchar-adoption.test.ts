@@ -76,8 +76,8 @@ const TABLE = "notes";
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
-function authoredMigration(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
+function authoredMigration(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
 
 function uniqueNamespace(prefix: string): string {
