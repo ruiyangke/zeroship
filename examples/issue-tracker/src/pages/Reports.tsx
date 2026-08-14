@@ -1,15 +1,14 @@
 import { useState } from "react";
-import {
-  listProducts,
-  reportByAssignee,
-  reportByComponent,
-  reportSummary,
-  reportTimeToResolve,
-  reportTrend,
-} from "../api";
 import { Cluster, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import {
+  useProducts,
+  useReportByAssignee,
+  useReportByComponent,
+  useReportSummary,
+  useReportTimeToResolve,
+  useReportTrend,
+} from "../lib/queries";
 import { AsyncSection } from "../components/StateViews";
-import { useAsync } from "../components/rpc";
 
 function CountBars({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
@@ -31,10 +30,22 @@ function CountBars({ counts }: { counts: Record<string, number> }) {
   );
 }
 
+/**
+ * The filter's "all products" value, as the cache spells it.
+ *
+ * The picker holds "" for all products and every hook keys on `string | null`,
+ * so the empty string is normalised HERE rather than in five places. Two
+ * spellings of the same filter would be two cache entries holding the same
+ * answer, refetched independently.
+ */
+function productKey(productId: string): string | null {
+  return productId || null;
+}
+
 function SummarySection({ productId }: { productId: string }) {
-  const { state, reload } = useAsync(() => reportSummary({ productId: productId || undefined }), [productId]);
+  const summaryQ = useReportSummary(productKey(productId));
   return (
-    <AsyncSection state={state} onRetry={reload} loadingLabel="Loading summary...">
+    <AsyncSection query={summaryQ} loadingLabel="Loading summary...">
       {(summary) => (
         <section className="report-section">
           <h2>Summary</h2>
@@ -115,14 +126,10 @@ function ByComponentSection({
   productId: string;
   productNames: Record<string, string>;
 }) {
-  const { state, reload } = useAsync(
-    () => reportByComponent({ productId: productId || undefined }),
-    [productId],
-  );
+  const byComponentQ = useReportByComponent(productKey(productId));
   return (
     <AsyncSection
-      state={state}
-      onRetry={reload}
+      query={byComponentQ}
       loadingLabel="Loading component report..."
       isEmpty={(data) => data.length === 0}
       emptyTitle="No open issues in any component."
@@ -153,14 +160,10 @@ function ByComponentSection({
 }
 
 function ByAssigneeSection({ productId }: { productId: string }) {
-  const { state, reload } = useAsync(
-    () => reportByAssignee({ productId: productId || undefined }),
-    [productId],
-  );
+  const byAssigneeQ = useReportByAssignee(productKey(productId));
   return (
     <AsyncSection
-      state={state}
-      onRetry={reload}
+      query={byAssigneeQ}
       loadingLabel="Loading assignee report..."
       isEmpty={(data) => data.length === 0}
       emptyTitle="No open issues assigned to anyone."
@@ -191,14 +194,10 @@ function ByAssigneeSection({ productId }: { productId: string }) {
 }
 
 function TrendSection({ productId, days }: { productId: string; days: number }) {
-  const { state, reload } = useAsync(
-    () => reportTrend({ productId: productId || undefined, days }),
-    [productId, days],
-  );
+  const trendQ = useReportTrend(productKey(productId), days);
   return (
     <AsyncSection
-      state={state}
-      onRetry={reload}
+      query={trendQ}
       loadingLabel="Loading trend..."
       isEmpty={(data) => data.every((d) => d.created === 0 && d.resolved === 0)}
       emptyTitle="No created or resolved issues in this window."
@@ -242,12 +241,9 @@ function humanMs(ms: number): string {
 }
 
 function TimeToResolveSection({ productId, days }: { productId: string; days: number }) {
-  const { state, reload } = useAsync(
-    () => reportTimeToResolve({ productId: productId || undefined, days }),
-    [productId, days],
-  );
+  const timeToResolveQ = useReportTimeToResolve(productKey(productId), days);
   return (
-    <AsyncSection state={state} onRetry={reload} loadingLabel="Loading resolution time...">
+    <AsyncSection query={timeToResolveQ} loadingLabel="Loading resolution time...">
       {(data) =>
         data.resolvedCount === 0 ? (
           <section className="report-section">
@@ -278,11 +274,9 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
 export function ReportsPage() {
   const [productId, setProductId] = useState("");
   const [days, setDays] = useState(30);
-  const productsQ = useAsync(() => listProducts({}), []);
-  const productNames =
-    productsQ.state.status === "ready"
-      ? Object.fromEntries(productsQ.state.data.map((p) => [p.id, p.name]))
-      : {};
+  const productsQ = useProducts({});
+  const products = productsQ.data ?? [];
+  const productNames = Object.fromEntries(products.map((p) => [p.id, p.name]));
 
   return (
     <div className="page reports-page">
@@ -302,18 +296,13 @@ export function ReportsPage() {
           placeholder="All products"
           aria-label="Product"
           className="filter-select"
-          renderValue={(id) =>
-            productsQ.state.status === "ready"
-              ? productsQ.state.data.find((p) => p.id === id)?.name ?? id
-              : id
-          }
+          renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
         >
-          {productsQ.state.status === "ready" &&
-            productsQ.state.data.map((p) => (
-              <Select.Item key={p.id} value={p.id}>
-                {p.name}
-              </Select.Item>
-            ))}
+          {products.map((p) => (
+            <Select.Item key={p.id} value={p.id}>
+              {p.name}
+            </Select.Item>
+          ))}
           </Select>
         </Field>
         <Field className="report-filter report-filter--window">

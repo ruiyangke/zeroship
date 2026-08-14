@@ -1,64 +1,69 @@
 import { useState } from "react";
 import { Button } from "@zeroship/ui";
-import { addCc, listCc, removeCc } from "../../api";
+import { addCc, removeCc } from "../../api";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, useAsync } from "../rpc";
+import { errorMessage } from "../rpc";
+import { useAppMutation, useCc } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import { UserPicker } from "../UserPicker";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
 export function CcPanel({ issueId }: { issueId: string }) {
-  const { state, reload } = useAsync(() => listCc({ issueId }), [issueId]);
-  const [busy, setBusy] = useState(false);
+  const ccQ = useCc(issueId);
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
 
+  const addUser = useAppMutation(
+    (userId: string) => addCc({ issueId, userId }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const removeUser = useAppMutation(
+    (userId: string) => removeCc({ issueId, userId }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const busy = addUser.isPending || removeUser.isPending;
+
   const add = async (userId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await addCc({ issueId, userId });
+      await addUser.mutateAsync(userId);
+      // Closing the picker is a UI decision this component still owns. Only
+      // the refresh moved out.
       setPicking(false);
-      reload();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const remove = async (userId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await removeCc({ issueId, userId });
-      reload();
+      await removeUser.mutateAsync(userId);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   // The resting line. Names while there are few, a count once the list is
   // longer than the rail is wide -- three names is already 30 characters.
-  const summary =
-    state.status !== "ready" ? (
-      <Pending width="5rem" />
-    ) : state.data.length === 0 ? (
-      <Absent />
-    ) : state.data.length <= 2 ? (
-      <>{state.data.map((row) => row.user?.name ?? row.userId).join(", ")}</>
-    ) : (
-      <>{state.data.length} people</>
-    );
+  // No data means no claim: a Skeleton while the query is pending, never `--`.
+  const cc = ccQ.data;
+  const summary = !cc ? (
+    <Pending width="5rem" />
+  ) : cc.length === 0 ? (
+    <Absent />
+  ) : cc.length <= 2 ? (
+    <>{cc.map((row) => row.user?.name ?? row.userId).join(", ")}</>
+  ) : (
+    <>{cc.length} people</>
+  );
 
   return (
     <RailDisclosure label="CC" summary={summary} action="Add">
     <section className="cc-panel">
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={ccQ}
         loadingLabel="Loading CC list..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="Nobody is CC'd."
@@ -77,7 +82,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
           </ul>
         )}
       </AsyncSection>
-      {state.status !== "error" ? (
+      {!ccQ.isError ? (
         <>
           <Button variant="gray" size="small" onClick={() => setPicking((v) => !v)}>
             Add CC

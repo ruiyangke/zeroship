@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 
-import { resolveProducts, resolveUsers } from "../api";
-import { useAsync } from "./rpc";
+import { useResolvedProducts, useResolvedUsers } from "../lib/queries";
 
 type Row = { productId?: string | null; assigneeId?: string | null; reporterId?: string | null };
 
@@ -51,44 +50,36 @@ export function useIssueLookups(rows: readonly Row[]): {
     [rows],
   );
 
-  const productKey = productIds.join(",");
-  const userKey = userIds.join(",");
-
-  const productsQ = useAsync(
-    () => resolveProducts({ ids: productIds }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the joined key IS
-    // the identity of productIds; depending on the array refetches per render.
-    [productKey],
-  );
-  const usersQ = useAsync(
-    () => resolveUsers({ ids: userIds }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above.
-    [userKey],
-  );
+  // The joined-string dependency keys are gone with the hook that needed
+  // them: the cache keys on the SORTED id array itself, so identity is the
+  // question rather than a hand-made stand-in for it, and two tables showing
+  // the same rows now share one answer instead of asking separately.
+  const productsQ = useResolvedProducts(productIds);
+  const usersQ = useResolvedUsers(userIds);
 
   const productsById = useMemo(() => {
     const map: Record<string, string> = {};
-    if (productsQ.state.status === "ready") {
-      for (const product of productsQ.state.data) map[product.id] = product.name;
+    if (productsQ.data) {
+      for (const product of productsQ.data) map[product.id] = product.name;
     }
     return map;
-  }, [productsQ.state]);
+  }, [productsQ.data]);
 
   const productKeysById = useMemo(() => {
     const map: Record<string, string> = {};
-    if (productsQ.state.status === "ready") {
-      for (const product of productsQ.state.data) map[product.id] = product.key;
+    if (productsQ.data) {
+      for (const product of productsQ.data) map[product.id] = product.key;
     }
     return map;
-  }, [productsQ.state]);
+  }, [productsQ.data]);
 
   const usersById = useMemo(() => {
     const map: Record<string, string> = {};
-    if (usersQ.state.status === "ready") {
-      for (const user of usersQ.state.data) map[user.id] = user.handle;
+    if (usersQ.data) {
+      for (const user of usersQ.data) map[user.id] = user.handle;
     }
     return map;
-  }, [usersQ.state]);
+  }, [usersQ.data]);
 
   return { productsById, productKeysById, usersById };
 }

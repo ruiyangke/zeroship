@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Banner, Button, Card, Cluster, Input, Stack } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { currentUser, getIssue, getProduct, listAttachments, listProducts, updateIssue } from "../api";
+import { getProduct, updateIssue } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import { useAppMutation, useInvalidate, useIssue, useProduct, useProducts } from "../lib/queries";
 import { ErrorState, Loading } from "../components/StateViews";
-import { isUnauthenticated } from "../components/rpc";
 import { AttachmentsPanel } from "../components/issue-detail/AttachmentsPanel";
 import { CcPanel } from "../components/issue-detail/CcPanel";
 import { CommentsPanel } from "../components/issue-detail/CommentsPanel";
@@ -15,9 +16,8 @@ import { VotesPanel } from "../components/issue-detail/VotesPanel";
 import { HistoryPanel } from "../components/issue-detail/HistoryPanel";
 import { DependenciesPanel, DuplicatesPanel } from "../components/issue-detail/RelationsPanel";
 import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
-import { errorMessage, toPromise, useAsync } from "../components/rpc";
+import { errorMessage, toPromise } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
-import type { ProductDetail } from "../components/types";
 
 type Tab = "details" | "history";
 
@@ -34,24 +34,23 @@ function TitleEditor({
   onDone,
 }: {
   issue: { id: string; summary: string };
-  onDone: (changed: boolean) => void;
+  /** Closes the editor. It no longer reports WHETHER anything changed: the
+   *  mutation invalidates the issue itself, so there is nothing for the caller
+   *  to do differently on a save than on an escape. */
+  onDone: () => void;
 }) {
   const [draft, setDraft] = useState(issue.summary);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const save = async () => {
+  const rename = useAppMutation(
+    (summary: string) => updateIssue({ id: issue.id, changes: { summary } }),
+    () => invalidatedBy.issueChanged(issue.id),
+  );
+  const busy = rename.isPending;
+
+  const save = () => {
     const summary = draft.trim();
     if (!summary) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await toPromise(updateIssue({ id: issue.id, changes: { summary } }));
-      onDone(true);
-    } catch (err) {
-      setError(errorMessage(err));
-      setBusy(false);
-    }
+    rename.mutate(summary, { onSuccess: onDone });
   };
 
   return (
@@ -64,21 +63,21 @@ function TitleEditor({
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();
-            void save();
+            save();
           }
           // Escape abandons, and the draft dies with the component.
-          if (event.key === "Escape") onDone(false);
+          if (event.key === "Escape") onDone();
         }}
       />
       <Cluster gap={2} align="center">
-        <Button variant="filled" size="small" disabled={busy || !draft.trim()} onClick={() => void save()}>
+        <Button variant="filled" size="small" disabled={busy || !draft.trim()} onClick={save}>
           Save
         </Button>
-        <Button variant="plain" size="small" disabled={busy} onClick={() => onDone(false)}>
+        <Button variant="plain" size="small" disabled={busy} onClick={onDone}>
           Cancel
         </Button>
       </Cluster>
-      {error ? <p className="field-error">{error}</p> : null}
+      {rename.error ? <p className="field-error">{errorMessage(rename.error)}</p> : null}
     </div>
   );
 }
@@ -91,7 +90,7 @@ export function IssueDetailPage({
   /** From #/issues/<id>/c/<n> -- scroll to that comment once it exists. */
   commentNumber?: number;
 }) {
-  const { state, reload } = useAsync(() => getIssue({ id }), [id]);
+  const issueQ = useIssue(id);
   const [tab, setTab] = useState<Tab>("details");
 
   // Land on the comment a permalink names.
@@ -129,38 +128,38 @@ export function IssueDetailPage({
   // visible" while clicking.
   const [moreOpen, setMoreOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
-  const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
-  const productsQ = useAsync(() => listProducts({}), []);
+  const productsQ = useProducts();
   // Issues are public, so unlike the dashboard this page stays READABLE without
   // an identity -- what it must not do is offer controls that cannot work.
   const session = useSession();
-  // The page owns the file list because two children render it: the thread
-  // shows each comment's files, and the roll-up shows every file on the issue.
-  const attachmentsQ = useAsync(() => listAttachments({ issueId: id }), [id]);
   const signedOut = isVisitor(session);
 
-  const productId = state.status === "ready" ? state.data.product?.id ?? null : null;
+  const productId = issueQ.data?.product?.id ?? null;
+  // The issue's product structure -- versions, milestones, components, flag
+  // types -- read by key rather than fetched into state by an effect. The
+  // effect this replaces had to cancel itself against a stale response and
+  // clear the previous product's detail by hand; a key does both by being a
+  // different key.
+  const productQ = useProduct(productId);
+  const productDetail = productQ.data ?? null;
 
-  useEffect(() => {
-    setProductDetail(null);
-    if (!productId) return;
-    let cancelled = false;
-    toPromise(getProduct({ id: productId }))
-      .then((detail) => {
-        if (!cancelled) setProductDetail(detail);
-      })
-      .catch(() => {
-        if (!cancelled) setProductDetail(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [productId]);
+  /**
+   * The one refresh callback this page still hands down.
+   *
+   * Flags, votes and security are not migrated yet, so they still take an
+   * `onChanged`. It invalidates rather than refetching one query: setting a
+   * flag or casting a vote can move the issue's status, which the list and the
+   * report totals are derived from -- `issueChanged` names all three.
+   */
+  const invalidate = useInvalidate();
+  const issueChanged = () => void invalidate(invalidatedBy.issueChanged(id));
 
-  if (state.status === "loading") return <Loading label="Loading issue..." />;
-  if (state.status === "error") return <ErrorState error={state.error} onRetry={reload} />;
+  if (issueQ.isPending) return <Loading label="Loading issue..." />;
+  if (issueQ.isError) {
+    return <ErrorState error={issueQ.error} onRetry={() => void issueQ.refetch()} />;
+  }
 
-  const { data: detail } = state;
+  const detail = issueQ.data;
   if (!detail.product || !detail.component) {
     return (
       <ErrorState
@@ -206,13 +205,7 @@ export function IssueDetailPage({
           {detail.product ? `${detail.product.key}-${detail.issue.number}` : detail.issue.id}
         </span>
         {editingTitle ? (
-          <TitleEditor
-            issue={detail.issue}
-            onDone={(next) => {
-              setEditingTitle(false);
-              if (next) reload();
-            }}
-          />
+          <TitleEditor issue={detail.issue} onDone={() => setEditingTitle(false)} />
         ) : (
           <Cluster gap={2} align="center" className="issue-title-row">
             <h1 className="issue-title">{detail.issue.summary}</h1>
@@ -285,14 +278,17 @@ export function IssueDetailPage({
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
           <div className="issue-detail-main">
+            {/* No `attachments` / `onAttachmentsChanged` props: the thread and
+                the roll-up below now ask `useAttachments(issueId)` for
+                themselves. Same key, so it is still ONE request -- what the
+                page owning it used to buy, minus the callback each side had to
+                remember. */}
             <CommentsPanel
               issueId={id}
               readOnly={signedOut}
               activities={detail.activities}
               people={detail.people}
               labels={historyLabels}
-              attachments={attachmentsQ.state}
-              onAttachmentsChanged={attachmentsQ.reload}
             />
             {/* Everything below is about the issue WITHOUT being metadata about
                 it: files, links to other issues, who is watching, what is
@@ -308,7 +304,7 @@ export function IssueDetailPage({
                 Their CONTENT still renders -- attachments, watchers and
                 linked issues are readable facts about a public issue. */}
             <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
-              <AttachmentsPanel state={attachmentsQ.state} reload={attachmentsQ.reload} />
+              <AttachmentsPanel issueId={id} />
             </fieldset>
 
             {/* The long tail, folded.
@@ -339,15 +335,19 @@ export function IssueDetailPage({
               <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
               {/* No `activities` prop: the panel reads real flags from
                   flags.list instead of replaying the issue's history. */}
-              <FlagsPanel issueId={id} flagTypes={productDetail?.flagTypes ?? null} onChanged={reload} />
+              <FlagsPanel
+                issueId={id}
+                flagTypes={productDetail?.flagTypes ?? null}
+                onChanged={issueChanged}
+              />
               <VotesPanel
                 issueId={id}
                 voteCount={detail.issue.voteCount}
                 maxVotesPerIssue={productDetail?.product.maxVotesPerIssue ?? 0}
                 votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
-                onChanged={reload}
+                onChanged={issueChanged}
               />
-              <SecurityPanel issueId={id} onChanged={reload} />
+              <SecurityPanel issueId={id} onChanged={issueChanged} />
               </fieldset>
               ) : null}
             </div>
@@ -359,13 +359,14 @@ export function IssueDetailPage({
               product={product}
               component={component}
               productDetail={productDetail}
-              products={
-                productsQ.state.status === "ready"
-                  ? productsQ.state.data.map((p) => ({ id: p.id, name: p.name }))
-                  : []
-              }
+              products={productsQ.data?.map((p) => ({ id: p.id, name: p.name })) ?? []}
+              // Two seams left standing because FieldsPanel is not this
+              // agent's file: `fetchProductDetail` is the last direct
+              // procedure call on this page, and `onUpdated` the last refresh
+              // callback it hands down. Both go when the panel reads
+              // `useProduct` and writes through `useAppMutation`.
               fetchProductDetail={(pid) => toPromise(getProduct({ id: pid }))}
-              onUpdated={() => reload()}
+              onUpdated={issueChanged}
               readOnly={signedOut}
             />
             {/* State and relations, not narrative -- so their position must
@@ -384,7 +385,11 @@ export function IssueDetailPage({
                 is a different kind of fact from severity or component. */}
             <p className="rail-section">Links</p>
             <fieldset className="rail-fields rail-groups" disabled={signedOut}>
-              <KeywordsPanel issueId={id} activities={detail.activities} onChanged={reload} />
+              {/* No `onChanged`: attaching a keyword is a relation change, and
+                  the panel's own mutation drops the issue detail that
+                  `activities` -- and so the attached set it renders -- comes
+                  from. */}
+              <KeywordsPanel issueId={id} activities={detail.activities} />
               <CcPanel issueId={id} />
               <DependenciesPanel issueId={id} />
               <DuplicatesPanel

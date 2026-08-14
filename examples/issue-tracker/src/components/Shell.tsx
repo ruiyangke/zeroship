@@ -3,7 +3,6 @@ import { Link, NavLink } from "react-router-dom";
 import { AppShell, Button, Cluster } from "@zeroship/ui";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
-import type { AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
 import type { Session } from "./session";
 

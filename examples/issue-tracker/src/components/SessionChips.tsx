@@ -10,9 +10,10 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@zeroship/auth/react";
 import { Button, Menu } from "@zeroship/ui";
 import { unreadNotificationCount } from "../api";
-import { errorMessage, isUnauthenticated, toPromise, type AsyncState } from "./rpc";
+import { errorMessage, isUnauthenticated, toPromise } from "./rpc";
 import type { CurrentUser } from "./types";
 import type { Session } from "./session";
+import { useUnreadNotificationCount } from "../lib/queries";
 
 
 /**
@@ -132,25 +133,13 @@ function AccountMenu({
 }
 
 export function UnreadBadge({ signedIn }: { signedIn: boolean }) {
-  const [count, setCount] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!signedIn) {
-      setCount(null);
-      return;
-    }
-    let cancelled = false;
-    toPromise(unreadNotificationCount({}))
-      .then((res) => {
-        if (!cancelled) setCount(res.count);
-      })
-      .catch(() => {
-        if (!cancelled) setCount(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [signedIn]);
+  // A QUERY, not a bespoke fetch. This was a useState + useEffect keyed on
+  // [signedIn], which meant marking a notification read updated the dashboard
+  // and left this number untouched until the next sign-in: the mutation
+  // invalidated notifications.unreadCount and nothing was subscribed to it.
+  // Reading through the cache is what connects the two.
+  const query = useUnreadNotificationCount({ enabled: signedIn });
+  const count = signedIn && query.isSuccess ? query.data.count : null;
 
   if (count === null || count === 0) return null;
   return <span className="unread-badge">{count}</span>;

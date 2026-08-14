@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button, Input } from "@zeroship/ui";
-import { addDependency, dependencyGraph, listDuplicates, removeDependency } from "../../api";
+import { addDependency, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, useAsync } from "../rpc";
+import { errorMessage } from "../rpc";
+import { useAppMutation, useDependencyGraph, useDuplicates } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
@@ -18,46 +20,51 @@ function IssueLink({ id, summary, status }: { id: string; summary: string; statu
 }
 
 export function DependenciesPanel({ issueId }: { issueId: string }) {
-  const { state, reload } = useAsync(() => dependencyGraph({ issueId }), [issueId]);
+  const graphQ = useDependencyGraph(issueId);
   const [newDep, setNewDep] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Both writes move the relation graph, so both name the same blast radius:
+  // this panel's query, its sibling panels, and the issue itself. Nothing has
+  // to be handed a callback to hear about it.
+  const addDep = useAppMutation(
+    (dependsOnId: string) => addDependency({ issueId, dependsOnId }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const removeDep = useAppMutation(
+    (dependsOnId: string) => removeDependency({ issueId, dependsOnId }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+  const busy = addDep.isPending || removeDep.isPending;
 
   const add = async () => {
     if (!newDep.trim()) return;
-    setBusy(true);
     setError(null);
     try {
-      await addDependency({ issueId, dependsOnId: newDep.trim() });
+      await addDep.mutateAsync(newDep.trim());
+      // Clearing the field is the only thing left for the caller to do; the
+      // refresh is the mutation's own business.
       setNewDep("");
-      reload();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const remove = async (dependsOnId: string) => {
-    setBusy(true);
     setError(null);
     try {
-      await removeDependency({ issueId, dependsOnId });
-      reload();
+      await removeDep.mutateAsync(dependsOnId);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
-  const counts =
-    state.status === "ready"
-      ? {
-          dependsOn: state.data.edges.filter((e) => e.issueId === issueId).length,
-          blocks: state.data.edges.filter((e) => e.dependsOnId === issueId).length,
-        }
-      : null;
+  const counts = graphQ.data
+    ? {
+        dependsOn: graphQ.data.edges.filter((e) => e.issueId === issueId).length,
+        blocks: graphQ.data.edges.filter((e) => e.dependsOnId === issueId).length,
+      }
+    : null;
   const summary = !counts ? (
     <Pending width="7rem" />
   ) : counts.dependsOn === 0 && counts.blocks === 0 ? (
@@ -72,8 +79,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
     <RailDisclosure label="Dependencies" summary={summary}>
     <section className="relations-panel">
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={graphQ}
         loadingLabel="Loading dependencies..."
         isEmpty={(data) => data.nodes.length <= 1}
         emptyTitle="No dependencies."
@@ -125,7 +131,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
           );
         }}
       </AsyncSection>
-      {state.status !== "error" ? (
+      {!graphQ.isError ? (
         <div className="inline-form">
           <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
           <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
@@ -149,17 +155,19 @@ export function DuplicatesPanel({
   /** Ids to the names they stand for, shared with the history and timeline. */
   labels?: Record<string, string>;
 }) {
-  const { state, reload } = useAsync(() => listDuplicates({ issueId }), [issueId]);
+  const duplicatesQ = useDuplicates(issueId);
 
-  const cluster = useMemo(() => {
-    if (state.status !== "ready") return null;
-    return state.data.filter((b) => b.id !== issueId);
-  }, [state, issueId]);
+  const cluster = useMemo(
+    () => (duplicatesQ.data ? duplicatesQ.data.filter((b) => b.id !== issueId) : null),
+    [duplicatesQ.data, issueId],
+  );
 
   // `duplicateOfId` comes from the issue we already have, so it answers before
   // the cluster query does. Only the LAST branch is a real emptiness claim --
   // testing `cluster.length > 0` alone would print "no duplicates" for the
-  // moment the list is still in flight.
+  // moment the list is still in flight. `cluster` is null exactly while there
+  // is no answer to give: `isPending` on a first load, and still nothing to
+  // report if the query failed. Both of those are the Skeleton, never `--`.
   const summary = duplicateOfId ? (
     <>duplicate of another issue</>
   ) : !cluster ? (
@@ -180,8 +188,7 @@ export function DuplicatesPanel({
         </p>
       ) : null}
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={duplicatesQ}
         loadingLabel="Loading duplicates..."
         isEmpty={() => (cluster?.length ?? 0) === 0}
         emptyTitle="No known duplicates."

@@ -1,40 +1,46 @@
 import { useState } from "react";
 import { formatBytes } from "./attachments";
 import { Button } from "@zeroship/ui";
-import { deleteAttachment, listAttachments, setAttachmentObsolete } from "../../api";
+import { deleteAttachment, setAttachmentObsolete } from "../../api";
 import { downloadAttachment } from "../../lib/download";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, type AsyncState } from "../rpc";
+import { errorMessage } from "../rpc";
+import { useAppMutation, useAttachments } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import type { Attachment } from "../types";
 
-function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
+function AttachmentRow({ attachment }: { attachment: Attachment }) {
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
 
+  // A file changing state is an attachment change: the roll-up here, the same
+  // files rendered inline in the thread, and the issue itself all hear about
+  // it from one declaration.
+  const setObsolete = useAppMutation(
+    (isObsolete: boolean) => setAttachmentObsolete({ id: attachment.id, isObsolete }),
+    () => invalidatedBy.attachmentChanged(attachment.issueId),
+  );
+  const removeFile = useAppMutation(
+    () => deleteAttachment({ id: attachment.id }),
+    () => invalidatedBy.attachmentChanged(attachment.issueId),
+  );
+  const busy = setObsolete.isPending || removeFile.isPending;
+
   const toggleObsolete = async () => {
-    setBusy(true);
     setError(null);
     try {
-      await setAttachmentObsolete({ id: attachment.id, isObsolete: !attachment.isObsolete });
-      onChanged();
+      await setObsolete.mutateAsync(!attachment.isObsolete);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const remove = async () => {
-    setBusy(true);
     setError(null);
     try {
-      await deleteAttachment({ id: attachment.id });
-      onChanged();
+      await removeFile.mutateAsync(undefined);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -88,26 +94,22 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
  * a question worth answering in one glance. Files that predate a comment, or
  * arrived without one, appear here and nowhere else.
  */
-export function AttachmentsPanel({
-  state,
-  reload,
-}: {
-  // Handed in rather than fetched. This panel and the comment thread both
-  // list the same files, and each owning its own query meant posting a
-  // comment with an attachment refreshed the thread and left this panel
-  // saying "No files yet" beside the file it was denying. One fetch, one
-  // owner, both views current -- the same fix the unread badge needed when
-  // two components derived a count from different sources.
-  state: AsyncState<Attachment[]>;
-  reload: () => void;
-}) {
+export function AttachmentsPanel({ issueId }: { issueId: string }) {
+  // Fetched here, and fetched again by the comment thread, which lists the
+  // same files per comment. That used to be one query owned by the page and
+  // drilled into both, because two independent `useAsync` calls meant posting
+  // a comment with an attachment refreshed the thread and left this panel
+  // saying "No files yet" beside the file it was denying. Both callers now ask
+  // the cache the same question under the same key, so there is still ONE
+  // request and one answer -- but no prop to keep in sync, and an upload
+  // anywhere invalidates the key rather than having to find the owner.
+  const attachmentsQ = useAttachments(issueId);
 
   return (
     <section className="attachments-panel">
       <h3>Files</h3>
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={attachmentsQ}
         loadingLabel="Loading attachments..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="No files yet. Attach one by adding a comment."
@@ -116,12 +118,12 @@ export function AttachmentsPanel({
         {(attachments: Attachment[]) => (
           <ul className="attachment-list">
             {attachments.map((attachment) => (
-              <AttachmentRow key={attachment.id} attachment={attachment} onChanged={reload} />
+              <AttachmentRow key={attachment.id} attachment={attachment} />
             ))}
           </ul>
         )}
       </AsyncSection>
-      {state.status === "ready" && state.data.length > 0 ? (
+      {attachmentsQ.data && attachmentsQ.data.length > 0 ? (
         <p className="state-hint small">Attach files by adding a comment.</p>
       ) : null}
     </section>

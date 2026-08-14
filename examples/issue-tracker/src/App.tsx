@@ -6,7 +6,6 @@ import { Shell } from "./components/Shell";
 import { SessionProvider, toSession } from "./components/session";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "./lib/query-keys";
-import { useAsync } from "./components/rpc";
 import { EmptyState } from "./components/StateViews";
 import { IssueDetailPage } from "./pages/IssueDetail";
 import { IssueListPage } from "./pages/IssueList";
@@ -91,6 +90,16 @@ export function App() {
   const { user } = useAuth();
   const lastUserId = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    // WAIT for the provider to settle before treating a change as a sign-in.
+    //
+    // `useAuth()` warms up through `undefined -> null -> id`, and a guard that
+    // only absorbed the FIRST transition read the second one as a session
+    // change: every signed-in page load invalidated the whole cache moments
+    // after mount. Measured by counting requests on one issue-list load --
+    // `users.me` went out twice signed in and once signed out, which is the
+    // signature of this effect rather than of anything in the cache. I had
+    // guessed React StrictMode; the signed-out control disproved it.
+    if (user === undefined) return;
     const id = user?.id ?? null;
     if (lastUserId.current === undefined) {
       lastUserId.current = id;

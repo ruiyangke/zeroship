@@ -3,11 +3,13 @@ import { Link } from "react-router-dom";
 import { Avatar, Button, Checkbox, Cluster, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
-import { addComment, editComment, listAttachments, listComments, setCommentPrivate, uploadAttachment } from "../../api";
+import { addComment, editComment, setCommentPrivate, uploadAttachment } from "../../api";
 import { MAX_ATTACHMENT_BYTES, fileToBase64, formatBytes } from "./attachments";
 import { AsyncSection } from "../StateViews";
 import { downloadAttachment } from "../../lib/download";
-import { errorMessage, useAsync, type AsyncState } from "../rpc";
+import { errorMessage } from "../rpc";
+import { useAppMutation, useAttachments, useComments } from "../../lib/queries";
+import { invalidatedBy } from "../../lib/query-keys";
 import type { Activity, Attachment, Comment } from "../types";
 import { buildTimeline } from "./timeline";
 import { displayValue, fieldLabel, personLabel } from "./activity";
@@ -51,12 +53,10 @@ function initials(name: string): string {
 
 function CommentRow({
   comment,
-  onChanged,
   readOnly = false,
   attachments = [],
 }: {
   comment: Comment;
-  onChanged: () => void;
   readOnly?: boolean;
   /** The files that arrived with THIS comment. */
   attachments?: Attachment[];
@@ -64,20 +64,29 @@ function CommentRow({
   const author = comment.author?.name || comment.author?.handle || comment.authorId;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(comment.body);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Editing a comment changes the thread, and the thread's key is not the only
+  // thing it makes stale -- `commentChanged` names the issue detail as well.
+  const edit = useAppMutation(
+    (body: string) => editComment({ id: comment.id, body }),
+    () => invalidatedBy.commentChanged(comment.issueId),
+  );
+  const setPrivate = useAppMutation(
+    (isPrivate: boolean) => setCommentPrivate({ id: comment.id, isPrivate }),
+    () => invalidatedBy.commentChanged(comment.issueId),
+  );
+  const busy = edit.isPending || setPrivate.isPending;
+
   const save = async () => {
-    setBusy(true);
     setError(null);
     try {
-      await editComment({ id: comment.id, body: draft });
+      await edit.mutateAsync(draft);
+      // Leaving the editor is still this row's decision; only the refresh of
+      // the thread and the issue moved out of it.
       setEditing(false);
-      onChanged();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -96,15 +105,11 @@ function CommentRow({
   };
 
   const togglePrivate = async () => {
-    setBusy(true);
     setError(null);
     try {
-      await setCommentPrivate({ id: comment.id, isPrivate: !comment.isPrivate });
-      onChanged();
+      await setPrivate.mutateAsync(!comment.isPrivate);
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -240,31 +245,26 @@ function CommentRow({
   );
 }
 
-function NewCommentForm({ issueId, onAdded }: { issueId: string; onAdded: () => void }) {
+function NewCommentForm({ issueId }: { issueId: string }) {
   const [body, setBody] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Named separately from the input so the chosen files can be listed back.
   // A bare file input shows one filename and silently hides the rest.
   const [fileNames, setFileNames] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
-    // An empty tiptap document is "<p></p>", not "". Guarding on the markup
-    // would let an empty comment through and post a blank bubble.
-    const files = Array.from(fileRef.current?.files ?? []);
-    if (!hasText(body) && files.length === 0) return;
-    const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
-    if (tooBig) {
-      setError(
-        `${tooBig.name} is ${formatBytes(tooBig.size)}; the server caps attachments at ${formatBytes(MAX_ATTACHMENT_BYTES)}.`,
-      );
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
+  // Posting can change two lists and one count, and it says so once here.
+  // `commentChanged` carries the issue detail because `commentCount` lives on
+  // the issue -- without it the new comment appears while the count beside it
+  // still reads one fewer. `attachmentChanged` covers the files this post
+  // brought with it, which the roll-up panel renders from the same key.
+  const post = useAppMutation(
+    // The draft travels in as an ARGUMENT rather than being read off the
+    // closure: the composer re-renders on every keystroke, and a mutation that
+    // reads its input from whichever render it was defined in is the kind of
+    // thing that works until it does not.
+    async ({ body, isPrivate, files }: { body: string; isPrivate: boolean; files: File[] }) => {
       const comment = await addComment({ issueId, body, isPrivate });
       // The comment first, then its files -- an attachment names the comment
       // it arrived with, so the comment has to exist to be named. If a file
@@ -279,15 +279,38 @@ function NewCommentForm({ issueId, onAdded }: { issueId: string; onAdded: () => 
           contentType: file.type || "application/octet-stream",
         });
       }
+    },
+    () => [
+      ...invalidatedBy.commentChanged(issueId),
+      ...invalidatedBy.attachmentChanged(issueId),
+    ],
+  );
+  const busy = post.isPending;
+
+  const submit = async () => {
+    // An empty tiptap document is "<p></p>", not "". Guarding on the markup
+    // would let an empty comment through and post a blank bubble.
+    const files = Array.from(fileRef.current?.files ?? []);
+    if (!hasText(body) && files.length === 0) return;
+    const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
+    if (tooBig) {
+      setError(
+        `${tooBig.name} is ${formatBytes(tooBig.size)}; the server caps attachments at ${formatBytes(MAX_ATTACHMENT_BYTES)}.`,
+      );
+      return;
+    }
+    setError(null);
+    try {
+      await post.mutateAsync({ body, isPrivate, files });
+      // Emptying the composer is the form's own job. The invalidation has
+      // already been awaited by this point, so the cleared box and the posted
+      // comment appear together rather than racing.
       setBody("");
       setIsPrivate(false);
       if (fileRef.current) fileRef.current.value = "";
       setFileNames([]);
-      onAdded();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -367,8 +390,6 @@ function NewCommentForm({ issueId, onAdded }: { issueId: string; onAdded: () => 
 export function CommentsPanel({
   issueId,
   readOnly = false,
-  attachments,
-  onAttachmentsChanged,
   activities = [],
   people = {},
   labels = {},
@@ -386,30 +407,31 @@ export function CommentsPanel({
   labels?: Record<string, string>;
   /** No identity: the thread is readable, the controls are not offered. */
   readOnly?: boolean;
-  /** Owned by the page, because the files panel lists the same rows. */
-  attachments: AsyncState<Attachment[]>;
-  onAttachmentsChanged: () => void;
 }) {
-  const { state, reload } = useAsync(() => listComments({ issueId }), [issueId]);
-  // Fetched once for the thread and handed out per comment, rather than each
-  // row asking for its own -- one request either way, and the grouping is a
-  // property of the thread, not of any single comment.
+  const commentsQ = useComments(issueId);
+  // Asked for by KEY, not handed down. The files panel asks the same question
+  // under the same key, so the two views share one request and one answer --
+  // which is what the page-owned prop used to buy, at the cost of a callback
+  // each side had to remember. An upload now invalidates the key and both
+  // views follow; before, the thread refreshed and the roll-up sat there
+  // saying "No files yet" beside the file it was denying.
+  const attachmentsQ = useAttachments(issueId);
+  // Grouped once for the thread and handed out per comment, rather than each
+  // row asking for its own -- the grouping is a property of the thread, not of
+  // any single comment.
   const filesByComment = new Map<string, Attachment[]>();
-  if (attachments.status === "ready") {
-    for (const file of attachments.data) {
-      const key = file.commentId ?? "";
-      if (!key) continue;
-      const list = filesByComment.get(key) ?? [];
-      list.push(file);
-      filesByComment.set(key, list);
-    }
+  for (const file of attachmentsQ.data ?? []) {
+    const key = file.commentId ?? "";
+    if (!key) continue;
+    const list = filesByComment.get(key) ?? [];
+    list.push(file);
+    filesByComment.set(key, list);
   }
 
   return (
     <section className="comments-panel">
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={commentsQ}
         loadingLabel="Loading comments..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="No comments yet."
@@ -421,10 +443,6 @@ export function CommentsPanel({
                 <CommentRow
                   key={item.comment.id}
                   comment={item.comment}
-                  onChanged={() => {
-                    reload();
-                    onAttachmentsChanged();
-                  }}
                   readOnly={readOnly}
                   attachments={filesByComment.get(item.comment.id) ?? []}
                 />
@@ -451,15 +469,7 @@ export function CommentsPanel({
           </ul>
         )}
       </AsyncSection>
-      {readOnly ? null : (
-        <NewCommentForm
-          issueId={issueId}
-          onAdded={() => {
-            reload();
-            onAttachmentsChanged();
-          }}
-        />
-      )}
+      {readOnly ? null : <NewCommentForm issueId={issueId} />}
     </section>
   );
 }

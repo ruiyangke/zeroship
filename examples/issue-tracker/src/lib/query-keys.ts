@@ -88,6 +88,15 @@ export const queryKeys = {
     all: ["products"] as const,
     /** Five callers today, each fetching the whole list independently. */
     list: () => ["products", "list"] as const,
+    /**
+     * Id-to-label resolution for the rows currently on screen.
+     *
+     * Sorted, because the ID SET is the identity of this question and
+     * [a, b] must not be a different cache entry from [b, a]. The table
+     * re-derives its id list on every render; without the sort, scrolling
+     * would miss the cache constantly.
+     */
+    resolve: (ids: readonly string[]) => ["products", "resolve", [...ids].sort()] as const,
     detail: (id: string) => ["products", "detail", id] as const,
   },
 
@@ -96,9 +105,23 @@ export const queryKeys = {
   notifications: {
     all: ["notifications"] as const,
     list: () => ["notifications", "list"] as const,
-    /** Separate from `list` because the header badge polls it and the
-     *  dashboard renders the list; marking one read must drop both, which the
-     *  shared `all` prefix gives us. */
+    /**
+     * Separate from `list` because the dashboard renders the list while the
+     * header shows only a count; marking one read must drop both, which the
+     * shared `notifications` prefix gives us.
+     *
+     * THIS COMMENT USED TO SAY "the header badge polls it", which was a
+     * description of the intended end state and not of the code. `UnreadBadge`
+     * was a `useState` + `useEffect` calling the procedure directly, with
+     * `[signedIn]` as its only dependency, so nothing subscribed to this key
+     * at all: invalidation dropped an entry no component was reading, and the
+     * badge went stale until the next sign-in or full remount.
+     *
+     * It is the rule in `queries.ts` -- nothing fetches outside a hook --
+     * demonstrated by the one component that broke it. A bespoke fetch is
+     * invisible to the cache, and looks right until something else changes
+     * the data.
+     */
     unreadCount: () => ["notifications", "unreadCount"] as const,
   },
 

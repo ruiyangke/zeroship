@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { Button, Checkbox, Tag, Input } from "@zeroship/ui";
-import { attachKeyword, createKeyword, detachKeyword, listKeywords } from "../../api";
+import { attachKeyword, createKeyword, detachKeyword } from "../../api";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
-import { errorMessage, useAsync } from "../rpc";
+import { errorMessage } from "../rpc";
+import { useAppMutation, useKeywords } from "../../lib/queries";
+import { invalidatedBy, queryKeys } from "../../lib/query-keys";
 import type { Activity } from "../types";
 import { RailDisclosure } from "./RailDisclosure";
 import { Absent } from "./Absent";
@@ -11,51 +13,56 @@ import { Absent } from "./Absent";
 export function KeywordsPanel({
   issueId,
   activities,
-  onChanged,
 }: {
   issueId: string;
   activities: readonly Activity[];
-  onChanged: () => void;
 }) {
-  const { state, reload: reloadKeywords } = useAsync(() => listKeywords({}), []);
-  const [busy, setBusy] = useState(false);
+  const keywordsQ = useKeywords();
   const [error, setError] = useState<string | null>(null);
   const [newKeyword, setNewKeyword] = useState("");
 
   const attached = useMemo(() => new Set(deriveNamedSet(activities, "keywords")), [activities]);
 
+  // Attaching or detaching is a relation change, so it drops the issue detail
+  // too -- which is where `activities`, and therefore the attached set above,
+  // comes from. That is the link the removed `onChanged` prop used to carry
+  // by hand.
+  const toggleKeyword = useAppMutation(
+    ({ keywordId, attach }: { keywordId: string; attach: boolean }) =>
+      attach ? attachKeyword({ issueId, keywordId }) : detachKeyword({ issueId, keywordId }),
+    () => invalidatedBy.relationsChanged(issueId),
+  );
+
+  // Creating one also changes the tracker's VOCABULARY, which is a different
+  // question from this issue's relations: `keywords.list` is shared by every
+  // issue, so it is named here in addition to the relation keys.
+  const createAndAttachKeyword = useAppMutation(
+    async (name: string) => {
+      const keyword = await createKeyword({ name });
+      await attachKeyword({ issueId, keywordId: keyword.id });
+    },
+    () => [...invalidatedBy.relationsChanged(issueId), queryKeys.keywords.all],
+  );
+  const busy = toggleKeyword.isPending || createAndAttachKeyword.isPending;
+
   const toggle = async (keywordId: string, keywordName: string) => {
-    setBusy(true);
     setError(null);
     try {
-      if (attached.has(keywordName)) {
-        await detachKeyword({ issueId, keywordId });
-      } else {
-        await attachKeyword({ issueId, keywordId });
-      }
-      onChanged();
+      await toggleKeyword.mutateAsync({ keywordId, attach: !attached.has(keywordName) });
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
   const createAndAttach = async () => {
     const name = newKeyword.trim();
     if (!name) return;
-    setBusy(true);
     setError(null);
     try {
-      const keyword = await createKeyword({ name });
-      await attachKeyword({ issueId, keywordId: keyword.id });
+      await createAndAttachKeyword.mutateAsync(name);
       setNewKeyword("");
-      reloadKeywords();
-      onChanged();
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -86,8 +93,10 @@ export function KeywordsPanel({
           // the tracker defines no keywords at all, "No keywords on this issue"
           // states a consequence of the message directly below it, and the
           // panel says nothing twice. The distinction is real; showing both at
-          // once is what was redundant.
-          state.status === "ready" && state.data.length === 0 ? null : (
+          // once is what was redundant. `data?.length === 0` is only true once
+          // the list has ARRIVED and is empty, so an in-flight query does not
+          // silence this line.
+          keywordsQ.data?.length === 0 ? null : (
             <span className="dim">No keywords on this issue.</span>
           )
         ) : (
@@ -99,8 +108,7 @@ export function KeywordsPanel({
         )}
       </div>
       <AsyncSection
-        state={state}
-        onRetry={reloadKeywords}
+        query={keywordsQ}
         loadingLabel="Loading keywords..."
         isEmpty={(data) => data.length === 0}
         emptyTitle="No keywords have been defined for this tracker yet."

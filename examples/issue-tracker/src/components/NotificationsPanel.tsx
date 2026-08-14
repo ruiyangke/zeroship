@@ -1,9 +1,10 @@
-import { listNotifications, markNotificationRead } from "../api";
+import { markNotificationRead } from "../api";
 import { Link } from "react-router-dom";
 import { Button, ListView } from "@zeroship/ui";
+import { invalidatedBy } from "../lib/query-keys";
+import { useAppMutation, useNotifications } from "../lib/queries";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
-import { useAsync } from "./rpc";
 
 /**
  * The notification inbox.
@@ -27,23 +28,24 @@ import { useAsync } from "./rpc";
  * else moves.
  */
 export function NotificationsPanel() {
-  const { state, reload } = useAsync(() => listNotifications({ limit: 50 }), []);
+  const notificationsQ = useNotifications(50);
 
-  const markRead = async (id: string) => {
-    await markNotificationRead({ id });
-    // Reloads rather than mutating in place: markRead also rewrites the KV
-    // unread cache, and the nav badge reads that on its own next render. Two
-    // components deriving the same count from different sources is how they
-    // drift apart.
-    reload();
-  };
+  // Invalidates rather than mutating the row in place: markRead also rewrites
+  // the KV unread cache that the nav badge counts, and two components deriving
+  // the same count from different sources is how they drift apart.
+  // `notificationsChanged` names the whole `notifications` prefix for exactly
+  // that reason -- it drops this list AND the unread count together, so no
+  // caller has to remember the badge exists.
+  const markRead = useAppMutation(
+    (id: string) => markNotificationRead({ id }),
+    () => invalidatedBy.notificationsChanged(),
+  );
 
   return (
     <section className="dashboard-section notifications-panel">
       <h2>Notifications</h2>
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={notificationsQ}
         loadingLabel="Loading notifications..."
         isEmpty={(rows) => rows.length === 0}
         emptyTitle="Nothing new."
@@ -97,7 +99,7 @@ export function NotificationsPanel() {
                 // to a line of its own under a row with one, so the same
                 // control appeared in two places down a single list.
                 trailing: row.isRead ? undefined : (
-                  <Button variant="gray" size="small" onClick={() => void markRead(row.id)}>
+                  <Button variant="gray" size="small" onClick={() => markRead.mutate(row.id)}>
                     Mark read
                   </Button>
                 ),

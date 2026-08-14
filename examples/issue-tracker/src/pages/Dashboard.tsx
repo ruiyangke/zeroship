@@ -1,23 +1,19 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Badge, Grid, PageHeader, Tabs } from "@zeroship/ui";
-import {
-  getAttachment,
-  getIssue,
-  listFlagRequests,
-  listMyCc,
-  listMyVotes,
-  searchIssues,
-} from "../api";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { WatchingPanel } from "../components/WatchingPanel";
-import { AsyncSection, SignInRequired } from "../components/StateViews";
-import { toPromise, useAsync, type AsyncState } from "../components/rpc";
+import { AsyncSection, SignInRequired, type QueryLike } from "../components/StateViews";
 import { RequireSession, isSignedIn, useSession } from "../components/session";
-import type { Issue, IssueDetail, FlagRequestEntry } from "../components/types";
-
-type DashboardIssue = IssueDetail["issue"];
+import {
+  useFlagRequestIssues,
+  useFlagRequests,
+  useIssueSearch,
+  useMyCc,
+  useMyVotes,
+} from "../lib/queries";
+import type { Issue, FlagRequestEntry } from "../components/types";
 
 const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
@@ -37,16 +33,17 @@ const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporte
  * only tells you what it holds after you open it is a worse index than a list
  * of headings.
  */
-function WorkTab({ label, state }: { label: string; state: AsyncState<unknown[]> }) {
+function WorkTab({ label, query }: { label: string; query: QueryLike<unknown[]> }) {
   return (
     <>
       <span>{label}</span>
       {/* No count until there is one. A "(0)" while the query is in flight is
           an answer we do not have yet, and the same wrong answer a signed-out
-          visitor used to get. */}
-      {state.status === "ready" ? (
+          visitor used to get. `data` is undefined until the first load lands,
+          which is the query spelling of that distinction. */}
+      {query.data ? (
         <Badge intent="neutral" variant="soft" size="sm">
-          {state.data.length}
+          {query.data.length}
         </Badge>
       ) : null}
     </>
@@ -54,20 +51,17 @@ function WorkTab({ label, state }: { label: string; state: AsyncState<unknown[]>
 }
 
 function WorkPanel({
-  state,
-  reload,
+  query,
   loadingLabel,
   emptyLabel,
 }: {
-  state: AsyncState<Issue[]>;
-  reload: () => void;
+  query: QueryLike<Issue[]>;
   loadingLabel: string;
   emptyLabel: string;
 }) {
   return (
     <AsyncSection
-      state={state}
-      onRetry={reload}
+      query={query}
       loadingLabel={loadingLabel}
       isEmpty={(issues) => issues.length === 0}
       emptyTitle={emptyLabel}
@@ -78,39 +72,15 @@ function WorkPanel({
   );
 }
 
-async function flagIssueId(entry: FlagRequestEntry): Promise<string | null> {
-  if (entry.flag.issueId) return entry.flag.issueId;
-  if (!entry.flag.attachmentId) return null;
-  try {
-    const { attachment } = await getAttachment({ id: entry.flag.attachmentId });
-    return attachment.issueId;
-  } catch {
-    return null;
-  }
-}
-
 function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[]; emptyLabel: string }) {
-  const { state } = useAsync(async () => {
-    const withIssueId = await Promise.all(
-      entries.map(async (entry) => ({ entry, issueId: await flagIssueId(entry) })),
-    );
-    const issueIds = [...new Set(withIssueId.map((x) => x.issueId).filter((id): id is string => id !== null))];
-    const issues = await Promise.all(
-      issueIds.map((id) => toPromise(getIssue({ id })).catch(() => null)),
-    );
-    const byId = new Map<string, DashboardIssue>();
-    for (const detail of issues) {
-      if (detail) byId.set(detail.issue.id, detail.issue);
-    }
-    return withIssueId.map(({ entry, issueId }) => ({
-      entry,
-      issue: issueId ? byId.get(issueId) ?? null : null,
-    }));
-  }, [entries]);
+  // The two-hop resolution (a flag names an issue OR an attachment) lives in
+  // queries.ts with every other read, keyed by the flag ids. Resolving it here
+  // would put a fetch outside the cache, where no invalidation can reach it.
+  const rowsQ = useFlagRequestIssues(entries);
 
   return (
     <AsyncSection
-      state={state}
+      query={rowsQ}
       loadingLabel="Loading flag requests..."
       isEmpty={(rows) => rows.length === 0}
       emptyTitle={emptyLabel}
@@ -182,38 +152,47 @@ function DashboardBody() {
   const me = isSignedIn(session) ? session.user : null;
   const meId = me?.id ?? null;
 
-  const assignedQ = useAsync(
-    () => (meId ? searchIssues({ assigneeId: meId, limit: 50 }) : Promise.resolve([])),
-    [meId],
+  // Gated on the identity rather than resolving to an empty list without one:
+  // "we do not know who you are yet" and "you have nothing assigned" are
+  // different answers, and only the gate keeps the tab from claiming the
+  // second. Inside RequireSession `meId` is always present, so the gate is a
+  // statement about the query, not a branch anyone reaches.
+  const assignedQ = useIssueSearch(
+    { assigneeId: meId ?? undefined, limit: 50 },
+    { enabled: Boolean(meId) },
   );
-  const reportedQ = useAsync(
-    () => (meId ? searchIssues({ reporterId: meId, limit: 50 }) : Promise.resolve([])),
-    [meId],
+  const reportedQ = useIssueSearch(
+    { reporterId: meId ?? undefined, limit: 50 },
+    { enabled: Boolean(meId) },
   );
-  const flagRequestsQ = useAsync(() => listFlagRequests({}), []);
-  const ccQ = useAsync(() => listMyCc({}), []);
-  const votesQ = useAsync(() => listMyVotes({}), []);
+  const flagRequestsQ = useFlagRequests();
+  const ccQ = useMyCc();
+  const votesQ = useMyVotes();
 
   // Voting had a panel on every issue and nowhere to see what you had voted
   // for, so the budget it enforces -- votesPerUser, per product -- was
   // spendable and unauditable. Projected to the issue rows the shared table
   // takes, so it is the same table as the other three tabs.
-  const votedIssues = useMemo<AsyncState<Issue[]>>(
-    () =>
-      votesQ.state.status === "ready"
-        ? { ...votesQ.state, data: votesQ.state.data.map((row) => row.issue) }
-        : votesQ.state,
-    [votesQ.state],
+  //
+  // The projection is a QueryLike rather than a second query: the votes are
+  // already cached under one key, and re-keying a view of them would be a
+  // second entry holding the same answer. Only `data` changes; every other
+  // field is the query's own, so the panel keeps the real loading, error and
+  // refetch behaviour.
+  const votedIssues = useMemo<QueryLike<Issue[]>>(
+    () => ({
+      data: votesQ.data?.map((row) => row.issue),
+      error: votesQ.error,
+      isPending: votesQ.isPending,
+      isError: votesQ.isError,
+      isFetching: votesQ.isFetching,
+      refetch: votesQ.refetch,
+    }),
+    [votesQ.data, votesQ.error, votesQ.isPending, votesQ.isError, votesQ.isFetching, votesQ.refetch],
   );
 
-  const setByMe = useMemo(
-    () => (flagRequestsQ.state.status === "ready" ? flagRequestsQ.state.data.setByMe : []),
-    [flagRequestsQ.state],
-  );
-  const requestedOfMe = useMemo(
-    () => (flagRequestsQ.state.status === "ready" ? flagRequestsQ.state.data.requestedOfMe : []),
-    [flagRequestsQ.state],
-  );
+  const setByMe = useMemo(() => flagRequestsQ.data?.setByMe ?? [], [flagRequestsQ.data]);
+  const requestedOfMe = useMemo(() => flagRequestsQ.data?.requestedOfMe ?? [], [flagRequestsQ.data]);
 
   // The signed-out arm is RequireSession's job now, above. It used to live here
   // as the same two-clause boolean five pages each wrote, which answers a
@@ -248,47 +227,43 @@ function DashboardBody() {
         <Tabs defaultValue="assigned" lazyMount>
           <Tabs.List>
             <Tabs.Tab value="assigned">
-              <WorkTab label="Assigned to me" state={assignedQ.state} />
+              <WorkTab label="Assigned to me" query={assignedQ} />
             </Tabs.Tab>
             <Tabs.Tab value="reported">
-              <WorkTab label="Reported by me" state={reportedQ.state} />
+              <WorkTab label="Reported by me" query={reportedQ} />
             </Tabs.Tab>
             <Tabs.Tab value="cc">
-              <WorkTab label="CC'd on" state={ccQ.state} />
+              <WorkTab label="CC'd on" query={ccQ} />
             </Tabs.Tab>
             <Tabs.Tab value="voted">
-              <WorkTab label="Voted for" state={votedIssues} />
+              <WorkTab label="Voted for" query={votedIssues} />
             </Tabs.Tab>
             <Tabs.Indicator />
           </Tabs.List>
           <Tabs.Panel value="assigned">
             <WorkPanel
-              state={assignedQ.state}
-              reload={assignedQ.reload}
+              query={assignedQ}
               loadingLabel="Loading assigned issues..."
               emptyLabel="Nothing is assigned to you."
             />
           </Tabs.Panel>
           <Tabs.Panel value="reported">
             <WorkPanel
-              state={reportedQ.state}
-              reload={reportedQ.reload}
+              query={reportedQ}
               loadingLabel="Loading reported issues..."
               emptyLabel="You have not reported an issue yet."
             />
           </Tabs.Panel>
           <Tabs.Panel value="cc">
             <WorkPanel
-              state={ccQ.state}
-              reload={ccQ.reload}
+              query={ccQ}
               loadingLabel="Loading CC'd issues..."
               emptyLabel="You are not on any CC list."
             />
           </Tabs.Panel>
           <Tabs.Panel value="voted">
             <WorkPanel
-              state={votedIssues}
-              reload={votesQ.reload}
+              query={votedIssues}
               loadingLabel="Loading votes..."
               emptyLabel="You have not voted for any issue."
             />

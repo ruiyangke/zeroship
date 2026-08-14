@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Checkbox, Field, Input, Select } from "@zeroship/ui";
-import { createIssue, currentUser, getProduct, listProducts } from "../api";
+import { createIssue } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import { useAppMutation, useProduct, useProducts } from "../lib/queries";
 import { AsyncSection } from "../components/StateViews";
-import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
-import type { ProductDetail } from "../components/types";
+import { errorMessage } from "../components/rpc";
+import { isVisitor, useSession } from "../components/session";
 import {
   ISSUE_KINDS,
   ISSUE_PRIORITIES,
@@ -16,12 +18,22 @@ import {
 
 export function NewIssuePage() {
   const navigate = useNavigate();
-  const { state: userState } = useAsync(() => currentUser({}), []);
-  const productsQ = useAsync(() => listProducts({}), []);
+  // ONE identity for the whole app, read from the session rather than asked
+  // again here. This page calling `currentUser` itself was one of the four
+  // `users.me` requests a single visit used to make.
+  const session = useSession();
+  // The active list, keyed by that input: the admin page asks for the same
+  // procedure WITH inactive products and gets its own entry, which is why the
+  // argument is part of the key.
+  const productsQ = useProducts();
 
   const [productId, setProductId] = useState("");
-  const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
-  const [productDetailError, setProductDetailError] = useState<string | null>(null);
+  // The chosen product's structure is a keyed read of `products.get`, not a
+  // copy of it in component state. The manual fetch-into-useState this
+  // replaced could not tell "not chosen yet" from "still loading", and held a
+  // second copy of a fact the cache already had.
+  const productQ = useProduct(productId || null);
+  const productDetail = productQ.data ?? null;
   const [componentId, setComponentId] = useState("");
   const [versionId, setVersionId] = useState("");
   const [milestoneId, setMilestoneId] = useState("");
@@ -35,30 +47,28 @@ export function NewIssuePage() {
   const [platform, setPlatform] = useState("Unspecified");
   const [url, setUrl] = useState("");
   const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const pickProduct = async (id: string) => {
+  // Filing moves the list and the report totals; nothing else here writes.
+  const create = useAppMutation(
+    (input: Parameters<typeof createIssue>[0]) => createIssue(input),
+    () => invalidatedBy.issueCreated(),
+  );
+
+  // Choosing a product only sets the id now -- the detail follows from the key.
+  // The dependent fields are still cleared here, because a component or version
+  // chosen under the previous product is not a stale copy of anything, it is
+  // simply wrong once the product changes.
+  const pickProduct = (id: string) => {
     setProductId(id);
     setComponentId("");
     setVersionId("");
     setMilestoneId("");
-    setProductDetail(null);
-    setProductDetailError(null);
-    if (!id) return;
-    try {
-      setProductDetail(await getProduct({ id }));
-    } catch (err) {
-      setProductDetailError(errorMessage(err));
-    }
   };
 
-  const submit = async () => {
+  const submit = () => {
     if (!productId || !componentId || !summary.trim() || !description.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const issue = await createIssue({
+    create.mutate(
+      {
         productId,
         componentId,
         summary: summary.trim(),
@@ -73,16 +83,15 @@ export function NewIssuePage() {
         platform,
         url: url || undefined,
         confirmed: confirmed || undefined,
-      });
-      navigate(`/issues/${issue.id}`);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+      },
+      // Navigation is not refresh plumbing, so it stays. It runs after the
+      // invalidation the mutation awaits, so the issue page opens over fresh
+      // data rather than racing it.
+      { onSuccess: (issue) => navigate(`/issues/${issue.id}`) },
+    );
   };
 
-  if (userState.status === "error" && isUnauthenticated(userState.error)) {
+  if (isVisitor(session)) {
     return (
       <div className="page">
         <h1>New issue</h1>
@@ -94,7 +103,7 @@ export function NewIssuePage() {
   return (
     <div className="page new-issue-page">
       <h1>New issue</h1>
-      <AsyncSection state={productsQ.state} loadingLabel="Loading products..." isEmpty={(d) => d.length === 0} emptyTitle="No products to file against.">
+      <AsyncSection query={productsQ} loadingLabel="Loading products..." isEmpty={(d) => d.length === 0} emptyTitle="No products to file against.">
         {(products) => (
           <>
           {/* The shape of the form, up front.
@@ -122,14 +131,14 @@ export function NewIssuePage() {
             className="new-issue-form"
             onSubmit={(e) => {
               e.preventDefault();
-              void submit();
+              submit();
             }}
           >
             <Field>
               <Field.Label>Product</Field.Label>
               <Select
                 value={productId}
-                onValueChange={(next) => void pickProduct(next ?? "")}
+                onValueChange={(next) => pickProduct(next ?? "")}
                 placeholder="Select a product"
                 aria-label="Product"
                 renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
@@ -141,7 +150,9 @@ export function NewIssuePage() {
                 ))}
               </Select>
             </Field>
-            {productDetailError ? <p className="field-error">{productDetailError}</p> : null}
+            {productQ.isError ? (
+              <p className="field-error">{errorMessage(productQ.error)}</p>
+            ) : null}
 
             {productDetail ? (
               <>
@@ -302,11 +313,13 @@ export function NewIssuePage() {
                   <Button
                     type="submit"
                     variant="filled"
-                    disabled={busy || !summary.trim() || !description.trim()}
+                    disabled={create.isPending || !summary.trim() || !description.trim()}
                   >
-                    {busy ? "Filing..." : "File issue"}
+                    {create.isPending ? "Filing..." : "File issue"}
                   </Button>
-                  {error ? <p className="field-error">{error}</p> : null}
+                  {create.error ? (
+                    <p className="field-error">{errorMessage(create.error)}</p>
+                  ) : null}
                 </fieldset>
               </>
             ) : null}

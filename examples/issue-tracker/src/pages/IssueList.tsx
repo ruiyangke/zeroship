@@ -1,15 +1,14 @@
 import { useState } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
 import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
-import { currentUser, listProducts, searchIssues } from "../api";
 import {
   ALL_ISSUE_COLUMNS,
   IssueResultsTable,
   type IssueColumnKey,
 } from "../components/IssueResultsTable";
+import { useIssueSearch, useProducts } from "../lib/queries";
 import { FieldBuilder } from "../components/search/SearchBuilder";
 import { AsyncSection } from "../components/StateViews";
-import { useAsync } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
 import type { Issue } from "../components/types";
 import { ISSUE_STATUSES, type IssueStatus } from "../lib/workflow";
@@ -132,7 +131,10 @@ export function IssueListPage() {
   const [advanced, setAdvanced] = useState<Issue[] | null>(null);
   const [builderOpen, setBuilderOpen] = useState(false);
 
-  const productsQ = useAsync(() => listProducts({}), []);
+  // The same entry the filing form and the issue page read. `products.list`
+  // was measured at FOUR requests on one load of this page; keyed, it is one.
+  const productsQ = useProducts();
+  const products = productsQ.data ?? [];
 
   // The list itself is public -- `issues.search` and `products.list` are both
   // `auth: "anon", publiclyAccessible: true` -- so this page does NOT become a
@@ -177,22 +179,28 @@ export function IssueListPage() {
     .map((c) => c.value)
     .join(" ");
 
-  const { state, reload } = useAsync(
-    () =>
-      searchIssues({
-        text: freeText.trim() || undefined,
-        status: status || tokenStatus || undefined,
-        kind: kind || tokenKind || undefined,
-        severity: severity || tokenSeverity || undefined,
-        priority: priority || tokenPriority || undefined,
-        productId: productId || undefined,
-        sortBy,
-        sortDirection,
-        limit: PAGE_SIZE,
-        offset,
-      }),
-    [text, status, kind, severity, priority, productId, sortBy, sortDirection, offset],
-  );
+  /**
+   * The filters ARE the key, so changing one is a different question and the
+   * cache answers it without this page arranging a refetch.
+   *
+   * The rows already on screen stay while the next answer loads --
+   * `useIssueSearch` sets `placeholderData` for exactly that. It is worth
+   * saying here too because it is the behaviour this page earned the hard way:
+   * dropping to a loading state on every refetch "blanked the section and
+   * jumped the layout" on each filter change, sort and page.
+   */
+  const issuesQ = useIssueSearch({
+    text: freeText.trim() || undefined,
+    status: status || tokenStatus || undefined,
+    kind: kind || tokenKind || undefined,
+    severity: severity || tokenSeverity || undefined,
+    priority: priority || tokenPriority || undefined,
+    productId: productId || undefined,
+    sortBy,
+    sortDirection,
+    limit: PAGE_SIZE,
+    offset,
+  });
 
 
   /**
@@ -234,7 +242,10 @@ export function IssueListPage() {
   // plenty, which reads as "no results" rather than "you are past the end".
   const applyFilters = () => {
     setOffset(0);
-    reload();
+    // A refetch, not a reload of a hand-rolled state machine. The filters
+    // themselves are already in the key, so this button is the "I typed
+    // something and want it now" affordance rather than the mechanism.
+    void issuesQ.refetch();
   };
 
   /**
@@ -280,11 +291,7 @@ export function IssueListPage() {
     productId
       ? {
           id: "product",
-          label: `Product: ${
-            productsQ.state.status === "ready"
-              ? productsQ.state.data.find((p) => p.id === productId)?.name ?? productId
-              : productId
-          }`,
+          label: `Product: ${products.find((p) => p.id === productId)?.name ?? productId}`,
           onRemove: () => setProductId(""),
         }
       : null,
@@ -411,18 +418,13 @@ export function IssueListPage() {
         </Select>
         <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="Any product"
           className="filter-select"
-          renderValue={(id) =>
-            productsQ.state.status === "ready"
-              ? productsQ.state.data.find((p) => p.id === id)?.name ?? id
-              : id
-          }
+          renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
         >
-          {productsQ.state.status === "ready" &&
-            productsQ.state.data.map((p) => (
-              <Select.Item key={p.id} value={p.id}>
-                {p.name}
-              </Select.Item>
-            ))}
+          {products.map((p) => (
+            <Select.Item key={p.id} value={p.id}>
+              {p.name}
+            </Select.Item>
+          ))}
         </Select>
       </FilterBar>
       {/* No sort bar. Sorting lives on the table headers, where the thing
@@ -478,8 +480,7 @@ export function IssueListPage() {
         </>
       ) : (
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={issuesQ}
         loadingLabel="Loading issues..."
         /* The table marks itself as loading rather than being replaced by a
            spinner. Swapping the whole surface out discards the headers and

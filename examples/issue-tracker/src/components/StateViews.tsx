@@ -10,7 +10,7 @@ import {
   Stack,
 } from "@zeroship/ui";
 
-import { errorCode, errorMessage, isUnauthenticated, type AsyncState } from "./rpc";
+import { errorCode, errorMessage, isUnauthenticated } from "./rpc";
 
 export function Loading({ label = "Loading..." }: { label?: string }) {
   return (
@@ -112,8 +112,27 @@ export function ErrorState({
 }
 
 /** Convenience wrapper for the common loading/error/empty/ready sequence. */
+/**
+ * The shape `AsyncSection` needs from a query, declared STRUCTURALLY.
+ *
+ * A TanStack `UseQueryResult` satisfies this without being named, so this
+ * file -- and the tests around it -- stay free of the library while every
+ * caller passes a real query. Naming the fields we use also documents the
+ * contract: anything else on the result is deliberately not part of it.
+ */
+export type QueryLike<T> = {
+  data: T | undefined;
+  error: unknown;
+  isPending: boolean;
+  isError: boolean;
+  /** True during a REFETCH as well as a first load, which is the distinction
+   *  the old `refreshing` flag existed to make. */
+  isFetching: boolean;
+  refetch?: () => unknown;
+};
+
 export function AsyncSection<T>({
-  state,
+  query,
   onRetry,
   loadingLabel,
   isEmpty,
@@ -123,10 +142,12 @@ export function AsyncSection<T>({
   renderLoading,
   children,
 }: {
-  // The shared AsyncState, not a re-spelling of it. This was an inline copy
-  // of the same union, so adding `refreshing` to the real one left this
-  // signature quietly behind.
-  state: AsyncState<T>;
+  // The query itself, not a re-spelling of its state. This took a bespoke
+  // `AsyncState` union until the app moved to one cache; the union existed
+  // only because there was no query object to hand around.
+  query: QueryLike<T>;
+  /** Defaults to the query's own `refetch`, so the retry button on an error
+   *  works without every caller remembering to wire one. */
   onRetry?: () => void;
   loadingLabel?: string;
   isEmpty?: (data: T) => boolean;
@@ -146,15 +167,25 @@ export function AsyncSection<T>({
   renderLoading?: () => ReactNode;
   children: (data: T, refreshing: boolean) => ReactNode;
 }) {
-  if (state.status === "loading") return renderLoading ? <>{renderLoading()}</> : <Loading label={loadingLabel} />;
-  if (state.status === "error") return <ErrorState error={state.error} onRetry={onRetry} />;
-  if (isEmpty?.(state.data)) {
+  // `isPending` is FIRST-LOAD only. A refetch with data already cached stays
+  // out of this branch, which is what keeps a filter change from blanking the
+  // table -- the behaviour the old union spelled as `refreshing`.
+  if (query.isPending) {
+    return renderLoading ? <>{renderLoading()}</> : <Loading label={loadingLabel} />;
+  }
+  if (query.isError) {
+    return <ErrorState error={query.error} onRetry={onRetry ?? (() => void query.refetch?.())} />;
+  }
+  // Pending is false and error is false, so data is present; the cast is the
+  // one place that fact is asserted rather than repeated at every call site.
+  const data = query.data as T;
+  if (isEmpty?.(data)) {
     return (
       <EmptyState title={emptyTitle ?? "Nothing here yet"} hint={emptyHint} tone={emptyTone} />
     );
   }
-  // The refreshing flag reaches the child rather than being swallowed here.
-  // A section that knows it is reloading can mark itself busy in place; the
+  // The fetching flag reaches the child rather than being swallowed here. A
+  // section that knows it is reloading can mark itself busy in place; the
   // alternative is unmounting it, which is what this component used to do.
-  return <>{children(state.data, state.refreshing === true)}</>;
+  return <>{children(data, query.isFetching)}</>;
 }

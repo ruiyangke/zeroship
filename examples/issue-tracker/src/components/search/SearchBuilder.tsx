@@ -9,15 +9,16 @@ import { useState } from "react";
 import { Button, Input, PageHeader, Select } from "@zeroship/ui";
 import {
   deleteSavedSearch,
-  listSavedSearches,
   listUsers,
   quickSearch,
   saveSavedSearch,
   structuredSearch,
 } from "../../api";
+import { queryKeys } from "../../lib/query-keys";
+import { useAppMutation, useSavedSearches } from "../../lib/queries";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable, type IssueColumnKey } from "../IssueResultsTable";
 import { AsyncSection, ErrorState, Loading } from "../StateViews";
-import { errorMessage, isUnauthenticated, toPromise, useAsync } from "../rpc";
+import { errorMessage, isUnauthenticated, toPromise } from "../rpc";
 import type { Issue } from "../types";
 
 const RESULT_COLUMNS: IssueColumnKey[] = ["id", "status", "resolution", "kind", "severity", "priority", "summary", "updated"];
@@ -86,23 +87,24 @@ function conditionsToWhere(conditions: Condition[]): WhereNode {
 
 export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => void }) {
   const [conditions, setConditions] = useState<Condition[]>([newCondition()]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [lastWhere, setLastWhere] = useState<WhereNode | null>(null);
 
-  const run = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const where = conditionsToWhere(conditions);
-      setLastWhere(where);
-      const issues = await structuredSearch({ where, limit: 100 });
-      onResults(issues);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+  /**
+   * A search READS, so it makes nothing stale -- hence the empty invalidation.
+   * It is still a `useAppMutation` rather than a bare call, because it is
+   * IMPERATIVE: the caller carries the rows away to render them elsewhere, so
+   * there is no key the cache could own them under. Going through the one
+   * layer is what keeps `busy` and `error` from being hand-rolled again here.
+   */
+  const search = useAppMutation(
+    (where: WhereNode) => structuredSearch({ where, limit: 100 }),
+    () => [],
+  );
+
+  const run = () => {
+    const where = conditionsToWhere(conditions);
+    setLastWhere(where);
+    search.mutate(where, { onSuccess: (issues) => onResults(issues) });
   };
 
   return (
@@ -165,56 +167,48 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
         <Button variant="gray" size="small" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
           Add condition (AND)
         </Button>
-        <Button variant="filled" size="small" disabled={busy} onClick={() => void run()}>
-          {busy ? "Searching..." : "Run search"}
+        <Button variant="filled" size="small" disabled={search.isPending} onClick={run}>
+          {search.isPending ? "Searching..." : "Run search"}
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {search.error ? <p className="field-error">{errorMessage(search.error)}</p> : null}
       <SavedSearchesPanel currentWhere={lastWhere} />
     </section>
   );
 }
 
 export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode | null }) {
-  const { state, reload } = useAsync(() => listSavedSearches({}), []);
+  const savedQ = useSavedSearches();
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const save = async () => {
+  // `invalidatedBy` has no entry for saved searches -- they are the one thing
+  // here that nothing else derives from -- so the prefix is named from
+  // `queryKeys` directly. Still a PREFIX, so a future keyed-by-owner list is
+  // covered without editing both writers.
+  const save = useAppMutation(
+    (args: { name: string; queryJson: WhereNode }) => saveSavedSearch(args),
+    () => [queryKeys.savedSearches.all],
+  );
+  const remove = useAppMutation(
+    (id: string) => deleteSavedSearch({ id }),
+    () => [queryKeys.savedSearches.all],
+  );
+  const busy = save.isPending || remove.isPending;
+  const error = save.error ?? remove.error;
+
+  const submitSave = () => {
     if (!currentWhere || !name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await saveSavedSearch({ name: name.trim(), queryJson: currentWhere });
-      setName("");
-      reload();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async (id: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await deleteSavedSearch({ id });
-      reload();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+    // Clearing the box is the callback that SURVIVES the migration: it is form
+    // state, not staleness. Refreshing the list is the mutation's own
+    // invalidation now, so there is no `reload()` to thread.
+    save.mutate({ name: name.trim(), queryJson: currentWhere }, { onSuccess: () => setName("") });
   };
 
   return (
     <div className="saved-searches">
       <h3>Saved searches</h3>
       <AsyncSection
-        state={state}
-        onRetry={reload}
+        query={savedQ}
         loadingLabel="Loading saved searches..."
         isEmpty={(data) => data.length === 0}
         // Inline: a block empty state renders its title as an h2, which
@@ -230,7 +224,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
               <li key={row.id}>
                 {row.name}
                 {row.isShared ? <span className="chip">shared</span> : null}
-                <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(row.id)}>
+                <Button variant="gray" size="small" disabled={busy} onClick={() => remove.mutate(row.id)}>
                   Delete
                 </Button>
               </li>
@@ -246,11 +240,11 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
           onChange={(e) => setName(e.target.value)}
           disabled={!currentWhere}
         />
-        <Button variant="gray" size="small" disabled={busy || !currentWhere || !name.trim()} onClick={() => void save()}>
+        <Button variant="gray" size="small" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
           Save
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
     </div>
   );
 }

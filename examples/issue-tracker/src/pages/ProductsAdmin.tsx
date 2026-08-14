@@ -21,16 +21,20 @@ import {
   createMilestone,
   createProduct,
   createVersion,
-  getProduct,
-  listProducts,
-  reportByComponent,
   updateComponent,
   updateProduct,
 } from "../api";
+import { invalidatedBy } from "../lib/query-keys";
+import {
+  useAppMutation,
+  useProduct,
+  useProducts,
+  useReportByComponent,
+} from "../lib/queries";
 import { FlagTypesAdmin } from "../components/FlagTypesAdmin";
 import { GroupsAdmin } from "../components/GroupsAdmin";
 import { AsyncSection } from "../components/StateViews";
-import { errorMessage, useAsync } from "../components/rpc";
+import { errorMessage } from "../components/rpc";
 import { isSignedIn, isVisitor, useSession } from "../components/session";
 import type { Product, ProductDetail, ReportByComponent } from "../components/types";
 
@@ -92,38 +96,45 @@ function ComponentChips({ rollup }: { rollup: Rollup }) {
   );
 }
 
-function NewProductDialog({ onCreated }: { onCreated: () => void }) {
+function NewProductDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [description, setDescription] = useState("");
   const [classification, setClassification] = useState("Unclassified");
   const [allowsUnconfirmed, setAllowsUnconfirmed] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
+  // A new product moves the list AND the open-issue rollup beside it, which is
+  // what `productStructureChanged` names. The dialog no longer takes an
+  // `onCreated` prop: it had nothing to say to its parent except "go and
+  // refetch", which the invalidation now says to every reader at once.
+  const create = useAppMutation(
+    (input: Parameters<typeof createProduct>[0]) => createProduct(input),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = create.isPending;
+
+  const submit = () => {
     if (!name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createProduct({
+    create.mutate(
+      {
         name: name.trim(),
         key: key.trim() || undefined,
         description: description || undefined,
         classification,
         allowsUnconfirmed,
-      });
-      setName("");
-      setKey("");
-      setDescription("");
-      setOpen(false);
-      onCreated();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+      },
+      {
+        // Emptying the form and closing the dialog stay -- they are what this
+        // callback did BESIDES carrying staleness.
+        onSuccess: () => {
+          setName("");
+          setKey("");
+          setDescription("");
+          setOpen(false);
+        },
+      },
+    );
   };
 
   return (
@@ -152,7 +163,7 @@ function NewProductDialog({ onCreated }: { onCreated: () => void }) {
                 id="new-product-form"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void submit();
+                  submit();
                 }}
               >
                 <Stack gap={3}>
@@ -196,7 +207,9 @@ function NewProductDialog({ onCreated }: { onCreated: () => void }) {
                     onCheckedChange={(next) => setAllowsUnconfirmed(next === true)}
                     label="Allows UNCONFIRMED"
                   />
-                  {error ? <p className="field-error">{error}</p> : null}
+                  {create.error ? (
+                    <p className="field-error">{errorMessage(create.error)}</p>
+                  ) : null}
                 </Stack>
               </form>
             </Dialog.Body>
@@ -236,13 +249,11 @@ function ProductBrowser({
   products,
   rollups,
   signedIn,
-  onChanged,
   refreshing,
 }: {
   products: Product[];
   rollups: Map<string, Rollup>;
   signedIn: boolean;
-  onChanged: () => void;
   refreshing: boolean;
 }) {
   const [search, setSearch] = useState("");
@@ -291,7 +302,7 @@ function ProductBrowser({
           setPage(1);
         }}
         searchPlaceholder="Search products by name, key or classification"
-        actions={signedIn ? <NewProductDialog onCreated={onChanged} /> : null}
+        actions={signedIn ? <NewProductDialog /> : null}
       >
         {/* No visible label, matching the search box beside it. The reports
             filters carry visible labels because there are two of them and one
@@ -391,7 +402,7 @@ function ProductBrowser({
               </Drawer.Description>
             </Drawer.Header>
             <Drawer.Body>
-              {selected ? <ProductEditor productId={selected} onChanged={onChanged} /> : null}
+              {selected ? <ProductEditor productId={selected} /> : null}
             </Drawer.Body>
           </Drawer.Content>
         </Drawer.Portal>
@@ -400,47 +411,32 @@ function ProductBrowser({
   );
 }
 
-function ProductEditor({ productId, onChanged }: { productId: string; onChanged: () => void }) {
-  const { state, reload } = useAsync(() => getProduct({ id: productId }), [productId]);
+function ProductEditor({ productId }: { productId: string }) {
+  const productQ = useProduct(productId);
   return (
-    <AsyncSection state={state} onRetry={reload} loadingLabel="Loading product...">
-      {(detail) => (
-        <ProductEditorBody
-          detail={detail}
-          onChanged={() => {
-            reload();
-            onChanged();
-          }}
-        />
-      )}
+    <AsyncSection query={productQ} loadingLabel="Loading product...">
+      {(detail) => <ProductEditorBody detail={detail} />}
     </AsyncSection>
   );
 }
 
-function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onChanged: () => void }) {
+function ProductEditorBody({ detail }: { detail: ProductDetail }) {
   const { product, components, versions, milestones } = detail;
   const [name, setName] = useState(product.name);
   const [description, setDescription] = useState(product.description ?? "");
   const [isActive, setIsActive] = useState(product.isActive);
   const [allowsUnconfirmed, setAllowsUnconfirmed] = useState(product.allowsUnconfirmed);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await updateProduct({
-        id: product.id,
-        changes: { name: name.trim(), description: description || undefined, isActive, allowsUnconfirmed },
-      });
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+  // `productStructureChanged` is a PREFIX over `products` and `reports`, so it
+  // drops this product's own detail, the browser's list and the open-issue
+  // rollup together. That chain used to be an `onChanged` handed down three
+  // components deep, and each new writer had to be wired into it by hand.
+  const save = useAppMutation(
+    (input: Parameters<typeof updateProduct>[0]) => updateProduct(input),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = save.isPending;
+  const error = save.error;
 
   return (
     <Stack gap={4} className="product-editor">
@@ -467,20 +463,35 @@ function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onCha
           label="Allows UNCONFIRMED"
         />
         <div>
-          <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
+          <Button
+            variant="filled"
+            size="small"
+            disabled={busy}
+            onClick={() =>
+              save.mutate({
+                id: product.id,
+                changes: {
+                  name: name.trim(),
+                  description: description || undefined,
+                  isActive,
+                  allowsUnconfirmed,
+                },
+              })
+            }
+          >
             Save product
           </Button>
         </div>
-        {error ? <p className="field-error">{error}</p> : null}
+        {error ? <p className="field-error">{errorMessage(error)}</p> : null}
       </Stack>
 
       {/* Stacked, not three columns. The 3-up grid was laid out for the width
           of a page; here each one is a short list over a one-field form and
           reads down the panel. */}
       <div className="admin-grid">
-        <ComponentsAdmin productId={product.id} components={components} onChanged={onChanged} />
-        <VersionsAdmin productId={product.id} versions={versions} onChanged={onChanged} />
-        <MilestonesAdmin productId={product.id} milestones={milestones} onChanged={onChanged} />
+        <ComponentsAdmin productId={product.id} components={components} />
+        <VersionsAdmin productId={product.id} versions={versions} />
+        <MilestonesAdmin productId={product.id} milestones={milestones} />
       </div>
     </Stack>
   );
@@ -489,42 +500,29 @@ function ProductEditorBody({ detail, onChanged }: { detail: ProductDetail; onCha
 function ComponentsAdmin({
   productId,
   components,
-  onChanged,
 }: {
   productId: string;
   components: ProductDetail["components"];
-  onChanged: () => void;
 }) {
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const add = async () => {
+  const add = useAppMutation(
+    (componentName: string) => createComponent({ productId, name: componentName }),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const toggle = useAppMutation(
+    (args: { id: string; isActive: boolean }) =>
+      updateComponent({ id: args.id, changes: { isActive: !args.isActive } }),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = add.isPending || toggle.isPending;
+  const error = add.error ?? toggle.error;
+
+  const submitAdd = () => {
     if (!name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createComponent({ productId, name: name.trim() });
-      setName("");
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const toggleActive = async (id: string, isActive: boolean) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await updateComponent({ id, changes: { isActive: !isActive } });
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+    // Only the field-clearing survives; the parent refetch it used to trigger
+    // is the invalidation above.
+    add.mutate(name.trim(), { onSuccess: () => setName("") });
   };
 
   return (
@@ -539,7 +537,12 @@ function ComponentsAdmin({
               <span>
                 {c.name} {!c.isActive ? <span className="dim">(inactive)</span> : null}
               </span>
-              <Button variant="gray" size="small" disabled={busy} onClick={() => void toggleActive(c.id, c.isActive)}>
+              <Button
+                variant="gray"
+                size="small"
+                disabled={busy}
+                onClick={() => toggle.mutate({ id: c.id, isActive: c.isActive })}
+              >
                 {c.isActive ? "Deactivate" : "Activate"}
               </Button>
             </li>
@@ -548,11 +551,11 @@ function ComponentsAdmin({
       )}
       <div className="inline-form">
         <Input aria-label="New component" placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
     </div>
   );
 }
@@ -560,29 +563,22 @@ function ComponentsAdmin({
 function VersionsAdmin({
   productId,
   versions,
-  onChanged,
 }: {
   productId: string;
   versions: ProductDetail["versions"];
-  onChanged: () => void;
 }) {
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const add = async () => {
+  const add = useAppMutation(
+    (versionName: string) => createVersion({ productId, name: versionName }),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = add.isPending;
+  const error = add.error;
+
+  const submitAdd = () => {
     if (!name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createVersion({ productId, name: name.trim() });
-      setName("");
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+    add.mutate(name.trim(), { onSuccess: () => setName("") });
   };
 
   return (
@@ -599,11 +595,11 @@ function VersionsAdmin({
       )}
       <div className="inline-form">
         <Input aria-label="New version" placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
       <p className="state-hint small">No versions.update RPC exists yet -- versions can be created but not edited.</p>
     </div>
   );
@@ -612,29 +608,22 @@ function VersionsAdmin({
 function MilestonesAdmin({
   productId,
   milestones,
-  onChanged,
 }: {
   productId: string;
   milestones: ProductDetail["milestones"];
-  onChanged: () => void;
 }) {
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const add = async () => {
+  const add = useAppMutation(
+    (milestoneName: string) => createMilestone({ productId, name: milestoneName }),
+    () => invalidatedBy.productStructureChanged(),
+  );
+  const busy = add.isPending;
+  const error = add.error;
+
+  const submitAdd = () => {
     if (!name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createMilestone({ productId, name: name.trim() });
-      setName("");
-      onChanged();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+    add.mutate(name.trim(), { onSuccess: () => setName("") });
   };
 
   return (
@@ -651,21 +640,26 @@ function MilestonesAdmin({
       )}
       <div className="inline-form">
         <Input aria-label="New milestone" placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="small" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
       <p className="state-hint small">No milestones.update RPC exists yet -- milestones can be created but not edited.</p>
     </div>
   );
 }
 
 export function ProductsAdminPage() {
-  const { state, reload } = useAsync(() => listProducts({ includeInactive: true }), []);
+  // Inactive products INCLUDED, which is a different question from the one the
+  // issue list and the filing form ask, so it is a different cache entry. Both
+  // go through `useProducts`; the argument is what keeps the answers apart.
+  const productsQ = useProducts({ includeInactive: true });
   // One anonymous call for the whole tracker's open counts. See `rollupByProduct`
-  // for why this procedure and not `components.list`.
-  const openQ = useAsync(() => reportByComponent({}), []);
+  // for why this procedure and not `components.list`. `null` is the whole
+  // tracker, and it is the same key the reports page uses for its unfiltered
+  // view, so the two share one entry rather than each fetching it.
+  const openQ = useReportByComponent(null);
   // `products.list` is `auth: "anon", publiclyAccessible: true` and everything
   // else this page touches is `auth: "user"` -- `products.get` (the editor's
   // own query), `products.create`, `products.update`, the component / version /
@@ -687,20 +681,11 @@ export function ProductsAdminPage() {
   const signedIn = isSignedIn(session);
   const visitor = isVisitor(session);
 
-  const rollups = useMemo(
-    () => rollupByProduct(openQ.state.status === "ready" ? openQ.state.data : []),
-    [openQ.state],
-  );
-
-  const reloadAll = () => {
-    reload();
-    openQ.reload();
-  };
+  const rollups = useMemo(() => rollupByProduct(openQ.data ?? []), [openQ.data]);
 
   const browser = (
     <AsyncSection
-      state={state}
-      onRetry={reload}
+      query={productsQ}
       loadingLabel="Loading products..."
       isEmpty={(data) => data.length === 0}
       emptyTitle="No products yet."
@@ -711,7 +696,6 @@ export function ProductsAdminPage() {
           products={products}
           rollups={rollups}
           signedIn={signedIn}
-          onChanged={reloadAll}
           refreshing={refreshing}
         />
       )}
