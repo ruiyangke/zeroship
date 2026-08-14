@@ -15,6 +15,7 @@ type Mysql2Connection = import("mysql2/promise").Connection;
 // The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
 // — the single source of truth. No hand-copied interfaces.
 import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
+import { assertHostAllowed } from "./net-allowlist.js";
 
 export type MysqlHostDriver = (
   args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void],
@@ -47,14 +48,10 @@ export async function openMysqlSession(
   const mysql = (await import("mysql2/promise")) as unknown as Mysql2Module;
 
   // Host-side net-allowlist: refuse a host not in the allowlist BEFORE connect.
-  if (opts.hostAllowlist && opts.hostAllowlist.length > 0) {
-    const parsed = new URL(url);
-    if (!opts.hostAllowlist.includes(parsed.hostname)) {
-      throw new Error(
-        `host mysql driver: ${parsed.hostname} is not in the host allowlist ${JSON.stringify(opts.hostAllowlist)}`,
-      );
-    }
-  }
+  // Shared with driver-pg.ts. mysql2 ignores a `?host=` parameter today, but the
+  // check covers it anyway: if that ever changes, an unapproved host fails closed
+  // instead of quietly becoming reachable.
+  assertHostAllowed(url, opts.hostAllowlist, "mysql");
 
   const connection = await mysql.createConnection({
     uri: url,

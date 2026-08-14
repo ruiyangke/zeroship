@@ -42,6 +42,7 @@ type PgClient = import("pg").Client;
 // The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
 // — the single source of truth. No hand-copied interfaces.
 import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
+import { assertHostAllowed } from "./net-allowlist.js";
 
 /** The addon's host-driver callback contract: `hostDriver([request, done]) => void`
  *  — napi delivers `(request, done)` as a SINGLE array arg. */
@@ -271,15 +272,10 @@ export async function openPgSession(
   const pg = (await import("pg")).default as unknown as PgModule;
 
   // Host-side net-allowlist: refuse a host not in the allowlist BEFORE connect
-  // (the host owns the socket now — mirrors driver-mysql2.ts).
-  if (opts.hostAllowlist && opts.hostAllowlist.length > 0) {
-    const parsed = new URL(connectionString);
-    if (!opts.hostAllowlist.includes(parsed.hostname)) {
-      throw new Error(
-        `host pg driver: ${parsed.hostname} is not in the host allowlist ${JSON.stringify(opts.hostAllowlist)}`,
-      );
-    }
-  }
+  // (the host owns the socket now). Shared with driver-mysql2.ts so the two cannot
+  // drift again — reading only the authority here let a `?host=` parameter, which
+  // `pg` honours over the authority, reach an unapproved host.
+  assertHostAllowed(connectionString, opts.hostAllowlist, "pg");
 
   const client = new pg.Client({
     connectionString,
