@@ -28,6 +28,7 @@ pub mod identity_bridge;
 pub mod internal;
 pub mod invoice_payments;
 pub mod metering;
+pub mod migrations_api;
 pub mod notify;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
@@ -457,6 +458,12 @@ pub struct AppState {
     /// claimed runs through the spend/account-gated edge before they reach a
     /// worker replay host.
     pub gateway_url: String,
+    /// Migration-service base URL. `POST /api/apps/{id}/migrations/apply`
+    /// forwards the creator's request here after authorizing it. Internal by
+    /// construction: `migrated` holds the superuser provisioning DSN and binds
+    /// loopback everywhere we ship it, so this hop is the only creator-reachable
+    /// route to the migration service.
+    pub migrated_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints.
