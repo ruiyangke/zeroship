@@ -1057,20 +1057,23 @@ export interface TableOptions {
 export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 /** Column index element object form. Use `order: "desc"` to render `col DESC`;
  *  `order: "asc"` and omitted order serialize as the default ASC shape. */
+/** No `nulls`: `dialects.md` states "Per-element `nulls` is unsupported", and the
+ *  renderer never read it — a `{ column, nulls }` element emitted plain
+ *  `btree (col)`, silently dropping the requested null ordering. `order`,
+ *  `opclass` and `collation` DO render here and stay. */
 export interface IndexColumnElementArg {
   column: string;
   order?: IndexSortOrder;
   opclass?: string;
   collation?: string;
-  nulls?: "first" | "last";
 }
 
+/** Only `expr`: `dialects.md` states "Expression elements cannot carry their own
+ *  order, operator class, collation, or null ordering", and that is exactly what
+ *  the renderer does — every one of those four was accepted and discarded, so an
+ *  authored `{ expr, order: "desc" }` produced an ASCENDING index. */
 export interface IndexExprElementArg {
   expr: IndexExprFn;
-  order?: IndexSortOrder;
-  opclass?: string;
-  collation?: string;
-  nulls?: "first" | "last";
 }
 
 export type IndexElementArg =

@@ -372,7 +372,9 @@ export function indexGrammar(): void {
   table("users").index("users_email_idx").add({
     on: [
       "email",
-      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
+      // `order`, `opclass` and `collation` DO render on a column element. `nulls`
+      // does not, and used to be accepted and discarded (F652), so it is gone.
+      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C" },
       { expr: (col) => col("email").lower() },
     ],
     using: "gin",
@@ -447,6 +449,20 @@ export function immutableOnlyBuilderSlots(): void {
   table("users").index("bad_index_agg").add({ on: [{ expr: () => countStar() }] });
 
   table("users").index("bad_partial_agg").add({ on: ["email"], where: () => countStar() });
+
+  // F652: facets the renderer discards are now TYPE errors, not silent no-ops.
+  // A `{ expr, order }` element used to produce an ASCENDING index.
+  table("users").index("bad_col_nulls").add({
+    // @ts-expect-error — per-element `nulls` is unsupported (dialects.md).
+    on: [{ column: "email", nulls: "last" }],
+  });
+
+  // `{ expr, order }` and `{ expr, opclass }` are NOT type errors, and cannot be:
+  // `IndexElementArg` is a union, and TypeScript's excess-property check accepts a
+  // property that exists on ANY member — `order`/`opclass` both exist on
+  // `IndexColumnElementArg`. Only `nulls`, now absent from every member, is
+  // catchable here. Those two are refused at RUNTIME instead; see
+  // `index-element-facets-not-silent.test.ts`.
 }
 
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):

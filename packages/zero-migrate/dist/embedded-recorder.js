@@ -3020,6 +3020,16 @@ function exclusionTargetToIr(target) {
     expr
   };
 }
+function rejectUnsupportedIndexElementFacets(element, unsupported, shape) {
+  for (const facet of unsupported) {
+    if (element[facet] !== void 0) {
+      throw structuredError(
+        "OP_INVALID",
+        `index element ${shape} does not support "${facet}"; the engine does not render it, and accepting it would silently change the index ordering`
+      );
+    }
+  }
+}
 function indexElementToIr(element) {
   if (typeof element === "string") {
     requireString(element, "index element column");
@@ -3028,6 +3038,7 @@ function indexElementToIr(element) {
   if (element && typeof element === "object") {
     if ("column" in element) {
       requireString(element.column, "index column element column");
+      rejectUnsupportedIndexElementFacets(element, ["nulls"], "{ column }");
       const order = indexColumnOrderToIr(element.order);
       const opclass = indexElementFacet(element.opclass, "index column opclass");
       const collation = indexElementFacet(element.collation, "index column collation");
@@ -3040,7 +3051,11 @@ function indexElementToIr(element) {
       });
     }
     if ("expr" in element) {
-      indexColumnOrderToIr(element.order);
+      rejectUnsupportedIndexElementFacets(
+        element,
+        ["order", "opclass", "collation", "nulls"],
+        "{ expr }"
+      );
       const expr = resolveImmutableExpr(
         element.expr,
         "index expression element"

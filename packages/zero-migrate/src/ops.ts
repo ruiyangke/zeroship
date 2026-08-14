@@ -3931,6 +3931,25 @@ function exclusionTargetToIr(target: ExclusionElementArg["target"]): Node {
   };
 }
 
+/** Refuse index-element facets the renderer does not carry, instead of dropping
+ *  them. Silence here is the dangerous shape: the migration applies, the index
+ *  exists, and only its ORDERING is quietly not what was authored. */
+function rejectUnsupportedIndexElementFacets(
+  element: object,
+  unsupported: readonly string[],
+  shape: string,
+): void {
+  for (const facet of unsupported) {
+    if ((element as Record<string, unknown>)[facet] !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        `index element ${shape} does not support "${facet}"; the engine does not ` +
+          `render it, and accepting it would silently change the index ordering`,
+      );
+    }
+  }
+}
+
 function indexElementToIr(element: IndexElementArg): Node {
   if (typeof element === "string") {
     requireString(element, "index element column");
@@ -3939,6 +3958,10 @@ function indexElementToIr(element: IndexElementArg): Node {
   if (element && typeof element === "object") {
     if ("column" in element) {
       requireString((element as { column?: unknown }).column, "index column element column");
+      // Fail closed rather than discard. The renderer never read `nulls`, so a
+      // `{ column, nulls }` element emitted plain `btree (col)` and the author's
+      // null ordering vanished with no error.
+      rejectUnsupportedIndexElementFacets(element, ["nulls"], "{ column }");
       const order = indexColumnOrderToIr((element as { order?: unknown }).order);
       // PG-vendor per-column facets: carried through when present, elided when
       // absent (byte-neutral wire shape). Validate gates them fail-closed off PG.
@@ -3953,7 +3976,15 @@ function indexElementToIr(element: IndexElementArg): Node {
       }) as Node;
     }
     if ("expr" in element) {
-      indexColumnOrderToIr((element as { order?: unknown }).order);
+      // All four were previously accepted and thrown away: the `order` result
+      // below was computed and never used, and opclass/collation/nulls were
+      // never read at all, so `{ expr, order: "desc" }` produced an ASCENDING
+      // index. `dialects.md` says expression elements cannot carry any of them.
+      rejectUnsupportedIndexElementFacets(
+        element,
+        ["order", "opclass", "collation", "nulls"],
+        "{ expr }",
+      );
       const expr = resolveImmutableExpr(
         (element as { expr?: IndexExprFn | ExprChainType | Node }).expr,
         "index expression element",
