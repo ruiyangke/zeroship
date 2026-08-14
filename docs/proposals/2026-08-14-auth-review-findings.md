@@ -370,7 +370,7 @@ evidence belongs to that decision; whoever lands it should pick this up.
 
 ## 12. TOTP 2FA cannot be switched on by a user - OPEN (status corrected)
 
-`docs/feature-map.md` marked TOTP 2FA 🟢, which that file's own legend defines
+`docs/feature-map.md` marked TOTP 2FA green, which that file's own legend defines
 as "Implemented, wired, and exercised end-to-end". It is implemented and it is
 exercised - `crates/auth/tests/totp_enroll_reauth_test.rs` drives the real route,
 and there are four more TOTP test files. It is not WIRED.
@@ -386,7 +386,7 @@ enrolled by other means.
 
 A security feature a user cannot switch on is, from that user's side, absent.
 
-Corrected to 🟡 ("Core works, but a documented sub-capability or wiring is
+Corrected to yellow ("Core works, but a documented sub-capability or wiring is
 incomplete") with the gap named in the Notes column. The status is what was
 fixed; BUILDING the enrolment UI is left open deliberately - it needs a QR or
 `otpauth://` render, a confirm step, and one-time backup-code display, and where
