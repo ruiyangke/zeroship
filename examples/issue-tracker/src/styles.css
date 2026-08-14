@@ -281,7 +281,6 @@ tbody tr:hover { background: var(--surface-2); }
    "ASSIGNEE" next to "Status", "Severity" and "Version". Two casings in one
    column look like two kinds of thing. */
 .field-label { font-size: 0.8rem; color: var(--ink-faint); font-weight: 500; }
-.status-control-row { display: flex; gap: 1rem; }
 .status-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
 
 /* ── bug detail ──────────────────────────────────────────────────────── */
@@ -291,12 +290,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* Reading column first, metadata rail second. The rail is FIXED rather than
    fractional: metadata is label-and-value and stops benefiting from width,
    while the conversation keeps every pixel it is given. */
-.issue-detail-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 22rem;
-  gap: 1.5rem;
-  align-items: start;
-}
 .issue-detail-main, .issue-detail-side { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
 /* Every panel on the bug page gets the same chrome, selected STRUCTURALLY.
    This was a hand-written list of seven class names, and it had simply
@@ -410,7 +403,6 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* ── attachments ─────────────────────────────────────────────────────── */
 .attachment-list { list-style: none; margin: 0 0 0.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-.attachment { border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.65rem; }
 .attachment.obsolete { opacity: 0.55; }
 .attachment-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.82rem; }
 .attachment-description { margin: 0.3rem 0 0; font-size: 0.8rem; color: var(--ink-2); }
@@ -454,7 +446,6 @@ tbody tr:hover { background: var(--surface-2); }
 .saved-searches li { display: flex; align-items: center; gap: 0.5rem; }
 
 /* ── dashboard ───────────────────────────────────────────────────────── */
-.dashboard-section { margin-bottom: 1.6rem; }
 
 /* ── products ────────────────────────────────────────────────────────── */
 /* The list is PAGED, not scroll-capped.
@@ -554,10 +545,6 @@ tbody tr:hover { background: var(--surface-2); }
 @media (max-width: 1100px) {
   .report-grid { grid-template-columns: repeat(2, 1fr); }
   .report-pair { grid-template-columns: 1fr; }
-}
-@media (max-width: 900px) {
-  .issue-detail-grid { grid-template-columns: 1fr; }
-  .report-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -771,20 +758,15 @@ tbody tr:hover { background: var(--surface-2); }
    row loses its own vertical margin so the row stays on one baseline. */
 .new-comment-row > * { margin-block: 0; }
 
-.status-control-row { flex-wrap: wrap; gap: 0.5rem; }
+/* Absorbed an earlier definition of this selector; the values below are
+   the ones that were already winning by source order. */
+.status-control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 /* The bug's related content: files, links, watchers, flags.
    Two-across inside the main column rather than one stack in the rail.
    Measured before moving them: these nine panels were 1856px tall inside a
    352px rail, against 747px of actual conversation -- the metadata column
    was four times the height of the thing the page is about. */
-.issue-detail-extras {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  align-items: start;
-}
 .issue-detail-extras > section {
   margin: 0;
   min-width: 0;
@@ -815,7 +797,10 @@ tbody tr:hover { background: var(--surface-2); }
 /* ── dashboard ───────────────────────────────────────────────────────── */
 /* Card chrome, matching the bug page's panels. These sections were the only
    grouped content in the app rendered as bare text on the page background. */
+/* Absorbed an earlier definition of this selector; the values below are
+   the ones that were already winning by source order. */
 .dashboard-section {
+  margin-bottom: 1.6rem;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -850,11 +835,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* The second and last signal: read fades back. */
 .notification-title.is-read { color: var(--ink-faint); }
 .notification-title.is-read a { color: var(--ink-2); }
-.notification-body {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--ink-2);
-}
 
 /* The reports filters are LABELLED alike, and left to size themselves.
    An earlier version of this pinned them to 14rem and 11rem so they would
@@ -949,7 +929,15 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* A notification is a preview, not the document. Clamp it so a long comment
    or one with a heading cannot turn an inbox row into a page. */
-.notification-body { max-block-size: 3.2em; overflow: hidden; }
+/* Absorbed an earlier definition of this selector; the values below are
+   the ones that were already winning by source order. */
+.notification-body {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  max-block-size: 3.2em;
+  overflow: hidden;
+}
 .notification-body .rich-text > * { margin-block: 0; font-size: 0.82rem; }
 
 /* Admin sections get the same card chrome as every other grouped surface. */
@@ -1151,8 +1139,25 @@ fieldset.issue-detail-extras { display: grid; }
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* The two columns: content and rail, divided by a single rule. */
+/* Absorbed an earlier definition of this selector; the values below are
+   the ones that were already winning by source order. */
 .issue-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  /* Zero, deliberately: the rail draws its own separator, so a grid gap here
+     doubled the space. This value beat the earlier 1.5rem by source order. */
   gap: 0;
+  align-items: start;
+}
+
+/* AFTER the rule it overrides, deliberately. This block used to sit above the
+   base definition and won by being later; consolidating the base rule
+   downwards silently reversed that, leaving a 22rem rail on a 390px screen.
+   Order is the whole mechanism here -- if either moves again, they move
+   together. */
+@media (max-width: 900px) {
+  .issue-detail-grid { grid-template-columns: 1fr; }
+  .report-grid { grid-template-columns: 1fr; }
 }
 .issue-detail-main {
   padding-inline-end: 2.5rem;
@@ -1175,9 +1180,16 @@ fieldset.issue-detail-extras { display: grid; }
 
 /* The extras become one quiet band under the conversation rather than three
    framed panels: a hairline above them is enough to say "different thing". */
+/* Absorbed an earlier definition of this selector; the values below are
+   the ones that were already winning by source order. */
 .issue-detail-extras {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  align-items: start;
   border-block-start: 1px solid var(--line);
   padding-block-start: 1.25rem;
+  /* margin-block-start beat the earlier margin-top, and this gap beat the
+     earlier 0.75rem. */
   margin-block-start: 1.75rem;
   gap: 1.75rem 2rem;
 }
@@ -1254,6 +1266,9 @@ fieldset.issue-detail-extras { display: grid; }
    A file entry framed inside a band that no longer frames anything, and the
    rail's assignee/move blocks still laid out as headed sub-groups while every
    property beside them is a single line. Both now follow the page. */
+/* Absorbed an earlier definition that set a border, a radius and wider
+   padding. Every one of those was already overridden here, so the rows are
+   separated by the sibling rule below rather than by a box each. */
 .attachment {
   border: 0;
   border-radius: 0;
