@@ -294,3 +294,60 @@ test("the username is still redacted where the text marks it as one", async (ctx
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+/** The same property on MySQL, whose wording and QUOTING differ:
+ *  `Access denied for user 'name'@'host'` uses single quotes where PostgreSQL uses
+ *  double. Covering one dialect's spelling and assuming the other is how the first
+ *  correction to this fix still left MySQL leaking, so both are pinned. */
+test("MySQL's access-denied message does not echo the username either", async (ctx) => {
+  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
+  if (!mysqlUrl) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
+    return;
+  }
+  const GHOST = "zm_ghost_my";
+  const GHOST_PASSWORD = "WrongPass123";
+  const target = new URL(mysqlUrl);
+  target.username = GHOST;
+  target.password = GHOST_PASSWORD;
+
+  const work = project();
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import", "tsx", CLI_BIN, "status",
+        "--dir", join(work, "migrations"),
+        "--database-url", target.toString(),
+        "--policy", join(work, "policy.toml"),
+      ],
+      {
+        cwd: work,
+        encoding: "utf8",
+        env: { ...process.env, ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, DATABASE_URL: "" },
+      },
+    );
+    const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+      .replace(/^WARNING.*$/gm, "")
+      .trim();
+
+    assert.match(
+      text,
+      /access denied/i,
+      `the arm must reach a real access rejection; got: ${text}`,
+    );
+    assert.equal(
+      text.includes(GHOST),
+      false,
+      `MySQL quotes the user with ' rather than ", and it must still be ` +
+        `redacted; got: ${text}`,
+    );
+    assert.equal(
+      text.includes(GHOST_PASSWORD),
+      false,
+      `and the password must never appear; got: ${text}`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

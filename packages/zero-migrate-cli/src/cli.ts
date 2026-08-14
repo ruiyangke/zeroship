@@ -599,20 +599,23 @@ function safeErrorMessage(error: unknown, databaseUrl: string | undefined): stri
         const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         // `user@host` and `user:password` — the URL authority forms.
         message = message.replace(new RegExp(`${escaped}(?=[@:])`, "g"), "<redacted user>");
-        // `user "name"` / `role "name"` — how a server names it back. PostgreSQL's
-        // `password authentication failed for user "…"` is among the likeliest
-        // errors an operator sees, and it is credential-shaped even though it is
-        // neither `user@` nor `user=`. Missing it here silently STOPPED redacting
-        // the username in that message, which the sibling password suite could not
-        // catch because no password appears in it.
+        // How a server names the user back, in any quoting it chooses:
+        //
+        //   PostgreSQL  password authentication failed for user "name"
+        //   MySQL       Access denied for user 'name'@'host'
+        //   libpq       user=name
+        //
+        // All three are credential-shaped, and none is `user@` or `user:`. The
+        // quote character is captured and back-referenced so the pair stays
+        // symmetric and an unquoted keyword form still matches with it empty.
+        //
+        // Enumerating only the double-quoted form here is precisely how the first
+        // attempt at this fix regressed: it stopped redacting the username in
+        // PostgreSQL's auth error, and the password suite could not notice because
+        // no password appears in that message.
         message = message.replace(
-          new RegExp(`\\b(user|role)(\\s*=\\s*|\\s+)"${escaped}"`, "gi"),
-          '$1$2"<redacted user>"',
-        );
-        // The same two keywords without quotes, e.g. the libpq `user=name` form.
-        message = message.replace(
-          new RegExp(`\\b(user|role)(\\s*=\\s*|\\s+)${escaped}\\b`, "gi"),
-          "$1$2<redacted user>",
+          new RegExp(`\\b(user|role)(\\s*=\\s*|\\s+)(['"\`]?)${escaped}\\3`, "gi"),
+          "$1$2$3<redacted user>$3",
         );
       }
       if (password.length > 0) message = message.split(password).join("<redacted password>");
