@@ -1,8 +1,13 @@
-//! zeroship CLI - serve, deploy, login, secret, var, dev.
+//! zeroship CLI - serve, deploy, migrate, config, login, secret, var, dev.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]
+//!   zeroship deploy  [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT]
+//!                    [--no-create] [--config=PATH] [--env=NAME]
+//!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<name|uuid>]
+//!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
+//!   zeroship config show [--config=PATH] [--env=NAME]
+//!   zeroship config path [--config=PATH]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
@@ -903,14 +908,18 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]");
+    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship migrate  [path-to-migrations.ir.json] --app=<name|uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<name|uuid>] [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]");
     eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
-    eprintln!("                   Path defaults to generated/zeroship/migrations.ir.json (written");
-    eprintln!("                   by the build). An app that uses env.db needs this after deploy,");
+    eprintln!("                   Without a path, reads <migrations.out>/migrations.ir.json from");
+    eprintln!("                   zeroship.jsonc; without either, the command errors.");
+    eprintln!("                   An app that uses env.db needs this after deploy,");
     eprintln!("                   or its first database call fails with a missing-role error.");
+    eprintln!("  zeroship config   show [--config=PATH] [--env=NAME]");
+    eprintln!("  zeroship config   path [--config=PATH]");
+    eprintln!("                   Show the resolved project config or its selected path.");
     eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase]");
     eprintln!("                   Sign in with the platform device flow.");
     eprintln!("  zeroship whoami");
@@ -1052,8 +1061,9 @@ pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> 
                 "unknown flag `{flag_name}`; a typo here is silent - \
                  `--control` falling back to its default would deploy to \
                  http://localhost:9090 instead of the control plane you named. \
-                 Usage: zeroship deploy <path-to-.zship> --app=<name> \
-                 [--control=<url>] [--token=<PAT>] [--no-create]"
+                 Usage: zeroship deploy [<path-to-.zship>] [--app=<name>] \
+                 [--control=<url>] [--token=<PAT>] [--no-create] \
+                 [--config=<path>] [--env=<name>]"
             ));
         }
     }
