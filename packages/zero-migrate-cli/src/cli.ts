@@ -585,7 +585,26 @@ function safeErrorMessage(error: unknown, databaseUrl: string | undefined): stri
       const colon = credentials.indexOf(":");
       const username = colon === -1 ? credentials : credentials.slice(0, colon);
       const password = colon === -1 ? "" : credentials.slice(colon + 1);
-      if (username.length >= 3) message = message.split(username).join("<redacted user>");
+      // Replaced only where the surrounding text marks it as a CREDENTIAL, not
+      // everywhere the word appears. A plain substring replace rewrote the engine's
+      // own diagnostics whenever the username collided with a word in them, and
+      // `postgres` -- the default superuser -- collides with the dialect name the
+      // engine reports, turning `dialect=postgres` into `dialect=<redacted user>`.
+      // That is the one token in a three-dialect error that says which target
+      // refused, so the conservative choice was destroying the message it protected.
+      //
+      // The whole URL, the `user:pass` pair and the password are each still redacted
+      // in full above and below; what changes here is only the BARE word.
+      if (username.length >= 3) {
+        const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // `user@host` and `user:password` — the URL authority forms.
+        message = message.replace(new RegExp(`${escaped}(?=[@:])`, "g"), "<redacted user>");
+        // `user=name` — the libpq keyword form.
+        message = message.replace(
+          new RegExp(`(user=)${escaped}\\b`, "gi"),
+          "$1<redacted user>",
+        );
+      }
       if (password.length > 0) message = message.split(password).join("<redacted password>");
     }
   }
