@@ -69,8 +69,8 @@ type FacetDrift = {
   actual: unknown;
 };
 
-function authoredMigration(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
+function authoredMigration(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
 
 function uniqueSchema(prefix: string): string {
