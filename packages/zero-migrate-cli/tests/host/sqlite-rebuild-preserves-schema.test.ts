@@ -195,3 +195,138 @@ test("a SQLite rebuild carries every schema feature across", async () => {
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+/** Foreign keys are the dangerous half of a rebuild, in BOTH directions.
+ *
+ *  Rebuilding the CHILD must bring its own outgoing FK back. Rebuilding the PARENT
+ *  is the classic SQLite hazard: the parent is recreated under the same name, and a
+ *  child's reference can be left pointing at something that no longer exists —
+ *  historically SQLite's own `ALTER TABLE RENAME` semantics differed here depending
+ *  on `legacy_alter_table`, so "it worked on my version" is not an argument.
+ *
+ *  Verified three ways, because each catches a different failure:
+ *    - `PRAGMA foreign_key_list` — the constraint is DECLARED and names the parent;
+ *    - `PRAGMA foreign_key_check` — no EXISTING row violates it, i.e. the rebuild
+ *      did not orphan the data it copied;
+ *    - an orphan INSERT is rejected — the constraint is still ENFORCED, which a
+ *      declared-but-dead FK would not do.
+ */
+function fkProject(rebuild: "child" | "parent"): string {
+  const work = mkdtempSync(join(HERE, "sqlitefk-"));
+  mkdirSync(join(work, "migrations"));
+  writeFileSync(
+    join(work, "policy.toml"),
+    `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+`,
+  );
+  writeFileSync(
+    join(work, "registry.json"),
+    JSON.stringify({ fk_parent: OWNER_APP, fk_child: OWNER_APP }),
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000000_base.ts"),
+    `import { table, t } from "zero-migrate";
+export const name = "base";
+export default {
+  up() {
+    table("fk_parent").create({ columns: { id: t.int().notNull(), spare: t.int() }, primaryKey: ["id"] });
+    table("fk_child").create({
+      columns: {
+        id: t.int().notNull(),
+        parent_id: t.int().notNull().references("fk_parent", "id"),
+        spare: t.int(),
+      },
+      primaryKey: ["id"],
+    });
+    table("fk_parent").insert({ rows: [{ id: 1, spare: 1 }] });
+    table("fk_child").insert({ rows: [{ id: 1, parent_id: 1, spare: 1 }] });
+  },
+};
+`,
+  );
+  // Dropping `spare` is incidental: it exists only to force the rebuild.
+  writeFileSync(
+    join(work, "migrations", "20260102000000_rebuild.ts"),
+    `import { table } from "zero-migrate";
+export const name = "rebuild";
+export default { up() { table("fk_${rebuild}").column("spare").drop(); } };
+`,
+  );
+  return work;
+}
+
+async function assertFkIntact(rebuild: "child" | "parent"): Promise<void> {
+  const work = fkProject(rebuild);
+  const dbPath = join(work, "app.db");
+  try {
+    const applied = await apply(work);
+    assert.equal(applied.code, 0, `rebuilding the ${rebuild} must succeed; ${applied.text}`);
+
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA foreign_keys = ON");
+
+    const declared = db.prepare(`PRAGMA foreign_key_list(fk_child)`).all() as Array<{
+      table: string;
+    }>;
+    const violations = db.prepare(`PRAGMA foreign_key_check`).all();
+    const counts = db
+      .prepare(`SELECT (SELECT count(*) FROM fk_parent) AS p, (SELECT count(*) FROM fk_child) AS c`)
+      .get() as { p: number; c: number };
+
+    let orphanRejected = false;
+    try {
+      db.prepare(`INSERT INTO fk_child (id, parent_id) VALUES (99, 12345)`).run();
+    } catch {
+      orphanRejected = true;
+    }
+    db.close();
+
+    assert.equal(Number(counts.p), 1, `rebuilding the ${rebuild} must keep the parent row`);
+    assert.equal(Number(counts.c), 1, `rebuilding the ${rebuild} must keep the child row`);
+    assert.equal(
+      declared.length,
+      1,
+      `the child's foreign key must still be DECLARED after rebuilding the ${rebuild}`,
+    );
+    assert.equal(
+      declared[0].table,
+      "fk_parent",
+      `and must still name the parent after rebuilding the ${rebuild}`,
+    );
+    assert.deepEqual(
+      violations,
+      [],
+      `no copied row may violate the foreign key after rebuilding the ${rebuild}`,
+    );
+    assert.ok(
+      orphanRejected,
+      `the foreign key must still be ENFORCED after rebuilding the ${rebuild} — a ` +
+        `declared-but-dead constraint would accept this orphan`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+test("rebuilding the child keeps its own foreign key", async () => {
+  await assertFkIntact("child");
+});
+
+test("rebuilding the parent keeps the child's foreign key pointing at it", async () => {
+  await assertFkIntact("parent");
+});
