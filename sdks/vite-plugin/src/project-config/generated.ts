@@ -14,7 +14,7 @@ export const CONFIG_ENV_VAR = "ZEROSHIP_CONFIG";
 export const SCHEMA_ID = "https://zeroship.ai/schema/project-v1.json";
 
 /** Fields the Rust CLI also reads. The `config` escape hatch may not touch these. */
-export const CLI_READ_FIELDS: readonly string[] = ["app","control","runtime_date","build.output","migrations.dir","migrations.out"];
+export const CLI_READ_FIELDS: readonly string[] = ["name","app","control","runtime_date","build.output","migrations.dir","migrations.out"];
 
 /** Key names that must never appear anywhere in the file (proposal 8.4). */
 export const FORBIDDEN_KEY_NAMES: readonly string[] = ["password","token","secret","key","apiKey","credentials"];

@@ -24,6 +24,7 @@
     "name": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "x-cli-read": true,
       "description": "The project name. Used as the app name when `zeroship deploy` auto-creates."
     },
     "app": {

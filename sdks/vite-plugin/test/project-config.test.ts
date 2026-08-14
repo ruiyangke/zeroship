@@ -35,6 +35,7 @@ import {
   parseProjectConfig,
   readProjectConfig,
   resolveProjectConfig,
+  type ResolvedProjectConfig,
 } from "../src/project-config/index.js";
 
 const FULL = `{
@@ -256,6 +257,7 @@ describe("the config escape hatch", () => {
       ["migrations.out", { migrations: { dir: "migrations", out: "somewhere/else" } }],
       ["build.output", { build: { ...base.build, output: "other.zship" } }],
       ["app", { app: "33333333-3333-4333-8333-333333333333" }],
+      ["name", { name: "another-app" }],
       ["runtime_date", { runtime_date: "2027-01-01" }],
     ] as const) {
       assert.throws(
@@ -266,11 +268,32 @@ describe("the config escape hatch", () => {
     }
   });
 
+  test("in-place changes to CLI-read fields are refused", () => {
+    const mutations: Array<[string, (c: ResolvedProjectConfig) => void]> = [
+      ["app", (c) => { c.app = "33333333-3333-4333-8333-333333333333"; }],
+      ["migrations.out", (c) => { c.migrations.out = "somewhere/else"; }],
+      ["build.output", (c) => { c.build.output = "other.zship"; }],
+      ["control", (c) => { delete (c as unknown as Record<string, unknown>).control; }],
+    ];
+
+    for (const [field, mutate] of mutations) {
+      const base = resolveProjectConfig(parsed());
+      assert.throws(
+        () => applyProjectConfigOverride(base, (c) => {
+          mutate(c);
+          return {};
+        }),
+        new RegExp(`may not change \\\`${field.replace(".", "\\.")}\\\``),
+        `${field} must be refused after an in-place change`,
+      );
+    }
+  });
+
   test("the deny-list is the generated one, not a list typed here", () => {
     // Generated from the schema's `x-cli-read` markers. Asserted rather than
     // assumed because a hand-maintained deny-list is exactly the drift the
     // restriction exists to prevent.
-    for (const f of ["app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out"]) {
+    for (const f of ["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out"]) {
       assert.ok(CLI_READ_FIELDS.includes(f), `${f} must be in CLI_READ_FIELDS`);
     }
   });
