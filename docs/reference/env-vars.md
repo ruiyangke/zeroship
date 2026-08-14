@@ -313,12 +313,16 @@ express them:
 
 ## Hand-maintained: the deployment surface
 
-What an operator actually sets in `deploy/compose/.env`. THESE ARE NOT NAMES ANY
-BINARY READS. Compose interpolates them into the canonical container variables
-above, so `CONTROL_DATABASE_URL` in `.env` becomes
+What an operator actually sets in `deploy/compose/.env`. Compose interpolates
+each one into the container variable OF THE SAME NAME, so
+`ZEROSHIP_CONTROL_DATABASE_URL` in `.env` becomes
 `ZEROSHIP_CONTROL_DATABASE_URL` in the control container. Everything else in the
 contract table has a working default or belongs to a service the stack does not
 run.
+
+The `.env` name and the container name are now always identical; that equality
+is enforced by check 6b of `tests/config_name_alignment_gate.sh`. It used to be
+that eight values were spelled one way in `.env` and another in the container.
 
 Before the first local compose run, provision the file and its sibling secret
 directory from the repository root:
@@ -359,32 +363,34 @@ move auth alone while leaving the other four services behind.
 
 ### Database DSNs an operator may override
 
-`.env` names on the left, canonical container name on the right. All default to
-the in-compose Postgres:
+All default to the in-compose Postgres. The `.env` name IS the container name:
 
-| `.env` name | Container variable |
+| Name (in `.env` and in the container) | Renamed 2026-08-13 from |
 | --- | --- |
-| `CONTROL_DATABASE_URL` | `ZEROSHIP_CONTROL_DATABASE_URL` |
-| `GATEWAY_DATABASE_URL` | `ZEROSHIP_GATEWAY_DATABASE_URL` |
-| `WORKER_DATABASE_URL` | `ZEROSHIP_WORKER_DATABASE_URL` |
-| `AUTH_DB_URL` | `ZEROSHIP_AUTH_DATABASE_URL` |
-| `MIGRATED_DATABASE_URL` | `ZEROSHIP_MIGRATED_DATABASE_URL` |
-| `PROVISION_DATABASE_URL` | `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` |
-| `WORKER_KV_URL` | `ZEROSHIP_WORKER_KV_URL` |
-| `STRIPE_WEBHOOK_SECRET` | `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` |
+| `ZEROSHIP_CONTROL_DATABASE_URL` | `CONTROL_DATABASE_URL` |
+| `ZEROSHIP_GATEWAY_DATABASE_URL` | `GATEWAY_DATABASE_URL` |
+| `ZEROSHIP_WORKER_DATABASE_URL` | `WORKER_DATABASE_URL` |
+| `ZEROSHIP_AUTH_DATABASE_URL` | `AUTH_DB_URL` |
+| `ZEROSHIP_MIGRATED_DATABASE_URL` | `MIGRATED_DATABASE_URL` |
+| `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` | `PROVISION_DATABASE_URL` |
+| `ZEROSHIP_WORKER_KV_URL` | `WORKER_KV_URL` |
+| `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` | `STRIPE_WEBHOOK_SECRET` |
 
-`PROVISION_DATABASE_URL` is the odd one and the only one that must be
+An operator upgrading a deployed host must ADD the left-hand name carrying the
+value of the right-hand one, and delete the old line. `deploy-remote.sh` refuses
+the deploy and names each pair until that is done.
+
+`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` is the odd one and the only one that must be
 privileged: `migrated` uses it to `CREATE SCHEMA "<app_id>"` and
 `CREATE ROLE migrator_<app_id>` for each deployed app.
 
 Optional: `OPENAI_API_KEY` (defaults empty), `ZEROSHIP_MIGRATE_DSN` (the platform
 migration one-shot).
 
-**These eight rows are the one place the deployment still spells a name twice.**
-Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` wants
-`LEFT == RIGHT` for any container value whose whole scalar is one interpolation,
-which would make this table unrepresentable. It is not enforced today; see the
-"not yet armed" note at the bottom of this file.
+Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` requires
+`LEFT == RIGHT` for any container value whose whole scalar is one interpolation.
+As of 2026-08-13 the deployment satisfies it and check 6b of
+`tests/config_name_alignment_gate.sh` enforces it.
 
 ### Operational literals not supplied by the generator
 
@@ -551,15 +557,6 @@ confident zero.
 ## Gates that are NOT armed, and why
 
 Recorded here so their absence is a stated position rather than an oversight.
-
-**Compose alias equality** (proposal Section 4.3). The rule is that a container
-value whose whole scalar is one interpolation must satisfy `LEFT == RIGHT`.
-Measured 2026-08-13 against `deploy/compose/docker-compose.yml`: eight pairs
-violate it, listed in the "Database DSNs" table above. Arming the rule as
-written would fail the build on the first run, so the deployment must be
-rewritten to canonical `.env` names first. What IS armed is the other half of
-that section - every explicit container variable on a platform service must be a
-name that exact binary declares.
 
 **Set-but-unread at process startup** (proposal Section 4.4). Nothing enumerates
 the ambient `ZEROSHIP_*` names at `bootstrap` and rejects the ones the current
