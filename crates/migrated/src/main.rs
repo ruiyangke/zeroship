@@ -255,6 +255,7 @@ fn build_pat_issuer(signing_key_file: &std::path::Path) -> Result<zeroship_authn
 mod tests {
     use super::*;
 
+    use zeroship_core::config::env_like_tokens;
     use zeroship_core::config::GeneratedConfig;
 
     #[test]
@@ -309,13 +310,6 @@ mod tests {
         names
     }
 
-    /// Maximal runs of `[A-Z0-9_]` holding at least one underscore.
-    fn env_like_tokens(text: &str) -> Vec<String> {
-        text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-            .filter(|token| token.len() >= 4 && token.contains('_'))
-            .map(str::to_owned)
-            .collect()
-    }
 
     #[test]
     fn every_startup_diagnostic_names_a_variable_migrated_reads() {

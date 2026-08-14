@@ -1186,7 +1186,10 @@ supabase_anon_key = "anon-file-key"
         let cfg = test_config();
         assert!(!cfg.settings.stash_signing_key.is_configured());
         assert!(
-            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_err()
+            validate_secret_material(&cfg.settings.stash_signing_key, |v| validate_stash_key(
+                "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+                v,
+            )).is_err()
         );
     }
 
@@ -1195,7 +1198,10 @@ supabase_anon_key = "anon-file-key"
         let mut cfg = test_config();
         cfg.settings.stash_signing_key = supplied(&"a".repeat(20));
         assert!(
-            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_err()
+            validate_secret_material(&cfg.settings.stash_signing_key, |v| validate_stash_key(
+                "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+                v,
+            )).is_err()
         );
     }
 
@@ -1204,7 +1210,10 @@ supabase_anon_key = "anon-file-key"
         let mut cfg = test_config();
         cfg.settings.stash_signing_key = supplied("0123456789abcdef0123456789abcdef");
         assert!(
-            validate_secret_material(&cfg.settings.stash_signing_key, validate_stash_key).is_ok()
+            validate_secret_material(&cfg.settings.stash_signing_key, |v| validate_stash_key(
+                "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+                v,
+            )).is_ok()
         );
     }
 

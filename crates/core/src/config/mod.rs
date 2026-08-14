@@ -7,6 +7,8 @@
 //! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
 //! - [`declared`] - typed keys for reads the config contract does not generate.
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
+//! - [`diagnostics`] - the shared env-name scanner every binary's
+//!   "this refusal names something settable" test drives.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
 //!
 //! - [`names`] — canonical identities, source-policy wrappers, and the
@@ -20,6 +22,7 @@
 pub mod auth_kind;
 pub mod bootstrap;
 pub mod declared;
+pub mod diagnostics;
 pub mod env;
 pub mod file;
 pub mod names;
@@ -34,6 +37,8 @@ pub use declared::{
 };
 
 pub use auth_kind::AuthProviderKind;
+
+pub use diagnostics::env_like_tokens;
 
 pub use bootstrap::{
     bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,

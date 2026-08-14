@@ -105,6 +105,13 @@ const PLATFORM_ISSUER_INPUT: &str = "--auth-platform-issuer / ZEROSHIP_AUTH_PLAT
 const MASTER_KEY_LABEL: &str = "ZEROSHIP_CONTROL_MASTER_KEY";
 /// Same, for the rotation list. The index is appended per entry.
 const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
+/// Operator-facing spelling of the worker dispatch key. The shared identity in
+/// `crates/config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
+/// this environment name. The bare `WORKER_KEY` the shared validator used to
+/// interpolate is not settable.
+const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
+/// Same, for the shared pairwise salt (`canonical: "pairwise_salt"`).
+const PAIRWISE_SALT_LABEL: &str = "ZEROSHIP_PAIRWISE_SALT / --pairwise-salt-file";
 
 fn build_control_auth_provider(
     auth_provider: AuthProviderKind,
@@ -338,10 +345,10 @@ fn main() -> std::io::Result<()> {
     // does that now, so the branch is gone rather than restated.
     if let Err(message) = zeroship_core::config::validate_secret_material(
         &settings.worker_key,
-        zeroship_core::config::validate_worker_key,
+        |value| zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, value),
     ) {
         eprintln!("control: {message}");
-        tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
+        tracing::error!(error = %message, "control: refusing to start with unsafe worker key");
         std::process::exit(1);
     }
 
@@ -400,7 +407,7 @@ fn main() -> std::io::Result<()> {
     // the permanent per-app `pws_` anchor and must equal the gateway's value.
     if let Err(message) = zeroship_core::config::validate_secret_material(
         &settings.pairwise_salt,
-        zeroship_core::config::validate_pairwise_salt,
+        |value| zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, value),
     ) {
         tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
         std::process::exit(1);
@@ -1197,6 +1204,9 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The one env-name scanner, shared with every other binary's copy of this
+    /// test. Local copies would be four things to keep in step.
+    use zeroship_core::config::env_like_tokens;
     use zeroship_core::config::{GeneratedConfig, OriginScheme};
 
     static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1424,17 +1434,6 @@ mod tests {
         names
     }
 
-    /// The substrings of `text` that are shaped like an environment name.
-    ///
-    /// A maximal run of `[A-Z0-9_]` holding at least one underscore. That
-    /// shape admits `SUPABASE_ANON_KEY` and `ZEROSHIP_AUTH_PROVIDER` while
-    /// excluding ordinary prose and bare acronyms such as `URL` or `JWKS`.
-    fn env_like_tokens(text: &str) -> Vec<String> {
-        text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-            .filter(|token| token.len() >= 4 && token.contains('_'))
-            .map(str::to_owned)
-            .collect()
-    }
 
     /// Every auth-provider diagnostic, obtained by DRIVING the code that emits
     /// it rather than by copying its wording.
@@ -1468,6 +1467,61 @@ mod tests {
         ]
     }
 
+    /// Build a Supabase config that fails for exactly one reason, and return the
+    /// message. `SupabaseConfig::new` is the code that emits it, so these are
+    /// DRIVEN, not copied.
+    fn supabase_config_error(
+        url: &str,
+        jwt_secret: Option<&str>,
+        jwks_url: Option<&str>,
+        issuer: &str,
+    ) -> String {
+        SupabaseConfig::new(
+            url,
+            "anon-key",
+            None,
+            jwt_secret.map(str::to_owned),
+            jwks_url.map(str::to_owned),
+            issuer,
+        )
+        .map(|_| ())
+        .expect_err("this input must fail closed")
+        .to_string()
+    }
+
+    /// Every OTHER startup refusal control can emit that names a variable.
+    ///
+    /// Split from [`auth_provider_diagnostics`] only because these come from a
+    /// different module; the check below runs the identical assertion over both.
+    /// Extending the existing test was the point: the Supabase arm and the
+    /// secret-strength arm are the same defect class as the auth-provider arm,
+    /// and a second copy of the scanner would have been a second thing to keep
+    /// in step.
+    fn other_startup_diagnostics() -> Vec<String> {
+        let strong = "0123456789abcdef0123456789abcdef";
+        vec![
+            // Supabase provider config. These named a bare `SUPABASE_URL`,
+            // `SUPABASE_JWT_ISSUER`, `SUPABASE_JWT_SECRET` and
+            // `SUPABASE_JWKS_URL` - four spellings control does not read.
+            supabase_config_error("", Some(strong), None, "https://issuer.test"),
+            supabase_config_error("https://p.supabase.co", Some(strong), None, ""),
+            supabase_config_error("https://p.supabase.co", Some("short"), None, "https://i.test"),
+            supabase_config_error("https://p.supabase.co", None, Some(""), "https://i.test"),
+            // Secret strength. The shared validators used to interpolate a bare
+            // `WORKER_KEY` / `PAIRWISE_SALT`; they now carry control's label.
+            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "")
+                .expect_err("an unset worker key must fail closed"),
+            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "short")
+                .expect_err("a weak worker key must fail closed"),
+            zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, "")
+                .expect_err("an unset pairwise salt must fail closed"),
+            validate_master_key_material(MASTER_KEY_LABEL, "YWJj")
+                .expect_err("a short master key must fail closed"),
+            validate_master_key_material(&format!("{LEGACY_MASTER_KEYS_LABEL}[0]"), "YWJj")
+                .expect_err("a short legacy master key must fail closed"),
+        ]
+    }
+
     #[test]
     fn every_auth_provider_diagnostic_names_a_variable_control_reads() {
         // The defect this pins: all three of these diagnostics named
@@ -1476,17 +1530,29 @@ mod tests {
         // after that variable had gained its ZEROSHIP_ prefix. An operator who
         // followed the advice edited a variable this binary does not read.
         //
+        // EXTENDED 2026-08-13 to the Supabase provider config and the
+        // secret-strength refusals, which carried the same defect: bare
+        // `SUPABASE_JWT_SECRET`, `WORKER_KEY` and `PAIRWISE_SALT` spellings that
+        // no binary reads. Extending this test rather than writing a second one
+        // is deliberate - the scanner and the derived readable set are the parts
+        // worth having exactly once.
+        //
         // What this does NOT catch: a diagnostic that names a variable control
         // really does read but that is the WRONG one for the failure at hand,
-        // and any stale name in a diagnostic outside the set
-        // `auth_provider_diagnostics` can reach.
+        // any stale name in a diagnostic outside the two sets driven below, and
+        // a stale spelling that happens to be a SUBSTRING of a live name (the
+        // scanner tokenises, so `WORKER_KEY` inside `ZEROSHIP_WORKER_KEY` is not
+        // a separate token and is invisible here).
         let readable = env_names_control_reads();
         assert!(
             readable.contains("ZEROSHIP_AUTH_PROVIDER"),
             "the derivation itself is broken: control's own selector is absent"
         );
 
-        for diagnostic in auth_provider_diagnostics() {
+        for diagnostic in auth_provider_diagnostics()
+            .into_iter()
+            .chain(other_startup_diagnostics())
+        {
             let tokens = env_like_tokens(&diagnostic);
             assert!(
                 !tokens.is_empty(),
