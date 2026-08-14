@@ -1319,3 +1319,7 @@ fieldset.bug-detail-extras { display: grid; }
    was "on screen", the right height); only the screenshot showed LINKS drawn
    through WHERE. */
 .bug-detail-side > * { flex-shrink: 0; }
+
+/* The comment a permalink pointed at, so arriving somewhere mid-thread does
+   not leave you hunting for which one you were sent to. */
+.comment.is-linked { background: var(--accent-soft); border-radius: var(--radius); }

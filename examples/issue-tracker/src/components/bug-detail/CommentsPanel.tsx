@@ -5,6 +5,7 @@ import { RichText, RichTextEditor, hasText } from "../RichText";
 import { addComment, editComment, listAttachments, listComments, setCommentPrivate, uploadAttachment } from "../../api";
 import { MAX_ATTACHMENT_BYTES, fileToBase64, formatBytes } from "./attachments";
 import { AsyncSection } from "../StateViews";
+import { downloadAttachment } from "../../lib/download";
 import { errorMessage, useAsync, type AsyncState } from "../rpc";
 import type { Activity, Attachment, Comment } from "../types";
 import { buildTimeline } from "./timeline";
@@ -139,11 +140,16 @@ function CommentRow({
           {timeAgo(comment.created_at)}
         </span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
-        {/* The permalink the "#3" used to be. It was a bare label doing
-            nothing; anchors already exist on the <li>, so it may as well be
-            the thing you can copy. */}
+        {/* A ROUTE, not a bare fragment. "#comment-3" reads like an anchor
+            and is one in a normal page, but this app routes on the hash, so
+            clicking it replaced the route and landed on "No page here.
+            Nothing is routed at #comment-3" -- from every comment, in every
+            thread. The <li> keeps its id so the page can scroll to it. */}
         {comment.commentNumber > 0 ? (
-          <a className="comment-number" href={`#comment-${comment.commentNumber}`}>
+          <a
+            className="comment-number"
+            href={`#/bugs/${comment.bugId}/c/${comment.commentNumber}`}
+          >
             #{comment.commentNumber}
           </a>
         ) : null}
@@ -204,9 +210,24 @@ function CommentRow({
         <ul className="comment-attachments">
           {attachments.map((file) => (
             <li key={file.id}>
-              <a href={"#/bugs/" + comment.bugId + "?attachment=" + file.id} className="comment-attachment">
+              {/* A button. It was an anchor to
+                  "#/bugs/<id>?attachment=<fileId>", which is not a deep link
+                  in a hash-routed app: the hash splits on "/", so the query
+                  rode inside the bug id and the page asked the server for a
+                  bug that cannot exist. Nothing read the parameter either.
+                  Attachments arrive over RPC as base64, so there is no URL to
+                  point at -- downloading IS the action. */}
+              <button
+                type="button"
+                className="comment-attachment"
+                onClick={() => {
+                  downloadAttachment(file.id, file.filename).catch((err: unknown) =>
+                    setError(errorMessage(err)),
+                  );
+                }}
+              >
                 {file.filename}
-              </a>
+              </button>
               <span className="dim small"> {formatBytes(file.sizeBytes)}</span>
             </li>
           ))}

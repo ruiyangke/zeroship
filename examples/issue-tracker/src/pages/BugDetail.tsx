@@ -82,9 +82,44 @@ function TitleEditor({
   );
 }
 
-export function BugDetailPage({ id }: { id: string }) {
+export function BugDetailPage({
+  id,
+  commentNumber,
+}: {
+  id: string;
+  /** From #/bugs/<id>/c/<n> -- scroll to that comment once it exists. */
+  commentNumber?: number;
+}) {
   const { state, reload } = useAsync(() => getBug({ id }), [id]);
   const [tab, setTab] = useState<Tab>("details");
+
+  // Land on the comment a permalink names.
+  //
+  // Waits for the element rather than scrolling on mount: the thread arrives
+  // over RPC, so at mount there is nothing to scroll to and a naive
+  // scrollIntoView would silently do nothing -- which is what a permalink
+  // that "works" but goes nowhere looks like.
+  useEffect(() => {
+    if (!commentNumber) return;
+    let cancelled = false;
+    let tries = 0;
+    const find = () => {
+      if (cancelled) return;
+      const el = document.getElementById(`comment-${commentNumber}`);
+      if (el) {
+        // scrollIntoView walks up to the nearest scrollable ancestor, which
+        // here is the shell's main rather than the document.
+        el.scrollIntoView({ block: "center" });
+        el.classList.add("is-linked");
+        return;
+      }
+      if (tries++ < 40) window.setTimeout(find, 100);
+    };
+    find();
+    return () => {
+      cancelled = true;
+    };
+  }, [commentNumber, id]);
   // CONTROLLED, because <details open> is not. Anything inside the fold that
   // reloads the bug -- voting, setting a flag, restricting it -- re-renders
   // this subtree, and an uncontrolled element comes back closed. The fold

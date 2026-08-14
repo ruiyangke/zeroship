@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { formatBytes } from "./attachments";
 import { Button } from "@zeroship/ui";
-import { deleteAttachment, getAttachment, listAttachments, setAttachmentObsolete } from "../../api";
+import { deleteAttachment, listAttachments, setAttachmentObsolete } from "../../api";
+import { downloadAttachment } from "../../lib/download";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, type AsyncState } from "../rpc";
 import type { Attachment } from "../types";
@@ -41,15 +42,7 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
     setDownloading(true);
     setError(null);
     try {
-      const { contentBase64, contentType } = await getAttachment({ id: attachment.id });
-      const bytes = Uint8Array.from(atob(contentBase64), (c) => c.charCodeAt(0));
-      const blob = new Blob([bytes], { type: contentType });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = attachment.filename;
-      link.click();
-      URL.revokeObjectURL(url);
+      await downloadAttachment(attachment.id, attachment.filename);
     } catch (err) {
       setError(errorMessage(err));
     } finally {

@@ -16,7 +16,7 @@ import { ReportsPage } from "./pages/Reports";
 // listen to, so back/forward and manual URL edits all just work.
 export type Route =
   | { name: "bugs" }
-  | { name: "bug"; id: string }
+  | { name: "bug"; id: string; commentNumber?: number }
   | { name: "new-bug" }
   | { name: "dashboard" }
   | { name: "products" }
@@ -33,7 +33,21 @@ function parseHash(hash: string): Route {
     case undefined:
     case "bugs":
       if (rest[0] === "new") return { name: "new-bug" };
-      if (rest[0]) return { name: "bug", id: rest[0] };
+      if (rest[0]) {
+        // #/bugs/<id>/c/<n> -- a comment permalink.
+        //
+        // It used to be a bare "#comment-3". In a hash-routed app that is not
+        // a fragment, it REPLACES the route: clicking one left the bug page
+        // for "No page here. Nothing is routed at #comment-3." Every comment
+        // in every thread carried one.
+        //
+        // As a route it does what a permalink is for: paste it and you land
+        // on the bug, scrolled to the comment.
+        const n = rest[1] === "c" ? Number(rest[2]) : NaN;
+        return Number.isSafeInteger(n) && n > 0
+          ? { name: "bug", id: rest[0], commentNumber: n }
+          : { name: "bug", id: rest[0] };
+      }
       return { name: "bugs" };
     case "dashboard":
       return { name: "dashboard" };
@@ -89,7 +103,7 @@ function renderRoute(route: Route): ReactNode {
     case "bugs":
       return <BugListPage />;
     case "bug":
-      return <BugDetailPage id={route.id} />;
+      return <BugDetailPage id={route.id} commentNumber={route.commentNumber} />;
     case "new-bug":
       return <NewBugPage />;
     case "dashboard":
