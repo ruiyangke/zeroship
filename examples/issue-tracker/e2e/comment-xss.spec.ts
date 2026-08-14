@@ -8,7 +8,7 @@ import { productKey } from "./keys";
  *
  * `comments.add` takes a body string over RPC, so a caller can store whatever
  * markup they like without ever touching the editor -- the toolbar is not a
- * filter. Every reader of the bug then renders that markup. This is the stored
+ * filter. Every reader of the issue then renders that markup. This is the stored
  * XSS path, and until now the only thing standing behind it was a claim in a
  * code comment.
  *
@@ -60,7 +60,7 @@ test("stored comment markup cannot execute", async ({ page, baseURL }) => {
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -69,13 +69,13 @@ test("stored comment markup cannot execute", async ({ page, baseURL }) => {
   });
 
   for (const body of PAYLOADS) {
-    await rpc("comments.add", { bugId: bug.id, body });
+    await rpc("comments.add", { issueId: issue.id, body });
   }
   // The positive control. Without it, a renderer that silently dropped EVERY
   // comment would pass every assertion below while being entirely broken --
   // "nothing executed" and "nothing rendered" look identical otherwise.
   await rpc("comments.add", {
-    bugId: bug.id,
+    issueId: issue.id,
     body: `<p>benign <strong>bold</strong> and <a href="https://example.com/safe">a safe link</a></p>`,
   });
 
@@ -85,7 +85,7 @@ test("stored comment markup cannot execute", async ({ page, baseURL }) => {
     await dialog.dismiss();
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await expect(page.locator("li.comment")).toHaveCount(PAYLOADS.length + 2);
 
   // The control first: if this fails, the rest proves nothing.

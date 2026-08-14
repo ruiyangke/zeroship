@@ -50,17 +50,17 @@ test("headers sort the server query, and only where the server can", async ({
   // order disagree. Filing them already sorted would let a table that ignores
   // the click still pass.
   for (const priority of ["P1", "P3", "P2"] as const) {
-    const bug = await rpc("bugs.create", {
+    const issue = await rpc("issues.create", {
       productId: product.id,
       componentId: component.id,
       versionId: version.id,
       summary: `Sortable ${priority} ${RUN}`,
       description: "d",
     });
-    await rpc("bugs.setPriority", { id: bug.id, priority });
+    await rpc("issues.setPriority", { id: issue.id, priority });
   }
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
 

@@ -1,39 +1,50 @@
 import {
-  BUG_RESOLUTIONS,
-  BUG_STATUSES,
-  type BugResolution,
-  type BugStatus,
+  ISSUE_RESOLUTIONS,
+  ISSUE_STATUSES,
+  type IssueResolution,
+  type IssueStatus,
 } from "./workflow";
 
-export const BUG_PRIORITIES = ["P1", "P2", "P3", "P4", "P5"] as const;
-export const BUG_SEVERITIES = [
+export const ISSUE_PRIORITIES = ["P1", "P2", "P3", "P4", "P5"] as const;
+
+// Severity is IMPACT and nothing else. `enhancement` used to live here, which
+// made "a critical feature request" unsayable -- one field cannot answer both
+// "what is this" and "how bad is it". It moved to ISSUE_KINDS below.
+export const ISSUE_SEVERITIES = [
   "blocker",
   "critical",
   "major",
   "normal",
   "minor",
   "trivial",
-  "enhancement",
 ] as const;
 
-export type BugPriority = (typeof BUG_PRIORITIES)[number];
-export type BugSeverity = (typeof BUG_SEVERITIES)[number];
+// WHAT the row is: something broken, something wished for, or something to do.
+// `defect` is the default because an unclassified report is more often
+// something broken than something wished for.
+export const ISSUE_KINDS = ["defect", "enhancement", "task"] as const;
+
+export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
+export type IssueSeverity = (typeof ISSUE_SEVERITIES)[number];
+export type IssueKind = (typeof ISSUE_KINDS)[number];
 
 export type QuickSearchClause =
   | { field: "text"; value: string }
-  | { field: "priority"; value: BugPriority }
+  | { field: "priority"; value: IssuePriority }
   | { field: "assignee"; value: string }
   | { field: "component"; value: string }
   | { field: "product"; value: string }
-  | { field: "status"; value: BugStatus }
-  | { field: "resolution"; value: BugResolution }
-  | { field: "severity"; value: BugSeverity }
+  | { field: "status"; value: IssueStatus }
+  | { field: "resolution"; value: IssueResolution }
+  | { field: "severity"; value: IssueSeverity }
+  | { field: "kind"; value: IssueKind }
   | { field: "reporter"; value: string };
 
-const PRIORITY_SET = new Set<string>(BUG_PRIORITIES);
-const STATUS_SET = new Set<string>(BUG_STATUSES);
-const RESOLUTION_SET = new Set<string>(BUG_RESOLUTIONS);
-const SEVERITY_SET = new Set<string>(BUG_SEVERITIES);
+const PRIORITY_SET = new Set<string>(ISSUE_PRIORITIES);
+const STATUS_SET = new Set<string>(ISSUE_STATUSES);
+const RESOLUTION_SET = new Set<string>(ISSUE_RESOLUTIONS);
+const SEVERITY_SET = new Set<string>(ISSUE_SEVERITIES);
+const KIND_SET = new Set<string>(ISSUE_KINDS);
 
 export class QuickSearchSyntaxError extends Error {
   readonly code = "INVALID_QUICKSEARCH";
@@ -130,6 +141,10 @@ function parseQualifiedToken(token: string): QuickSearchClause | null {
     "res",
     "severity",
     "sev",
+    // Beside `severity:`, because the two are now separate axes: `sev:critical
+    // kind:enhancement` is a sentence this grammar has to be able to say.
+    // Qualified only -- a bare `task` token has to stay a text search.
+    "kind",
     "reporter",
   ]);
 
@@ -151,24 +166,29 @@ function parseQualifiedToken(token: string): QuickSearchClause | null {
     case "prio": {
       const normalized = value.toUpperCase();
       if (!PRIORITY_SET.has(normalized)) invalidValue("priority", value);
-      return { field: "priority", value: normalized as BugPriority };
+      return { field: "priority", value: normalized as IssuePriority };
     }
     case "status": {
       const normalized = value.toUpperCase();
       if (!STATUS_SET.has(normalized)) invalidValue("status", value);
-      return { field: "status", value: normalized as BugStatus };
+      return { field: "status", value: normalized as IssueStatus };
     }
     case "resolution":
     case "res": {
       const normalized = value.toUpperCase();
       if (!RESOLUTION_SET.has(normalized)) invalidValue("resolution", value);
-      return { field: "resolution", value: normalized as BugResolution };
+      return { field: "resolution", value: normalized as IssueResolution };
     }
     case "severity":
     case "sev": {
       const normalized = value.toLowerCase();
       if (!SEVERITY_SET.has(normalized)) invalidValue("severity", value);
-      return { field: "severity", value: normalized as BugSeverity };
+      return { field: "severity", value: normalized as IssueSeverity };
+    }
+    case "kind": {
+      const normalized = value.toLowerCase();
+      if (!KIND_SET.has(normalized)) invalidValue("kind", value);
+      return { field: "kind", value: normalized as IssueKind };
     }
     case "reporter":
       return { field: "reporter", value: normalizeHandle("reporter", value) };
@@ -184,7 +204,7 @@ export function parseQuickSearch(input: string): QuickSearchClause[] {
     if (PRIORITY_SET.has(normalizedPriority)) {
       return {
         field: "priority",
-        value: normalizedPriority as BugPriority,
+        value: normalizedPriority as IssuePriority,
       };
     }
 

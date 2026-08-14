@@ -4,44 +4,44 @@ import { PageHeader } from "@zeroship/ui";
 import {
   currentUser,
   getAttachment,
-  getBug,
+  getIssue,
   listFlagRequests,
   listMyCc,
   listMyVotes,
-  searchBugs,
+  searchIssues,
 } from "../api";
-import { ALL_BUG_COLUMNS, BugResultsTable } from "../components/BugResultsTable";
+import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { WatchingPanel } from "../components/WatchingPanel";
 import { AsyncSection, ErrorState } from "../components/StateViews";
 import { isUnauthenticated, toPromise, useAsync } from "../components/rpc";
-import type { Bug, BugDetail, FlagRequestEntry } from "../components/types";
+import type { Issue, IssueDetail, FlagRequestEntry } from "../components/types";
 
-type DashboardBug = BugDetail["bug"];
+type DashboardIssue = IssueDetail["issue"];
 
-const COLUMNS = ALL_BUG_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
+const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
-function BugSection({ title, bugs }: { title: string; bugs: Bug[] }) {
+function IssueSection({ title, issues }: { title: string; issues: Issue[] }) {
   return (
     <section className="dashboard-section">
       <h2>
-        {title} <span className="dim">({bugs.length})</span>
+        {title} <span className="dim">({issues.length})</span>
       </h2>
-      {bugs.length === 0 ? (
+      {issues.length === 0 ? (
         <p className="state-hint small">Nothing here.</p>
       ) : (
-        <BugResultsTable bugs={bugs} columns={COLUMNS} />
+        <IssueResultsTable issues={issues} columns={COLUMNS} />
       )}
     </section>
   );
 }
 
-async function flagBugId(entry: FlagRequestEntry): Promise<string | null> {
-  if (entry.flag.bugId) return entry.flag.bugId;
+async function flagIssueId(entry: FlagRequestEntry): Promise<string | null> {
+  if (entry.flag.issueId) return entry.flag.issueId;
   if (!entry.flag.attachmentId) return null;
   try {
     const { attachment } = await getAttachment({ id: entry.flag.attachmentId });
-    return attachment.bugId;
+    return attachment.issueId;
   } catch {
     return null;
   }
@@ -49,20 +49,20 @@ async function flagBugId(entry: FlagRequestEntry): Promise<string | null> {
 
 function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[]; emptyLabel: string }) {
   const { state } = useAsync(async () => {
-    const withBugId = await Promise.all(
-      entries.map(async (entry) => ({ entry, bugId: await flagBugId(entry) })),
+    const withIssueId = await Promise.all(
+      entries.map(async (entry) => ({ entry, issueId: await flagIssueId(entry) })),
     );
-    const bugIds = [...new Set(withBugId.map((x) => x.bugId).filter((id): id is string => id !== null))];
-    const bugs = await Promise.all(
-      bugIds.map((id) => toPromise(getBug({ id })).catch(() => null)),
+    const issueIds = [...new Set(withIssueId.map((x) => x.issueId).filter((id): id is string => id !== null))];
+    const issues = await Promise.all(
+      issueIds.map((id) => toPromise(getIssue({ id })).catch(() => null)),
     );
-    const byId = new Map<string, DashboardBug>();
-    for (const detail of bugs) {
-      if (detail) byId.set(detail.bug.id, detail.bug);
+    const byId = new Map<string, DashboardIssue>();
+    for (const detail of issues) {
+      if (detail) byId.set(detail.issue.id, detail.issue);
     }
-    return withBugId.map(({ entry, bugId }) => ({
+    return withIssueId.map(({ entry, issueId }) => ({
       entry,
-      bug: bugId ? byId.get(bugId) ?? null : null,
+      issue: issueId ? byId.get(issueId) ?? null : null,
     }));
   }, [entries]);
 
@@ -75,13 +75,13 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
     >
       {(rows) => (
         <ul className="flag-request-list">
-          {rows.map(({ entry, bug }) => (
+          {rows.map(({ entry, issue }) => (
             <li key={entry.flag.id}>
               <span className="chip">
                 {entry.flagType?.name ?? entry.flag.flagTypeId} {entry.flag.status}
               </span>
-              {bug ? (
-                <Link to={`/bugs/${bug.id}`}>{bug.summary}</Link>
+              {issue ? (
+                <Link to={`/issues/${issue.id}`}>{issue.summary}</Link>
               ) : (
                 <span className="dim">on an attachment</span>
               )}
@@ -98,11 +98,11 @@ export function DashboardPage() {
   const meId = userState.status === "ready" ? userState.data.id : null;
 
   const assignedQ = useAsync(
-    () => (meId ? searchBugs({ assigneeId: meId, limit: 50 }) : Promise.resolve([])),
+    () => (meId ? searchIssues({ assigneeId: meId, limit: 50 }) : Promise.resolve([])),
     [meId],
   );
   const reportedQ = useAsync(
-    () => (meId ? searchBugs({ reporterId: meId, limit: 50 }) : Promise.resolve([])),
+    () => (meId ? searchIssues({ reporterId: meId, limit: 50 }) : Promise.resolve([])),
     [meId],
   );
   const flagRequestsQ = useAsync(() => listFlagRequests({}), []);
@@ -118,10 +118,10 @@ export function DashboardPage() {
     [flagRequestsQ.state],
   );
 
-  // Signed out, the whole page is one answer: sign in. Without this the bug
+  // Signed out, the whole page is one answer: sign in. Without this the issue
   // sections fell back to Promise.resolve([]) and rendered "Assigned to me (0)
-  // -- Nothing here", which tells a visitor they have no bugs when the truth
-  // is that we do not know who they are. searchBugs is anonymous and returns
+  // -- Nothing here", which tells a visitor they have no issues when the truth
+  // is that we do not know who they are. searchIssues is anonymous and returns
   // an empty list rather than a 401, so nothing downstream could tell the two
   // apart. StateViews says this in its own header: a 401 is a sign-in prompt,
   // never an empty list.
@@ -151,12 +151,12 @@ export function DashboardPage() {
         </p>
       ) : null}
 
-      <AsyncSection state={assignedQ.state} onRetry={assignedQ.reload} loadingLabel="Loading assigned bugs...">
-        {(bugs) => <BugSection title="Assigned to me" bugs={bugs} />}
+      <AsyncSection state={assignedQ.state} onRetry={assignedQ.reload} loadingLabel="Loading assigned issues...">
+        {(issues) => <IssueSection title="Assigned to me" issues={issues} />}
       </AsyncSection>
 
-      <AsyncSection state={reportedQ.state} onRetry={reportedQ.reload} loadingLabel="Loading reported bugs...">
-        {(bugs) => <BugSection title="Reported by me" bugs={bugs} />}
+      <AsyncSection state={reportedQ.state} onRetry={reportedQ.reload} loadingLabel="Loading reported issues...">
+        {(issues) => <IssueSection title="Reported by me" issues={issues} />}
       </AsyncSection>
 
       <section className="dashboard-section">
@@ -170,9 +170,9 @@ export function DashboardPage() {
       </section>
 
       {/* Was a hardcoded "(0)" with a note saying no reverse index existed.
-          The index did exist (bugCc.userId); what was missing was a procedure
+          The index did exist (issueCc.userId); what was missing was a procedure
           reading it, which cc.listMine now is. */}
-      {/* Voting had a panel on every bug and nowhere to see what you had
+      {/* Voting had a panel on every issue and nowhere to see what you had
           voted for, so the budget it enforces -- votesPerUser, per product --
           was spendable and unauditable. */}
       <AsyncSection
@@ -180,20 +180,20 @@ export function DashboardPage() {
         onRetry={votesQ.reload}
         loadingLabel="Loading votes..."
         isEmpty={(rows) => rows.length === 0}
-        emptyTitle="You have not voted for any bug."
+        emptyTitle="You have not voted for any issue."
       >
         {(rows) => (
-          <BugSection
-            title="Bugs I voted for"
-            bugs={rows.map((row) => row.bug)}
+          <IssueSection
+            title="Issues I voted for"
+            issues={rows.map((row) => row.issue)}
           />
         )}
       </AsyncSection>
 
       <WatchingPanel />
 
-      <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd bugs...">
-        {(bugs) => <BugSection title="Bugs I'm CC'd on" bugs={bugs} />}
+      <AsyncSection state={ccQ.state} onRetry={ccQ.reload} loadingLabel="Loading CC'd issues...">
+        {(issues) => <IssueSection title="Issues I'm CC'd on" issues={issues} />}
       </AsyncSection>
     </div>
   );

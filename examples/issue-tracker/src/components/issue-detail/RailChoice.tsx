@@ -7,7 +7,7 @@ import { RailProperty } from "./RailProperty";
  * A rail property whose value comes from a fixed list.
  *
  * The rail used to render a bordered Select per property, so a column whose
- * job is to state facts about the bug was a column of form controls -- four
+ * job is to state facts about the issue was a column of form controls -- four
  * boxes with chevrons, heavier on the page than the conversation they sat
  * beside. Linear shows the value and swaps in a control on interaction; this
  * is that, using the same edit-on-demand pattern the whiteboard and URL rows

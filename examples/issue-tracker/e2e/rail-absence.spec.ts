@@ -7,7 +7,7 @@ import { signIn } from "./session";
  * The rail says "empty" one way, and never says it about a value it is still
  * fetching.
  *
- * A freshly filed bug has almost nothing set, so the right-hand column is
+ * A freshly filed issue has almost nothing set, so the right-hand column is
  * mostly absence -- and it had SEVEN spellings for it. `--` on QA contact and
  * the free-text fields, `None` on version and milestone, `none` on keywords,
  * duplicates and see-also, `nobody` on CC, `not set` on flags, `unassigned` on
@@ -22,13 +22,13 @@ import { signIn } from "./session";
  * WHAT THIS DOES NOT CATCH, measured by mutation rather than guessed. Putting
  * `None` back on the milestone fallback fails this spec; putting it back on
  * the ASSIGNEE fallback does not, and that is not a gap in the assertions --
- * `bugs.create` assigns the reporter, so no fixture here has an empty
- * assignee and the branch never renders. Reaching it needs a bug whose
+ * `issues.create` assigns the reporter, so no fixture here has an empty
+ * assignee and the branch never renders. Reaching it needs an issue whose
  * assignee was explicitly cleared.
  *
  * Nor does it reach a spelling that only appears inside an opened panel, on a
- * bug with data, or on another page. `EmptyState` prose ("No keywords on this
- * bug.") is deliberately still prose, and the History tab still says "unset"
+ * issue with data, or on another page. `EmptyState` prose ("No keywords on this
+ * issue.") is deliberately still prose, and the History tab still says "unset"
  * inside a sentence about a past value. The claim is about the rail's
  * at-a-glance column, not about every word for empty in the app.
  */
@@ -61,7 +61,7 @@ test("the rail spells absence one way, and never spells it while loading", async
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   // Nothing optional is set: no assignee, no QA contact, no milestone, no CC,
   // no keywords, no dependencies, no flags. The rail is almost all absence.
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -69,8 +69,8 @@ test("the rail spells absence one way, and never spells it while loading", async
     description: "d",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
-  const rail = page.locator(".bug-detail-side");
+  await page.goto(`/issues/${issue.id}`);
+  const rail = page.locator(".issue-detail-side");
   await expect(rail).toBeVisible();
   // The rail's async groups (CC, dependencies, duplicates, see-also) each
   // resolve on their own request. Wait for the placeholders to clear, or the
@@ -121,7 +121,7 @@ test("a rail group shows a skeleton before its answer, not an absence", async ({
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -146,7 +146,7 @@ test("a rail group shows a skeleton before its answer, not an absence", async ({
     await route.continue();
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const cc = page.locator(".rail-disclosure", { hasText: "CC" }).first();
   await expect(cc, "the group renders before its data arrives").toBeVisible();
@@ -174,6 +174,6 @@ test("a rail group shows a skeleton before its answer, not an absence", async ({
   expect(snapshot.hasSkeleton, "still loading at the moment of the read").toBe(true);
   expect(
     snapshot.text,
-    "a loading group does not print the absent token, which would be a claim about the bug",
+    "a loading group does not print the absent token, which would be a claim about the issue",
   ).not.toContain("--");
 });

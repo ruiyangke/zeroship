@@ -9,7 +9,7 @@ import { productKey } from "./keys";
  * This is the only cluster in the app that touches `env.storage`, and until
  * now nothing exercised it succeeding. scripts/smoke.sh covers the denial
  * arms thoroughly -- content and filenames are both refused to someone who
- * cannot read the bug -- but a refusal proves the guard, not the storage path.
+ * cannot read the issue -- but a refusal proves the guard, not the storage path.
  * A wrong bucket, a mangled key, a base64 round trip that dropped the last
  * block, or a delete that removed the row and left the object would all have
  * passed every check this app had.
@@ -43,7 +43,7 @@ test("an attachment uploads, reads back byte-identical, and deletes", async ({
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -58,7 +58,7 @@ test("an attachment uploads, reads back byte-identical, and deletes", async ({
   const encoded = Buffer.from(payload, "utf8").toString("base64");
 
   const uploaded = await rpc("attachments.upload", {
-    bugId: bug.id,
+    issueId: issue.id,
     filename: "crash.log",
     contentBase64: encoded,
     contentType: "text/plain",
@@ -68,7 +68,7 @@ test("an attachment uploads, reads back byte-identical, and deletes", async ({
     Buffer.byteLength(payload, "utf8"),
   );
 
-  const listed = await rpc("attachments.list", { bugId: bug.id });
+  const listed = await rpc("attachments.list", { issueId: issue.id });
   expect(listed.map((row: { id: string }) => row.id)).toContain(uploaded.id);
 
   const fetched = await rpc("attachments.get", { id: uploaded.id });
@@ -79,14 +79,14 @@ test("an attachment uploads, reads back byte-identical, and deletes", async ({
   expect(fetched.contentType).toBe("text/plain");
 
   await rpc("attachments.setObsolete", { id: uploaded.id, isObsolete: true });
-  const afterObsolete = await rpc("attachments.list", { bugId: bug.id });
+  const afterObsolete = await rpc("attachments.list", { issueId: issue.id });
   expect(
     afterObsolete.find((row: { id: string }) => row.id === uploaded.id).isObsolete,
     "obsolete hides it in Bugzilla's UI but must not remove it",
   ).toBe(true);
 
   await rpc("attachments.delete", { id: uploaded.id });
-  const afterDelete = await rpc("attachments.list", { bugId: bug.id });
+  const afterDelete = await rpc("attachments.list", { issueId: issue.id });
   expect(afterDelete.map((row: { id: string }) => row.id)).not.toContain(uploaded.id);
 
   // The object goes with the row. `attachments.delete` removes the stored

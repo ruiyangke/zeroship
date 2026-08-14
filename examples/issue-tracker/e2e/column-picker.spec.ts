@@ -22,7 +22,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 test("the column picker opens within the viewport", async ({ page, baseURL }) => {
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/bugs");
+  await page.goto("/issues");
 
   const toggle = page.getByRole("button", { name: "Columns" });
   await expect(toggle).toBeVisible();

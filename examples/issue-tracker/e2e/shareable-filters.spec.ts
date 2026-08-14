@@ -7,7 +7,7 @@ import { signIn } from "./session";
  * A filtered list is a link you can send.
  *
  * The filters were component state, so narrowing the list changed what you
- * saw and nothing else: the URL stayed /bugs, a reload dropped it, Back did
+ * saw and nothing else: the URL stayed /issues, a reload dropped it, Back did
  * not undo it, and pasting the address to a colleague sent them the unfiltered
  * list. That is the half of routing the hash never made worth doing.
  *
@@ -44,20 +44,20 @@ test("a filtered list survives a reload and travels in a link", async ({
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const mk = async (summary: string, severity: string) => {
-    const bug = await rpc("bugs.create", {
+    const issue = await rpc("issues.create", {
       productId: product.id,
       componentId: component.id,
       versionId: version.id,
       summary,
       description: "d",
     });
-    await rpc("bugs.setSeverity", { id: bug.id, severity });
-    return bug;
+    await rpc("issues.setSeverity", { id: issue.id, severity });
+    return issue;
   };
   await mk(`Critical one ${RUN}`, "critical");
   await mk(`Normal one ${RUN}`, "normal");
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
 
   // Narrow to this product, then to critical.
   const product_ = page.getByRole("combobox", { name: /product/i }).first();

@@ -43,20 +43,20 @@ test("typing P1 in the search box filters by priority", async ({ page, baseURL, 
   // One of each priority, so filtering to P1 is a real narrowing rather than
   // a query that happens to match everything.
   for (const priority of ["P1", "P3"] as const) {
-    const bug = await rpc("bugs.create", {
+    const issue = await rpc("issues.create", {
       productId: product.id,
       componentId: component.id,
       versionId: version.id,
       summary: `Quick ${priority} ${RUN}`,
       description: "d",
     });
-    await rpc("bugs.setPriority", { id: bug.id, priority });
+    await rpc("issues.setPriority", { id: issue.id, priority });
   }
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
   const search = page.getByPlaceholder("Search, or type");
 
-  // The run marker alone: both bugs.
+  // The run marker alone: both issues.
   await search.fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(page.locator("table tbody tr")).toHaveCount(2);
@@ -77,8 +77,8 @@ test("typing P1 in the search box filters by priority", async ({ page, baseURL, 
   // The page survives -- which is not the same as "a table is shown". An
   // unparseable query matches nothing, and DataTable renders its empty state
   // rather than a table, so asserting on <table> fails on correct behaviour.
-  // Level 1 specifically: the rail also has a "Bugs" link and the empty
+  // Level 1 specifically: the rail also has an "Issues" link and the empty
   // state carries its own heading, so an unlevelled match is ambiguous.
-  await expect(page.getByRole("heading", { level: 1, name: "Bugs" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Issues" })).toBeVisible();
   await expect(page.getByText(/something went wrong/i)).toHaveCount(0);
 });

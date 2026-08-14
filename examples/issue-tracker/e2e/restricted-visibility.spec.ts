@@ -8,11 +8,11 @@ import { openMorePanels } from "./more";
 /**
  * The access-control model, driven in two real browsers.
  *
- * WHY THIS EXISTS SEPARATELY. bug-lifecycle.spec.ts says so in its own header:
+ * WHY THIS EXISTS SEPARATELY. issue-lifecycle.spec.ts says so in its own header:
  * "It runs one identity, so nothing here shows that another user is denied."
- * Its security spec restricts a bug through the UI and then asserts on the
+ * Its security spec restricts an issue through the UI and then asserts on the
  * confirmation text -- but that string is a client-side literal set after the
- * call resolves (SecurityPanel.tsx), so it proves `restrictBug` did not throw
+ * call resolves (SecurityPanel.tsx), so it proves `restrictIssue` did not throw
  * and nothing more. A server that accepted the call and wrote nothing would
  * pass it. Excluding somebody is the entire point of the feature, and no
  * browser spec showed it happening.
@@ -34,7 +34,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("a bug restricted to a group stops being visible to a non-member", async ({
+test("an issue restricted to a group stops being visible to a non-member", async ({
   page,
   baseURL,
   browser,
@@ -50,7 +50,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   // Alice writes BEFORE Bob's context exists, and that ordering is load-bearing
   // rather than incidental: the app makes the first account to reach a handler
   // the administrator, and an administrator bypasses group restrictions
-  // outright (`canViewBug`). If Bob provisioned first he would see the bug
+  // outright (`canViewIssue`). If Bob provisioned first he would see the issue
   // after the restriction and this spec would fail while the app was right.
   const product = await rpc("products.create", { key: productKey("VIS"),
     name: `Vis ${RUN}`, description: "visibility" });
@@ -61,7 +61,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const summary = `Embargoed ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -74,14 +74,14 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   const bob = await bobContext.newPage();
 
   const openDetail = async () => {
-    await bob.goto(`/bugs/${bug.id}`);
+    await bob.goto(`/issues/${issue.id}`);
     // A full reload, not just a hash change. Arriving from the list is a
     // same-document navigation, so without this the second visit could render
     // whatever the router already had rather than refetching.
     await bob.reload();
   };
   const search = async () => {
-    await bob.goto("/bugs");
+    await bob.goto("/issues");
     await bob.reload();
     await bob.getByPlaceholder("Search, or type").fill(RUN);
     await bob.getByRole("button", { name: "Apply" }).click();
@@ -89,7 +89,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
 
   // ---- Before: the control half. -----------------------------------------
   await openDetail();
-  await expect(bob.locator("h1"), "Bob should see an unrestricted bug").toContainText(summary);
+  await expect(bob.locator("h1"), "Bob should see an unrestricted issue").toContainText(summary);
   await search();
   await expect(bob.getByText(summary), "and should find it in the list").toBeVisible();
 
@@ -101,7 +101,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   await groups.getByRole("button", { name: "Create" }).click();
   await expect(groups.locator("ul.group-list").getByText(`vis-${RUN}`)).toBeVisible();
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
@@ -128,7 +128,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   // keeps full access to the product, as the search below still proves.
   // Asserting on the STATUS alone would have passed on that message.
   //
-  // Matched by its text rather than by `getByRole("alert")`. The bug page
+  // Matched by its text rather than by `getByRole("alert")`. The issue page
   // mounts a panel per section and each renders its own alert on failure, so
   // the role selector is ambiguous exactly when something has gone wrong -- it
   // reported a strict-mode violation about Dependencies and Duplicates instead
@@ -143,7 +143,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
 
   // Alice, in the same state, still sees it. Without this the "after" half is
   // also satisfied by a tracker that broke for everyone.
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await page.reload();
   await expect(page.locator("h1"), "the restriction must not hide it from a member").toContainText(
     summary,
@@ -156,7 +156,7 @@ test("a bug restricted to a group stops being visible to a non-member", async ({
   const created = ((await rpc("groups.list", {})) as Array<{ id: string; name: string }>).find(
     (g) => g.name === `vis-${RUN}`,
   );
-  if (created) await rpc("bugs.unrestrict", { bugId: bug.id, groupId: created.id });
+  if (created) await rpc("issues.unrestrict", { issueId: issue.id, groupId: created.id });
 
   await bobContext.close();
 });

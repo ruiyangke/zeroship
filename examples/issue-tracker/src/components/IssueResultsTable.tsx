@@ -1,17 +1,18 @@
-// Shared results table used by the bug list, advanced/quick search results,
+// Shared results table used by the issue list, advanced/quick search results,
 // and the "my dashboard" sections. Presentation only -- callers own data
-// fetching, filtering, and (for the bug list) which columns are visible.
+// fetching, filtering, and (for the issue list) which columns are visible.
 import { DataTable, type DataTableColumn, type DataTableSort } from "@zeroship/ui";
 import { Link } from "react-router-dom";
 
-import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
-import type { Bug } from "./types";
-import { useBugLookups } from "./useBugLookups";
+import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
+import type { Issue } from "./types";
+import { useIssueLookups } from "./useIssueLookups";
 
-export type BugColumnKey =
+export type IssueColumnKey =
   | "id"
   | "status"
   | "resolution"
+  | "kind"
   | "severity"
   | "priority"
   | "product"
@@ -20,10 +21,11 @@ export type BugColumnKey =
   | "reporter"
   | "updated";
 
-export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
+export const ALL_ISSUE_COLUMNS: { key: IssueColumnKey; label: string }[] = [
   { key: "id", label: "ID" },
   { key: "status", label: "Status" },
   { key: "resolution", label: "Resolution" },
+  { key: "kind", label: "Kind" },
   { key: "severity", label: "Severity" },
   { key: "priority", label: "Priority" },
   { key: "product", label: "Product" },
@@ -39,8 +41,8 @@ export const ALL_BUG_COLUMNS: { key: BugColumnKey; label: string }[] = [
  * Falls back to the UUID when the product key has not resolved yet, rather
  * than rendering a bare number: "12" on its own belongs to no product.
  */
-function bugLabel(bug: Bug, productKeysById: Record<string, string>): string {
-  // The row's OWN key first. searchBugs carries productKey, so the label is
+function issueLabel(issue: Issue, productKeysById: Record<string, string>): string {
+  // The row's OWN key first. searchIssues carries productKey, so the label is
   // known the moment the row is, and the lookup map is only a fallback for
   // callers whose rows predate that field.
   //
@@ -48,8 +50,8 @@ function bugLabel(bug: Bug, productKeysById: Record<string, string>): string {
   // rendered a column of long ids until a second request resolved the keys and
   // then snapped to the short form. A dash is a placeholder that holds its
   // place; a UUID is a different, much wider string pretending to be an answer.
-  const key = bug.productKey ?? productKeysById[bug.productId];
-  return key ? `${key}-${bug.number}` : "--";
+  const key = issue.productKey ?? productKeysById[issue.productId];
+  return key ? `${key}-${issue.number}` : "--";
 }
 
 function formatDate(ms: number): string {
@@ -66,9 +68,9 @@ function formatDate(ms: number): string {
  * Built on the design system's DataTable rather than a hand-rolled `<table>`.
  *
  * The status column is a BADGE, not a select. Every row used to carry an
- * always-live dropdown, so a screen of twelve bugs was twelve form controls
+ * always-live dropdown, so a screen of twelve issues was twelve form controls
  * and the eye had nowhere to rest -- the control competed with the data it
- * described. Changing status is a deliberate act and belongs on the bug page,
+ * described. Changing status is a deliberate act and belongs on the issue page,
  * which is also the only place that can ask for the resolution a close
  * requires.
  */
@@ -78,7 +80,7 @@ function formatDate(ms: number): string {
  * order would either silently do nothing or quietly sort one page in
  * isolation, which is worse than not offering it.
  */
-const SERVER_SORTABLE: Partial<Record<BugColumnKey, string>> = {
+const SERVER_SORTABLE: Partial<Record<IssueColumnKey, string>> = {
   id: "created_at",
   status: "status",
   severity: "severity",
@@ -86,16 +88,16 @@ const SERVER_SORTABLE: Partial<Record<BugColumnKey, string>> = {
   updated: "updated_at",
 };
 
-export function BugResultsTable({
-  bugs,
+export function IssueResultsTable({
+  issues,
   columns,
   caption,
   loading = false,
   sort,
   onSortChange,
 }: {
-  bugs: readonly Bug[];
-  columns: readonly BugColumnKey[];
+  issues: readonly Issue[];
+  columns: readonly IssueColumnKey[];
   caption?: string;
   /** Marks the table busy IN PLACE during a refetch, rather than the caller
    *  unmounting it and leaving a hole where the rows were. */
@@ -107,33 +109,38 @@ export function BugResultsTable({
   // four call sites left them out, so those tables printed raw ids with
   // nothing failing. The table is the one place that always knows which ids
   // are on screen.
-  const { productsById, productKeysById, usersById } = useBugLookups(bugs);
+  const { productsById, productKeysById, usersById } = useIssueLookups(issues);
 
-  const byKey: Record<BugColumnKey, DataTableColumn<Bug>> = {
+  const byKey: Record<IssueColumnKey, DataTableColumn<Issue>> = {
     id: {
       key: "id",
       header: "ID",
-      cell: (bug) => (
-        <Link to={`/bugs/${bug.id}`} className="bug-link" title={bug.id}>
-          {bugLabel(bug, productKeysById)}
+      cell: (issue) => (
+        <Link to={`/issues/${issue.id}`} className="issue-link" title={issue.id}>
+          {issueLabel(issue, productKeysById)}
         </Link>
       ),
     },
-    status: { key: "status", header: "Status", cell: (bug) => <StatusBadge status={bug.status} /> },
+    status: { key: "status", header: "Status", cell: (issue) => <StatusBadge status={issue.status} /> },
     resolution: {
       key: "resolution",
       header: "Resolution",
-      cell: (bug) => <ResolutionBadge resolution={bug.resolution ?? null} />,
+      cell: (issue) => <ResolutionBadge resolution={issue.resolution ?? null} />,
+    },
+    kind: {
+      key: "kind",
+      header: "Kind",
+      cell: (issue) => <KindBadge kind={issue.kind} />,
     },
     severity: {
       key: "severity",
       header: "Severity",
-      cell: (bug) => <SeverityBadge severity={bug.severity} />,
+      cell: (issue) => <SeverityBadge severity={issue.severity} />,
     },
     priority: {
       key: "priority",
       header: "Priority",
-      cell: (bug) => <PriorityBadge priority={bug.priority} />,
+      cell: (issue) => <PriorityBadge priority={issue.priority} />,
     },
     product: {
       key: "product",
@@ -142,28 +149,28 @@ export function BugResultsTable({
       // a second request, so falling back to the raw value meant every row
       // flashed prod_0346En6o4bMYRunhVm0mmX before the names landed -- brief
       // when idle, long enough to read on a loaded machine.
-      cell: (bug) => productsById[bug.productId] ?? "--",
+      cell: (issue) => productsById[issue.productId] ?? "--",
     },
     summary: {
       key: "summary",
       header: "Summary",
-      cell: (bug) => (
-        <Link to={`/bugs/${bug.id}`} className="bug-summary-link">
-          {bug.summary}
+      cell: (issue) => (
+        <Link to={`/issues/${issue.id}`} className="issue-summary-link">
+          {issue.summary}
         </Link>
       ),
     },
     assignee: {
       key: "assignee",
       header: "Assignee",
-      cell: (bug) => (bug.assigneeId ? usersById[bug.assigneeId] ?? "--" : "--"),
+      cell: (issue) => (issue.assigneeId ? usersById[issue.assigneeId] ?? "--" : "--"),
     },
     reporter: {
       key: "reporter",
       header: "Reporter",
-      cell: (bug) => usersById[bug.reporterId] ?? "--",
+      cell: (issue) => usersById[issue.reporterId] ?? "--",
     },
-    updated: { key: "updated", header: "Updated", cell: (bug) => formatDate(bug.updated_at) },
+    updated: { key: "updated", header: "Updated", cell: (issue) => formatDate(issue.updated_at) },
   };
 
   // Two different states, deliberately not conflated.
@@ -178,8 +185,8 @@ export function BugResultsTable({
   // table stays exactly as it is and the wrapper is marked aria-busy, which
   // announces the update to a screen reader and dims it without moving
   // anything.
-  const firstLoad = loading && bugs.length === 0;
-  const refetching = loading && bugs.length > 0;
+  const firstLoad = loading && issues.length === 0;
+  const refetching = loading && issues.length > 0;
 
   return (
     <div aria-busy={refetching || undefined} className={refetching ? "is-refetching" : undefined}>
@@ -188,9 +195,9 @@ export function BugResultsTable({
         ...byKey[key],
         sortable: onSortChange ? Boolean(SERVER_SORTABLE[key]) : false,
       }))}
-      data={[...bugs]}
-      rowKey={(bug) => bug.id}
-      // The SERVER filters, sorts and pages -- searchBugs takes text, sortBy
+      data={[...issues]}
+      rowKey={(issue) => issue.id}
+      // The SERVER filters, sorts and pages -- searchIssues takes text, sortBy
       // and limit/offset. Leaving the managed engine on gave the page two
       // search boxes and two paginators disagreeing with each other: the
       // built-in one showing "1-10 of 25" over a set the server had already
@@ -205,7 +212,7 @@ export function BugResultsTable({
       onSortChange={onSortChange}
       // A caption or an aria-label is REQUIRED -- the component dev-warns and
       // the table is left unnamed for a screen reader without one.
-      aria-label={caption ?? "Bugs"}
+      aria-label={caption ?? "Issues"}
     />
     </div>
   );

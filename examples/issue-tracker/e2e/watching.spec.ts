@@ -4,10 +4,10 @@ import { otherUser, signIn } from "./session";
 import { productKey } from "./keys";
 
 /**
- * User watching, end to end: watch someone, hear about their bug, stop.
+ * User watching, end to end: watch someone, hear about their issue, stop.
  *
  * The three procedures behind this had no UI, so the feature was unreachable
- * -- but unlike the flags surface it was not dead. `notifyBugChange` already
+ * -- but unlike the flags surface it was not dead. `notifyIssueChange` already
  * read the `watchers` table and fanned out to them alongside the assignee,
  * reporter, QA contact and CC list. Only the way to say who you watch was
  * missing.
@@ -21,7 +21,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("watching a user delivers their bug activity, and stopping ends it", async ({
+test("watching a user delivers their issue activity, and stopping ends it", async ({
   page,
   baseURL,
   browser,
@@ -36,7 +36,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
 
   // Alice writes first, so she is the admin and Bob is an ordinary user.
   // She creates nothing Bob will file into: components.create stamps its
-  // creator as the default assignee, so a bug filed into HER component is
+  // creator as the default assignee, so an issue filed into HER component is
   // assigned to her and she is notified as the assignee -- watch or no watch.
   // That made the "no notification after unwatching" half unfalsifiable.
   await rpc("products.create", {
@@ -62,7 +62,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   // write provisions him.
   await bobRpc("users.updatePrefs", { timezone: "UTC" });
   // BOB owns the product, component and version, so the only route from his
-  // bug to Alice is the watch.
+  // issue to Alice is the watch.
   const product = await bobRpc("products.create", {
     name: `Watched ${RUN}`,
     key: productKey("WBB"),
@@ -101,18 +101,18 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   await page.reload();
   await expect(bobRow, "the panel shows who you watch").toHaveCount(1);
 
-  // Bob files a bug Alice has no other connection to: not her product to
+  // Bob files an issue Alice has no other connection to: not her product to
   // report, not assigned to her, not on the CC list. The only reason she
   // should hear about it is the watch.
   const before = await countNow();
-  await bobRpc("bugs.create", {
+  await bobRpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
     summary: `Bob filed this ${RUN}`,
     description: "watched activity",
   });
-  expect(await countNow(), "a watcher is notified of the watched user's bug").toBeGreaterThan(
+  expect(await countNow(), "a watcher is notified of the watched user's issue").toBeGreaterThan(
     before,
   );
 
@@ -123,7 +123,7 @@ test("watching a user delivers their bug activity, and stopping ends it", async 
   await expect(bobRow, "the watch is gone").toHaveCount(0);
 
   const afterStop = await countNow();
-  await bobRpc("bugs.create", {
+  await bobRpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,

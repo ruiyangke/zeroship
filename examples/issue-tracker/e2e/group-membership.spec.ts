@@ -14,7 +14,7 @@ import { productKey } from "./keys";
  *
  * The membership is checked through its CONSEQUENCE, not just the member list.
  * A row disappearing from a list proves the list changed; only reading the
- * restricted bug proves the access did.
+ * restricted issue proves the access did.
  */
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
@@ -47,7 +47,7 @@ test("an admin can see who is in a group and remove them", async ({
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const summary = `Members only ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -65,10 +65,10 @@ test("an admin can see who is in a group and remove them", async ({
   });
 
   const group = await rpc("groups.create", { name: `mem-${RUN}`, description: "members" });
-  await rpc("bugs.restrict", { bugId: bug.id, groupId: group.id });
+  await rpc("issues.restrict", { issueId: issue.id, groupId: group.id });
 
   // Restricted: Bob cannot read it.
-  await bob.goto(`/bugs/${bug.id}`);
+  await bob.goto(`/issues/${issue.id}`);
   await expect(bob.getByText(summary), "a non-member is refused").toHaveCount(0);
 
   // Grant through the UI.

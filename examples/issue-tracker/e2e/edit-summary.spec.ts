@@ -4,11 +4,11 @@ import { productKey } from "./keys";
 import { signIn } from "./session";
 
 /**
- * The bug's title is edited where the title is.
+ * The issue's title is edited where the title is.
  *
  * This lived in the metadata rail as "Edit summary" -- a control several
  * hundred pixels from the words it changes, in the column reserved for facts
- * ABOUT the bug. A title is not metadata about itself.
+ * ABOUT the issue. A title is not metadata about itself.
  *
  * The affordance is quiet until the heading is hovered or focused, so this
  * spec drives it the way a keyboard user reaches it rather than by forcing a
@@ -43,7 +43,7 @@ test("the summary is edited from the page head, and can be abandoned", async ({
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const original = `Original summary ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -51,7 +51,7 @@ test("the summary is edited from the page head, and can be abandoned", async ({
     description: "seed",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await expect(page.locator("h1")).toContainText(original);
 
   // Reachable by keyboard: focusing the control is what reveals it.
@@ -76,6 +76,6 @@ test("the summary is edited from the page head, and can be abandoned", async ({
   await expect(page.locator("h1"), "saving rewrites the heading").toContainText(updated);
 
   // Persisted, not just re-rendered.
-  const stored = await rpc("bugs.get", { id: bug.id });
-  expect(stored.bug.summary, "and the new summary is stored").toBe(updated);
+  const stored = await rpc("issues.get", { id: issue.id });
+  expect(stored.issue.summary, "and the new summary is stored").toBe(updated);
 });

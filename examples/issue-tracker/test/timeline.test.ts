@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { buildTimeline } from "../src/components/bug-detail/timeline";
-import { displayValue } from "../src/components/bug-detail/activity";
+import { buildTimeline } from "../src/components/issue-detail/timeline";
+import { displayValue } from "../src/components/issue-detail/activity";
 
 /**
  * Unit-level because the ordering rule is arithmetic, not layout.

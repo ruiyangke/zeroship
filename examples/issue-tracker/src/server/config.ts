@@ -11,19 +11,20 @@ import { defineApp } from "@zeroship/server";
 // an explicit acknowledgement that they are intentionally public.
 export default defineApp({
   resources: {
-    // Bugs
-    "rpc:bugs.create": { auth: "user" },
-    "rpc:bugs.get": { auth: "anon", publiclyAccessible: true },
-    "rpc:bugs.update": { auth: "user" },
-    "rpc:bugs.search": { auth: "anon", publiclyAccessible: true },
-    "rpc:bugs.changeStatus": { auth: "user" },
-    "rpc:bugs.resolve": { auth: "user" },
-    "rpc:bugs.reopen": { auth: "user" },
-    "rpc:bugs.markDuplicate": { auth: "user" },
-    "rpc:bugs.reassign": { auth: "user" },
-    "rpc:bugs.setSeverity": { auth: "user" },
-    "rpc:bugs.setPriority": { auth: "user" },
-    "rpc:bugs.move": { auth: "user" },
+    // Issues
+    "rpc:issues.create": { auth: "user" },
+    "rpc:issues.get": { auth: "anon", publiclyAccessible: true },
+    "rpc:issues.update": { auth: "user" },
+    "rpc:issues.search": { auth: "anon", publiclyAccessible: true },
+    "rpc:issues.changeStatus": { auth: "user" },
+    "rpc:issues.resolve": { auth: "user" },
+    "rpc:issues.reopen": { auth: "user" },
+    "rpc:issues.markDuplicate": { auth: "user" },
+    "rpc:issues.reassign": { auth: "user" },
+    "rpc:issues.setKind": { auth: "user" },
+    "rpc:issues.setSeverity": { auth: "user" },
+    "rpc:issues.setPriority": { auth: "user" },
+    "rpc:issues.move": { auth: "user" },
 
     // Comments
     "rpc:comments.add": { auth: "user" },
@@ -75,8 +76,8 @@ export default defineApp({
     "rpc:groups.removeMember": { auth: "user" },
     "rpc:products.restrict": { auth: "user" },
     "rpc:products.unrestrict": { auth: "user" },
-    "rpc:bugs.restrict": { auth: "user" },
-    "rpc:bugs.unrestrict": { auth: "user" },
+    "rpc:issues.restrict": { auth: "user" },
+    "rpc:issues.unrestrict": { auth: "user" },
 
     // Product structure.
     //
@@ -84,7 +85,7 @@ export default defineApp({
     // need `editcomponents`. Any authenticated user can create or rename a
     // product here. The reason is that the first account bootstraps as the
     // only admin, so gating these would mean a second user could not set up
-    // anything to file bugs against -- which makes the example unusable as a
+    // anything to file issues against -- which makes the example unusable as a
     // demo. `assertCanViewProduct` is NOT a substitute: it returns true for
     // any product with no group restriction, so it gates almost nothing here.
     //

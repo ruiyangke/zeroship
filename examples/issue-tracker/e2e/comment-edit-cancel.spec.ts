@@ -42,7 +42,7 @@ test("cancelling a comment edit throws the draft away, saving keeps it", async (
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -50,9 +50,9 @@ test("cancelling a comment edit throws the draft away, saving keeps it", async (
     description: "seed",
   });
   const original = `original-${RUN}`;
-  await rpc("comments.add", { bugId: bug.id, body: original });
+  await rpc("comments.add", { issueId: issue.id, body: original });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   // Anchored to the comment element, NOT to its text. Filtering by the body
   // and then replacing that body in the editor makes the locator stop matching
   // the very element being driven -- the Cancel button then "does not exist"

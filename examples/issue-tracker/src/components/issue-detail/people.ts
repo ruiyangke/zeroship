@@ -1,10 +1,10 @@
 /**
- * Naming the people a bug refers to.
+ * Naming the people an issue refers to.
  *
- * The detail page used to print `bug.assigneeId`, `bug.reporterId` and
+ * The detail page used to print `issue.assigneeId`, `issue.reporterId` and
  * `comment.authorId` verbatim -- `user_0345pl8prFezDsK4tQtOTB` where a name
  * belongs -- while the CC panel a few pixels away showed "Alice Dev", because
- * `cc.list` joined its user and no other endpoint did. `bugs.get` and
+ * `cc.list` joined its user and no other endpoint did. `issues.get` and
  * `comments.list` now resolve theirs too, and this is the one place that
  * decides what to render.
  */

@@ -9,7 +9,7 @@ import { personName, type PeopleMap } from "./people";
  * "Reporter Id" in the other, which is exactly the bug it was written to fix.
  */
 const FIELD_LABELS: Record<string, string> = {
-  bug_group: "Group restriction",
+  issue_group: "Group restriction",
   assigneeId: "Assignee",
   qaContactId: "QA contact",
   reporterId: "Reporter",
@@ -57,7 +57,7 @@ export function displayValue(
 ): string {
   if (!value) return "";
   // A resolved name wins over any string surgery: `dependsOn` stores a bare
-  // bug id with no readable half to salvage, so stripping cannot help and
+  // issue id with no readable half to salvage, so stripping cannot help and
   // only a lookup can.
   if (labels[value]) return labels[value];
   const match = /^[a-z]{3,6}_[0-9A-Za-z]{16,}:(.+)$/.exec(value);

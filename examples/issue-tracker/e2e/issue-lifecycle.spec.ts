@@ -6,14 +6,14 @@ import { productKey } from "./keys";
 import { openMorePanels, openRailGroup } from "./more";
 
 /**
- * The Bugzilla flow a real user walks, driven in a real browser: file a bug
+ * The Bugzilla flow a real user walks, driven in a real browser: file an issue
  * through the guided form, find it in the list, open it, and resolve it.
  *
  * WHAT THIS COVERS THAT scripts/smoke.sh DOES NOT. smoke.sh drives the RPC
  * surface directly, so it proves the server is right and says nothing about
  * whether the client is wired to it. Everything below goes through the
  * rendered UI: the product -> component cascade only populates if the client
- * refetches on product change, the bug only appears in the list if the list
+ * refetches on product change, the issue only appears in the list if the list
  * reads the same filter the form wrote, and the detail page only shows a
  * resolution if the client sent one.
  *
@@ -27,16 +27,16 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 // A per-run marker so repeated runs against the same dev database cannot see
 // each other's rows. Without it the list assertions pass on a previous run's
-// bug and the spec stops testing what it claims to.
+// issue and the spec stops testing what it claims to.
 const RUN = `${process.pid}-${Date.now()}`;
 
 test.beforeEach(async ({ context, baseURL }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 });
 
-test("files a bug through the guided form and resolves it", async ({ page, baseURL }) => {
+test("files an issue through the guided form and resolves it", async ({ page, baseURL }) => {
   // Structure is seeded over RPC rather than through the admin UI: this spec is
-  // about the bug lifecycle, and building a product through the UI here would
+  // about the issue lifecycle, and building a product through the UI here would
   // mean a failure in the products page reports as a failure in this test.
   //
   // `page.request` and NOT the `request` fixture: the fixture is a separate
@@ -57,7 +57,7 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
 
   const summary = `Parser drops trailing newline ${RUN}`;
 
-  await page.goto("/bugs/new");
+  await page.goto("/issues/new");
 
   // The component list is populated by a fetch that only fires once a product
   // is chosen, so selecting the product must change what the next select
@@ -69,9 +69,11 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   // the options only exist in the DOM while the popup is open.
   await chooseOption(page, page, "Component", "Parser");
 
-  // Version is required because bugs.versionId is NOT NULL. Selecting it here
-  // is not incidental setup: leaving the form's default in place is exactly
-  // what produced an unfileable bug and a 500.
+  // Version is chosen on purpose, and it is no longer the difference between a
+  // filed issue and a 500: `issues.versionId` is NULLABLE now, because a
+  // feature request has no version it was found in. Setting it here keeps this
+  // walk over the populated path, where the value has to survive the round trip
+  // and the third cascade level has to render.
   await chooseOption(page, page, "Version", "1.0");
 
   await page.getByLabel("Summary").fill(summary);
@@ -83,14 +85,14 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
   await chooseOption(page, page, "Severity", "major");
   await chooseOption(page, page, "Priority", "P1");
 
-  await page.getByRole("button", { name: "File bug" }).click();
+  await page.getByRole("button", { name: "File issue" }).click();
 
-  // Filing navigates to the new bug's detail page. Asserted by ROLE rather
-  // than by text: the summary appears in both the h1 (prefixed with the bug
+  // Filing navigates to the new issue's detail page. Asserted by ROLE rather
+  // than by text: the summary appears in both the h1 (prefixed with the issue
   // id) and the h2, so a bare getByText matches two nodes and fails strict
   // mode -- which reads as "not found" and sends you looking for a filing bug
   // that isn't there.
-  await expect(page).toHaveURL(/\/bugs\/bug_/);
+  await expect(page).toHaveURL(/\/issues\/issu_/);
   // The page heading, level 1. The detail panel used to repeat the summary as
   // an h2 directly above an input holding the same text; this asserted on that
   // duplicate, so removing it broke a spec that was pinning the defect.
@@ -115,8 +117,8 @@ test("files a bug through the guided form and resolves it", async ({ page, baseU
     "and the priority",
   ).toContainText("P1");
 
-  // The bug is findable from the list by its summary.
-  await page.goto("/bugs");
+  // The issue is findable from the list by its summary.
+  await page.goto("/issues");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.keyboard.press("Enter");
   await expect(page.getByText(summary)).toBeVisible();
@@ -142,9 +144,9 @@ test("an anonymous visitor is told to sign in rather than shown an empty list", 
   await anon.close();
 });
 
-test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => {
+test("an issue I am CC'd on appears on my dashboard", async ({ page, baseURL }) => {
   // Guards cc.listMine and its client wiring together. The schema was already
-  // indexed for this direction (bugCc.userId) but no procedure read it, and
+  // indexed for this direction (issueCc.userId) but no procedure read it, and
   // the dashboard rendered a hardcoded "(0)" with a note claiming the lookup
   // was impossible. Both halves have to work for this to pass.
   const rpc = async (proc: string, json: unknown) => {
@@ -170,8 +172,8 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
   });
   const version = await rpc("versions.create", { productId: product.id, name: "2.0" });
 
-  const summary = `Watched bug ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const summary = `Watched issue ${RUN}`;
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -183,11 +185,11 @@ test("a bug I am CC'd on appears on my dashboard", async ({ page, baseURL }) => 
   // section that lists everything would pass this test without cc.listMine
   // working at all.
   await page.goto("/dashboard");
-  const ccSection = page.locator("section.dashboard-section", { hasText: "Bugs I'm CC'd on" });
+  const ccSection = page.locator("section.dashboard-section", { hasText: "Issues I'm CC'd on" });
   await expect(ccSection).toBeVisible();
   await expect(ccSection.getByText(summary)).toHaveCount(0);
 
-  await rpc("cc.add", { bugId: bug.id, userId: me.id });
+  await rpc("cc.add", { issueId: issue.id, userId: me.id });
 
   await page.reload();
   await expect(ccSection.getByText(summary)).toBeVisible();
@@ -211,7 +213,7 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -221,7 +223,7 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
 
   // Voting off by default: the panel must say so rather than show a control
   // that always fails.
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await openMorePanels(page);
   const votes = page.locator("section.votes-panel");
   await expect(votes).toBeVisible();
@@ -229,7 +231,7 @@ test("voting is offered only when the product enables it", async ({ page, baseUR
 
   await rpc("products.update", {
     id: product.id,
-    changes: { votesPerUser: 5, maxVotesPerBug: 3, votesToConfirm: 2 },
+    changes: { votesPerUser: 5, maxVotesPerIssue: 3, votesToConfirm: 2 },
   });
 
   await page.reload();
@@ -275,7 +277,7 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const summary = `Notify me ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -298,13 +300,13 @@ test("the notification inbox renders, and omits my own changes", async ({ page, 
   // A self-authored comment must NOT appear: the actor is not notified about
   // her own change, and an inbox that showed it would be wrong in a way the
   // count alone would hide.
-  await rpc("cc.add", { bugId: bug.id, userId: me.id });
-  await rpc("comments.add", { bugId: bug.id, body: `self comment ${RUN}` });
+  await rpc("cc.add", { issueId: issue.id, userId: me.id });
+  await rpc("comments.add", { issueId: issue.id, body: `self comment ${RUN}` });
   await page.reload();
   await expect(inbox.getByText(summary)).toHaveCount(0);
 });
 
-test("an admin can restrict a bug to a group through the UI", async ({ page, baseURL }) => {
+test("an admin can restrict an issue to a group through the UI", async ({ page, baseURL }) => {
   // The whole access-control model -- eight procedures -- had no interface at
   // all, so the app's most consequential feature could only be reached over
   // raw RPC. This drives it the way an operator would.
@@ -322,7 +324,7 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -342,8 +344,8 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   // mode -- which reads as "the group was not created" when it was.
   await expect(groups.locator("ul.group-list").getByText(`sec-${RUN}`)).toBeVisible();
 
-  // Then restrict the bug from its detail page.
-  await page.goto(`/bugs/${bug.id}`);
+  // Then restrict the issue from its detail page.
+  await page.goto(`/issues/${issue.id}`);
   await openMorePanels(page);
   const security = page.locator("section.security-panel");
   await expect(security).toBeVisible();
@@ -355,7 +357,7 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   await security.getByRole("button", { name: "Restrict", exact: true }).click();
 
   // The confirmation must state the consequence, not just "done" -- restricting
-  // a bug changes who can see it and that is the point of the action.
+  // an issue changes who can see it and that is the point of the action.
   await expect(security.getByText(/only members of that group/i)).toBeVisible();
 
   // Lift it again. The global teardown sweeps fixture groups through the
@@ -364,10 +366,10 @@ test("an admin can restrict a bug to a group through the UI", async ({ page, bas
   const created = ((await rpc("groups.list", {})) as Array<{ id: string; name: string }>).find(
     (g) => g.name === `sec-${RUN}`,
   );
-  if (created) await rpc("bugs.unrestrict", { bugId: bug.id, groupId: created.id });
+  if (created) await rpc("issues.unrestrict", { issueId: issue.id, groupId: created.id });
 });
 
-test("see also links are added, listed and removed from the bug page", async ({ page, baseURL }) => {
+test("see also links are added, listed and removed from the issue page", async ({ page, baseURL }) => {
   const rpc = async (proc: string, json: unknown) => {
     const res = await page.request.post(`${baseURL}/__zeroship/v1/${proc}`, { data: { json } });
     expect(res.status(), `${proc} should succeed`).toBe(200);
@@ -382,7 +384,7 @@ test("see also links are added, listed and removed from the bug page", async ({ 
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -390,7 +392,7 @@ test("see also links are added, listed and removed from the bug page", async ({ 
     description: "has links",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await openMorePanels(page);
   await openRailGroup(page, "See also");
   const panel = page.locator("section.see-also-panel");

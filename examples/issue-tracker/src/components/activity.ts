@@ -1,6 +1,6 @@
-// Reconstructs derived "current state" views from the bugs.get activity
+// Reconstructs derived "current state" views from the issues.get activity
 // log, for the two relations the RPC surface never exposes as a direct
-// per-bug list: attached keywords and set flags. Every mutation that
+// per-issue list: attached keywords and set flags. Every mutation that
 // touches either one writes an activity row (see src/index.ts
 // recordRelatedChange calls for "keywords" and "flag.<TypeName>"), so
 // replaying the log in order reconstructs the live set.
@@ -14,7 +14,7 @@
 // row, so several simultaneous flags of the same multiplicable type collapse
 // onto one derived value (the most recent one). Non-multiplicable flag
 // types (the common case) are exact, because the server itself only ever
-// keeps one flag row per (bug, flagType) for those.
+// keeps one flag row per (issue, flagType) for those.
 import type { Activity } from "./types";
 
 export function deriveNamedSet(

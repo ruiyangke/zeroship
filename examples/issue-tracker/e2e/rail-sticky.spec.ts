@@ -43,7 +43,7 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -52,13 +52,13 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
   });
   // Long enough that the thread outruns the viewport, which is the whole case.
   for (let i = 0; i < 12; i++) {
-    await rpc("comments.add", { bugId: bug.id, body: `Comment number ${i} with a sentence.` });
+    await rpc("comments.add", { issueId: issue.id, body: `Comment number ${i} with a sentence.` });
   }
 
   // A laptop, not a tall test window -- the bug only exists when the rail is
   // taller than the scrollport.
   await page.setViewportSize({ width: 1440, height: 800 });
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await expect(page.locator("ul.comment-list")).toBeVisible();
 
   // The page itself does not scroll; the shell's main does. Scrolling the
@@ -83,7 +83,7 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
   // 2. NOT DRAWN THROUGH ITSELF.
   const overlaps = await page.evaluate(() => {
     const rows = Array.from(
-      document.querySelectorAll(".bug-detail-side .rail-choice, .bug-detail-side .rail-section"),
+      document.querySelectorAll(".issue-detail-side .rail-choice, .issue-detail-side .rail-section"),
     ) as HTMLElement[];
     const boxes = rows.map((el) => ({
       label: (el.textContent ?? "").trim().slice(0, 24),

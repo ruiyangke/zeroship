@@ -9,11 +9,11 @@ import { RailDisclosure } from "./RailDisclosure";
 import { Absent } from "./Absent";
 
 export function KeywordsPanel({
-  bugId,
+  issueId,
   activities,
   onChanged,
 }: {
-  bugId: string;
+  issueId: string;
   activities: readonly Activity[];
   onChanged: () => void;
 }) {
@@ -29,9 +29,9 @@ export function KeywordsPanel({
     setError(null);
     try {
       if (attached.has(keywordName)) {
-        await detachKeyword({ bugId, keywordId });
+        await detachKeyword({ issueId, keywordId });
       } else {
-        await attachKeyword({ bugId, keywordId });
+        await attachKeyword({ issueId, keywordId });
       }
       onChanged();
     } catch (err) {
@@ -48,7 +48,7 @@ export function KeywordsPanel({
     setError(null);
     try {
       const keyword = await createKeyword({ name });
-      await attachKeyword({ bugId, keywordId: keyword.id });
+      await attachKeyword({ issueId, keywordId: keyword.id });
       setNewKeyword("");
       reloadKeywords();
       onChanged();
@@ -78,17 +78,17 @@ export function KeywordsPanel({
     <section className="keywords-panel">
       <div className="keyword-tags">
         {/* These two empty states say DIFFERENT things -- none attached to
-            this bug, versus none defined anywhere -- and stacked as "none"
+            this issue, versus none defined anywhere -- and stacked as "none"
             above "No keywords defined yet." they read as one statement
             contradicting itself. Both now name their own subject. */}
         {[...attached].length === 0 ? (
           // ...but only while there is a vocabulary to have chosen from. When
-          // the tracker defines no keywords at all, "No keywords on this bug"
+          // the tracker defines no keywords at all, "No keywords on this issue"
           // states a consequence of the message directly below it, and the
           // panel says nothing twice. The distinction is real; showing both at
           // once is what was redundant.
           state.status === "ready" && state.data.length === 0 ? null : (
-            <span className="dim">No keywords on this bug.</span>
+            <span className="dim">No keywords on this issue.</span>
           )
         ) : (
           [...attached].map((name) => (

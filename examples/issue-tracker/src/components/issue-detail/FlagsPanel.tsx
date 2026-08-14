@@ -1,6 +1,6 @@
 // Flags are READ from the server via flags.list, not reconstructed.
 //
-// This panel used to derive each flag's current value by replaying the bug's
+// This panel used to derive each flag's current value by replaying the issue's
 // activity log. That was exact only for non-multiplicable flag types -- several
 // live flags of one type collapse to whichever was written last -- and it left
 // "Clear" unusable, because clearing needs a flag id and the id was only ever
@@ -20,15 +20,15 @@ import { Absent } from "./Absent";
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];
 
-type LiveFlag = Awaited<ReturnType<typeof listFlags>>["onBug"][number];
+type LiveFlag = Awaited<ReturnType<typeof listFlags>>["onIssue"][number];
 
 function FlagRow({
-  bugId,
+  issueId,
   flagType,
   live,
   onChanged,
 }: {
-  bugId: string;
+  issueId: string;
   flagType: FlagType;
   live: readonly LiveFlag[];
   onChanged: () => void;
@@ -49,7 +49,7 @@ function FlagRow({
     try {
       await setFlag({
         flagTypeId: flagType.id,
-        bugId,
+        issueId,
         status,
         requesteeId: requesteeId ?? undefined,
       });
@@ -154,11 +154,11 @@ function FlagRow({
 }
 
 export function FlagsPanel({
-  bugId,
+  issueId,
   flagTypes,
   onChanged,
 }: {
-  bugId: string;
+  issueId: string;
   flagTypes: readonly FlagType[] | null;
   onChanged: () => void;
 }) {
@@ -167,15 +167,15 @@ export function FlagsPanel({
 
   const reload = useCallback(async () => {
     try {
-      const result = await listFlags({ bugId });
-      setLive(result.onBug);
+      const result = await listFlags({ issueId });
+      setLive(result.onIssue);
       setLoadError(null);
     } catch (err) {
       // Surfaced rather than swallowed: an unreadable flag list rendering as
-      // "not set" would claim, wrongly, that the bug carries no flags.
+      // "not set" would claim, wrongly, that the issue carries no flags.
       setLoadError(errorMessage(err));
     }
-  }, [bugId]);
+  }, [issueId]);
 
   useEffect(() => {
     void reload();
@@ -186,20 +186,20 @@ export function FlagsPanel({
     onChanged();
   };
 
-  const bugFlagTypes = flagTypes?.filter((t) => t.targetType === "bug") ?? [];
+  const issueFlagTypes = flagTypes?.filter((t) => t.targetType === "issue") ?? [];
   return (
     <section className="flags-panel">
       <h3>Flags</h3>
       {flagTypes === null ? (
         <p className="state-hint small">Sign in to see and set flags for this product.</p>
-      ) : bugFlagTypes.length === 0 ? (
-        <p className="state-hint small">This product defines no bug-level flag types.</p>
+      ) : issueFlagTypes.length === 0 ? (
+        <p className="state-hint small">This product defines no issue-level flag types.</p>
       ) : (
         <ul className="flag-list">
-          {bugFlagTypes.map((flagType) => (
+          {issueFlagTypes.map((flagType) => (
             <FlagRow
               key={flagType.id}
-              bugId={bugId}
+              issueId={issueId}
               flagType={flagType}
               live={live}
               onChanged={refresh}

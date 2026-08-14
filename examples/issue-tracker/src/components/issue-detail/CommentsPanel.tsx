@@ -127,10 +127,10 @@ function CommentRow({
       <Avatar size="sm" fallback={initials(author)} aria-hidden="true" />
       <div className="comment-body-column">
       <div className="comment-head">
-        {/* Comment 0 IS the description -- `bugs.create` writes the description
+        {/* Comment 0 IS the description -- `issues.create` writes the description
             as the first comment, the way Bugzilla does, so there is no separate
             description row to render. Presenting it as an anonymous "#0" bubble
-            hid that: the one piece of text stating what the bug IS looked like
+            hid that: the one piece of text stating what the issue IS looked like
             the first reply to it. Named rather than restyled, so it reads
             correctly to a screen reader too. */}
         <span className="comment-author">{author}</span>
@@ -149,7 +149,7 @@ function CommentRow({
         {comment.commentNumber > 0 ? (
           <Link
             className="comment-number"
-            to={`/bugs/${comment.bugId}/c/${comment.commentNumber}`}
+            to={`/issues/${comment.issueId}/c/${comment.commentNumber}`}
           >
             #{comment.commentNumber}
           </Link>
@@ -212,10 +212,10 @@ function CommentRow({
           {attachments.map((file) => (
             <li key={file.id}>
               {/* A button. It was an anchor to
-                  "/bugs/<id>?attachment=<fileId>", which is not a deep link
+                  "/issues/<id>?attachment=<fileId>", which is not a deep link
                   in a hash-routed app: the hash splits on "/", so the query
-                  rode inside the bug id and the page asked the server for a
-                  bug that cannot exist. Nothing read the parameter either.
+                  rode inside the issue id and the page asked the server for a
+                  issue that cannot exist. Nothing read the parameter either.
                   Attachments arrive over RPC as base64, so there is no URL to
                   point at -- downloading IS the action. */}
               <button
@@ -240,7 +240,7 @@ function CommentRow({
   );
 }
 
-function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void }) {
+function NewCommentForm({ issueId, onAdded }: { issueId: string; onAdded: () => void }) {
   const [body, setBody] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -265,14 +265,14 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
     setBusy(true);
     setError(null);
     try {
-      const comment = await addComment({ bugId, body, isPrivate });
+      const comment = await addComment({ issueId, body, isPrivate });
       // The comment first, then its files -- an attachment names the comment
       // it arrived with, so the comment has to exist to be named. If a file
       // fails here the comment still stands, which is the right way round:
       // the sentence explaining the file is worth more than the file.
       for (const file of files) {
         await uploadAttachment({
-          bugId,
+          issueId,
           commentId: comment.id,
           filename: file.name,
           contentBase64: await fileToBase64(file),
@@ -365,7 +365,7 @@ function NewCommentForm({ bugId, onAdded }: { bugId: string; onAdded: () => void
 }
 
 export function CommentsPanel({
-  bugId,
+  issueId,
   readOnly = false,
   attachments,
   onAttachmentsChanged,
@@ -373,7 +373,7 @@ export function CommentsPanel({
   people = {},
   labels = {},
 }: {
-  bugId: string;
+  issueId: string;
   /** Field changes, shown inline the way GitHub and Linear do. */
   activities?: readonly Activity[];
   people?: PeopleMap;
@@ -390,7 +390,7 @@ export function CommentsPanel({
   attachments: AsyncState<Attachment[]>;
   onAttachmentsChanged: () => void;
 }) {
-  const { state, reload } = useAsync(() => listComments({ bugId }), [bugId]);
+  const { state, reload } = useAsync(() => listComments({ issueId }), [issueId]);
   // Fetched once for the thread and handed out per comment, rather than each
   // row asking for its own -- one request either way, and the grouping is a
   // property of the thread, not of any single comment.
@@ -453,7 +453,7 @@ export function CommentsPanel({
       </AsyncSection>
       {readOnly ? null : (
         <NewCommentForm
-          bugId={bugId}
+          issueId={issueId}
           onAdded={() => {
             reload();
             onAttachmentsChanged();

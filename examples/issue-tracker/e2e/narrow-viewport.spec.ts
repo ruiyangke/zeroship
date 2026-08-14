@@ -4,7 +4,7 @@ import { productKey } from "./keys";
 import { signIn } from "./session";
 
 /**
- * Nothing on the bug page runs off a narrow screen.
+ * Nothing on the issue page runs off a narrow screen.
  *
  * Every other spec and every screenshot in this suite ran at 1280px or wider,
  * so the phone width was simply never looked at -- and the fold's own label,
@@ -23,7 +23,7 @@ const RUN = `${process.pid}-${Date.now()}`;
 
 test.use({ viewport: { width: 390, height: 1400 } });
 
-test("the bug page fits a phone", async ({ page, baseURL }) => {
+test("the issue page fits a phone", async ({ page, baseURL }) => {
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
   const rpc = async (proc: string, json: unknown) => {
@@ -43,7 +43,7 @@ test("the bug page fits a phone", async ({ page, baseURL }) => {
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -51,7 +51,7 @@ test("the bug page fits a phone", async ({ page, baseURL }) => {
     description: "The progress bar reaches 99% and never completes.",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await expect(page.locator("li.comment").first()).toBeVisible();
 
   const overflowing = await page.evaluate(() => {

@@ -17,13 +17,13 @@ import { signDevSession } from "./session";
  * needs no cooperation.
  *
  * SAFETY: it deletes by calling the same `groups.delete` a person would, so
- * the server's guard still applies -- a group that still restricts a bug or a
+ * the server's guard still applies -- a group that still restricts an issue or
  * product is refused and left alone. This cannot widen anyone's visibility,
  * and the refusals are reported rather than hidden, because a rising refused
  * count means the restrict specs are leaving restrictions behind.
  *
  * WHAT IT DOES NOT DO: unrestrict anything to make a group deletable. Nothing
- * exposes which bugs a group restricts, and guessing is not worth it for a
+ * exposes which issues a group restricts, and guessing is not worth it for a
  * cleanup task.
  */
 

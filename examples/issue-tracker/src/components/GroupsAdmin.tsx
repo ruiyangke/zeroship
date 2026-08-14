@@ -19,7 +19,7 @@ import { errorMessage } from "./rpc";
  * Group administration: create a group and put people in it.
  *
  * Without this there is no way to reach the access-control model from the app
- * at all -- `bugs.restrict` needs a group id, and nothing could create one. The
+ * at all -- `issues.restrict` needs a group id, and nothing could create one. The
  * whole security surface existed server-side and was unreachable.
  *
  * Admin-only, and it says so rather than rendering a form that will 403 on
@@ -53,7 +53,7 @@ export function GroupsAdmin() {
   }, [load]);
 
   // Refusal is an ANSWER here, not a failure: the server declines while the
-  // group still restricts bugs or products and says how many, because
+  // group still restricts issues or products and says how many, because
   // deleting it then would quietly widen who can read them. So the message
   // is surfaced rather than swallowed.
   const remove = async (groupId: string) => {
@@ -154,7 +154,7 @@ export function GroupsAdmin() {
       <h2>Groups</h2>
       <p className="state-hint small">
         A group restricts what its members can see. Restrict a whole product, or one
-        confidential bug inside an otherwise readable one.
+        confidential issue inside an otherwise readable one.
       </p>
 
       <div className="field-row">
@@ -298,7 +298,7 @@ export function GroupsAdmin() {
 /**
  * Product-level restriction: hide an entire product behind a group.
  *
- * Distinct from restricting one bug. This is the coarser of the two controls
+ * Distinct from restricting one issue. This is the coarser of the two controls
  * and the one that silently changes what a whole team can see, so the
  * confirmation names the consequence rather than saying "saved".
  */
@@ -332,7 +332,7 @@ function ProductRestrictions({ groups }: { groups: Awaited<ReturnType<typeof lis
       else await unrestrictProduct({ productId, groupId });
       setNote(
         action === "restrict"
-          ? "Restricted. Only members of that group can now see this product and its bugs."
+          ? "Restricted. Only members of that group can now see this product and its issues."
           : "Restriction removed.",
       );
     } catch (err) {

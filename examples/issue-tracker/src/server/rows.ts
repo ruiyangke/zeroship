@@ -56,7 +56,7 @@ export type ProductRow = SystemRow & {
   // Bugzilla voting limits. Present in the schema since the rework and
   // absent from this view, which is why nothing could read them.
   votesPerUser: number;
-  maxVotesPerBug: number;
+  maxVotesPerIssue: number;
   votesToConfirm: number;
 };
 
@@ -78,13 +78,20 @@ export type VersionRow = SystemRow & {
 
 export type MilestoneRow = VersionRow;
 
-export type BugRow = SystemRow & {
+export type IssueRow = SystemRow & {
   productId: string;
   number: number;
   componentId: string;
+  // NULLABLE in the schema, and optional here for the same reason: "version
+  // found in" is a defect concept, and an enhancement has none.
   versionId?: string | null;
   milestoneId?: string | null;
   summary: string;
+  // What the row IS -- "defect" | "enhancement" | "task" -- kept apart from
+  // how bad it is. NOT NULL, default "defect". Typed as `string` like every
+  // other closed-vocabulary column here: the row type mirrors what the
+  // database returns, and the narrow union lives in ./lib/quicksearch.
+  kind: string;
   status: string;
   resolution?: string | null;
   severity: string;
@@ -101,14 +108,14 @@ export type BugRow = SystemRow & {
   voteCount: number;
   commentCount: number;
   deadline?: number | null;
-  // Stamped by bugs.resolve / bugs.markDuplicate and cleared by bugs.reopen.
+  // Stamped by issues.resolve / issues.markDuplicate and cleared by issues.reopen.
   // reports.timeToResolve reads this instead of mining the activities table
   // for status->RESOLVED transitions, which was a scan plus string matching.
   resolvedAt?: number | null;
 };
 
 export type CommentRow = SystemRow & {
-  bugId: string;
+  issueId: string;
   authorId: string;
   body: string;
   commentNumber: number;
@@ -116,7 +123,7 @@ export type CommentRow = SystemRow & {
 };
 
 export type AttachmentRow = SystemRow & {
-  bugId: string;
+  issueId: string;
   commentId?: string | null;
   uploaderId: string;
   filename: string;
@@ -133,20 +140,20 @@ export type KeywordRow = SystemRow & {
   description?: string | null;
 };
 
-export type BugKeywordRow = SystemRow & { bugId: string; keywordId: string };
-export type DependencyRow = SystemRow & { bugId: string; dependsOnId: string };
-export type CcRow = SystemRow & { bugId: string; userId: string };
-export type SeeAlsoRow = SystemRow & { bugId: string; url: string };
+export type IssueKeywordRow = SystemRow & { issueId: string; keywordId: string };
+export type DependencyRow = SystemRow & { issueId: string; dependsOnId: string };
+export type CcRow = SystemRow & { issueId: string; userId: string };
+export type SeeAlsoRow = SystemRow & { issueId: string; url: string };
 export type WatcherRow = SystemRow & { watcherId: string; watchedId: string };
-export type VoteRow = SystemRow & { bugId: string; userId: string; count: number };
+export type VoteRow = SystemRow & { issueId: string; userId: string; count: number };
 export type ProductGroupRow = SystemRow & { productId: string; groupId: string };
 export type GroupMemberRow = SystemRow & { groupId: string; userId: string };
 export type GroupRow = SystemRow & {
   name: string;
   description?: string | null;
-  isBugGroup: boolean;
+  isIssueGroup: boolean;
 };
-export type BugGroupRow = SystemRow & { bugId: string; groupId: string };
+export type IssueGroupRow = SystemRow & { issueId: string; groupId: string };
 
 export type FlagTypeRow = SystemRow & {
   name: string;
@@ -159,7 +166,7 @@ export type FlagTypeRow = SystemRow & {
 
 export type FlagRow = SystemRow & {
   flagTypeId: string;
-  bugId?: string | null;
+  issueId?: string | null;
   attachmentId?: string | null;
   setterId: string;
   requesteeId?: string | null;
@@ -167,7 +174,7 @@ export type FlagRow = SystemRow & {
 };
 
 export type ActivityRow = SystemRow & {
-  bugId: string;
+  issueId: string;
   actorId: string;
   fieldName: string;
   oldValue?: string | null;
@@ -183,7 +190,7 @@ export type SavedSearchRow = SystemRow & {
 
 export type NotificationRow = SystemRow & {
   userId: string;
-  bugId?: string | null;
+  issueId?: string | null;
   kind: string;
   title: string;
   body?: string | null;
@@ -241,16 +248,16 @@ export type TxDb = {
   components: TxCollection<ComponentRow>;
   versions: TxCollection<VersionRow>;
   milestones: TxCollection<MilestoneRow>;
-  bugs: TxCollection<BugRow>;
+  issues: TxCollection<IssueRow>;
   comments: TxCollection<CommentRow>;
   attachments: TxCollection<AttachmentRow>;
   keywords: TxCollection<KeywordRow>;
-  bugKeywords: TxCollection<BugKeywordRow>;
-  bugDependencies: TxCollection<DependencyRow>;
-  bugCc: TxCollection<CcRow>;
+  issueKeywords: TxCollection<IssueKeywordRow>;
+  issueDependencies: TxCollection<DependencyRow>;
+  issueCc: TxCollection<CcRow>;
   votes: TxCollection<VoteRow>;
-  bugSeeAlso: TxCollection<SeeAlsoRow>;
-  bugGroups: TxCollection<BugGroupRow>;
+  issueSeeAlso: TxCollection<SeeAlsoRow>;
+  issueGroups: TxCollection<IssueGroupRow>;
   flags: TxCollection<FlagRow>;
   activities: TxCollection<ActivityRow>;
   savedSearches: TxCollection<SavedSearchRow>;
@@ -266,20 +273,20 @@ export type AppDb = {
   groups: Collection<GroupRow>;
   productGroups: Collection<ProductGroupRow>;
   groupMembers: Collection<GroupMemberRow>;
-  bugGroups: Collection<BugGroupRow>;
-  bugs: Collection<BugRow>;
+  issueGroups: Collection<IssueGroupRow>;
+  issues: Collection<IssueRow>;
   // Every table the migration creates is now listed here. This comment used to
-  // say bugSeeAlso, votes and watchers were absent and their features
+  // say issueSeeAlso, votes and watchers were absent and their features
   // unimplemented; all three are listed above and implemented.
   comments: Collection<CommentRow>;
   attachments: Collection<AttachmentRow>;
   keywords: Collection<KeywordRow>;
-  bugKeywords: Collection<BugKeywordRow>;
-  bugDependencies: Collection<DependencyRow>;
-  bugCc: Collection<CcRow>;
+  issueKeywords: Collection<IssueKeywordRow>;
+  issueDependencies: Collection<DependencyRow>;
+  issueCc: Collection<CcRow>;
   votes: Collection<VoteRow>;
   watchers: Collection<WatcherRow>;
-  bugSeeAlso: Collection<SeeAlsoRow>;
+  issueSeeAlso: Collection<SeeAlsoRow>;
   flagTypes: Collection<FlagTypeRow>;
   flags: Collection<FlagRow>;
   activities: Collection<ActivityRow>;

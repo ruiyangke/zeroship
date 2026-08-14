@@ -1,18 +1,25 @@
 # issue-tracker
 
 A Bugzilla-faithful issue tracker built as a zeroship example app. It keeps
-Bugzilla's domain model and vocabulary: products and components, bugs with
+Bugzilla's domain model and vocabulary: products and components, issues with
 separate status and resolution fields, comments, attachments, dependencies,
 duplicates, keywords, flags, CC lists, voting, watching, cross-tracker
 see-also links, saved searches, notifications, and activity history.
+
+One noun is deliberately not Bugzilla's. The record is an **issue** carrying a
+**kind** (`defect | enhancement | task`), where Bugzilla has a **bug** carrying
+`severity: enhancement`. Overloading severity makes "a critical feature
+request" unsayable; bugzilla.mozilla.org made the same split for the same
+reason. Severity here means impact and nothing else. SPEC.md argues it in full
+under Vocabulary and files it under the deliberate divergences.
 
 The example is deliberately migration-first. The committed migration in
 `migrations/` is the schema source of truth; the build folds it into the typed
 `env.db` runtime descriptor. There is no inline `dbSchema` or server-module
 schema export.
 
-The server exposes **88 explicitly named RPC procedures**, each with an auth
-policy in `src/server/config.ts`. Ten are anonymous — bug browsing, comment
+The server exposes **89 explicitly named RPC procedures**, each with an auth
+policy in `src/server/config.ts`. Ten are anonymous — issue browsing, comment
 reading, product listing and resolution, and the reports — and every one of
 those ten is a read. Writes, administration, personal searches and notification data require
 an authenticated user. Field-changing mutations record Bugzilla-style activity
@@ -23,13 +30,13 @@ rows, and dependency and duplicate operations reject cycles.
 Three mechanisms, all enforced on reads *and* writes:
 
 - **Product groups** (`products.restrict`) hide a whole product.
-- **Bug groups** (`bugs.restrict`) are Bugzilla's `bug_group_map`: one
-  confidential bug inside an otherwise readable product.
+- **Issue groups** (`issues.restrict`) are Bugzilla's `bug_group_map`: one
+  confidential issue inside an otherwise readable product.
 - **Private comments** are withheld from everyone but their author.
 
 Restrictions apply to searches, reports and dependency graphs, not only to the
 detail route — a count or a graph node is a disclosure too. A user who cannot
-read a bug also cannot comment on it, resolve it or touch its attachments.
+read an issue also cannot comment on it, resolve it or touch its attachments.
 
 The **first account to exist becomes an admin**, the way Bugzilla's installer
 creates one. Nothing else sets `isAdmin`, so without that bootstrap the whole
@@ -43,8 +50,8 @@ with a conflict error rather than corrupting the relation. Clearing a timestamp
 stores an empty string rather than `NULL`, which is why `reports.timeToResolve`
 filters on `typeof === "number"`.
 
-`attachments.delete` checks bug access but not uploader identity, so any user
-who can edit a bug can delete another user's attachment. See SPEC.md's
+`attachments.delete` checks issue access but not uploader identity, so any
+user who can edit an issue can delete another user's attachment. See SPEC.md's
 "Divergences from Bugzilla" for the full list of deliberate departures.
 
 ## Run locally
@@ -72,9 +79,9 @@ Four layers, because each one catches what the layer below cannot:
 
 ```bash
 pnpm typecheck
-pnpm test        # 72 unit tests, no database
+pnpm test        # 86 unit tests, no database
 pnpm smoke       # 58 checks against a running `pnpm dev`
-pnpm test:e2e    # 5 Chromium specs via Playwright
+pnpm test:e2e    # 58 Chromium specs via Playwright
 ```
 
 - **Unit** covers the pure parsers and transition helpers, plus two structural

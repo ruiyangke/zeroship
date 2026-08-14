@@ -18,7 +18,7 @@ import { signIn } from "./session";
  *
  * EXCLUDES controls that are not reachable. Base UI's Select renders a hidden
  * form input per combobox, and the popup is a portal that exists whether or
- * not it is open -- counting those reports four "nameless inputs" on the bug
+ * not it is open -- counting those reports four "nameless inputs" on the issue
  * list that no one can reach or needs to.
  */
 
@@ -32,16 +32,16 @@ test("no reachable control is missing an accessible name", async ({ page, baseUR
     expect(res.status(), `${proc} should succeed`).toBe(200);
     return (await res.json()).json;
   };
-  const bugs = await rpc("bugs.search", { limit: 1 });
-  expect(bugs.length, "the fixture needs a bug to open").toBeGreaterThan(0);
+  const issues = await rpc("issues.search", { limit: 1 });
+  expect(issues.length, "the fixture needs an issue to open").toBeGreaterThan(0);
 
   const pages: [string, string][] = [
-    ["bug list", "/bugs"],
-    ["new bug", "/bugs/new"],
+    ["issue list", "/issues"],
+    ["new issue", "/issues/new"],
     ["dashboard", "/dashboard"],
     ["products admin", "/products"],
     ["reports", "/reports"],
-    ["bug detail", `/bugs/${bugs[0].id}`],
+    ["issue detail", `/issues/${issues[0].id}`],
   ];
 
   const offenders: string[] = [];

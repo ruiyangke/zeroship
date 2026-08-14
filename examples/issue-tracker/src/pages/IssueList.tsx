@@ -1,18 +1,18 @@
 import { useState } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
 import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
-import { listProducts, searchBugs } from "../api";
+import { listProducts, searchIssues } from "../api";
 import {
-  ALL_BUG_COLUMNS,
-  BugResultsTable,
-  type BugColumnKey,
-} from "../components/BugResultsTable";
+  ALL_ISSUE_COLUMNS,
+  IssueResultsTable,
+  type IssueColumnKey,
+} from "../components/IssueResultsTable";
 import { FieldBuilder } from "../components/search/SearchBuilder";
 import { AsyncSection } from "../components/StateViews";
 import { useAsync } from "../components/rpc";
-import type { Bug } from "../components/types";
-import { BUG_STATUSES, type BugStatus } from "../lib/workflow";
-import { BUG_PRIORITIES, BUG_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
+import type { Issue } from "../components/types";
+import { ISSUE_STATUSES, type IssueStatus } from "../lib/workflow";
+import { ISSUE_KINDS, ISSUE_PRIORITIES, ISSUE_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
 
 /**
  * The parser throws on malformed input ("@" with no handle). A half-typed
@@ -28,10 +28,17 @@ function parseQuickSearchSafely(input: string) {
   }
 }
 
-const DEFAULT_COLUMNS: BugColumnKey[] = [
+// `kind` is DEFAULT, not opt-in like `reporter`. It was briefly opt-in, and a
+// screenshot of the result settled it: "Support dark mode in the viewer" and
+// "Crash on empty input" rendered identically, because the only classification
+// on screen was a severity badge and severity no longer says what a record is.
+// A field that exists so two things can be told apart has to be visible in the
+// view where you are telling them apart.
+const DEFAULT_COLUMNS: IssueColumnKey[] = [
   "id",
   "status",
   "resolution",
+  "kind",
   "severity",
   "priority",
   "product",
@@ -43,14 +50,14 @@ const DEFAULT_COLUMNS: BugColumnKey[] = [
 const COLUMNS_STORAGE_KEY = "issue-tracker:list-columns";
 const PAGE_SIZE = 25;
 
-function loadColumns(): BugColumnKey[] {
+function loadColumns(): IssueColumnKey[] {
   try {
     const raw = window.localStorage.getItem(COLUMNS_STORAGE_KEY);
     if (!raw) return DEFAULT_COLUMNS;
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return DEFAULT_COLUMNS;
-    const valid = parsed.filter((c): c is BugColumnKey =>
-      ALL_BUG_COLUMNS.some((col) => col.key === c),
+    const valid = parsed.filter((c): c is IssueColumnKey =>
+      ALL_ISSUE_COLUMNS.some((col) => col.key === c),
     );
     return valid.length > 0 ? valid : DEFAULT_COLUMNS;
   } catch {
@@ -79,12 +86,13 @@ const SORT_COLUMN: Record<SortBy, string> = {
   updated_at: "updated",
 };
 
-export function BugListPage() {
+export function IssueListPage() {
   // The query lives in the URL, so a narrowed list is a link you can send.
   // Typing replaces the entry (one per keystroke would bury the Back button);
   // the discrete choices push, so Back undoes them one at a time.
   const [text, setText] = useQueryParam("q", "", { replace: true });
   const [statusParam, setStatus] = useQueryParam("status");
+  const [kindParam, setKind] = useQueryParam("kind");
   const [severityParam, setSeverity] = useQueryParam("severity");
   const [priorityParam, setPriority] = useQueryParam("priority");
   const [productId, setProductId] = useQueryParam("product");
@@ -96,14 +104,17 @@ export function BugListPage() {
   // unions. An unknown value reads as "no filter" rather than being passed to
   // the server, so a hand-edited ?status=nonsense narrows nothing instead of
   // erroring.
-  const status = (BUG_STATUSES as readonly string[]).includes(statusParam)
-    ? (statusParam as BugStatus)
+  const status = (ISSUE_STATUSES as readonly string[]).includes(statusParam)
+    ? (statusParam as IssueStatus)
     : "";
-  const severity = (BUG_SEVERITIES as readonly string[]).includes(severityParam)
-    ? (severityParam as (typeof BUG_SEVERITIES)[number])
+  const kind = (ISSUE_KINDS as readonly string[]).includes(kindParam)
+    ? (kindParam as (typeof ISSUE_KINDS)[number])
     : "";
-  const priority = (BUG_PRIORITIES as readonly string[]).includes(priorityParam)
-    ? (priorityParam as (typeof BUG_PRIORITIES)[number])
+  const severity = (ISSUE_SEVERITIES as readonly string[]).includes(severityParam)
+    ? (severityParam as (typeof ISSUE_SEVERITIES)[number])
+    : "";
+  const priority = (ISSUE_PRIORITIES as readonly string[]).includes(priorityParam)
+    ? (priorityParam as (typeof ISSUE_PRIORITIES)[number])
     : "";
   const sortBy = (SORTABLE as readonly string[]).includes(sortByParam)
     ? (sortByParam as SortBy)
@@ -111,13 +122,13 @@ export function BugListPage() {
   const sortDirection: 1 | -1 = sortDirParam === "1" ? 1 : -1;
   const setSortBy = (next: SortBy) => setSortByParam(next);
   const setSortDirection = (next: 1 | -1) => setSortDirParam(String(next));
-  const [columns, setColumns] = useState<BugColumnKey[]>(loadColumns);
+  const [columns, setColumns] = useState<IssueColumnKey[]>(loadColumns);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Results from the advanced builder REPLACE the filtered list while they
   // are set. There is no second results page any more: the builder is a modal
   // over this one, and a search that lands somewhere else is a search whose
   // result you then have to go and find.
-  const [advanced, setAdvanced] = useState<Bug[] | null>(null);
+  const [advanced, setAdvanced] = useState<Issue[] | null>(null);
   const [builderOpen, setBuilderOpen] = useState(false);
 
   const productsQ = useAsync(() => listProducts({}), []);
@@ -129,7 +140,7 @@ export function BugListPage() {
    * page is gone, and rather than bury the shorthand in the modal it is
    * parsed HERE: recognised tokens become the same filters the dropdowns set,
    * so they show up as removable chips and the query stays one call to
-   * bugs.search -- which is anonymous, where search.quick is not.
+   * issues.search -- which is anonymous, where search.quick is not.
    *
    * Only the tokens that map to a filter this page already has. An assignee,
    * product or component token names something by handle or name and would
@@ -137,12 +148,15 @@ export function BugListPage() {
    * being silently dropped.
    */
   const parsed = parseQuickSearchSafely(text);
-  const tokenStatus = parsed.find((c) => c.field === "status")?.value as BugStatus | undefined;
+  const tokenStatus = parsed.find((c) => c.field === "status")?.value as IssueStatus | undefined;
+  const tokenKind = parsed.find((c) => c.field === "kind")?.value as
+    | (typeof ISSUE_KINDS)[number]
+    | undefined;
   const tokenSeverity = parsed.find((c) => c.field === "severity")?.value as
-    | (typeof BUG_SEVERITIES)[number]
+    | (typeof ISSUE_SEVERITIES)[number]
     | undefined;
   const tokenPriority = parsed.find((c) => c.field === "priority")?.value as
-    | (typeof BUG_PRIORITIES)[number]
+    | (typeof ISSUE_PRIORITIES)[number]
     | undefined;
   const freeText = parsed
     .filter((c) => c.field === "text")
@@ -151,9 +165,10 @@ export function BugListPage() {
 
   const { state, reload } = useAsync(
     () =>
-      searchBugs({
+      searchIssues({
         text: freeText.trim() || undefined,
         status: status || tokenStatus || undefined,
+        kind: kind || tokenKind || undefined,
         severity: severity || tokenSeverity || undefined,
         priority: priority || tokenPriority || undefined,
         productId: productId || undefined,
@@ -162,14 +177,14 @@ export function BugListPage() {
         limit: PAGE_SIZE,
         offset,
       }),
-    [text, status, severity, priority, productId, sortBy, sortDirection, offset],
+    [text, status, kind, severity, priority, productId, sortBy, sortDirection, offset],
   );
 
 
-  const toggleColumn = (key: BugColumnKey) => {
+  const toggleColumn = (key: IssueColumnKey) => {
     setColumns((prev) => {
       const next = prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key];
-      const ordered = ALL_BUG_COLUMNS.map((c) => c.key).filter((c) => next.includes(c));
+      const ordered = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => next.includes(c));
       window.localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(ordered));
       return ordered;
     });
@@ -201,6 +216,9 @@ export function BugListPage() {
     tokenStatus && !status
       ? { id: "t-status", label: `Status: ${tokenStatus} (typed)`, onRemove: () => setText(freeText) }
       : null,
+    tokenKind && !kind
+      ? { id: "t-kind", label: `Kind: ${tokenKind} (typed)`, onRemove: () => setText(freeText) }
+      : null,
     tokenSeverity && !severity
       ? {
           id: "t-severity",
@@ -216,6 +234,7 @@ export function BugListPage() {
         }
       : null,
     status ? { id: "status", label: `Status: ${status}`, onRemove: () => setStatus("") } : null,
+    kind ? { id: "kind", label: `Kind: ${kind}`, onRemove: () => setKind("") } : null,
     severity
       ? { id: "severity", label: `Severity: ${severity}`, onRemove: () => setSeverity("") }
       : null,
@@ -236,15 +255,15 @@ export function BugListPage() {
   ].filter((chip): chip is NonNullable<typeof chip> => chip !== null);
 
   return (
-    <div className="page bug-list-page">
-      {/* No page-level "New bug": the shell header carries it on every
+    <div className="page issue-list-page">
+      {/* No page-level "New issue": the shell header carries it on every
           page, and two of them side by side was the first thing the
           screenshot showed. */}
       {/* Compound parts, not a `title` prop -- PageHeader is a container and
           passing title rendered nothing at all, which reads as a missing
           heading rather than a wrong API. */}
       <PageHeader>
-        <PageHeader.Title>Bugs</PageHeader.Title>
+        <PageHeader.Title>Issues</PageHeader.Title>
       </PageHeader>
 
       {/* FilterBar owns the row: a real search Input, the applied filters as
@@ -284,7 +303,7 @@ export function BugListPage() {
               {pickerOpen ? (
                 <Card className="column-picker-menu">
                   <Cluster gap={3}>
-                    {ALL_BUG_COLUMNS.map((col) => (
+                    {ALL_ISSUE_COLUMNS.map((col) => (
                       <Checkbox
                         key={col.key}
                         checked={columns.includes(col.key)}
@@ -300,20 +319,34 @@ export function BugListPage() {
           </Cluster>
         }
       >
-        <Select value={status} onValueChange={(v) => setStatus((v as BugStatus) ?? "")} placeholder="Any status" className="filter-select">
-          {BUG_STATUSES.map((s) => (
+        <Select value={status} onValueChange={(v) => setStatus((v as IssueStatus) ?? "")} placeholder="Any status" className="filter-select">
+          {ISSUE_STATUSES.map((s) => (
             <Select.Item key={s} value={s}>
               {s}
             </Select.Item>
           ))}
         </Select>
+        {/* Beside severity, and before it: kind decides what the severity
+            beside it is even describing. */}
+        <Select
+          value={kind}
+          onValueChange={(v) => setKind((v as (typeof ISSUE_KINDS)[number]) ?? "")}
+          placeholder="Any kind"
+          className="filter-select"
+        >
+          {ISSUE_KINDS.map((k) => (
+            <Select.Item key={k} value={k}>
+              {k}
+            </Select.Item>
+          ))}
+        </Select>
         <Select
           value={severity}
-          onValueChange={(v) => setSeverity((v as (typeof BUG_SEVERITIES)[number]) ?? "")}
+          onValueChange={(v) => setSeverity((v as (typeof ISSUE_SEVERITIES)[number]) ?? "")}
           placeholder="Any severity"
           className="filter-select"
         >
-          {BUG_SEVERITIES.map((s) => (
+          {ISSUE_SEVERITIES.map((s) => (
             <Select.Item key={s} value={s}>
               {s}
             </Select.Item>
@@ -321,11 +354,11 @@ export function BugListPage() {
         </Select>
         <Select
           value={priority}
-          onValueChange={(v) => setPriority((v as (typeof BUG_PRIORITIES)[number]) ?? "")}
+          onValueChange={(v) => setPriority((v as (typeof ISSUE_PRIORITIES)[number]) ?? "")}
           placeholder="Any priority"
           className="filter-select"
         >
-          {BUG_PRIORITIES.map((p) => (
+          {ISSUE_PRIORITIES.map((p) => (
             <Select.Item key={p} value={p}>
               {p}
             </Select.Item>
@@ -396,21 +429,21 @@ export function BugListPage() {
               Back to filters
             </Button>
           </Cluster>
-          <BugResultsTable bugs={advanced} columns={columns} caption="Advanced search results" />
+          <IssueResultsTable issues={advanced} columns={columns} caption="Advanced search results" />
         </>
       ) : (
       <AsyncSection
         state={state}
         onRetry={reload}
-        loadingLabel="Loading bugs..."
+        loadingLabel="Loading issues..."
         /* The table marks itself as loading rather than being replaced by a
            spinner. Swapping the whole surface out discards the headers and
            the page height, so the layout jumped when rows arrived -- the
            first load was the one case still doing it, because `loading` on
            the table below only applies once there is data to keep. */
         renderLoading={() => (
-          <BugResultsTable
-            bugs={[]}
+          <IssueResultsTable
+            issues={[]}
             columns={columns}
             loading
             sort={{
@@ -422,20 +455,20 @@ export function BugListPage() {
         )}
         isEmpty={(data) => data.length === 0}
         emptyTitle={
-          text || status || severity || priority || productId
-            ? "No bugs match these filters."
-            : "No bugs visible."
+          text || status || kind || severity || priority || productId
+            ? "No issues match these filters."
+            : "No issues visible."
         }
         emptyHint={
-          text || status || severity || priority || productId
+          text || status || kind || severity || priority || productId
             ? "Try widening the filters."
             : "Either nothing has been filed yet, or there is no signed-in identity with visibility into any product."
         }
       >
-        {(bugs: Bug[], refreshing: boolean) => (
+        {(issues: Issue[], refreshing: boolean) => (
           <>
-            <BugResultsTable
-              bugs={bugs}
+            <IssueResultsTable
+              issues={issues}
               columns={columns}
               loading={refreshing}
               sort={{ key: SORT_COLUMN[sortBy] ?? "updated", direction: sortDirection === 1 ? "asc" : "desc" }}
@@ -453,10 +486,10 @@ export function BugListPage() {
                 Previous
               </Button>
               <span>
-                {offset + 1}-{offset + bugs.length}
+                {offset + 1}-{offset + issues.length}
               </span>
               <Button variant="gray" size="small"
-                disabled={bugs.length < PAGE_SIZE}
+                disabled={issues.length < PAGE_SIZE}
                 onClick={() => setOffset(offset + PAGE_SIZE)}
               >
                 Next

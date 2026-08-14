@@ -27,7 +27,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   // One worker: every spec drives the same dev database, and the reports and
-  // bug-list assertions read totals that a concurrent spec would move under
+  // issue-list assertions read totals that a concurrent spec would move under
   // them.
   //
   // THE SUITE PASSES AT --workers=4 AND THAT IS NOT EVIDENCE IT IS SAFE.
@@ -35,7 +35,7 @@ export default defineConfig({
   // exactly the result that invites raising this. The race it hides is in
   // table-labels.spec.ts, which asserts that no dashboard row prints a raw
   // `prod_...` id. Those rows resolve their product through maps that
-  // `useBugLookups()` fetched once on mount; a product created by another
+  // `useIssueLookups()` fetched once on mount; a product created by another
   // worker AFTER that fetch and BEFORE the rows render is absent from the map
   // and renders as an id. The window is milliseconds wide, so it closes on
   // most runs and opens on a loaded machine.

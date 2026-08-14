@@ -13,15 +13,15 @@ import { errorMessage } from "../rpc";
  * control that always fails.
  */
 export function VotesPanel({
-  bugId,
+  issueId,
   voteCount,
-  maxVotesPerBug,
+  maxVotesPerIssue,
   votingEnabled,
   onChanged,
 }: {
-  bugId: string;
+  issueId: string;
   voteCount: number;
-  maxVotesPerBug: number;
+  maxVotesPerIssue: number;
   votingEnabled: boolean;
   onChanged: () => void;
 }) {
@@ -34,9 +34,9 @@ export function VotesPanel({
     setBusy(true);
     setError(null);
     try {
-      const result = await castVote({ bugId, count });
+      const result = await castVote({ issueId, count });
       // The server reports whether this vote crossed votesToConfirm. Surfacing
-      // it matters: the bug's status changed as a side effect of voting, and a
+      // it matters: the issue's status changed as a side effect of voting, and a
       // silent status change is the kind of thing users file bugs about.
       setConfirmed(result.confirmed);
       onChanged();
@@ -71,7 +71,7 @@ export function VotesPanel({
             <Field.Label>My votes</Field.Label>
             <NumberField
               min={0}
-              max={maxVotesPerBug > 0 ? maxVotesPerBug : undefined}
+              max={maxVotesPerIssue > 0 ? maxVotesPerIssue : undefined}
               value={count}
               onValueChange={(next) => setCount(Math.max(0, next ?? 0))}
             />
@@ -79,11 +79,11 @@ export function VotesPanel({
           <Button variant="gray" size="small" disabled={busy} onClick={() => void submit()}>
             {busy ? "Voting..." : "Vote"}
           </Button>
-          {maxVotesPerBug > 0 ? (
-            <p className="state-hint small">At most {maxVotesPerBug} on this bug.</p>
+          {maxVotesPerIssue > 0 ? (
+            <p className="state-hint small">At most {maxVotesPerIssue} on this issue.</p>
           ) : null}
           {confirmed ? (
-            <p className="state-hint small">This bug was confirmed by reaching the vote threshold.</p>
+            <p className="state-hint small">This issue was confirmed by reaching the vote threshold.</p>
           ) : null}
           {error ? <p className="field-error">{error}</p> : null}
         </>

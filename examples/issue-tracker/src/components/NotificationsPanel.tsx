@@ -49,8 +49,8 @@ export function NotificationsPanel() {
             <ul className="notification-list">
             {rows.map((row) => (
               <li key={row.id} className={row.isRead ? "read" : "unread"}>
-                {row.bugId ? (
-                  <Link to={`/bugs/${row.bugId}`}>{row.title}</Link>
+                {row.issueId ? (
+                  <Link to={`/issues/${row.issueId}`}>{row.title}</Link>
                 ) : (
                   <span>{row.title}</span>
                 )}

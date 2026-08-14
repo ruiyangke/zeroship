@@ -1,13 +1,20 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Checkbox, Field, Input, Select } from "@zeroship/ui";
-import { createBug, currentUser, getProduct, listProducts } from "../api";
+import { createIssue, currentUser, getProduct, listProducts } from "../api";
 import { AsyncSection } from "../components/StateViews";
 import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
 import type { ProductDetail } from "../components/types";
-import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../lib/quicksearch";
+import {
+  ISSUE_KINDS,
+  ISSUE_PRIORITIES,
+  ISSUE_SEVERITIES,
+  type IssueKind,
+  type IssuePriority,
+  type IssueSeverity,
+} from "../lib/quicksearch";
 
-export function NewBugPage() {
+export function NewIssuePage() {
   const navigate = useNavigate();
   const { state: userState } = useAsync(() => currentUser({}), []);
   const productsQ = useAsync(() => listProducts({}), []);
@@ -20,8 +27,9 @@ export function NewBugPage() {
   const [milestoneId, setMilestoneId] = useState("");
   const [summary, setSummary] = useState("");
   const [description, setDescription] = useState("");
-  const [severity, setSeverity] = useState<BugSeverity>("normal");
-  const [priority, setPriority] = useState<BugPriority>("P3");
+  const [kind, setKind] = useState<IssueKind>("defect");
+  const [severity, setSeverity] = useState<IssueSeverity>("normal");
+  const [priority, setPriority] = useState<IssuePriority>("P3");
   const [whiteboard, setWhiteboard] = useState("");
   const [opSys, setOpSys] = useState("Unspecified");
   const [platform, setPlatform] = useState("Unspecified");
@@ -50,13 +58,14 @@ export function NewBugPage() {
     setBusy(true);
     setError(null);
     try {
-      const bug = await createBug({
+      const issue = await createIssue({
         productId,
         componentId,
         summary: summary.trim(),
         description: description.trim(),
         versionId: versionId || undefined,
         milestoneId: milestoneId || undefined,
+        kind,
         severity,
         priority,
         whiteboard: whiteboard || undefined,
@@ -65,7 +74,7 @@ export function NewBugPage() {
         url: url || undefined,
         confirmed: confirmed || undefined,
       });
-      navigate(`/bugs/${bug.id}`);
+      navigate(`/issues/${issue.id}`);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -76,15 +85,15 @@ export function NewBugPage() {
   if (userState.status === "error" && isUnauthenticated(userState.error)) {
     return (
       <div className="page">
-        <h1>New bug</h1>
-        <p className="state-hint">Filing a bug requires a signed-in identity. Sign in and reload.</p>
+        <h1>New issue</h1>
+        <p className="state-hint">Filing an issue requires a signed-in identity. Sign in and reload.</p>
       </div>
     );
   }
 
   return (
-    <div className="page new-bug-page">
-      <h1>New bug</h1>
+    <div className="page new-issue-page">
+      <h1>New issue</h1>
       <AsyncSection state={productsQ.state} loadingLabel="Loading products..." isEmpty={(d) => d.length === 0} emptyTitle="No products to file against.">
         {(products) => (
           <>
@@ -110,7 +119,7 @@ export function NewBugPage() {
             })}
           </ol>
           <form
-            className="new-bug-form"
+            className="new-issue-form"
             onSubmit={(e) => {
               e.preventDefault();
               void submit();
@@ -160,10 +169,10 @@ export function NewBugPage() {
                     <Input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={500} required />
                   </Field>
                   <Field>
-                    <Field.Label htmlFor="new-bug-description">Description</Field.Label>
+                    <Field.Label htmlFor="new-issue-description">Description</Field.Label>
                     <textarea
                       className="app-field-shell app-textarea"
-                      id="new-bug-description"
+                      id="new-issue-description"
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       rows={6}
@@ -173,14 +182,15 @@ export function NewBugPage() {
                   <div className="field-row">
                     <Field>
                       <Field.Label>Version</Field.Label>
-                      {/* Required, not optional: bugs.versionId is NOT NULL,
-                          so an "unspecified" choice here composed a bug that
-                          could not be stored and failed at submit. Milestone
-                          below is genuinely nullable and keeps its blank. */}
+                      {/* Optional, like Milestone beside it. "Version found in"
+                          is a defect concept: a feature request is not found
+                          in a version, so requiring one here made the form
+                          unable to express half of what the tracker now holds.
+                          `issues.versionId` is nullable for the same reason. */}
                       <Select
                         value={versionId}
                         onValueChange={(next) => setVersionId(next ?? "")}
-                        placeholder="Select a version"
+                        placeholder="unspecified"
                         aria-label="Version"
                         renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
                       >
@@ -211,14 +221,33 @@ export function NewBugPage() {
                     </Field>
                   </div>
                   <div className="field-row">
+                    {/* Kind before Severity: "what is this" is the question
+                        that decides whether the severity beside it is even
+                        about a defect. It used to be answerable only by
+                        picking `enhancement` as a SEVERITY, which is why a
+                        critical feature request was unsayable. */}
+                    <Field>
+                      <Field.Label>Kind</Field.Label>
+                      <Select
+                        value={kind}
+                        onValueChange={(next) => setKind(next as IssueKind)}
+                        aria-label="Kind"
+                      >
+                        {ISSUE_KINDS.map((k) => (
+                          <Select.Item key={k} value={k}>
+                            {k}
+                          </Select.Item>
+                        ))}
+                      </Select>
+                    </Field>
                     <Field>
                       <Field.Label>Severity</Field.Label>
                       <Select
                         value={severity}
-                        onValueChange={(next) => setSeverity(next as BugSeverity)}
+                        onValueChange={(next) => setSeverity(next as IssueSeverity)}
                         aria-label="Severity"
                       >
-                        {BUG_SEVERITIES.map((s) => (
+                        {ISSUE_SEVERITIES.map((s) => (
                           <Select.Item key={s} value={s}>
                             {s}
                           </Select.Item>
@@ -229,10 +258,10 @@ export function NewBugPage() {
                       <Field.Label>Priority</Field.Label>
                       <Select
                         value={priority}
-                        onValueChange={(next) => setPriority(next as BugPriority)}
+                        onValueChange={(next) => setPriority(next as IssuePriority)}
                         aria-label="Priority"
                       >
-                        {BUG_PRIORITIES.map((p) => (
+                        {ISSUE_PRIORITIES.map((p) => (
                           <Select.Item key={p} value={p}>
                             {p}
                           </Select.Item>
@@ -266,7 +295,7 @@ export function NewBugPage() {
                     />
                   ) : (
                     <p className="state-hint small">
-                      This product does not allow UNCONFIRMED bugs; this will be filed as CONFIRMED.
+                      This product does not allow UNCONFIRMED issues; this will be filed as CONFIRMED.
                     </p>
                   )}
 
@@ -275,7 +304,7 @@ export function NewBugPage() {
                     variant="filled"
                     disabled={busy || !summary.trim() || !description.trim()}
                   >
-                    {busy ? "Filing..." : "File bug"}
+                    {busy ? "Filing..." : "File issue"}
                   </Button>
                   {error ? <p className="field-error">{error}</p> : null}
                 </fieldset>

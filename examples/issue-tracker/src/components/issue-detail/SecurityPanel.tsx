@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button, Field, Select } from "@zeroship/ui";
 
-import { listGroups, restrictBug, unrestrictBug } from "../../api";
+import { listGroups, restrictIssue, unrestrictIssue } from "../../api";
 import { errorMessage } from "../rpc";
 
 /**
- * Bug-level security groups -- Bugzilla's bug_group_map, the mechanism behind
- * a confidential bug inside an otherwise readable product.
+ * Issue-level security groups -- Bugzilla's bug_group_map, the mechanism behind
+ * a confidential issue inside an otherwise readable product.
  *
- * The server has had `bugs.restrict` / `bugs.unrestrict` and the whole group
+ * The server has had `issues.restrict` / `issues.unrestrict` and the whole group
  * model for a while and NO interface reached any of it, so the app's most
  * consequential feature could only be exercised over raw RPC. That is the same
  * gap the flags, CC and voting panels each had.
@@ -17,7 +17,7 @@ import { errorMessage } from "../rpc";
  * empty picker -- an empty control would read as "there are no groups" when
  * the truth is "you cannot see them".
  */
-export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: () => void }) {
+export function SecurityPanel({ issueId, onChanged }: { issueId: string; onChanged: () => void }) {
   const [groups, setGroups] = useState<Awaited<ReturnType<typeof listGroups>> | null>(null);
   const [denied, setDenied] = useState(false);
   const [selected, setSelected] = useState("");
@@ -47,11 +47,11 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
     setError(null);
     setNote(null);
     try {
-      if (action === "restrict") await restrictBug({ bugId, groupId: selected });
-      else await unrestrictBug({ bugId, groupId: selected });
+      if (action === "restrict") await restrictIssue({ issueId, groupId: selected });
+      else await unrestrictIssue({ issueId, groupId: selected });
       setNote(
         action === "restrict"
-          ? "Restricted. Only members of that group can now see this bug."
+          ? "Restricted. Only members of that group can now see this issue."
           : "Restriction removed.",
       );
       // Deliberately NOT calling onChanged().
@@ -60,7 +60,7 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
       // unmounts the whole detail tree -- so this panel remounts, `note` and
       // `selected` reset, and the confirmation the user needs to see is
       // destroyed by the act of succeeding. Nothing on this page reflects a
-      // group restriction anyway: the bug row is unchanged, and the viewer
+      // group restriction anyway: the issue row is unchanged, and the viewer
       // making the change can still see it either way.
       void onChanged;
     } catch (err) {
@@ -75,13 +75,13 @@ export function SecurityPanel({ bugId, onChanged }: { bugId: string; onChanged: 
       <h3>Security</h3>
       {denied ? (
         <p className="state-hint small">
-          Only an administrator can see and change which groups a bug is restricted to.
+          Only an administrator can see and change which groups an issue is restricted to.
         </p>
       ) : groups === null ? (
         <p className="state-hint small">Loading groups...</p>
       ) : groups.length === 0 ? (
         <p className="state-hint small">
-          No groups exist yet. Create one under Products to restrict this bug.
+          No groups exist yet. Create one under Products to restrict this issue.
         </p>
       ) : (
         <>

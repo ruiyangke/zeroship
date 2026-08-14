@@ -77,7 +77,7 @@ test("the unread count rises on someone else's change and falls when read", asyn
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -85,7 +85,7 @@ test("the unread count rises on someone else's change and falls when read", asyn
     description: "d",
   });
   const me = await rpc("users.me", {});
-  await rpc("cc.add", { bugId: bug.id, userId: me.id });
+  await rpc("cc.add", { issueId: issue.id, userId: me.id });
 
   // Someone ELSE has to make the change. Your own edits are deliberately not
   // notified, so a single-identity version of this test would assert that the
@@ -101,13 +101,13 @@ test("the unread count rises on someone else's change and falls when read", asyn
 
   const before = await countNow();
   await bob.request.post(`${baseURL}/__zeroship/v1/comments.add`, {
-    data: { json: { bugId: bug.id, body: `bob was here ${RUN}` } },
+    data: { json: { issueId: issue.id, body: `bob was here ${RUN}` } },
   });
   expect(await countNow(), "a CC'd user is notified of someone else's comment").toBe(before + 1);
 
   const unread = await rpc("notifications.list", { unreadOnly: true });
-  const mine = unread.filter((row: { bugId: string }) => row.bugId === bug.id);
-  expect(mine, "the new notification is about this bug").toHaveLength(1);
+  const mine = unread.filter((row: { issueId: string }) => row.issueId === issue.id);
+  expect(mine, "the new notification is about this issue").toHaveLength(1);
 
   await rpc("notifications.markRead", { id: mine[0].id });
   expect(await countNow(), "marking it read must decrement, not just hide it").toBe(before);

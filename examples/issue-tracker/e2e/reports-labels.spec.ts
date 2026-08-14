@@ -11,7 +11,7 @@ import { chooseOption } from "./select";
  * therefore renders many rows with identical labels and different counts,
  * which reads as a broken query rather than as real data.
  *
- * A browser spec, for the same reason as bug-list-identity: the RPC payload is
+ * A browser spec, for the same reason as issue-list-identity: the RPC payload is
  * correct -- each row carries its own component with its own productId -- so
  * nothing server-side is wrong to assert on. The defect exists only in what
  * reaches the screen.
@@ -46,7 +46,7 @@ test("the component report distinguishes same-named components across products",
       description: "core",
     });
     const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-    await rpc("bugs.create", {
+    await rpc("issues.create", {
       productId: product.id,
       componentId: component.id,
       versionId: version.id,

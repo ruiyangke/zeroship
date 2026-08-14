@@ -44,7 +44,7 @@ test("a file attached moments after filing still appears in the timeline", async
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -55,13 +55,13 @@ test("a file attached moments after filing still appears in the timeline", async
   // No page load in between: this lands within the same second as the
   // description, which is the case that used to vanish.
   await rpc("attachments.upload", {
-    bugId: bug.id,
+    issueId: issue.id,
     filename: "early.log",
     contentBase64: Buffer.from("early\n").toString("base64"),
     contentType: "text/plain",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const timeline = page.locator("ul.comment-list");
   await expect(timeline, "the thread rendered").toBeVisible();

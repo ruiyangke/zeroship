@@ -4,7 +4,7 @@ import { devUser, signIn } from "./session";
 import { productKey } from "./keys";
 
 /**
- * A bug names people. It has to name them the way a person is named.
+ * An issue names people. It has to name them the way a person is named.
  *
  * The detail page printed `user_0345pl8prFezDsK4tQtOTB` for the assignee, the
  * reporter and every comment author, while the CC panel a few pixels to the
@@ -19,9 +19,18 @@ const RUN = `${process.pid}-${Date.now()}`;
 
 // A typed_id for an app user. Deliberately not anchored to a particular
 // prefix length, so it still matches if the id scheme changes shape.
+//
+// The PREFIX is the fragile part, not the length. It is derived from the
+// collection name at runtime (`derive_prefix_from_collection_name` in
+// crates/plugin-db/src/crud/system_fields_pass.rs), so a table rename silently
+// retires the old prefix -- exactly what renaming `bugs` to `issues` did to
+// `bug_`. `users` is untouched by that rename and still mints `user_`, but a
+// regex nothing can match makes the absence assertion at the end of this test
+// pass forever while checking nothing, so the test pins it against a live id
+// rather than trusting this constant.
 const RAW_USER_ID = /user_[A-Za-z0-9]{10,}/;
 
-test("the bug page names people rather than printing their ids", async ({
+test("the issue page names people rather than printing their ids", async ({
   page,
   baseURL,
   context,
@@ -42,17 +51,23 @@ test("the bug page names people rather than printing their ids", async ({
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  // Read AFTER a write, because `users.me` does not provision on its own.
+  const me = await rpc("users.me", {});
+  expect(
+    me.id,
+    "minted user ids no longer look like RAW_USER_ID, so the absence check below is vacuous",
+  ).toMatch(RAW_USER_ID);
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
     summary: `Named people ${RUN}`,
     description: "the description becomes comment #0, authored by the reporter",
   });
-  await rpc("comments.add", { bugId: bug.id, body: `A comment ${RUN}` });
+  await rpc("comments.add", { issueId: issue.id, body: `A comment ${RUN}` });
 
-  await page.goto(`/bugs/${bug.id}`);
-  const main = page.locator(".bug-detail-main");
+  await page.goto(`/issues/${issue.id}`);
+  const main = page.locator(".issue-detail-main");
   await expect(main).toBeVisible();
 
   // The dev identity's display name, taken from the session rather than
@@ -85,6 +100,6 @@ test("the bug page names people rather than printing their ids", async ({
   const body = (await main.textContent()) ?? "";
   expect(
     body.match(RAW_USER_ID)?.[0] ?? null,
-    "no raw user id should survive anywhere in the bug body",
+    "no raw user id should survive anywhere in the issue body",
   ).toBeNull();
 });

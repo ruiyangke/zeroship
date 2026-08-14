@@ -36,7 +36,7 @@ test("the link control applies safe URLs and states refusals", async ({ page, ba
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -44,7 +44,7 @@ test("the link control applies safe URLs and states refusals", async ({ page, ba
     description: "<p>seed</p>",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const editor = page.getByLabel("Add a comment");
   const composer = page.locator(".new-comment");

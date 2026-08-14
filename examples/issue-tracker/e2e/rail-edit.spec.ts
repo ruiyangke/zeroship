@@ -7,7 +7,7 @@ import { signIn } from "./session";
  * The rail states properties, and becomes editable only when asked.
  *
  * It used to render a bordered select per property, so a column whose job is
- * to state facts about the bug was a column of form controls -- heavier on the
+ * to state facts about the issue was a column of form controls -- heavier on the
  * page than the conversation beside it. Now the value shows and a control
  * appears on demand.
  *
@@ -40,7 +40,7 @@ test("a rail property reads as a value and edits in place", async ({ page, baseU
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -48,7 +48,7 @@ test("a rail property reads as a value and edits in place", async ({ page, baseU
     description: "seed",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const row = page.locator(".rail-choice", { hasText: "Severity" });
   await expect(row, "the property states its value").toContainText("normal");
@@ -74,8 +74,8 @@ test("a rail property reads as a value and edits in place", async ({ page, baseU
 
   // It really saved. A control that opens, closes and writes nothing looks
   // exactly the same from the outside.
-  const stored = await rpc("bugs.get", { id: bug.id });
-  expect(stored.bug.severity, "the change reached the server").toBe("critical");
+  const stored = await rpc("issues.get", { id: issue.id });
+  expect(stored.issue.severity, "the change reached the server").toBe("critical");
 });
 
 /**
@@ -110,7 +110,7 @@ test("the assignee editor stays inside the rail", async ({ page, baseURL }) => {
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -119,11 +119,11 @@ test("the assignee editor stays inside the rail", async ({ page, baseURL }) => {
   });
 
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   await page.getByRole("button", { name: "Edit Assignee", exact: true }).click();
 
-  const rail = page.locator(".bug-detail-side");
+  const rail = page.locator(".issue-detail-side");
   const row = page.locator(".rail-choice.is-editing .user-picker-row");
   await expect(row, "the picker opened").toBeVisible();
 

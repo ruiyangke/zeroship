@@ -11,13 +11,43 @@ identity and per-product permissions), `env.storage` (attachments), and
 in the corpus after `hr-system`, and unlike `hr-system` it is authored
 migration-first with no legacy inline-schema export.
 
-## Vocabulary (Bugzilla's, kept deliberately)
+## Vocabulary (Bugzilla's, with one noun changed)
 
 Bugzilla's nouns are load-bearing for anyone who has used it, so they are kept
-verbatim rather than modernised: a **bug** (not "issue") belongs to exactly one
-**component**, which belongs to exactly one **product**. A bug carries a
-**status** and, once closed, a **resolution**. **Severity** describes impact;
-**priority** describes scheduling. They are separate fields on purpose.
+verbatim rather than modernised -- with one exception, reversed deliberately and
+recorded here because this section previously said the opposite.
+
+An **issue** belongs to exactly one **component**, which belongs to exactly one
+**product**. An issue carries a **kind**, a **status** and, once closed, a
+**resolution**. **Severity** describes impact; **priority** describes
+scheduling; **kind** describes what the record is. All three are separate
+fields on purpose.
+
+This file used to read "a **bug** (not "issue")", on the argument that
+Bugzilla's vocabulary is what makes the example legible to anyone who has used
+Bugzilla. That argument is still sound and is why every other noun here is
+untouched -- product, component, milestone, QA contact, whiteboard, flag,
+keyword, see-also, resolution and the UNCONFIRMED/VERIFIED lifecycle all keep
+Bugzilla's spelling.
+
+What changed is that the tracker has to hold FEATURE REQUESTS, and "bug" is a
+claim that something is broken. Bugzilla's own answer is `severity:
+enhancement`, which puts "what kind of thing is this" on the axis that means
+"how bad is it" -- so a critical feature request is unsayable and every severity
+distribution is polluted by records that have no severity at all. Bugzilla's
+flagship deployment reached the same conclusion: bugzilla.mozilla.org dropped
+the `enhancement` severity in favour of a Type field of
+defect/enhancement/task, after which Mozilla's own severity guide reads "the
+severity of most bugs of type task and enhancement will be N/A".
+
+So the fix is the **kind** field, and the rename follows it rather than leading
+it. The two are separable -- GitHub calls the record an issue and still offers
+"bug" as a type -- and the field is the half that makes feature requests
+representable. The noun changed as well because the product already called
+itself an Issue Tracker in its title, its directory, its nav and this file's
+own heading, while the model underneath said `bug`: a page listing feature
+requests under a heading that said "Bugs", filed with a button that said "New
+bug".
 
 ## Models
 
@@ -29,7 +59,7 @@ Every table gets the seven injected platform system columns (`id`,
 
 - `products` — name (unique), key (unique, the PARSER in PARSER-12),
   description, isActive, defaultMilestone,
-  allowsUnconfirmed, classification, votesPerUser, maxVotesPerBug,
+  allowsUnconfirmed, classification, votesPerUser, maxVotesPerIssue,
   votesToConfirm (all three default 0, which means voting is off)
 - `components` — productId -> products, name, description, defaultAssigneeId
   (NOT NULL: a component always has an initial owner), defaultQaContactId,
@@ -37,43 +67,47 @@ Every table gets the seven injected platform system columns (`id`,
 - `versions` — productId -> products, name, sortKey, isActive
 - `milestones` — productId -> products, name, sortKey, isActive
 - `keywords` — name (unique), description
-- `flagTypes` — name, description, targetType (bug/attachment), isRequestable,
+- `flagTypes` — name, description, targetType (issue/attachment), isRequestable,
   isMultiplicable, productId (nullable = global)
 
-### Bugs
+### Issues
 
-- `bugs` — productId, componentId, versionId, milestoneId, summary,
+- `issues` — productId, componentId, versionId (nullable: a feature request
+  is not found in a version), milestoneId, summary,
+  kind (defect/enhancement/task; what the record IS, kept apart from how bad
+  it is),
   status (UNCONFIRMED/CONFIRMED/IN_PROGRESS/RESOLVED/VERIFIED/CLOSED),
   resolution (nullable; FIXED/INVALID/WONTFIX/DUPLICATE/WORKSFORME/INCOMPLETE),
-  severity (blocker/critical/major/normal/minor/trivial/enhancement),
+  severity (blocker/critical/major/normal/minor/trivial; `enhancement` is a
+  kind, not a severity),
   priority (P1..P5), assigneeId, reporterId, qaContactId, duplicateOfId,
   number (per-product sequence, 1-based; with the product key this is the
   PARSER-12 a person reads and types),
   alias (unique when set), whiteboard, opSys, platform, url, isConfirmed,
-  voteCount, commentCount, estimatedTimeMinutes, remainingTimeMinutes,
+  voteCount, commentCount,
   deadline, resolvedAt (stamped on resolve so reports need not mine history)
-- `comments` — bugId, authorId, body, isPrivate, workTimeMinutes,
+- `comments` — issueId, authorId, body, isPrivate,
   commentNumber (0 = the original description)
-- `attachments` — bugId, uploaderId, filename, contentType, sizeBytes,
+- `attachments` — issueId, uploaderId, filename, contentType, sizeBytes,
   storageKey (the `env.storage` object key), description, isPatch, isObsolete
-- `bugKeywords` — bugId, keywordId (join)
-- `bugDependencies` — bugId, dependsOnId (a bug blocked by another bug)
-- `bugCc` — bugId, userId (join)
-- `bugGroups` — bugId, groupId (join). Bugzilla's bug_group_map: the table
-  behind a confidential bug inside an otherwise readable product.
-- `bugSeeAlso` — bugId, url
-- `flags` — bugId (nullable), attachmentId (nullable), flagTypeId, setterId,
+- `issueKeywords` — issueId, keywordId (join)
+- `issueDependencies` — issueId, dependsOnId (an issue blocked by another)
+- `issueCc` — issueId, userId (join)
+- `issueGroups` — issueId, groupId (join). Bugzilla's bug_group_map: the table
+  behind a confidential issue inside an otherwise readable product.
+- `issueSeeAlso` — issueId, url
+- `flags` — issueId (nullable), attachmentId (nullable), flagTypeId, setterId,
   requesteeId, status (+/-/?)
-- `activities` — bugId, actorId, fieldName, oldValue, newValue, changedAt.
+- `activities` — issueId, actorId, fieldName, oldValue, newValue, changedAt.
   Every mutating RPC writes here; this is Bugzilla's bug history table.
-- `votes` — bugId, userId, count
+- `votes` — issueId, userId, count
 
 ### People and preferences
 
 - `users` — email (unique), handle (unique), name, isAdmin, isDisabled,
   timezone, prefs (json). Bugzilla has login + realname and no third name
   field, so there is no separate `realName`
-- `groups` — name (unique), description, isBugGroup
+- `groups` — name (unique), description, isIssueGroup
 - `groupMembers` — groupId, userId
 - `productGroups` — productId, groupId (per-product visibility)
 - `savedSearches` — ownerId, name, queryJson, isShared
@@ -85,10 +119,11 @@ Wire ids are dotted and explicit. Auth policy lives in `src/server/config.ts`;
 the default is `auth: "user"` and anything anonymous is opted in there
 explicitly with `publiclyAccessible: true`.
 
-### Bugs (core)
-`bugs.create` `bugs.get` `bugs.update` `bugs.search` `bugs.changeStatus`
-`bugs.resolve` `bugs.reopen` `bugs.markDuplicate` `bugs.reassign`
-`bugs.setSeverity` `bugs.setPriority` `bugs.move` (product/component)
+### Issues (core)
+`issues.create` `issues.get` `issues.update` `issues.search`
+`issues.changeStatus` `issues.resolve` `issues.reopen`
+`issues.markDuplicate` `issues.reassign` `issues.setKind` `issues.setSeverity`
+`issues.setPriority` `issues.move` (product/component)
 
 ### Comments
 `comments.add` `comments.list` `comments.edit` `comments.setPrivate`
@@ -99,22 +134,22 @@ explicitly with `publiclyAccessible: true`.
 
 ### Dependencies and duplicates
 `deps.add` `deps.remove` `deps.tree` `deps.graph`
-`dupes.list` (the duplicate cluster for a bug)
+`dupes.list` (the duplicate cluster for an issue)
 
 ### Keywords, flags, CC
 `keywords.list` `keywords.create` `keywords.attach` `keywords.detach`
 `flags.set` `flags.clear` `flags.listRequests` (my requests / requests of me)
-`flags.list` (the live flags on a bug and its attachments)
+`flags.list` (the live flags on an issue and its attachments)
 `flagTypes.create` `flagTypes.list` (admin-defined; without a type no flag can
 be set, which is what made the four `flags.*` procedures unreachable)
-`cc.add` `cc.remove` `cc.list` `cc.listMine` (the bugs I am CC'd on)
+`cc.add` `cc.remove` `cc.list` `cc.listMine` (the issues I am CC'd on)
 
 ### Access control
 `groups.create` `groups.delete` `groups.list` `groups.members`
 `groups.addMember` `groups.removeMember`
 `products.restrict` `products.unrestrict` (product-level visibility)
-`bugs.restrict` `bugs.unrestrict` (Bugzilla's bug_group_map: a confidential
-bug inside an otherwise readable product)
+`issues.restrict` `issues.unrestrict` (Bugzilla's bug_group_map: a confidential
+issue inside an otherwise readable product)
 
 The first account to exist becomes an admin, the way Bugzilla's installer
 creates one. Without a bootstrap nothing could ever set `isAdmin`, and the
@@ -196,7 +231,7 @@ and vote list were found; all four now have UI.
 ## Known limits
 
 **Reference-data lists are not paginated, and adding a limit alone would break
-name resolution.** Bug listing is capped -- `bugs.search` returns 100 rows by
+name resolution.** Bug listing is capped -- `issues.search` returns 100 rows by
 default and takes `limit`/`offset`. The reference lists do not: measured
 against the dev database, `products.list` returned 131 rows and
 `reports.byComponent` 103, both reachable anonymously and both growing with the
@@ -217,7 +252,17 @@ rather than half-applied.
 
 ## Divergences from Bugzilla, taken deliberately
 
-- **A group-restricted bug answers 403, not 404, and so its existence leaks.**
+- **The record is an `issue` with a `kind`, not a `bug` with `severity:
+  enhancement`.** The largest divergence in this file, argued in full under
+  Vocabulary above. `kind` is `defect | enhancement | task`, `severity` means
+  only impact, and `enhancement` is gone from the severity vocabulary. This
+  follows bugzilla.mozilla.org, which made the same split; upstream Bugzilla
+  still ships the overloaded severity.
+- **`versionId` is nullable.** It was NOT NULL, matching Bugzilla, where every
+  bug is found in some version. A feature request is not found in a version at
+  all, so requiring one forced a lie. The column stays for defects and is
+  simply absent on the kinds that have no answer.
+- **A group-restricted issue answers 403, not 404, and so its existence leaks.**
   Bugzilla behaves the same way ("You are not authorized to access bug #N"), and
   a tracker that pretends a restricted bug was never filed still cannot explain
   the gap its id leaves in every list. Hiding existence is the stronger property

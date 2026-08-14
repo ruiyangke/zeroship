@@ -41,7 +41,7 @@ const RUN = `${process.pid}-${Date.now()}`;
  * is wired and reads correctly. Why it did not take effect here is NOT known --
  * no reproduction, so no claim.
  *
- * The tell was in the same response and I read past it twice: `bugs.get`
+ * The tell was in the same response and I read past it twice: `issues.get`
  * returned two junk keys named with literal quote marks, `"\"estimatedTime
  * Minutes\"": "estimatedTimeMinutes"`, for columns dropped an hour earlier.
  * That is SQLite's double-quoted-string fallback -- an unresolvable "ident"
@@ -72,7 +72,7 @@ test("a file attached while commenting appears with that comment", async ({ page
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -80,7 +80,7 @@ test("a file attached while commenting appears with that comment", async ({ page
     description: "seed",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const editor = page.getByLabel("Add a comment");
   await expect(editor).toBeVisible();
@@ -108,7 +108,7 @@ test("a file attached while commenting appears with that comment", async ({ page
   // The server really did associate the two, rather than the page only
   // appearing to: a rendering that grouped by upload order would look the
   // same and be wrong the moment a second comment arrived.
-  const files = (await rpc("attachments.list", { bugId: bug.id })) as Array<{
+  const files = (await rpc("attachments.list", { issueId: issue.id })) as Array<{
     filename: string;
     commentId: string | null;
   }>;
@@ -116,7 +116,7 @@ test("a file attached while commenting appears with that comment", async ({ page
   expect(stored, "the file was stored").toBeTruthy();
   expect(stored!.commentId, "and it names the comment it arrived with").toBeTruthy();
 
-  // The roll-up still lists it, because "what is attached to this bug" is a
+  // The roll-up still lists it, because "what is attached to this issue" is a
   // question the thread cannot answer at a glance.
   await expect(page.locator("section.attachments-panel")).toContainText("trace.log");
 });

@@ -4,9 +4,9 @@ import { productKey } from "./keys";
 import { signIn } from "./session";
 
 /**
- * A signed-out visitor can READ a bug and is not offered controls that fail.
+ * A signed-out visitor can READ an issue and is not offered controls that fail.
  *
- * Bugs are public, so unlike the dashboard this page must not become a sign-in
+ * Issues are public, so unlike the dashboard this page must not become a sign-in
  * wall. What it was doing instead was worse in a quieter way: it rendered a
  * comment composer, an Edit and a Make private button on every comment, and
  * three editable selects, every one of which answers 401 when used. The page
@@ -20,7 +20,7 @@ import { signIn } from "./session";
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("a signed-out visitor reads the bug without being offered dead controls", async ({
+test("a signed-out visitor reads the issue without being offered dead controls", async ({
   page,
   baseURL,
   browser,
@@ -45,7 +45,7 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const summary = `Readable while signed out ${RUN}`;
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -53,11 +53,11 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
     description: "public description",
   });
   const secret = `private-${RUN}`;
-  await rpc("comments.add", { bugId: bug.id, body: secret, isPrivate: true });
+  await rpc("comments.add", { issueId: issue.id, body: secret, isPrivate: true });
 
   // Signed IN -- the control half. Without it, "no composer" would pass
   // against a page that never offers one to anybody.
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await expect(page.getByLabel("Add a comment"), "a signed-in user can comment").toBeVisible();
   // The way in is the per-property Edit affordance; the control itself does
   // not exist until it is asked for.
@@ -69,9 +69,9 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
   // Signed OUT.
   const anon = await browser.newContext();
   const visitor = await anon.newPage();
-  await visitor.goto(`${baseURL}/bugs/${bug.id}`);
+  await visitor.goto(`${baseURL}/issues/${issue.id}`);
 
-  await expect(visitor.locator("h1"), "the bug is still readable").toContainText(summary);
+  await expect(visitor.locator("h1"), "the issue is still readable").toContainText(summary);
   await expect(visitor.getByText("public description")).toBeVisible();
   // Scoped to the banner: the title and its body both say it, so an unscoped
   // match is a strict-mode violation rather than a stronger assertion.
@@ -100,7 +100,7 @@ test("a signed-out visitor reads the bug without being offered dead controls", a
     () =>
       Array.from(
         document.querySelectorAll<HTMLElement>(
-          ".bug-detail-extras button, .bug-detail-extras input, .fields-panel button, .fields-panel input",
+          ".issue-detail-extras button, .issue-detail-extras input, .fields-panel button, .fields-panel input",
         ),
       ).filter((el) => !el.closest("fieldset[disabled]")).length,
   );

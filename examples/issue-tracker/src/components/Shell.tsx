@@ -20,7 +20,7 @@ import type { CurrentUser } from "./types";
  */
 
 const LINKS: { label: string; href: string }[] = [
-  { label: "Bugs", href: "/bugs" },
+  { label: "Issues", href: "/issues" },
   { label: "My dashboard", href: "/dashboard" },
   { label: "Products", href: "/products" },
   { label: "Reports", href: "/reports" },
@@ -50,23 +50,23 @@ export function Shell({
             >
               ☰
             </Button>
-            <Link to="/bugs" className="brand">
+            <Link to="/issues" className="brand">
               Issue Tracker
             </Link>
           </Cluster>
           <Cluster align="center" gap={2}>
             {/* asChild, not render: this library composes onto the child element,
-                so the button styling lands on a real anchor and "New bug"
+                so the button styling lands on a real anchor and "New issue"
                 stays a link you can middle-click.
 
-                Only when there is someone to file as. The new-bug page
+                Only when there is someone to file as. The new-issue page
                 refuses without an identity -- it says so and stops -- so
                 signed out this was a primary button leading to a dead end,
                 sitting beside the Sign in button in the same blue and
                 competing with it for the one action that actually works. */}
             {signedIn ? (
               <Button variant="filled" size="small" asChild>
-                <Link to="/bugs/new">New bug</Link>
+                <Link to="/issues/new">New issue</Link>
               </Button>
             ) : null}
             <UserChip userState={userState} />

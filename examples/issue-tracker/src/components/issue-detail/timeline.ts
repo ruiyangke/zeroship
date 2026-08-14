@@ -1,4 +1,4 @@
-import { BUG_CREATION_FIELDS } from "../../lib/changes";
+import { ISSUE_CREATION_FIELDS } from "../../lib/changes";
 import type { Activity, Comment } from "../types";
 
 /**
@@ -6,7 +6,7 @@ import type { Activity, Comment } from "../types";
  *
  * GitHub and Linear both put activity INLINE with the conversation, and they
  * are right. This app had it behind a second tab, so "Alice raised this to P1"
- * -- often the most consequential thing on a bug -- was somewhere you had to
+ * -- often the most consequential thing on an issue -- was somewhere you had to
  * go and look, while a reply saying "on it" sat in plain view. A reader asking
  * "what happened here" wants both, in order.
  *
@@ -40,10 +40,10 @@ const NOT_WORTH_SAYING = new Set([
   "isConfirmed",
 ]);
 
-const CREATION_FIELDS: ReadonlySet<string> = new Set(BUG_CREATION_FIELDS);
+const CREATION_FIELDS: ReadonlySet<string> = new Set(ISSUE_CREATION_FIELDS);
 
 /**
- * Is this activity part of filing the bug, rather than something someone did?
+ * Is this activity part of filing the issue, rather than something someone did?
  *
  * All three clauses matter. The field is one the server writes at creation;
  * it went from nothing; and it happened with the description. An assignee set
@@ -67,7 +67,7 @@ function isCreationField(activity: Activity, firstCommentAt: number): boolean {
  * Merge comments and activity into one ordered list.
  *
  * Consecutive changes by the same person within a second are one edit -- the
- * log stores a row per field, so closing a bug writes three. Filing is dropped
+ * log stores a row per field, so closing an issue writes three. Filing is dropped
  * entirely (see isCreationField): it writes nineteen fields at once, which as a
  * timeline entry reads as nineteen changes nobody made.
  */

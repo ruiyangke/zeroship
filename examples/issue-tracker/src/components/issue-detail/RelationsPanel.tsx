@@ -8,17 +8,17 @@ import { errorMessage, useAsync } from "../rpc";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
-function BugLink({ id, summary, status }: { id: string; summary: string; status: string }) {
+function IssueLink({ id, summary, status }: { id: string; summary: string; status: string }) {
   return (
-    <Link to={`/bugs/${id}`} className="relation-link">
+    <Link to={`/issues/${id}`} className="relation-link">
       <StatusBadge status={status} />
       <span>{summary}</span>
     </Link>
   );
 }
 
-export function DependenciesPanel({ bugId }: { bugId: string }) {
-  const { state, reload } = useAsync(() => dependencyGraph({ bugId }), [bugId]);
+export function DependenciesPanel({ issueId }: { issueId: string }) {
+  const { state, reload } = useAsync(() => dependencyGraph({ issueId }), [issueId]);
   const [newDep, setNewDep] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +28,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await addDependency({ bugId, dependsOnId: newDep.trim() });
+      await addDependency({ issueId, dependsOnId: newDep.trim() });
       setNewDep("");
       reload();
     } catch (err) {
@@ -42,7 +42,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await removeDependency({ bugId, dependsOnId });
+      await removeDependency({ issueId, dependsOnId });
       reload();
     } catch (err) {
       setError(errorMessage(err));
@@ -54,8 +54,8 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
   const counts =
     state.status === "ready"
       ? {
-          dependsOn: state.data.edges.filter((e) => e.bugId === bugId).length,
-          blocks: state.data.edges.filter((e) => e.dependsOnId === bugId).length,
+          dependsOn: state.data.edges.filter((e) => e.issueId === issueId).length,
+          blocks: state.data.edges.filter((e) => e.dependsOnId === issueId).length,
         }
       : null;
   const summary = !counts ? (
@@ -78,12 +78,12 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
         isEmpty={(data) => data.nodes.length <= 1}
         emptyTitle="No dependencies."
         emptyTone="inline"
-        emptyHint="This bug doesn't block, or depend on, any other bug."
+        emptyHint="This issue doesn't block, or depend on, any other issue."
       >
         {(graph) => {
           const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-          const dependsOn = graph.edges.filter((e) => e.bugId === bugId).map((e) => e.dependsOnId);
-          const blocks = graph.edges.filter((e) => e.dependsOnId === bugId).map((e) => e.bugId);
+          const dependsOn = graph.edges.filter((e) => e.issueId === issueId).map((e) => e.dependsOnId);
+          const blocks = graph.edges.filter((e) => e.dependsOnId === issueId).map((e) => e.issueId);
           return (
             <div className="relation-columns">
               <div>
@@ -96,7 +96,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
                       const node = byId.get(id);
                       return (
                         <li key={id}>
-                          {node ? <BugLink id={id} summary={node.summary} status={node.status} /> : id}
+                          {node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}
                           <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(id)}>
                             Remove
                           </Button>
@@ -115,7 +115,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
                     {blocks.map((id) => {
                       const node = byId.get(id);
                       return (
-                        <li key={id}>{node ? <BugLink id={id} summary={node.summary} status={node.status} /> : id}</li>
+                        <li key={id}>{node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}</li>
                       );
                     })}
                   </ul>
@@ -127,7 +127,7 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
       </AsyncSection>
       {state.status !== "error" ? (
         <div className="inline-form">
-          <Input aria-label="Bug this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
+          <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
           <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
           </Button>
@@ -140,28 +140,28 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
 }
 
 export function DuplicatesPanel({
-  bugId,
+  issueId,
   duplicateOfId,
   labels = {},
 }: {
-  bugId: string;
+  issueId: string;
   duplicateOfId: string | null;
   /** Ids to the names they stand for, shared with the history and timeline. */
   labels?: Record<string, string>;
 }) {
-  const { state, reload } = useAsync(() => listDuplicates({ bugId }), [bugId]);
+  const { state, reload } = useAsync(() => listDuplicates({ issueId }), [issueId]);
 
   const cluster = useMemo(() => {
     if (state.status !== "ready") return null;
-    return state.data.filter((b) => b.id !== bugId);
-  }, [state, bugId]);
+    return state.data.filter((b) => b.id !== issueId);
+  }, [state, issueId]);
 
-  // `duplicateOfId` comes from the bug we already have, so it answers before
+  // `duplicateOfId` comes from the issue we already have, so it answers before
   // the cluster query does. Only the LAST branch is a real emptiness claim --
   // testing `cluster.length > 0` alone would print "no duplicates" for the
   // moment the list is still in flight.
   const summary = duplicateOfId ? (
-    <>duplicate of another bug</>
+    <>duplicate of another issue</>
   ) : !cluster ? (
     <Pending width="8rem" />
   ) : cluster.length > 0 ? (
@@ -175,8 +175,8 @@ export function DuplicatesPanel({
     <section className="relations-panel">
       {duplicateOfId ? (
         <p className="state-hint small">
-          This bug is marked as a duplicate of{" "}
-          <Link to={`/bugs/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</Link>.
+          This issue is marked as a duplicate of{" "}
+          <Link to={`/issues/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</Link>.
         </p>
       ) : null}
       <AsyncSection
@@ -191,8 +191,8 @@ export function DuplicatesPanel({
           <ul>
             {cluster?.map((b) => (
               <li key={b.id}>
-                <BugLink id={b.id} summary={b.summary} status={b.status} />
-                {b.duplicateOfId === bugId ? <span className="dim"> (duplicate of this bug)</span> : null}
+                <IssueLink id={b.id} summary={b.summary} status={b.status} />
+                {b.duplicateOfId === issueId ? <span className="dim"> (duplicate of this issue)</span> : null}
               </li>
             ))}
           </ul>

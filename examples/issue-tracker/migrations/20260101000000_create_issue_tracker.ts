@@ -67,7 +67,7 @@ export default {
       columns: {
         name: t.text().notNull().unique(),
         description: t.text(),
-        isBugGroup: t.boolean().notNull().default(true),
+        isIssueGroup: t.boolean().notNull().default(true),
       },
     });
 
@@ -101,7 +101,7 @@ export default {
         // Bugzilla's voting mechanics. Without these three the classic
         // "votes auto-confirm an UNCONFIRMED bug" flow is unrepresentable.
         votesPerUser: t.int().notNull().default(0),
-        maxVotesPerBug: t.int().notNull().default(0),
+        maxVotesPerIssue: t.int().notNull().default(0),
         votesToConfirm: t.int().notNull().default(0),
       },
     });
@@ -169,7 +169,7 @@ export default {
     });
 
     // -----------------------------------------------------------------------
-    // Bugs
+    // Issues
     // -----------------------------------------------------------------------
     //
     // `status` and `resolution` are separate columns because Bugzilla treats
@@ -179,12 +179,16 @@ export default {
     //
     // `severity` (impact) and `priority` (scheduling) are likewise distinct
     // fields, not two names for one axis.
-    table("bugs").create({
+    table("issues").create({
       columns: {
         productId: t.text().notNull().references("products", "id"),
         componentId: t.text().notNull().references("components", "id"),
-        // Version is mandatory on a Bugzilla bug; nullable here was wrong.
-        versionId: t.text().notNull().references("versions", "id"),
+        // NULLABLE, and this reversed an earlier decision that read "version is
+        // mandatory on a Bugzilla bug; nullable here was wrong". That was true
+        // while every row WAS a bug: "version found in" is a defect concept.
+        // An enhancement has no version it was found in, so requiring one meant
+        // a feature request had to name a version it has nothing to do with.
+        versionId: t.text().references("versions", "id"),
         milestoneId: t.text().references("milestones", "id"),
         // Bugzilla users address bugs by alias constantly. Unique when set,
         // via the plain unique index below: NULLs compare distinct in both
@@ -197,6 +201,21 @@ export default {
         // by the allocator, so two concurrent files cannot both take 12.
         number: t.int().notNull(),
         summary: t.text().notNull(),
+        // WHAT this row is, kept strictly apart from how bad it is.
+        //
+        // Bugzilla answers both with one field: a feature request is
+        // `severity: enhancement`. That makes "a critical feature request"
+        // unsayable and pollutes every severity distribution, and Bugzilla's
+        // own flagship deployment abandoned it -- bugzilla.mozilla.org dropped
+        // the `enhancement` severity for a Type field of defect/enhancement/
+        // task (bugzilla.mozilla.org bug 1522340), after which Mozilla's
+        // severity guide reads "the severity of most bugs of type task and
+        // enhancement will be N/A".
+        //
+        // So `enhancement` is gone from severity (see BUG_SEVERITIES) and
+        // lives here instead. `defect` is the default because an unclassified
+        // report is more often something broken than something wished for.
+        kind: t.text().notNull().default("defect"),
         status: t.text().notNull().default("UNCONFIRMED"),
         resolution: t.text(),
         severity: t.text().notNull().default("normal"),
@@ -206,7 +225,7 @@ export default {
         qaContactId: t.text().references("users", "id"),
         // Was a bare t.text() with no FK and no index, which made
         // `dupes.list` an unindexed scan against an unconstrained column.
-        duplicateOfId: t.text().references("bugs", "id"),
+        duplicateOfId: t.text().references("issues", "id"),
         whiteboard: t.text(),
         opSys: t.text().notNull().default("Unspecified"),
         platform: t.text().notNull().default("Unspecified"),
@@ -225,18 +244,20 @@ export default {
         resolvedAt: t.timestamp(),
       },
       indexes: [
-        { name: "bugs_product_idx", on: ["productId"] },
+        { name: "issues_product_idx", on: ["productId"] },
         // The allocator reads max(number) for a product and writes max+1. This
         // is what makes that safe: two transactions that both read 11 cannot
         // both commit 12, the loser is rejected and retries.
-        { name: "bugs_product_number_uniq", on: ["productId", "number"], unique: true },
-        { name: "bugs_component_idx", on: ["componentId"] },
-        { name: "bugs_status_idx", on: ["status"] },
-        { name: "bugs_assignee_idx", on: ["assigneeId"] },
-        { name: "bugs_reporter_idx", on: ["reporterId"] },
-        { name: "bugs_duplicate_of_idx", on: ["duplicateOfId"] },
-        { name: "bugs_resolved_at_idx", on: ["resolvedAt"] },
-        { name: "bugs_alias_uniq", on: ["alias"], unique: true },
+        { name: "issues_product_number_uniq", on: ["productId", "number"], unique: true },
+        { name: "issues_component_idx", on: ["componentId"] },
+        { name: "issues_status_idx", on: ["status"] },
+        // Every "show me the feature requests" view is this index.
+        { name: "issues_kind_idx", on: ["kind"] },
+        { name: "issues_assignee_idx", on: ["assigneeId"] },
+        { name: "issues_reporter_idx", on: ["reporterId"] },
+        { name: "issues_duplicate_of_idx", on: ["duplicateOfId"] },
+        { name: "issues_resolved_at_idx", on: ["resolvedAt"] },
+        { name: "issues_alias_uniq", on: ["alias"], unique: true },
       ],
     });
 
@@ -244,14 +265,14 @@ export default {
     // confidential security bug inside an otherwise public product. `groups`
     // without this buys almost nothing -- product-level visibility alone
     // cannot express "this one bug is restricted".
-    table("bugGroups").create({
+    table("issueGroups").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         groupId: t.text().notNull().references("groups", "id"),
       },
       indexes: [
-        { name: "bug_groups_pair_uniq", on: ["bugId", "groupId"], unique: true },
-        { name: "bug_groups_group_idx", on: ["groupId"] },
+        { name: "issue_groups_pair_uniq", on: ["issueId", "groupId"], unique: true },
+        { name: "issue_groups_group_idx", on: ["groupId"] },
       ],
     });
 
@@ -266,7 +287,7 @@ export default {
     // and a dead control teaches the wrong thing in an example app.
     table("comments").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         authorId: t.text().notNull().references("users", "id"),
         body: t.text().notNull(),
         commentNumber: t.int().notNull().default(0),
@@ -275,7 +296,7 @@ export default {
       indexes: [
         // Also the ordering index for comments.list, and the backstop for the
         // max+1 race in the comment-number assignment.
-        { name: "comments_bug_number_uniq", on: ["bugId", "commentNumber"], unique: true },
+        { name: "comments_issue_number_uniq", on: ["issueId", "commentNumber"], unique: true },
       ],
     });
 
@@ -284,7 +305,7 @@ export default {
     // list view never has to touch object storage.
     table("attachments").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         // The comment a file arrived with, when it arrived with one.
         // Files are attached BY commenting, the way anyone who has used a
         // tracker this decade expects, so an attachment usually has a
@@ -304,7 +325,7 @@ export default {
         isObsolete: t.boolean().notNull().default(false),
       },
       indexes: [
-        { name: "attachments_bug_idx", on: ["bugId"] },
+        { name: "attachments_issue_idx", on: ["issueId"] },
         { name: "attachments_comment_idx", on: ["commentId"] },
       ],
     });
@@ -316,15 +337,15 @@ export default {
       },
     });
 
-    table("bugKeywords").create({
+    table("issueKeywords").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         keywordId: t.text().notNull().references("keywords", "id"),
       },
       indexes: [
-        { name: "bug_keywords_pair_uniq", on: ["bugId", "keywordId"], unique: true },
+        { name: "issue_keywords_pair_uniq", on: ["issueId", "keywordId"], unique: true },
         // Advanced search filters by keyword, which reads this direction.
-        { name: "bug_keywords_keyword_idx", on: ["keywordId"] },
+        { name: "issue_keywords_keyword_idx", on: ["keywordId"] },
       ],
     });
 
@@ -332,48 +353,48 @@ export default {
     // ("blocks") is the same row read the other way; storing both would let
     // the two halves disagree. Acyclicity is not expressible here and is
     // enforced in `deps.add`.
-    table("bugDependencies").create({
+    table("issueDependencies").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
-        dependsOnId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
+        dependsOnId: t.text().notNull().references("issues", "id"),
       },
       indexes: [
-        { name: "bug_deps_pair_uniq", on: ["bugId", "dependsOnId"], unique: true },
-        { name: "bug_deps_depends_idx", on: ["dependsOnId"] },
+        { name: "issue_deps_pair_uniq", on: ["issueId", "dependsOnId"], unique: true },
+        { name: "issue_deps_depends_idx", on: ["dependsOnId"] },
       ],
     });
 
-    table("bugCc").create({
+    table("issueCc").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         userId: t.text().notNull().references("users", "id"),
       },
       indexes: [
-        { name: "bug_cc_pair_uniq", on: ["bugId", "userId"], unique: true },
+        { name: "issue_cc_pair_uniq", on: ["issueId", "userId"], unique: true },
         // "CC'd to me" on the dashboard reads this direction.
-        { name: "bug_cc_user_idx", on: ["userId"] },
+        { name: "issue_cc_user_idx", on: ["userId"] },
       ],
     });
 
-    table("bugSeeAlso").create({
+    table("issueSeeAlso").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         url: t.text().notNull(),
       },
       indexes: [
-        { name: "bug_see_also_pair_uniq", on: ["bugId", "url"], unique: true },
+        { name: "issue_see_also_pair_uniq", on: ["issueId", "url"], unique: true },
       ],
     });
 
     table("votes").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         userId: t.text().notNull().references("users", "id"),
         // A vote quantity, so bugs.voteCount is SUM(count), not COUNT(*).
         count: t.int().notNull().default(1),
       },
       indexes: [
-        { name: "votes_pair_uniq", on: ["bugId", "userId"], unique: true },
+        { name: "votes_pair_uniq", on: ["issueId", "userId"], unique: true },
         { name: "votes_user_idx", on: ["userId"] },
       ],
     });
@@ -385,7 +406,7 @@ export default {
       columns: {
         name: t.text().notNull(),
         description: t.text(),
-        targetType: t.text().notNull().default("bug"),
+        targetType: t.text().notNull().default("issue"),
         isRequestable: t.boolean().notNull().default(true),
         isMultiplicable: t.boolean().notNull().default(false),
         productId: t.text().references("products", "id"),
@@ -401,14 +422,14 @@ export default {
     table("flags").create({
       columns: {
         flagTypeId: t.text().notNull().references("flagTypes", "id"),
-        bugId: t.text().references("bugs", "id"),
+        issueId: t.text().references("issues", "id"),
         attachmentId: t.text().references("attachments", "id"),
         setterId: t.text().notNull().references("users", "id"),
         requesteeId: t.text().references("users", "id"),
         status: t.text().notNull().default("?"),
       },
       indexes: [
-        { name: "flags_bug_idx", on: ["bugId"] },
+        { name: "flags_issue_idx", on: ["issueId"] },
         { name: "flags_attachment_idx", on: ["attachmentId"] },
         // flags.listRequests answers both "requests OF me" and "requests BY
         // me"; only the first was indexed.
@@ -427,7 +448,7 @@ export default {
     // separate event log.
     table("activities").create({
       columns: {
-        bugId: t.text().notNull().references("bugs", "id"),
+        issueId: t.text().notNull().references("issues", "id"),
         actorId: t.text().notNull().references("users", "id"),
         // Bugzilla's bugs_activity carries attach_id. Without it, "attachment
         // 12 marked obsolete" renders in the history as a bare field name.
@@ -437,10 +458,10 @@ export default {
         newValue: t.text(),
       },
       indexes: [
-        { name: "activities_bug_idx", on: ["bugId"] },
+        { name: "activities_issue_idx", on: ["issueId"] },
         // reports.trend mines history by field; bug-only indexing made that a
         // full scan.
-        { name: "activities_bug_field_idx", on: ["bugId", "fieldName"] },
+        { name: "activities_issue_field_idx", on: ["issueId", "fieldName"] },
       ],
     });
 
@@ -474,8 +495,8 @@ export default {
     table("notifications").create({
       columns: {
         userId: t.text().notNull().references("users", "id"),
-        bugId: t.text().references("bugs", "id"),
-        kind: t.text().notNull().default("bug_changed"),
+        issueId: t.text().references("issues", "id"),
+        kind: t.text().notNull().default("issue_changed"),
         title: t.text().notNull(),
         body: t.text(),
         isRead: t.boolean().notNull().default(false),

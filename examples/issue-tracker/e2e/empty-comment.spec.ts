@@ -43,7 +43,7 @@ test("clearing the comment editor disables the Comment button", async ({ page, b
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -51,7 +51,7 @@ test("clearing the comment editor disables the Comment button", async ({ page, b
     description: "<p>seed</p>",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
 
   const editor = page.getByLabel("Add a comment");
   const comment = page.getByRole("button", { name: "Comment", exact: true });

@@ -20,7 +20,7 @@ import { signIn } from "./session";
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
-test("the bug table is marked loading rather than hidden on first load", async ({
+test("the issue table is marked loading rather than hidden on first load", async ({
   page,
   baseURL,
 }) => {
@@ -32,18 +32,24 @@ test("the bug table is marked loading rather than hidden on first load", async (
   const held = new Promise<void>((resolve) => {
     released = resolve;
   });
-  await page.route(/bugs\.search/, async (route) => {
+  await page.route(/issues\.search/, async (route) => {
     await held;
     await route.continue();
   });
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
 
   // While the search is still in flight: the table is there, marked busy.
   const table = page.locator("table");
   await expect(table, "the table renders while the first load is in flight").toBeVisible();
+  // THE STRING MUST TRACK THE APP. This is an absence assertion about a
+  // spinner's exact label (`loadingLabel` on the AsyncSection in
+  // src/pages/IssueList.tsx), and a label the app never renders is absent for
+  // free -- the check would pass on a page that was nothing BUT a spinner. It
+  // read "Loading bugs..." until the entity was renamed; if it drifts again,
+  // this line stops being a test.
   await expect(
-    page.getByText("Loading bugs..."),
+    page.getByText("Loading issues..."),
     "and it is not replaced by a bare spinner",
   ).toHaveCount(0);
   await expect(

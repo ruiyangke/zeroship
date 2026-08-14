@@ -21,29 +21,29 @@ import { signIn } from "./session";
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
-test("the bug table stays on screen and marks itself busy while reloading", async ({
+test("the issue table stays on screen and marks itself busy while reloading", async ({
   page,
   baseURL,
   context,
 }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
   const rows = page.locator("table tbody tr");
   // Wait for REAL rows, not the skeleton. The first load now renders the table
   // in its loading state instead of a spinner, so "a tbody tr is visible" is
   // satisfied by placeholder rows -- this sampled five of those as `before`
-  // and then compared them against twenty-five real ones. A bug link only
+  // and then compared them against twenty-five real ones. An issue link only
   // exists on a row with data behind it.
-  await expect(page.locator("a.bug-link").first()).toBeVisible();
+  await expect(page.locator("a.issue-link").first()).toBeVisible();
   const before = await rows.count();
   expect(before, "the fixture needs rows for there to be anything to keep").toBeGreaterThan(0);
 
   // The trailing glob is load-bearing. Queries go out as GET with a base64
-  // `input` query string, so "**/bugs.search" matches nothing and the
+  // `input` query string, so "**/issues.search" matches nothing and the
   // delay never applies -- the refetch then completes between two calls and
   // the test passes without ever observing the state it exists to check.
-  await page.route("**/__zeroship/v1/bugs.search*", async (route) => {
+  await page.route("**/__zeroship/v1/issues.search*", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     await route.continue();
   });

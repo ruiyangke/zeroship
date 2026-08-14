@@ -1,4 +1,4 @@
-// Renders bugs.get's `activities` array in order, with reference values
+// Renders issues.get's `activities` array in order, with reference values
 // resolved to names for display -- no client-side history re-derivation, per
 // this app's fidelity requirement. (Other panels use the
 // same array to reconstruct current keyword/flag state, which is a
@@ -47,7 +47,7 @@ function initials(who: string): string {
 /**
  * One edit, however many fields it touched.
  *
- * The log stores a row per FIELD, so closing a bug writes three of them --
+ * The log stores a row per FIELD, so closing an issue writes three of them --
  * status, resolution and whoever it was assigned to -- with the same actor and
  * the same timestamp. As four table columns that read as three unrelated
  * events. Grouping them is a presentation choice only: the rows, their order
@@ -106,7 +106,7 @@ export function HistoryPanel({
       {events.map((event, index) => {
         const who = personName(event.actorId, people, "Someone");
         /**
-         * Filing a bug writes a row per field, so the first event is fourteen
+         * Filing an issue writes a row per field, so the first event is fourteen
          * lines of "unset to X" and every real change starts below them. It
          * is FOLDED, not dropped: the rows are all still here, one click away,
          * because a history that quietly omits things is worse than a long
@@ -135,7 +135,7 @@ export function HistoryPanel({
               <p className="history-event-head">
                 <span className="history-actor">{who}</span>
                 <span className="history-when" title={formatDate(event.changedAt)}>
-                  {isCreation ? "filed this bug" : null} {timeAgo(event.changedAt)}
+                  {isCreation ? "filed this issue" : null} {timeAgo(event.changedAt)}
                 </span>
               </p>
               {isCreation ? (

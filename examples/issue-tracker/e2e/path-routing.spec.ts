@@ -43,7 +43,7 @@ test("a deep path renders, survives reload, and has no hash", async ({ page, bas
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -52,20 +52,20 @@ test("a deep path renders, survives reload, and has no hash", async ({ page, bas
   });
 
   // Navigating in-app produces a real path, with nothing after a "#".
-  await page.goto("/bugs");
+  await page.goto("/issues");
   await page.getByRole("link", { name: new RegExp(`Path routed ${RUN}`) }).first().click();
   await expect(page.locator("ul.comment-list")).toBeVisible();
-  expect(page.url(), "the URL is a path").toContain(`/bugs/${bug.id}`);
+  expect(page.url(), "the URL is a path").toContain(`/issues/${issue.id}`);
   expect(new URL(page.url()).hash, "and carries no fragment").toBe("");
 
   // The server serves the app for a path it has no file for.
-  const direct = await page.request.get(`${baseURL}/bugs/${bug.id}`);
+  const direct = await page.request.get(`${baseURL}/issues/${issue.id}`);
   expect(direct.status(), "a deep path is served, not 404'd").toBe(200);
   expect(await direct.text(), "and it is the app's html").toContain("<div id=\"root\">");
 
-  // A reload lands in the same place rather than on a 404 or the bug list.
+  // A reload lands in the same place rather than on a 404 or the issue list.
   await page.reload();
-  await expect(page.locator("ul.comment-list"), "the bug renders after a reload").toBeVisible();
+  await expect(page.locator("ul.comment-list"), "the issue renders after a reload").toBeVisible();
   await expect(page.getByText("No page here"), "and it is not the not-found page").toHaveCount(0);
-  expect(page.url()).toContain(`/bugs/${bug.id}`);
+  expect(page.url()).toContain(`/issues/${issue.id}`);
 });

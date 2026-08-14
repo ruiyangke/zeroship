@@ -7,8 +7,8 @@ import { UserPicker } from "../UserPicker";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
-export function CcPanel({ bugId }: { bugId: string }) {
-  const { state, reload } = useAsync(() => listCc({ bugId }), [bugId]);
+export function CcPanel({ issueId }: { issueId: string }) {
+  const { state, reload } = useAsync(() => listCc({ issueId }), [issueId]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
@@ -17,7 +17,7 @@ export function CcPanel({ bugId }: { bugId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await addCc({ bugId, userId });
+      await addCc({ issueId, userId });
       setPicking(false);
       reload();
     } catch (err) {
@@ -31,7 +31,7 @@ export function CcPanel({ bugId }: { bugId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await removeCc({ bugId, userId });
+      await removeCc({ issueId, userId });
       reload();
     } catch (err) {
       setError(errorMessage(err));

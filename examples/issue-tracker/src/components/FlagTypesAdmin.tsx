@@ -10,9 +10,9 @@ import { errorMessage } from "./rpc";
  *
  * The same hole `GroupsAdmin` closed, in the flag feature: `flags.set`,
  * `flags.clear`, `flags.list` and `flags.listRequests` all need a
- * `flagTypeId`, the bug page renders a Flags panel, and SPEC.md listed flags
+ * `flagTypeId`, the issue page renders a Flags panel, and SPEC.md listed flags
  * as delivered -- but nothing in the app, the migration or any seed could put
- * a row in `flagTypes`. Every product reported "defines no bug-level flag
+ * a row in `flagTypes`. Every product reported "defines no issue-level flag
  * types" and always would have.
  *
  * Admin-only, matching Bugzilla, where flag types are defined by an
@@ -22,7 +22,7 @@ export function FlagTypesAdmin() {
   const [types, setTypes] = useState<Awaited<ReturnType<typeof listFlagTypes>> | null>(null);
   const [denied, setDenied] = useState(false);
   const [name, setName] = useState("");
-  const [targetType, setTargetType] = useState<"bug" | "attachment">("bug");
+  const [targetType, setTargetType] = useState<"issue" | "attachment">("issue");
   const [productId, setProductId] = useState("");
   const [products, setProducts] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
   const [busy, setBusy] = useState(false);
@@ -67,8 +67,8 @@ export function FlagTypesAdmin() {
     <section className="flag-types-admin">
       <h2>Flag types</h2>
       <p className="state-hint small">
-        A flag is a named request or sign-off on a bug or an attachment. Until a type exists
-        here, the Flags panel on every bug stays empty.
+        A flag is a named request or sign-off on an issue or an attachment. Until a type exists
+        here, the Flags panel on every issue stays empty.
       </p>
       {denied ? (
         <p className="state-hint small">Only an administrator can define flag types.</p>
@@ -97,10 +97,10 @@ export function FlagTypesAdmin() {
           <Field.Label>Applies to</Field.Label>
           <Select
             value={targetType}
-            onValueChange={(next) => setTargetType((next as "bug" | "attachment") ?? "bug")}
+            onValueChange={(next) => setTargetType((next as "issue" | "attachment") ?? "issue")}
             aria-label="Applies to"
           >
-            <Select.Item value="bug">bug</Select.Item>
+            <Select.Item value="issue">issue</Select.Item>
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
         </Field>

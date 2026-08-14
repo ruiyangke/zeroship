@@ -12,10 +12,10 @@ import { signIn } from "./session";
  * one-way door.
  *
  * The refusal is the half worth guarding. Deleting a group that still carries
- * `bugGroups` or `productGroups` rows does not just remove a row -- it makes
- * every bug behind it readable by everyone, at the exact moment an admin is
+ * `issueGroups` or `productGroups` rows does not just remove a row -- it makes
+ * every issue behind it readable by everyone, at the exact moment an admin is
  * tidying up and least expects a visibility change. So the two arms below are
- * a matched pair differing in ONE variable: whether the group restricts a bug.
+ * a matched pair differing in ONE variable: whether the group restricts an issue.
  * The delete-succeeds arm alone would pass against a server that never checks;
  * the refusal arm alone would pass against one that never deletes.
  */
@@ -23,7 +23,7 @@ import { signIn } from "./session";
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("a group deletes when unused and refuses while it restricts a bug", async ({
+test("a group deletes when unused and refuses while it restricts an issue", async ({
   page,
   baseURL,
 }) => {
@@ -46,7 +46,7 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -57,8 +57,8 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
   const unusedName = `unused-${RUN}`;
   const inUseName = `in-use-${RUN}`;
   await rpc("groups.create", { name: unusedName, description: "nothing uses this" });
-  const inUse = await rpc("groups.create", { name: inUseName, description: "restricts a bug" });
-  await rpc("bugs.restrict", { bugId: bug.id, groupId: inUse.id });
+  const inUse = await rpc("groups.create", { name: inUseName, description: "restricts an issue" });
+  await rpc("issues.restrict", { issueId: issue.id, groupId: inUse.id });
 
   await page.goto("/products");
   const admin = page.locator("section.groups-admin");
@@ -71,19 +71,19 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
   await expect(
     admin.locator("p.field-error"),
     "the refusal names what still depends on the group",
-  ).toContainText(/still restricts 1 bug/i);
+  ).toContainText(/still restricts 1 issue/i);
   await expect(list, "and the group is still there").toContainText(inUseName);
 
   // The restriction genuinely survived the refused delete, evidenced by the
   // server refusing again for the same stated reason -- it can only count
-  // "1 bug" if the bugGroups row is still there. Asserting on the bug itself
-  // would be more direct, but nothing exposes a bug's restrictions over RPC,
+  // "1 issue" if the issueGroups row is still there. Asserting on the issue itself
+  // would be more direct, but nothing exposes an issue's restrictions over RPC,
   // and inventing a procedure to make a test easier is the wrong direction.
   const second = await page.request.post(`${baseURL}/__zeroship/v1/groups.delete`, {
     data: { json: { id: inUse.id } },
   });
   expect(second.status(), "a second delete is refused too").toBe(409);
-  expect(JSON.stringify(await second.json())).toMatch(/still restricts 1 bug/i);
+  expect(JSON.stringify(await second.json())).toMatch(/still restricts 1 issue/i);
 
   // Arm 2 -- the one-variable partner: same button, same list, a group that
   // restricts nothing.
@@ -102,6 +102,6 @@ test("a group deletes when unused and refuses while it restricts a bug", async (
   // on a page about products -- and this spec, of all of them, has no excuse.
   // Unrestrict first: the server refuses while the group is load-bearing,
   // which is the whole point of it.
-  await rpc("bugs.unrestrict", { bugId: bug.id, groupId: inUse.id });
+  await rpc("issues.unrestrict", { issueId: issue.id, groupId: inUse.id });
   await rpc("groups.delete", { id: inUse.id });
 });

@@ -34,7 +34,7 @@ test("a notification renders its comment as markup, not as markdown source", asy
     return (await res.json()).json;
   };
 
-  // Alice owns the bug so she is its reporter, which is what puts the comment
+  // Alice owns the issue so she is its reporter, which is what puts the comment
   // in her inbox. Bob writes it, because the fanout deliberately omits your
   // own changes.
   const product = await rpc("products.create", {
@@ -48,7 +48,7 @@ test("a notification renders its comment as markup, not as markdown source", asy
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -61,7 +61,7 @@ test("a notification renders its comment as markup, not as markdown source", asy
   const bob = await bobCtx.newPage();
   const marker = `emphasised-${RUN}`;
   await bob.request.post(`${baseURL}/__zeroship/v1/comments.add`, {
-    data: { json: { bugId: bug.id, body: `Reproduced on **${marker}** already.` } },
+    data: { json: { issueId: issue.id, body: `Reproduced on **${marker}** already.` } },
   });
 
   await page.goto("/dashboard");

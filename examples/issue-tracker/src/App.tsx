@@ -5,10 +5,10 @@ import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
 import { useAsync } from "./components/rpc";
 import { EmptyState } from "./components/StateViews";
-import { BugDetailPage } from "./pages/BugDetail";
-import { BugListPage } from "./pages/BugList";
+import { IssueDetailPage } from "./pages/IssueDetail";
+import { IssueListPage } from "./pages/IssueList";
 import { DashboardPage } from "./pages/Dashboard";
-import { NewBugPage } from "./pages/NewBug";
+import { NewIssuePage } from "./pages/NewIssue";
 import { ProductsAdminPage } from "./pages/ProductsAdmin";
 import { ReportsPage } from "./pages/Reports";
 
@@ -24,12 +24,12 @@ import { ReportsPage } from "./pages/Reports";
  * rather than a new one.
  */
 
-/** The bug page, for both /bugs/:id and its /c/:n permalink. */
-function BugDetailRoute() {
+/** The issue page, for both /issues/:id and its /c/:n permalink. */
+function IssueDetailRoute() {
   const { id, n } = useParams();
   const parsed = n === undefined ? NaN : Number(n);
   return (
-    <BugDetailPage
+    <IssueDetailPage
       id={id ?? ""}
       commentNumber={Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined}
     />
@@ -44,7 +44,7 @@ function BugDetailRoute() {
  * back tells you which, and is the difference between a typo you can fix and
  * a bug you would report.
  *
- * NOT a redirect to the bug list. An unknown path used to render Bugs, so a
+ * NOT a redirect to the issue list. An unknown path used to render Issues, so a
  * mistyped or stale link answered with a plausible page and never said it had
  * not found the one you asked for -- the worst kind of wrong, because nothing
  * looks wrong.
@@ -58,7 +58,7 @@ function NotFoundPage() {
         hint={
           <>
             Nothing is routed at <code>{pathname}</code>. Try the{" "}
-            <Link to="/bugs">bug list</Link>.
+            <Link to="/issues">issue list</Link>.
           </>
         }
       />
@@ -108,13 +108,13 @@ export function App() {
     <Shell userState={userState}>
       <Fragment key={sessionKey}>
         <Routes>
-          <Route path="/" element={<BugListPage />} />
-          <Route path="/bugs" element={<BugListPage />} />
-          <Route path="/bugs/new" element={<NewBugPage />} />
-          <Route path="/bugs/:id" element={<BugDetailRoute />} />
-          {/* The comment permalink. A route, so pasting it lands on the bug
+          <Route path="/" element={<IssueListPage />} />
+          <Route path="/issues" element={<IssueListPage />} />
+          <Route path="/issues/new" element={<NewIssuePage />} />
+          <Route path="/issues/:id" element={<IssueDetailRoute />} />
+          {/* The comment permalink. A route, so pasting it lands on the issue
               scrolled to that comment. */}
-          <Route path="/bugs/:id/c/:n" element={<BugDetailRoute />} />
+          <Route path="/issues/:id/c/:n" element={<IssueDetailRoute />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/products" element={<ProductsAdminPage />} />
           <Route path="/reports" element={<ReportsPage />} />

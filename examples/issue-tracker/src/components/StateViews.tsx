@@ -32,8 +32,8 @@ export function EmptyState({
    * "block" is the page-level empty state: a centred illustration-scale
    * heading, right when a whole list has nothing in it.
    *
-   * "inline" is for a panel. The bug page carries nine small panels side by
-   * side, and most of them are empty on most bugs -- no keywords, no votes,
+   * "inline" is for a panel. The issue page carries nine small panels side by
+   * side, and most of them are empty on most issues -- no keywords, no votes,
    * no dependencies. Rendering "No keywords have been defined for this
    * tracker yet." as a centred heading inside a 280px card made an ordinary
    * state look like a failure, nine times over. Here the empty case is an

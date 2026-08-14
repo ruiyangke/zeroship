@@ -79,12 +79,12 @@ function AttachmentRow({ attachment, onChanged }: { attachment: Attachment; onCh
 }
 
 /**
- * Every file on the bug, in one place.
+ * Every file on the issue, in one place.
  *
  * Uploading happens in the comment box now -- a file almost always needs a
  * sentence saying what it is, and this panel had you do the two things at
  * opposite ends of the page. What it keeps is the ROLL-UP: comments scatter
- * files down a long thread, and "what has been attached to this bug" is still
+ * files down a long thread, and "what has been attached to this issue" is still
  * a question worth answering in one glance. Files that predate a comment, or
  * arrived without one, appear here and nowhere else.
  */

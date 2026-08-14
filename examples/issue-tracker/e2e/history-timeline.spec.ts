@@ -43,7 +43,7 @@ test("the history names who changed what, grouped per edit", async ({
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -55,11 +55,11 @@ test("the history names who changed what, grouped per edit", async ({
   const bobCtx = await browser.newContext();
   await signIn(bobCtx, { runtimePort: RUNTIME_PORT, baseURL: baseURL!, user: otherUser });
   const bob = await bobCtx.newPage();
-  await bob.request.post(`${baseURL}/__zeroship/v1/bugs.setSeverity`, {
-    data: { json: { id: bug.id, severity: "major" } },
+  await bob.request.post(`${baseURL}/__zeroship/v1/issues.setSeverity`, {
+    data: { json: { id: issue.id, severity: "major" } },
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await page.getByRole("button", { name: /^History/ }).click();
 
   const events = page.locator(".history-event");
@@ -72,7 +72,7 @@ test("the history names who changed what, grouped per edit", async ({
   await expect(bobEvent).toContainText("normal");
   await expect(bobEvent).toContainText("major");
 
-  // Alice filed the bug, so she owns the creation event.
+  // Alice filed the issue, so she owns the creation event.
   await expect(
     events.filter({ hasText: "Alice Dev" }).first(),
     "and the creation is attributed too",

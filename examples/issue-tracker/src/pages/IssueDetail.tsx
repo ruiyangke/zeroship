@@ -1,41 +1,41 @@
 import { useEffect, useState } from "react";
 import { Banner, Button, Card, Cluster, Input, Stack } from "@zeroship/ui";
-import { PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
-import { currentUser, getBug, getProduct, listAttachments, listProducts, updateBug } from "../api";
+import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
+import { currentUser, getIssue, getProduct, listAttachments, listProducts, updateIssue } from "../api";
 import { ErrorState, Loading } from "../components/StateViews";
 import { isUnauthenticated } from "../components/rpc";
-import { AttachmentsPanel } from "../components/bug-detail/AttachmentsPanel";
-import { CcPanel } from "../components/bug-detail/CcPanel";
-import { CommentsPanel } from "../components/bug-detail/CommentsPanel";
-import { FieldsPanel } from "../components/bug-detail/FieldsPanel";
-import { FlagsPanel } from "../components/bug-detail/FlagsPanel";
-import { SecurityPanel } from "../components/bug-detail/SecurityPanel";
-import { SeeAlsoPanel } from "../components/bug-detail/SeeAlsoPanel";
-import { VotesPanel } from "../components/bug-detail/VotesPanel";
-import { HistoryPanel } from "../components/bug-detail/HistoryPanel";
-import { DependenciesPanel, DuplicatesPanel } from "../components/bug-detail/RelationsPanel";
-import { KeywordsPanel } from "../components/bug-detail/KeywordsPanel";
+import { AttachmentsPanel } from "../components/issue-detail/AttachmentsPanel";
+import { CcPanel } from "../components/issue-detail/CcPanel";
+import { CommentsPanel } from "../components/issue-detail/CommentsPanel";
+import { FieldsPanel } from "../components/issue-detail/FieldsPanel";
+import { FlagsPanel } from "../components/issue-detail/FlagsPanel";
+import { SecurityPanel } from "../components/issue-detail/SecurityPanel";
+import { SeeAlsoPanel } from "../components/issue-detail/SeeAlsoPanel";
+import { VotesPanel } from "../components/issue-detail/VotesPanel";
+import { HistoryPanel } from "../components/issue-detail/HistoryPanel";
+import { DependenciesPanel, DuplicatesPanel } from "../components/issue-detail/RelationsPanel";
+import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
 import { errorMessage, toPromise, useAsync } from "../components/rpc";
 import type { ProductDetail } from "../components/types";
 
 type Tab = "details" | "history";
 
 /**
- * Editing the bug's title, where the title is.
+ * Editing the issue's title, where the title is.
  *
  * This used to be "Edit summary" at the top of the metadata rail: a control
  * several hundred pixels from the words it changes, in the column reserved for
- * facts ABOUT the bug. A title is not metadata about itself, and an action
+ * facts ABOUT the issue. A title is not metadata about itself, and an action
  * belongs beside its object.
  */
 function TitleEditor({
-  bug,
+  issue,
   onDone,
 }: {
-  bug: { id: string; summary: string };
+  issue: { id: string; summary: string };
   onDone: (changed: boolean) => void;
 }) {
-  const [draft, setDraft] = useState(bug.summary);
+  const [draft, setDraft] = useState(issue.summary);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,7 +45,7 @@ function TitleEditor({
     setBusy(true);
     setError(null);
     try {
-      await toPromise(updateBug({ id: bug.id, changes: { summary } }));
+      await toPromise(updateIssue({ id: issue.id, changes: { summary } }));
       onDone(true);
     } catch (err) {
       setError(errorMessage(err));
@@ -54,7 +54,7 @@ function TitleEditor({
   };
 
   return (
-    <div className="bug-title-editor">
+    <div className="issue-title-editor">
       <Input
         aria-label="Summary"
         value={draft}
@@ -82,15 +82,15 @@ function TitleEditor({
   );
 }
 
-export function BugDetailPage({
+export function IssueDetailPage({
   id,
   commentNumber,
 }: {
   id: string;
-  /** From #/bugs/<id>/c/<n> -- scroll to that comment once it exists. */
+  /** From #/issues/<id>/c/<n> -- scroll to that comment once it exists. */
   commentNumber?: number;
 }) {
-  const { state, reload } = useAsync(() => getBug({ id }), [id]);
+  const { state, reload } = useAsync(() => getIssue({ id }), [id]);
   const [tab, setTab] = useState<Tab>("details");
 
   // Land on the comment a permalink names.
@@ -121,7 +121,7 @@ export function BugDetailPage({
     };
   }, [commentNumber, id]);
   // CONTROLLED, because <details open> is not. Anything inside the fold that
-  // reloads the bug -- voting, setting a flag, restricting it -- re-renders
+  // reloads the issue -- voting, setting a flag, restricting it -- re-renders
   // this subtree, and an uncontrolled element comes back closed. The fold
   // would snap shut under someone in the middle of using it, which is both a
   // real defect and why the specs saw the panel become "not stable, then not
@@ -130,12 +130,12 @@ export function BugDetailPage({
   const [editingTitle, setEditingTitle] = useState(false);
   const [productDetail, setProductDetail] = useState<ProductDetail | null>(null);
   const productsQ = useAsync(() => listProducts({}), []);
-  // Bugs are public, so unlike the dashboard this page stays READABLE without
+  // Issues are public, so unlike the dashboard this page stays READABLE without
   // an identity -- what it must not do is offer controls that cannot work.
   const { state: userState } = useAsync(() => currentUser({}), []);
   // The page owns the file list because two children render it: the thread
-  // shows each comment's files, and the roll-up shows every file on the bug.
-  const attachmentsQ = useAsync(() => listAttachments({ bugId: id }), [id]);
+  // shows each comment's files, and the roll-up shows every file on the issue.
+  const attachmentsQ = useAsync(() => listAttachments({ issueId: id }), [id]);
   const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
 
   const productId = state.status === "ready" ? state.data.product?.id ?? null : null;
@@ -156,14 +156,14 @@ export function BugDetailPage({
     };
   }, [productId]);
 
-  if (state.status === "loading") return <Loading label="Loading bug..." />;
+  if (state.status === "loading") return <Loading label="Loading issue..." />;
   if (state.status === "error") return <ErrorState error={state.error} onRetry={reload} />;
 
   const { data: detail } = state;
   if (!detail.product || !detail.component) {
     return (
       <ErrorState
-        error={new Error("This bug references a product or component that no longer resolves.")}
+        error={new Error("This issue references a product or component that no longer resolves.")}
       />
     );
   }
@@ -171,8 +171,8 @@ export function BugDetailPage({
   const component = detail.component;
 
   // Everything the log might name by id. Built from what the page already
-  // has, so the history tab costs no extra request: the bug's own product and
-  // component, the people bugs.get resolved, and the product structure the
+  // has, so the history tab costs no extra request: the issue's own product and
+  // component, the people issues.get resolved, and the product structure the
   // fields panel loaded.
   const historyLabels: Record<string, string> = {
     [product.id]: product.name,
@@ -183,43 +183,43 @@ export function BugDetailPage({
     ...Object.fromEntries((productDetail?.versions ?? []).map((v) => [v.id, v.name])),
     ...Object.fromEntries((productDetail?.milestones ?? []).map((m) => [m.id, m.name])),
     ...Object.fromEntries((productDetail?.components ?? []).map((c) => [c.id, c.name])),
-    // Bugs named by the log: dependsOn / blocks / duplicateOfId store another
-    // bug's typed id as the value, so without these the history reads "set
-    // Depends On to bug_0346W0Ole6amXDN9RKvzW6".
+    // Issues named by the log: dependsOn / blocks / duplicateOfId store another
+    // issue's typed id as the value, so without these the history reads "set
+    // Depends On to issue_0346W0Ole6amXDN9RKvzW6".
     ...Object.fromEntries(
-      Object.entries(detail.bugRefs ?? {}).map(([id, ref]) => [id, ref.label]),
+      Object.entries(detail.issueRefs ?? {}).map(([id, ref]) => [id, ref.label]),
     ),
   };
 
   return (
-    <div className="page bug-detail-page">
+    <div className="page issue-detail-page">
       {/* The key, the title and the state, in that reading order.
           These used to share one line: a mono key, a long summary and four
           badges all at the same height, so a title that ran long squeezed the
           badges and the eye had no obvious place to start. The key is now a
           quiet line above, the summary owns its own line at heading size, and
-          the state sits under it where it reads as a caption about the bug
+          the state sits under it where it reads as a caption about the issue
           rather than as more title. */}
-      <div className="page-head bug-head">
-        <span className="bug-id">
-          {detail.product ? `${detail.product.key}-${detail.bug.number}` : detail.bug.id}
+      <div className="page-head issue-head">
+        <span className="issue-id">
+          {detail.product ? `${detail.product.key}-${detail.issue.number}` : detail.issue.id}
         </span>
         {editingTitle ? (
           <TitleEditor
-            bug={detail.bug}
+            issue={detail.issue}
             onDone={(next) => {
               setEditingTitle(false);
               if (next) reload();
             }}
           />
         ) : (
-          <Cluster gap={2} align="center" className="bug-title-row">
-            <h1 className="bug-title">{detail.bug.summary}</h1>
+          <Cluster gap={2} align="center" className="issue-title-row">
+            <h1 className="issue-title">{detail.issue.summary}</h1>
             {signedOut ? null : (
               <Button
                 variant="plain"
                 size="small"
-                className="bug-title-edit"
+                className="issue-title-edit"
                 aria-label="Edit summary"
                 onClick={() => setEditingTitle(true)}
               >
@@ -228,12 +228,17 @@ export function BugDetailPage({
             )}
           </Cluster>
         )}
-        <Cluster gap={2} align="center" className="bug-state">
-          <StatusBadge status={detail.bug.status} />
-          <ResolutionBadge resolution={detail.bug.resolution ?? null} />
-          <SeverityBadge severity={detail.bug.severity} />
-          <PriorityBadge priority={detail.bug.priority} />
-          <span className="bug-head-meta">
+        <Cluster gap={2} align="center" className="issue-state">
+          <StatusBadge status={detail.issue.status} />
+          <ResolutionBadge resolution={detail.issue.resolution ?? null} />
+          {/* Before severity, because it qualifies it: "blocker" answers how
+              bad, and only kind answers how bad AT WHAT. Without this the top
+              of a feature request and the top of a crash report were the same
+              three badges. */}
+          <KindBadge kind={detail.issue.kind} />
+          <SeverityBadge severity={detail.issue.severity} />
+          <PriorityBadge priority={detail.issue.priority} />
+          <span className="issue-head-meta">
             {detail.product ? detail.product.name : null}
             {detail.component ? ` / ${detail.component.name}` : null}
           </span>
@@ -243,11 +248,11 @@ export function BugDetailPage({
       {/* Said once, at the top, rather than discovered one 401 at a time.
           A signed-out visitor could read this page and still be offered a
           comment box, an Edit button on every comment and three editable
-          selects -- every one of which fails on use. The bug stays readable
-          because bugs are public; the controls that cannot work go away. */}
+          selects -- every one of which fails on use. The issue stays readable
+          because issues are public; the controls that cannot work go away. */}
       {signedOut ? (
         <Banner intent="info" title="You are not signed in">
-          This bug is public, so you can read it. Sign in to comment or change any
+          This issue is public, so you can read it. Sign in to comment or change any
           of its fields.
         </Banner>
       ) : null}
@@ -271,16 +276,16 @@ export function BugDetailPage({
       {tab === "history" ? (
         <HistoryPanel activities={detail.activities} labels={historyLabels} people={detail.people} />
       ) : (
-        <div className="bug-detail-grid">
-          {/* The conversation IS the bug. It used to sit under a screen of
+        <div className="issue-detail-grid">
+          {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
-              URL -- so the description, which is what the bug actually says,
+              URL -- so the description, which is what the issue actually says,
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
-          <div className="bug-detail-main">
+          <div className="issue-detail-main">
             <CommentsPanel
-              bugId={id}
+              issueId={id}
               readOnly={signedOut}
               activities={detail.activities}
               people={detail.people}
@@ -288,8 +293,8 @@ export function BugDetailPage({
               attachments={attachmentsQ.state}
               onAttachmentsChanged={attachmentsQ.reload}
             />
-            {/* Everything below is about the bug WITHOUT being metadata about
-                it: files, links to other bugs, who is watching, what is
+            {/* Everything below is about the issue WITHOUT being metadata about
+                it: files, links to other issues, who is watching, what is
                 pending review. They lived in the rail, where measurement put
                 them at 1856px stacked inside a 352px column -- a column whose
                 whole job is to stay glanceable. Here they get the main
@@ -300,13 +305,13 @@ export function BugDetailPage({
                 without a session. A fieldset covers all nine and any tenth,
                 where nine readOnly props would each be a thing to remember.
                 Their CONTENT still renders -- attachments, watchers and
-                linked bugs are readable facts about a public bug. */}
-            <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
+                linked issues are readable facts about a public issue. */}
+            <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
               <AttachmentsPanel state={attachmentsQ.state} reload={attachmentsQ.reload} />
             </fieldset>
 
             {/* The long tail, folded.
-                Six of these nine panels report ABSENCE on a typical bug -- no
+                Six of these nine panels report ABSENCE on a typical issue -- no
                 duplicates, no linked reports, no keywords, no flags, no votes,
                 no group -- and each one drew a full card to say so. That is
                 four hundred pixels of grid carrying no information, directly
@@ -320,7 +325,7 @@ export function BugDetailPage({
                 the element, so a panel would go "not stable, then not
                 visible" under a click. One owner of the state removes the
                 argument entirely. */}
-            <div className="bug-detail-more">
+            <div className="issue-detail-more">
               <Button
                 variant="plain"
                 size="small"
@@ -330,25 +335,25 @@ export function BugDetailPage({
                 {moreOpen ? "Hide" : "Show"} flags, votes and security
               </Button>
               {moreOpen ? (
-              <fieldset className="rail-fields bug-detail-extras" disabled={signedOut}>
+              <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
               {/* No `activities` prop: the panel reads real flags from
-                  flags.list instead of replaying the bug's history. */}
-              <FlagsPanel bugId={id} flagTypes={productDetail?.flagTypes ?? null} onChanged={reload} />
+                  flags.list instead of replaying the issue's history. */}
+              <FlagsPanel issueId={id} flagTypes={productDetail?.flagTypes ?? null} onChanged={reload} />
               <VotesPanel
-                bugId={id}
-                voteCount={detail.bug.voteCount}
-                maxVotesPerBug={productDetail?.product.maxVotesPerBug ?? 0}
+                issueId={id}
+                voteCount={detail.issue.voteCount}
+                maxVotesPerIssue={productDetail?.product.maxVotesPerIssue ?? 0}
                 votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
                 onChanged={reload}
               />
-              <SecurityPanel bugId={id} onChanged={reload} />
+              <SecurityPanel issueId={id} onChanged={reload} />
               </fieldset>
               ) : null}
             </div>
           </div>
-          <Stack className="bug-detail-side" gap={3}>
+          <Stack className="issue-detail-side" gap={3}>
             <FieldsPanel
-              bug={detail.bug}
+              issue={detail.issue}
               people={detail.people}
               product={product}
               component={component}
@@ -364,7 +369,7 @@ export function BugDetailPage({
             />
             {/* State and relations, not narrative -- so their position must
                 not depend on how long the conversation is. Below the composer
-                they sank further down the page with every reply; a bug with
+                they sank further down the page with every reply; an issue with
                 forty comments put "who is CC'd" a thousand pixels from the
                 top. Here they are anchored.
 
@@ -374,19 +379,19 @@ export function BugDetailPage({
                 stack measured 1856px in a 352px column. */}
             {/* Labelled like every other rail group, so the space above it
                 reads as a heading's space rather than as a gap nobody meant.
-                These four are about OTHER things -- people and bugs -- which
+                These four are about OTHER things -- people and issues -- which
                 is a different kind of fact from severity or component. */}
             <p className="rail-section">Links</p>
             <fieldset className="rail-fields rail-groups" disabled={signedOut}>
-              <KeywordsPanel bugId={id} activities={detail.activities} onChanged={reload} />
-              <CcPanel bugId={id} />
-              <DependenciesPanel bugId={id} />
+              <KeywordsPanel issueId={id} activities={detail.activities} onChanged={reload} />
+              <CcPanel issueId={id} />
+              <DependenciesPanel issueId={id} />
               <DuplicatesPanel
-                bugId={id}
-                duplicateOfId={detail.bug.duplicateOfId ?? null}
+                issueId={id}
+                duplicateOfId={detail.issue.duplicateOfId ?? null}
                 labels={historyLabels}
               />
-              <SeeAlsoPanel bugId={id} />
+              <SeeAlsoPanel issueId={id} />
             </fieldset>
           </Stack>
         </div>

@@ -5,9 +5,9 @@ import {
 } from "../src/lib/flags";
 
 describe("flag target invariant", () => {
-  it("accepts and normalizes a bug flag target", () => {
-    expect(assertFlagTarget("bug", { bugId: "bug_123" })).toEqual({
-      bugId: "bug_123",
+  it("accepts and normalizes an issue flag target", () => {
+    expect(assertFlagTarget("issue", { issueId: "issue_123" })).toEqual({
+      issueId: "issue_123",
       attachmentId: null,
     });
   });
@@ -15,49 +15,49 @@ describe("flag target invariant", () => {
   it("accepts and normalizes an attachment flag target", () => {
     expect(
       assertFlagTarget("attachment", { attachmentId: "atta_123" }),
-    ).toEqual({ bugId: null, attachmentId: "atta_123" });
+    ).toEqual({ issueId: null, attachmentId: "atta_123" });
   });
 
   it("rejects setting neither target", () => {
-    expect(() => assertFlagTarget("bug", {})).toThrow(
-      /exactly one of bugId and attachmentId/u,
+    expect(() => assertFlagTarget("issue", {})).toThrow(
+      /exactly one of issueId and attachmentId/u,
     );
   });
 
   it("rejects setting both targets", () => {
     expect(() =>
-      assertFlagTarget("bug", {
-        bugId: "bug_123",
+      assertFlagTarget("issue", {
+        issueId: "issue_123",
         attachmentId: "atta_123",
       }),
-    ).toThrow(/exactly one of bugId and attachmentId/u);
+    ).toThrow(/exactly one of issueId and attachmentId/u);
   });
 
-  it("rejects an attachment target for a bug flag type", () => {
+  it("rejects an attachment target for an issue flag type", () => {
     expect(() =>
-      assertFlagTarget("bug", { attachmentId: "atta_123" }),
-    ).toThrow(/requires bugId/u);
+      assertFlagTarget("issue", { attachmentId: "atta_123" }),
+    ).toThrow(/requires issueId/u);
   });
 
-  it("rejects a bug target for an attachment flag type", () => {
+  it("rejects an issue target for an attachment flag type", () => {
     expect(() =>
-      assertFlagTarget("attachment", { bugId: "bug_123" }),
+      assertFlagTarget("attachment", { issueId: "issue_123" }),
     ).toThrow(/requires attachmentId/u);
   });
 
   it.each([
-    { bugId: "" },
-    { bugId: "   " },
+    { issueId: "" },
+    { issueId: "   " },
     { attachmentId: "" },
   ])("rejects empty ids: %o", (target) => {
-    expect(() => assertFlagTarget("bug", target)).toThrow(
+    expect(() => assertFlagTarget("issue", target)).toThrow(
       InvalidFlagTargetError,
     );
   });
 
   it("rejects an unknown target type arriving from the wire", () => {
     expect(() =>
-      assertFlagTarget("comment" as never, { bugId: "bug_123" }),
+      assertFlagTarget("comment" as never, { issueId: "issue_123" }),
     ).toThrow(/unsupported flag target type/u);
   });
 });

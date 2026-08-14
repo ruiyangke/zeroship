@@ -10,7 +10,7 @@
 import { env } from "zeroship";
 import { mutation, query } from "@zeroship/rpc/server";
 import {
-  BUG_CREATION_FIELDS,
+  ISSUE_CREATION_FIELDS,
   diffTrackedFields,
   type TrackedFieldChange,
 } from "./lib/changes";
@@ -21,35 +21,37 @@ import {
   type DirectedEdge,
 } from "./lib/graph";
 import {
-  BUG_PRIORITIES,
-  BUG_SEVERITIES,
+  ISSUE_KINDS,
+  ISSUE_PRIORITIES,
+  ISSUE_SEVERITIES,
   parseQuickSearch,
-  type BugPriority,
-  type BugSeverity,
+  type IssueKind,
+  type IssuePriority,
+  type IssueSeverity,
   type QuickSearchClause,
 } from "./lib/quicksearch";
 import {
-  BUG_RESOLUTIONS,
-  BUG_STATUSES,
-  isBugResolution,
-  isBugStatus,
-  isOpenBugStatus,
-  markDuplicateBugState,
-  reopenBugState,
-  resolveBugState,
-  transitionBugState,
-  type BugResolution,
-  type BugState,
-  type BugStatus,
+  ISSUE_RESOLUTIONS,
+  ISSUE_STATUSES,
+  isIssueResolution,
+  isIssueStatus,
+  isOpenIssueStatus,
+  markDuplicateIssueState,
+  reopenIssueState,
+  resolveIssueState,
+  transitionIssueState,
+  type IssueResolution,
+  type IssueState,
+  type IssueStatus,
 } from "./lib/workflow";
 
 import type {
   ActivityRow,
   AppDb,
   AttachmentRow,
-  BugGroupRow,
-  BugKeywordRow,
-  BugRow,
+  IssueGroupRow,
+  IssueKeywordRow,
+  IssueRow,
   CcRow,
   Collection,
   CommentRow,
@@ -114,12 +116,12 @@ type NativeKv = {
 
 const ATTACHMENT_BUCKET = "issue-tracker-attachments";
 const MAX_ATTACHMENT_BYTES = 512 * 1024;
-const OPEN_STATUSES: readonly BugStatus[] = [
+const OPEN_STATUSES: readonly IssueStatus[] = [
   "UNCONFIRMED",
   "CONFIRMED",
   "IN_PROGRESS",
 ];
-const NULLABLE_BUG_TEXT_FIELDS = new Set([
+const NULLABLE_ISSUE_TEXT_FIELDS = new Set([
   "versionId",
   "milestoneId",
   "resolution",
@@ -166,28 +168,28 @@ function requireProductKey(value: string): string {
 /**
  * The identifier a person uses: `PARSER-12`.
  *
- * Bugs are addressed by this everywhere a human reads or types one. The UUID
+ * Issues are addressed by this everywhere a human reads or types one. The UUID
  * remains the primary key and the thing every foreign key points at -- this is
  * a display and lookup form, not a second identity.
  */
 /**
- * Look a bug up by UUID or by its PARSER-12 key.
+ * Look an issue up by UUID or by its PARSER-12 key.
  *
  * The key path is two reads rather than one, and is not indexed as a pair --
  * the (productId, number) index does the work once the product is known.
  */
-async function bugByIdOrKey(input: string): Promise<BugRow> {
-  const parsed = parseBugKey(input);
-  if (!parsed) return getRequired(db.bugs, input, "Bug");
+async function issueByIdOrKey(input: string): Promise<IssueRow> {
+  const parsed = parseIssueKey(input);
+  if (!parsed) return getRequired(db.issues, input, "Issue");
   const product = must(await db.products.get({ key: parsed.key }));
-  if (!product) notFound("Bug");
-  const bug = must(await db.bugs.get({ productId: product.id, number: parsed.number }));
-  if (!bug) notFound("Bug");
-  return bug;
+  if (!product) notFound("Issue");
+  const issue = must(await db.issues.get({ productId: product.id, number: parsed.number }));
+  if (!issue) notFound("Issue");
+  return issue;
 }
 
-function bugKey(product: { key: string }, bug: { number: number }): string {
-  return `${product.key}-${bug.number}`;
+function issueKey(product: { key: string }, issue: { number: number }): string {
+  return `${product.key}-${issue.number}`;
 }
 
 /**
@@ -208,7 +210,7 @@ function deriveProductKey(name: string): string {
  * Split `PARSER-12` back into its parts. Returns null for anything that is not
  * in that shape, so callers can fall through to treating the input as a UUID.
  */
-function parseBugKey(input: string): { key: string; number: number } | null {
+function parseIssueKey(input: string): { key: string; number: number } | null {
   const match = /^([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,9})$/.exec(input.trim());
   if (!match) return null;
   const number = Number(match[2]);
@@ -225,24 +227,24 @@ function forbidden(message = "You do not have access to this product"): never {
 }
 
 /**
- * Refusing a bug the caller may not see.
+ * Refusing an issue the caller may not see.
  *
  * Separate from `forbidden()` because the reasons are different and the default
- * message is not interchangeable. Every bug-level denial used to report "You do
+ * message is not interchangeable. Every issue-level denial used to report "You do
  * not have access to this product", which is false in the case that matters:
- * the product IS accessible -- a user can list the product's other bugs and
- * file new ones -- and only this bug is held in a group they are not in. A
+ * the product IS accessible -- a user can list the product's other issues and
+ * file new ones -- and only this issue is held in a group they are not in. A
  * reader told the product is off-limits looks for the wrong fix.
  *
- * 403 and not 404. This is deliberate and it does leak the bug's existence:
+ * 403 and not 404. This is deliberate and it does leak the issue's existence:
  * Bugzilla answers "You are not authorized to access bug #N", so the id space
- * is enumerable there too, and a tracker that pretends a restricted bug was
+ * is enumerable there too, and a tracker that pretends a restricted issue was
  * never filed cannot explain why its id is skipped in every list. Hiding
  * existence would be the stronger property and it is NOT what this app does.
  * See "Divergences from Bugzilla" in SPEC.md.
  */
-function forbiddenBug(): never {
-  forbidden("You do not have access to this bug. It is restricted to a group you are not in.");
+function forbiddenIssue(): never {
+  forbidden("You do not have access to this issue. It is restricted to a group you are not in.");
 }
 
 function must<T>(result: DbResult<T>): T {
@@ -496,16 +498,16 @@ async function visibleProductIds(
   );
 }
 
-// Bug-level security groups: Bugzilla's bug_group_map, the mechanism behind a
-// confidential security bug inside an otherwise public product. Product-level
-// visibility alone cannot express "this ONE bug is restricted".
+// Issue-level security groups: Bugzilla's bug_group_map, the mechanism behind a
+// confidential security issue inside an otherwise public product. Product-level
+// visibility alone cannot express "this ONE issue is restricted".
 //
-// This existed as a table and nothing read it. `assertBugVisible` checked only
-// the product, so every bugGroups row was decorative and a "restricted" bug was
+// This existed as a table and nothing read it. `assertIssueVisible` checked only
+// the product, so every issueGroups row was decorative and a "restricted" issue was
 // readable by anyone who could see its product.
-async function canViewBug(bug: BugRow, user: UserRow | null): Promise<boolean> {
-  if (!(await canViewProduct(bug.productId, user))) return false;
-  const restrictions = await readAll(db.bugGroups, { bugId: bug.id });
+async function canViewIssue(issue: IssueRow, user: UserRow | null): Promise<boolean> {
+  if (!(await canViewProduct(issue.productId, user))) return false;
+  const restrictions = await readAll(db.issueGroups, { issueId: issue.id });
   if (restrictions.length === 0) return true;
   if (user?.isAdmin) return true;
   if (!user) return false;
@@ -514,38 +516,38 @@ async function canViewBug(bug: BugRow, user: UserRow | null): Promise<boolean> {
   return restrictions.some((row) => groups.has(row.groupId));
 }
 
-async function assertBugVisible(bug: BugRow, identity: PlatformUser | null): Promise<void> {
-  if (!(await canViewBug(bug, await appUserForIdentity(identity)))) forbiddenBug();
+async function assertIssueVisible(issue: IssueRow, identity: PlatformUser | null): Promise<void> {
+  if (!(await canViewIssue(issue, await appUserForIdentity(identity)))) forbiddenIssue();
 }
 
 /**
- * The write-path counterpart of `assertBugVisible`, for handlers that already
+ * The write-path counterpart of `assertIssueVisible`, for handlers that already
  * hold the actor.
  *
- * Every mutation that touches a bug used to call `assertCanViewProduct` -- the
- * PRODUCT check only -- so bug-level restriction guarded reads and nothing
- * else. Measured 2026-08-12: a second user got 403 from `bugs.get` on a
- * restricted bug and 200 from `comments.add` on the same bug, in the same
+ * Every mutation that touches an issue used to call `assertCanViewProduct` -- the
+ * PRODUCT check only -- so issue-level restriction guarded reads and nothing
+ * else. Measured 2026-08-12: a second user got 403 from `issues.get` on a
+ * restricted issue and 200 from `comments.add` on the same issue, in the same
  * session. Commenting, resolving, reassigning, CC'ing, marking attachments
- * obsolete and deleting them were all reachable on a bug the caller could not
+ * obsolete and deleting them were all reachable on an issue the caller could not
  * open.
  *
  * If you can't read it, you can't write it.
  */
-async function assertBugAccessible(bug: BugRow, actor: UserRow | null): Promise<void> {
-  if (!(await canViewBug(bug, actor))) forbiddenBug();
+async function assertIssueAccessible(issue: IssueRow, actor: UserRow | null): Promise<void> {
+  if (!(await canViewIssue(issue, actor))) forbiddenIssue();
 }
 
 /**
- * Bugs the user must not see because of a bug-level restriction.
+ * Issues the user must not see because of an issue-level restriction.
  *
  * Returned as an exclusion list for the QUERY rather than applied by filtering
  * the result rows: post-filtering a page silently shrinks it, so a viewer with
- * a restricted bug in range gets a short page and the offsets stop meaning what
+ * a restricted issue in range gets a short page and the offsets stop meaning what
  * the caller thinks. `$nin` keeps limit/offset honest.
  */
-async function hiddenBugIds(user: UserRow | null): Promise<string[]> {
-  const restrictions = await readAll(db.bugGroups);
+async function hiddenIssueIds(user: UserRow | null): Promise<string[]> {
+  const restrictions = await readAll(db.issueGroups);
   if (restrictions.length === 0) return [];
   if (user?.isAdmin) return [];
 
@@ -553,13 +555,13 @@ async function hiddenBugIds(user: UserRow | null): Promise<string[]> {
     ? new Set((await readAll(db.groupMembers, { userId: user.id })).map((row) => row.groupId))
     : new Set<string>();
 
-  const byBug = new Map<string, string[]>();
+  const byIssue = new Map<string, string[]>();
   for (const row of restrictions) {
-    byBug.set(row.bugId, [...(byBug.get(row.bugId) ?? []), row.groupId]);
+    byIssue.set(row.issueId, [...(byIssue.get(row.issueId) ?? []), row.groupId]);
   }
-  return [...byBug.entries()]
+  return [...byIssue.entries()]
     .filter(([, required]) => !required.some((groupId) => groups.has(groupId)))
-    .map(([bugId]) => bugId);
+    .map(([issueId]) => issueId);
 }
 
 async function validateProductChildren(
@@ -574,14 +576,16 @@ async function validateProductChildren(
   ]);
   if (component.productId !== product.id) invalid("componentId does not belong to productId");
 
-  // `bugs.versionId` is NOT NULL: a Bugzilla bug is always filed against a
-  // version. Omitting it used to fall through to the insert and surface as
-  // HTTP 500 "internal error" -- the browser spec caught it by filing with the
-  // form's "unspecified" version still selected. A missing version is the
-  // caller's to fix, so it gets a 400 that says which field.
-  if (!versionId) invalid("versionId is required");
-  const version = await getRequired(db.versions, versionId, "Version");
-  if (version.productId !== product.id) invalid("versionId does not belong to productId");
+  // `issues.versionId` is NULLABLE, so an omitted version is a legal filing and
+  // not a 400 any more. This reversed the rule that a Bugzilla bug is always
+  // filed against a version, which held while every row WAS a bug: "version
+  // found in" is a defect concept, and requiring it meant a feature request had
+  // to name a version it has nothing to do with. A version that IS supplied is
+  // still checked to belong to the product.
+  if (versionId) {
+    const version = await getRequired(db.versions, versionId, "Version");
+    if (version.productId !== product.id) invalid("versionId does not belong to productId");
+  }
   if (milestoneId) {
     const milestone = await getRequired(db.milestones, milestoneId, "Milestone");
     if (milestone.productId !== product.id) invalid("milestoneId does not belong to productId");
@@ -589,67 +593,67 @@ async function validateProductChildren(
   return { product, component };
 }
 
-function bugState(row: BugRow): BugState {
-  if (!isBugStatus(row.status)) invalid(`bug ${row.id} has an invalid stored status`);
+function issueState(row: IssueRow): IssueState {
+  if (!isIssueStatus(row.status)) invalid(`issue ${row.id} has an invalid stored status`);
   // The current DB update builder binds a nullable TEXT `$set: null` as an
   // empty text parameter. Keep the app's logical contract null-shaped at the
   // boundary (and in history/state checks) until that platform seam is fixed.
   const resolution = row.resolution ? row.resolution : null;
-  if (resolution !== null && !isBugResolution(resolution)) {
-    invalid(`bug ${row.id} has an invalid stored resolution`);
+  if (resolution !== null && !isIssueResolution(resolution)) {
+    invalid(`issue ${row.id} has an invalid stored resolution`);
   }
   return { status: row.status, resolution };
 }
 
 /**
- * Blank a bug link that points somewhere the caller cannot look.
+ * Blank an issue link that points somewhere the caller cannot look.
  *
  * Excluding the restricted ROW from a list is only half the job: a surviving
- * row that still names the restricted bug in `duplicateOfId` confirms it
- * exists, which is what a confidential bug is hiding.
+ * row that still names the restricted issue in `duplicateOfId` confirms it
+ * exists, which is what a confidential issue is hiding.
  */
 /**
  * Should this history row be withheld from the viewer?
  *
- * Activity rows are permanent, and several carry ANOTHER bug.s id as their
+ * Activity rows are permanent, and several carry ANOTHER issue's id as their
  * value: `dependsOn` and `duplicateOfId` both do. The write that created the
- * row required access to both bugs at the time, but the row survives a later
+ * row required access to both issues at the time, but the row survives a later
  * restriction, so replaying history re-leaks what the graph and duplicate
  * endpoints withhold.
  *
  * `bug_group` rows go further and are dropped whenever anything is hidden from
- * this viewer: which groups a bug is restricted to is itself the shape of the
+ * this viewer: which groups an issue is restricted to is itself the shape of the
  * security model.
  */
-const BUG_REFERENCE_FIELDS = new Set(["dependsOn", "duplicateOfId", "blocks"]);
+const ISSUE_REFERENCE_FIELDS = new Set(["dependsOn", "duplicateOfId", "blocks"]);
 
 function hidesRestrictedReference(
   activity: ActivityRow,
   hidden: ReadonlySet<string>,
 ): boolean {
-  if (activity.fieldName === "bug_group") return hidden.size > 0;
-  if (!BUG_REFERENCE_FIELDS.has(activity.fieldName)) return false;
+  if (activity.fieldName === "issue_group") return hidden.size > 0;
+  if (!ISSUE_REFERENCE_FIELDS.has(activity.fieldName)) return false;
   return [activity.oldValue, activity.newValue].some(
     (value) => typeof value === "string" && hidden.has(value),
   );
 }
 
-function maskHiddenBugLinks(row: BugRow, hidden: ReadonlySet<string>): BugRow {
+function maskHiddenIssueLinks(row: IssueRow, hidden: ReadonlySet<string>): IssueRow {
   if (!row.duplicateOfId || !hidden.has(row.duplicateOfId)) return row;
   return { ...row, duplicateOfId: null };
 }
 
-function normalizeBugRow(row: BugRow): BugRow {
-  const out = { ...row } as BugRow & Record<string, unknown>;
-  for (const field of NULLABLE_BUG_TEXT_FIELDS) {
+function normalizeIssueRow(row: IssueRow): IssueRow {
+  const out = { ...row } as IssueRow & Record<string, unknown>;
+  for (const field of NULLABLE_ISSUE_TEXT_FIELDS) {
     if (out[field] === "" || out[field] === undefined) out[field] = null;
   }
   if (out.deadline === undefined) out.deadline = null;
   return out;
 }
 
-function logicalBugValue(field: string, value: unknown): unknown {
-  return NULLABLE_BUG_TEXT_FIELDS.has(field) && (value === "" || value === undefined)
+function logicalIssueValue(field: string, value: unknown): unknown {
+  return NULLABLE_ISSUE_TEXT_FIELDS.has(field) && (value === "" || value === undefined)
     ? null
     : value;
 }
@@ -658,7 +662,7 @@ function asTrackedRecord(value: object): Record<string, string | number | boolea
   const record = {
     ...(value as Record<string, string | number | boolean | null | undefined>),
   };
-  for (const field of NULLABLE_BUG_TEXT_FIELDS) {
+  for (const field of NULLABLE_ISSUE_TEXT_FIELDS) {
     if (record[field] === "" || record[field] === undefined) record[field] = null;
   }
   return record;
@@ -666,14 +670,14 @@ function asTrackedRecord(value: object): Record<string, string | number | boolea
 
 async function insertActivities(
   activities: TxCollection<ActivityRow>,
-  bugId: string,
+  issueId: string,
   actorId: string,
   changes: readonly TrackedFieldChange[],
 ): Promise<void> {
   if (changes.length === 0) return;
   await activities.insertMany(
     changes.map((change) => ({
-      bugId,
+      issueId,
       actorId,
       fieldName: change.fieldName,
       ...(change.oldValue === null ? {} : { oldValue: change.oldValue }),
@@ -685,7 +689,7 @@ async function insertActivities(
 /** Write exactly one activity row for every actually changed tracked field. */
 async function recordChanges(
   activities: TxCollection<ActivityRow>,
-  bugId: string,
+  issueId: string,
   actorId: string,
   before: object,
   after: object,
@@ -693,7 +697,7 @@ async function recordChanges(
 ): Promise<void> {
   await insertActivities(
     activities,
-    bugId,
+    issueId,
     actorId,
     diffTrackedFields(asTrackedRecord(before), asTrackedRecord(after), fieldNames),
   );
@@ -701,40 +705,40 @@ async function recordChanges(
 
 async function recordRelatedChange(
   activities: TxCollection<ActivityRow>,
-  bugId: string,
+  issueId: string,
   actorId: string,
   fieldName: string,
   oldValue: string | null,
   newValue: string | null,
 ): Promise<void> {
   if (oldValue === newValue) return;
-  await insertActivities(activities, bugId, actorId, [
+  await insertActivities(activities, issueId, actorId, [
     { fieldName, oldValue, newValue },
   ]);
 }
 
-async function updateBugWithHistory(
+async function updateIssueWithHistory(
   id: string,
   actorId: string,
-  makePatch: (before: BugRow) => DbPatch | Promise<DbPatch>,
+  makePatch: (before: IssueRow) => DbPatch | Promise<DbPatch>,
   trackedFields: readonly string[],
-): Promise<BugRow> {
+): Promise<IssueRow> {
   const result = await db.transaction(async (tx) => {
-    const before = await getTxRequired(tx.bugs, id, "Bug");
+    const before = await getTxRequired(tx.issues, id, "Issue");
     const candidate = await makePatch(before);
     const patch = Object.fromEntries(
       Object.entries(candidate).filter(
         ([field, value]) =>
-          logicalBugValue(field, before[field as keyof BugRow]) !==
-          logicalBugValue(field, value),
+          logicalIssueValue(field, before[field as keyof IssueRow]) !==
+          logicalIssueValue(field, value),
       ),
     );
-    if (Object.keys(patch).length === 0) return { row: normalizeBugRow(before), changed: [] };
-    const after = await tx.bugs.update(id, patch);
-    if (!after) notFound("Bug");
+    if (Object.keys(patch).length === 0) return { row: normalizeIssueRow(before), changed: [] };
+    const after = await tx.issues.update(id, patch);
+    if (!after) notFound("Issue");
     await recordChanges(tx.activities, id, actorId, before, after, trackedFields);
     return {
-      row: normalizeBugRow(after),
+      row: normalizeIssueRow(after),
       changed: Object.keys(patch).filter((field) => trackedFields.includes(field)),
     };
   }, { isolationLevel: "serializable" });
@@ -743,22 +747,22 @@ async function updateBugWithHistory(
 
   // Fanout lives HERE rather than at each call site, because putting it at
   // call sites is exactly how it ended up on two of the ten mutations that
-  // change a bug. It covers the EIGHT that route through this helper;
-  // bugs.markDuplicate runs its own transaction for cycle detection and
-  // notifies itself, and bugs.create deliberately does not notify at all. bugs.reassign was silent, so a new assignee was never told
-  // they had been given a bug -- the single most useful notification a tracker
+  // change an issue. It covers the EIGHT that route through this helper;
+  // issues.markDuplicate runs its own transaction for cycle detection and
+  // notifies itself, and issues.create deliberately does not notify at all. issues.reassign was silent, so a new assignee was never told
+  // they had been given an issue -- the single most useful notification a tracker
   // sends.
   //
   // Nothing is sent when the patch was empty: `changed` is derived from the
   // fields that actually differed, so a no-op update does not wake anyone.
   if (changed.length > 0) {
-    await notifyBugChange(row, actorId, `${row.summary} was updated (${changed.join(", ")})`);
+    await notifyIssueChange(row, actorId, `${row.summary} was updated (${changed.join(", ")})`);
   }
   return row;
 }
 
-function rejectUnsupportedBugNullClears(
-  before: BugRow,
+function rejectUnsupportedIssueNullClears(
+  before: IssueRow,
   patch: Readonly<DbPatch>,
 ): void {
   const nullableForeignKeys = ["versionId", "milestoneId", "qaContactId"] as const;
@@ -775,10 +779,10 @@ function rejectUnsupportedBugNullClears(
 }
 
 function dependencyEdges(rows: readonly DependencyRow[]): DirectedEdge[] {
-  return rows.map((row) => ({ from: row.bugId, to: row.dependsOnId }));
+  return rows.map((row) => ({ from: row.issueId, to: row.dependsOnId }));
 }
 
-function duplicateEdges(rows: readonly BugRow[]): DirectedEdge[] {
+function duplicateEdges(rows: readonly IssueRow[]): DirectedEdge[] {
   return rows.flatMap((row) =>
     row.duplicateOfId ? [{ from: row.id, to: row.duplicateOfId }] : [],
   );
@@ -792,8 +796,8 @@ function safeFilename(filename: string): string {
   return cleaned || "attachment.bin";
 }
 
-function attachmentStorageKey(bugId: string, filename: string): string {
-  return `${bugId}/${crypto.randomUUID()}-${safeFilename(filename)}`;
+function attachmentStorageKey(issueId: string, filename: string): string {
+  return `${issueId}/${crypto.randomUUID()}-${safeFilename(filename)}`;
 }
 
 function parseNativeJson<T>(raw: string): T {
@@ -810,10 +814,10 @@ function decodedBase64Size(value: string): number {
   return (clean.length / 4) * 3 - padding;
 }
 
-async function bugIdForFlag(flag: FlagRow): Promise<string> {
-  if (flag.bugId) return flag.bugId;
+async function issueIdForFlag(flag: FlagRow): Promise<string> {
+  if (flag.issueId) return flag.issueId;
   if (!flag.attachmentId) invalid("stored flag has no target");
-  return (await getRequired(db.attachments, flag.attachmentId, "Attachment")).bugId;
+  return (await getRequired(db.attachments, flag.attachmentId, "Attachment")).issueId;
 }
 
 function notificationCacheKey(userId: string): string {
@@ -832,18 +836,22 @@ async function setUnreadCache(userId: string, count: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Bugs
+// Issues
 // ---------------------------------------------------------------------------
 
-type CreateBugInput = {
+type CreateIssueInput = {
   productId: string;
   componentId: string;
   summary: string;
   description: string;
+  // Optional, and NOT defaulted to a version by the server: an enhancement has
+  // no "version found in", so the column is nullable and an omitted version
+  // stays omitted.
   versionId?: string | null;
   milestoneId?: string | null;
-  severity?: BugSeverity;
-  priority?: BugPriority;
+  kind?: IssueKind;
+  severity?: IssueSeverity;
+  priority?: IssuePriority;
   assigneeId?: string | null;
   qaContactId?: string | null;
   whiteboard?: string | null;
@@ -854,7 +862,7 @@ type CreateBugInput = {
   deadline?: number | null;
 };
 
-export const createBug = mutation(
+export const createIssue = mutation(
   async ({
     productId,
     componentId,
@@ -862,6 +870,7 @@ export const createBug = mutation(
     description,
     versionId,
     milestoneId,
+    kind = "defect",
     severity = "normal",
     priority = "P3",
     assigneeId,
@@ -872,10 +881,11 @@ export const createBug = mutation(
     url,
     confirmed,
     deadline,
-  }: CreateBugInput) => {
+  }: CreateIssueInput) => {
     const actor = await requireActor();
-    if (!BUG_SEVERITIES.includes(severity)) invalid("invalid severity");
-    if (!BUG_PRIORITIES.includes(priority)) invalid("invalid priority");
+    if (!ISSUE_KINDS.includes(kind)) invalid("invalid kind");
+    if (!ISSUE_SEVERITIES.includes(severity)) invalid("invalid severity");
+    if (!ISSUE_PRIORITIES.includes(priority)) invalid("invalid priority");
     const structure = await validateProductChildren(
       requireId(productId, "productId"),
       requireId(componentId, "componentId"),
@@ -884,11 +894,11 @@ export const createBug = mutation(
     );
     await assertCanViewProduct(structure.product.id, actor);
     if (!structure.product.isActive || !structure.component.isActive) {
-      conflict("New bugs require an active product and component");
+      conflict("New issues require an active product and component");
     }
 
     const isConfirmed = confirmed === true || !structure.product.allowsUnconfirmed;
-    const status: BugStatus = isConfirmed ? "CONFIRMED" : "UNCONFIRMED";
+    const status: IssueStatus = isConfirmed ? "CONFIRMED" : "UNCONFIRMED";
     const cleanSummary = requireNonEmpty(summary, "summary").slice(0, 500);
     const cleanDescription = requireNonEmpty(description, "description");
     const result = await db.transaction(async (tx) => {
@@ -896,17 +906,18 @@ export const createBug = mutation(
       // a counter that could drift from them. Two concurrent files can read
       // the same max; the (productId, number) unique index rejects the loser
       // and the retry below re-reads. Without that index this is a lost
-      // update that silently gives two bugs the same key.
-      const siblings = await readAllTx(tx.bugs, { productId: structure.product.id });
+      // update that silently gives two issues the same key.
+      const siblings = await readAllTx(tx.issues, { productId: structure.product.id });
       const nextNumber =
         siblings.reduce((highest, row) => Math.max(highest, row.number ?? 0), 0) + 1;
-      const bug = await tx.bugs.insert({
+      const issue = await tx.issues.insert({
         number: nextNumber,
         productId: structure.product.id,
         componentId: structure.component.id,
         ...(versionId ? { versionId } : {}),
         ...(milestoneId ? { milestoneId } : {}),
         summary: cleanSummary,
+        kind,
         status,
         severity,
         priority,
@@ -927,7 +938,7 @@ export const createBug = mutation(
         ...(deadline === null || deadline === undefined ? {} : { deadline }),
       });
       await tx.comments.insert({
-        bugId: bug.id,
+        issueId: issue.id,
         authorId: actor.id,
         body: cleanDescription,
         commentNumber: 0,
@@ -935,49 +946,49 @@ export const createBug = mutation(
       });
       await recordChanges(
         tx.activities,
-        bug.id,
+        issue.id,
         actor.id,
         {},
-        bug,
-        BUG_CREATION_FIELDS,
+        issue,
+        ISSUE_CREATION_FIELDS,
       );
-      return bug;
+      return issue;
     });
     const created = must(result);
     // Filing is an event too. Watchers only ever heard about CHANGES, so
-    // watching someone whose new bugs never reached you was close to
+    // watching someone whose new issues never reached you was close to
     // pointless -- and in Bugzilla a watch delivers their bugmail, which
     // starts at the report. The fanout already excludes the actor, so the
     // reporter does not notify themselves.
-    await notifyBugChange(created, actor.id, `${created.summary} was filed`);
+    await notifyIssueChange(created, actor.id, `${created.summary} was filed`);
     return created;
   },
-  { id: "bugs.create" },
+  { id: "issues.create" },
 );
 
-export const getBug = query(
+export const getIssue = query(
   async ({ id }: { id: string }) => {
     // Accepts either form. A person arrives with PARSER-12 -- from a commit
     // message, a chat, the address bar -- while every internal link still
     // carries the UUID. Refusing the human form here would mean the
     // identifier the app puts on screen is not one it accepts back.
-    const storedBug = await bugByIdOrKey(id);
-    // Resolved once and reused: bugs.get is anonymous, so `optionalIdentity()`
+    const storedIssue = await issueByIdOrKey(id);
+    // Resolved once and reused: issues.get is anonymous, so `optionalIdentity()`
     // is frequently null and `appUserForIdentity(null)` is the anonymous case
     // rather than an error.
     const identity = optionalIdentity();
-    await assertBugVisible(storedBug, identity);
-    const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
-    const bug = maskHiddenBugLinks(normalizeBugRow(storedBug), hidden);
+    await assertIssueVisible(storedIssue, identity);
+    const hidden = new Set(await hiddenIssueIds(await appUserForIdentity(identity)));
+    const issue = maskHiddenIssueLinks(normalizeIssueRow(storedIssue), hidden);
     const [activityRows, product, component] = await Promise.all([
-      readAll(db.activities, { bugId: bug.id }),
-      db.products.get(bug.productId),
-      db.components.get(bug.componentId),
+      readAll(db.activities, { issueId: issue.id }),
+      db.products.get(issue.productId),
+      db.components.get(issue.componentId),
     ]);
-    // Everyone this bug names, resolved once. The page showed raw ids for the
+    // Everyone this issue names, resolved once. The page showed raw ids for the
     // assignee, reporter and QA contact while the CC panel beside them showed
     // real names, because `cc.list` joins its user and nothing else did.
-    // `publicUserView`, since `bugs.get` is anonymous.
+    // `publicUserView`, since `issues.get` is anonymous.
     const people = Object.fromEntries(
       (
         await readByIds(
@@ -990,9 +1001,9 @@ export const getBug = query(
           // of the record entirely. A history that cannot name who acted is
           // the half of an audit trail that does not audit.
           [
-            bug.assigneeId,
-            bug.reporterId,
-            bug.qaContactId,
+            issue.assigneeId,
+            issue.reporterId,
+            issue.qaContactId,
             ...activityRows.map((activity) => activity.actorId),
           ].filter(
             (value): value is string => typeof value === "string" && value.length > 0,
@@ -1001,25 +1012,25 @@ export const getBug = query(
       ).map((user) => [user.id, publicUserView(user)]),
     );
 
-    // Bugs named by the LOG rather than by a column.
+    // Issues named by the LOG rather than by a column.
     //
-    // `dependsOn`, `blocks` and `duplicateOfId` store another bug's typed id
+    // `dependsOn`, `blocks` and `duplicateOfId` store another issue's typed id
     // as the activity value, and the history rendered it verbatim: "set
-    // Depends On to bug_0346W0Ole6amXDN9RKvzW6". That is the raw-id leak this
+    // Depends On to issue_0346W0Ole6amXDN9RKvzW6". That is the raw-id leak this
     // app has a whole spec class about, and it survived because the spec's
-    // fixture -- "a bug with everything hung off it" -- had no dependency, so
+    // fixture -- "an issue with everything hung off it" -- had no dependency, so
     // the row it would have caught was never written.
     //
     // Resolved here rather than in the client for the same reason `people` is:
     // the viewer's access was already decided above, so a reference they may
     // not see is simply absent from the map.
-    const referencedBugIds = [
+    const referencedIssueIds = [
       ...new Set(
         [
           ...activityRows
-            .filter((activity) => BUG_REFERENCE_FIELDS.has(activity.fieldName))
+            .filter((activity) => ISSUE_REFERENCE_FIELDS.has(activity.fieldName))
             .flatMap((activity) => [activity.oldValue, activity.newValue]),
-          bug.duplicateOfId,
+          issue.duplicateOfId,
         ]
           .filter(
             (value): value is string =>
@@ -1027,41 +1038,41 @@ export const getBug = query(
           ),
       ),
     ];
-    const referencedBugs = referencedBugIds.length > 0 ? await readByIds(db.bugs, referencedBugIds) : [];
+    const referencedIssues = referencedIssueIds.length > 0 ? await readByIds(db.issues, referencedIssueIds) : [];
     const referencedProducts =
-      referencedBugs.length > 0
-        ? await readByIds(db.products, [...new Set(referencedBugs.map((b) => b.productId))])
+      referencedIssues.length > 0
+        ? await readByIds(db.products, [...new Set(referencedIssues.map((b) => b.productId))])
         : [];
     const referencedKeys = new Map(referencedProducts.map((prod) => [prod.id, prod.key]));
-    const bugRefs = Object.fromEntries(
-      referencedBugs.map((b) => {
+    const issueRefs = Object.fromEntries(
+      referencedIssues.map((b) => {
         const key = referencedKeys.get(b.productId);
         return [b.id, { label: key ? `${key}-${b.number}` : b.id, summary: b.summary }];
       }),
     );
 
     return {
-      // The same denormalised key searchBugs carries, so a bug from EITHER
+      // The same denormalised key searchIssues carries, so an issue from EITHER
       // endpoint can name itself without a second lookup. The dashboard builds
-      // its rows from bugs.get and would otherwise be the one surface that
+      // its rows from issues.get and would otherwise be the one surface that
       // could not.
-      // OPTIONAL, so a plain BugRow -- what every mutation returns -- is still
+      // OPTIONAL, so a plain IssueRow -- what every mutation returns -- is still
       // assignable. The label falls back when it is absent, so the only cost of
       // a mutation not carrying it is one render without the key, and the
       // alternative is threading it through twenty return statements.
-      bug: { ...bug, productKey: must(product)?.key ?? null } as BugRow & {
+      issue: { ...issue, productKey: must(product)?.key ?? null } as IssueRow & {
         productKey?: string | null;
       },
       people,
-      bugRefs,
+      issueRefs,
       product: must(product),
       component: must(component),
       // The history is filtered too. Several activity rows carry ANOTHER
-      // bug's id in their value -- `dependsOn` and `duplicateOfId` both do --
+      // issue's id in their value -- `dependsOn` and `duplicateOfId` both do --
       // so an unfiltered stream re-leaks exactly what the graph and duplicate
       // endpoints were hardened to withhold. The write required access at the
       // time; the row outlives that. `bug_group` rows are dropped for
-      // non-privileged viewers outright: which groups a bug is restricted to
+      // non-privileged viewers outright: which groups an issue is restricted to
       // is itself security information.
       activities: activityRows
         .sort((left, right) => left.created_at - right.created_at)
@@ -1079,18 +1090,19 @@ export const getBug = query(
         })),
     };
   },
-  { id: "bugs.get" },
+  { id: "issues.get" },
 );
 
-type BugSearchInput = {
+type IssueSearchInput = {
   productId?: string;
   componentId?: string;
   versionId?: string;
   milestoneId?: string;
-  status?: BugStatus | BugStatus[];
-  resolution?: BugResolution | BugResolution[] | null;
-  severity?: BugSeverity | BugSeverity[];
-  priority?: BugPriority | BugPriority[];
+  status?: IssueStatus | IssueStatus[];
+  resolution?: IssueResolution | IssueResolution[] | null;
+  kind?: IssueKind | IssueKind[];
+  severity?: IssueSeverity | IssueSeverity[];
+  priority?: IssuePriority | IssuePriority[];
   assigneeId?: string | null;
   reporterId?: string;
   qaContactId?: string | null;
@@ -1109,14 +1121,14 @@ function inFilter<T>(value: T | T[]): T | { $in: T[] } {
   return { $in: value };
 }
 
-async function searchBugsInternal(
-  input: BugSearchInput,
+async function searchIssuesInternal(
+  input: IssueSearchInput,
   identity: PlatformUser | null,
   extraFilter?: DbFilter,
   // The annotation carries productKey: without it the declared type erases the
   // field the client needs to render PARSER-12, and the flash comes back with
   // nothing failing to typecheck.
-): Promise<(BugRow & { productKey?: string | null })[]> {
+): Promise<(IssueRow & { productKey?: string | null })[]> {
   const visible = await visibleProductIds(identity);
   if (visible.size === 0) return [];
   if (input.productId && !visible.has(input.productId)) return [];
@@ -1136,6 +1148,7 @@ async function searchBugsInternal(
     ...(input.resolution !== undefined && input.resolution !== null
       ? { resolution: inFilter(input.resolution) }
       : {}),
+    ...(input.kind ? { kind: inFilter(input.kind) } : {}),
     ...(input.severity ? { severity: inFilter(input.severity) } : {}),
     ...(input.priority ? { priority: inFilter(input.priority) } : {}),
     ...(input.assigneeId !== undefined && input.assigneeId !== null
@@ -1169,37 +1182,37 @@ async function searchBugsInternal(
   }
   if (extraFilter) clauses.push(extraFilter);
 
-  // Bug-level restrictions are applied to every search, not only to bugs.get.
-  // Enforcing on the detail route alone would keep a restricted bug's summary,
-  // status and assignee listed on the bug list and in reports -- which is most
-  // of what a confidential bug is trying not to leak.
+  // Issue-level restrictions are applied to every search, not only to issues.get.
+  // Enforcing on the detail route alone would keep a restricted issue's summary,
+  // status and assignee listed on the issue list and in reports -- which is most
+  // of what a confidential issue is trying not to leak.
   // Chunked for the same reason every `$in` in this file is: the list is
-  // unbounded (one entry per restricted bug the viewer cannot see) and each
+  // unbounded (one entry per restricted issue the viewer cannot see) and each
   // entry becomes a bind parameter, so one `NOT IN` would grow without limit.
   // `$nin` chunks cleanly where `$in` would not -- excluding A and excluding B
   // is the AND of the two, whereas including A or B is the OR.
-  const hidden = await hiddenBugIds(await appUserForIdentity(identity));
+  const hidden = await hiddenIssueIds(await appUserForIdentity(identity));
   for (const page of chunks(hidden)) clauses.push({ id: { $nin: page } });
 
   const filter = clauses.length === 1 ? clauses[0] : { $and: clauses };
   const sortBy = input.sortBy ?? "updated_at";
   const direction = input.sortDirection ?? -1;
   // The same `hidden` set that built the $nin above also masks outward links.
-  // Excluding restricted ROWS is not the whole job: a public bug that is a
+  // Excluding restricted ROWS is not the whole job: a public issue that is a
   // duplicate of a restricted one still NAMES it in duplicateOfId, and
-  // bugs.search is anonymous.
+  // issues.search is anonymous.
   const hiddenSet = new Set(hidden);
   const rows = must(
-    await db.bugs
+    await db.issues
       .find(filter)
       .sort({ [sortBy]: direction })
       .skip(clampOffset(input.offset))
       .limit(clampLimit(input.limit)),
-  ).map((row) => maskHiddenBugLinks(normalizeBugRow(row), hiddenSet));
+  ).map((row) => maskHiddenIssueLinks(normalizeIssueRow(row), hiddenSet));
 
   // The product KEY travels with the row.
   //
-  // A bug is displayed as PARSER-12, and the key half used to be fetched
+  // An issue is displayed as PARSER-12, and the key half used to be fetched
   // separately by the client, so every time the rows changed the id column
   // rendered a full UUID until that second request landed and then snapped to
   // the short form -- a visible flash on every sort, filter and page turn.
@@ -1207,7 +1220,7 @@ async function searchBugsInternal(
   // The server already knows the key, and one lookup here covers the whole
   // page: at most one product per row, in practice a handful. Denormalised
   // onto the row rather than returned alongside it because every consumer of
-  // a bug wants to be able to name it.
+  // an issue wants to be able to name it.
   const keysByProduct = new Map(
     (await readByIds(db.products, rows.map((row) => row.productId))).map((product) => [
       product.id,
@@ -1217,7 +1230,7 @@ async function searchBugsInternal(
   return rows.map((row) => ({ ...row, productKey: keysByProduct.get(row.productId) ?? null }));
 }
 
-export const searchBugs = query(
+export const searchIssues = query(
   async ({
     productId,
     componentId,
@@ -1225,6 +1238,7 @@ export const searchBugs = query(
     milestoneId,
     status,
     resolution,
+    kind,
     severity,
     priority,
     assigneeId,
@@ -1236,8 +1250,8 @@ export const searchBugs = query(
     offset,
     sortBy,
     sortDirection,
-  }: BugSearchInput) =>
-    searchBugsInternal(
+  }: IssueSearchInput) =>
+    searchIssuesInternal(
       {
         productId,
         componentId,
@@ -1245,6 +1259,7 @@ export const searchBugs = query(
         milestoneId,
         status,
         resolution,
+        kind,
         severity,
         priority,
         assigneeId,
@@ -1259,10 +1274,10 @@ export const searchBugs = query(
       },
       optionalIdentity(),
     ),
-  { id: "bugs.search" },
+  { id: "issues.search" },
 );
 
-type GeneralBugPatch = {
+type GeneralIssuePatch = {
   summary?: string;
   versionId?: string | null;
   milestoneId?: string | null;
@@ -1274,7 +1289,7 @@ type GeneralBugPatch = {
   deadline?: number | null;
 };
 
-const GENERAL_BUG_FIELDS = [
+const GENERAL_ISSUE_FIELDS = [
   "summary",
   "versionId",
   "milestoneId",
@@ -1286,14 +1301,14 @@ const GENERAL_BUG_FIELDS = [
   "deadline",
 ] as const;
 
-export const updateBug = mutation(
-  async ({ id, changes }: { id: string; changes: GeneralBugPatch }) => {
+export const updateIssue = mutation(
+  async ({ id, changes }: { id: string; changes: GeneralIssuePatch }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
     const keys = Object.keys(changes);
     if (keys.length === 0) invalid("changes must contain at least one field");
-    if (keys.some((key) => !(GENERAL_BUG_FIELDS as readonly string[]).includes(key))) {
+    if (keys.some((key) => !(GENERAL_ISSUE_FIELDS as readonly string[]).includes(key))) {
       invalid("changes contains a field with a dedicated mutation");
     }
     if (changes.summary !== undefined) {
@@ -1307,50 +1322,50 @@ export const updateBug = mutation(
       const milestone = await getRequired(db.milestones, changes.milestoneId, "Milestone");
       if (milestone.productId !== current.productId) invalid("milestoneId belongs to another product");
     }
-    return updateBugWithHistory(
+    return updateIssueWithHistory(
       id,
       actor.id,
       (before) => {
-        rejectUnsupportedBugNullClears(before, changes);
+        rejectUnsupportedIssueNullClears(before, changes);
         return { ...changes };
       },
-      GENERAL_BUG_FIELDS,
+      GENERAL_ISSUE_FIELDS,
     );
   },
-  { id: "bugs.update" },
+  { id: "issues.update" },
 );
 
-export const changeBugStatus = mutation(
+export const changeIssueStatus = mutation(
   async ({
     id,
     status,
     resolution,
   }: {
     id: string;
-    status: BugStatus;
-    resolution?: BugResolution | null;
+    status: IssueStatus;
+    resolution?: IssueResolution | null;
   }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
-    return updateBugWithHistory(
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    return updateIssueWithHistory(
       id,
       actor.id,
       (before) => {
-        const next = transitionBugState(bugState(before), { status, resolution });
-        // `resolvedAt` is maintained HERE too, not only in bugs.resolve /
+        const next = transitionIssueState(issueState(before), { status, resolution });
+        // `resolvedAt` is maintained HERE too, not only in issues.resolve /
         // markDuplicate / reopen. This path performs the same transitions --
-        // it can move a bug into RESOLVED and back out to CONFIRMED -- and it
+        // it can move an issue into RESOLVED and back out to CONFIRMED -- and it
         // was leaving the stamp untouched in both directions:
         //   - resolving through here left resolvedAt null, so
-        //     reports.timeToResolve never counted the bug while
+        //     reports.timeToResolve never counted the issue while
         //     reports.trend (which mines status history) did, and the two
-        //     reports disagreed about the same bug;
+        //     reports disagreed about the same issue;
         //   - reopening through here left a stale stamp, so timeToResolve
-        //     counted a currently-OPEN bug as resolved, with a duration
+        //     counted a currently-OPEN issue as resolved, with a duration
         //     measured to a resolution that had been undone.
-        const wasResolved = !isOpenBugStatus(bugState(before).status);
-        const isResolved = !isOpenBugStatus(next.status);
+        const wasResolved = !isOpenIssueStatus(issueState(before).status);
+        const isResolved = !isOpenIssueStatus(next.status);
         return {
           status: next.status,
           resolution: next.resolution,
@@ -1365,19 +1380,19 @@ export const changeBugStatus = mutation(
       ["status", "resolution", "isConfirmed", "duplicateOfId"],
     );
   },
-  { id: "bugs.changeStatus" },
+  { id: "issues.changeStatus" },
 );
 
-export const resolveBug = mutation(
-  async ({ id, resolution }: { id: string; resolution: Exclude<BugResolution, "DUPLICATE"> }) => {
+export const resolveIssue = mutation(
+  async ({ id, resolution }: { id: string; resolution: Exclude<IssueResolution, "DUPLICATE"> }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
-    const updated = await updateBugWithHistory(
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    const updated = await updateIssueWithHistory(
       id,
       actor.id,
       (before) => {
-        const next = resolveBugState(bugState(before), resolution);
+        const next = resolveIssueState(issueState(before), resolution);
         return {
           status: next.status,
           resolution: next.resolution,
@@ -1385,37 +1400,37 @@ export const resolveBug = mutation(
           isConfirmed: true,
           // Stamped here, and deliberately NOT in trackedFields below: it is
           // derived metadata, not a field a user edited, so it does not belong
-          // in the bug's visible history.
+          // in the issue's visible history.
           resolvedAt: portableTimestamp(Date.now()),
         };
       },
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
     );
-    // No explicit fanout here any more: updateBugWithHistory sends one for
+    // No explicit fanout here any more: updateIssueWithHistory sends one for
     // every field it actually changed, and calling it again would notify
     // twice for a single resolve.
     return updated;
   },
-  { id: "bugs.resolve" },
+  { id: "issues.resolve" },
 );
 
-export const reopenBug = mutation(
+export const reopenIssue = mutation(
   async ({ id }: { id: string }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
-    return updateBugWithHistory(
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    return updateIssueWithHistory(
       id,
       actor.id,
       (before) => {
-        const next = reopenBugState(bugState(before));
+        const next = reopenIssueState(issueState(before));
         return {
           status: next.status,
           resolution: next.resolution,
           duplicateOfId: null,
           isConfirmed: true,
           // Cleared on reopen for the same reason it is set on resolve: a
-          // reopened bug is not resolved, and leaving a stale stamp would make
+          // reopened issue is not resolved, and leaving a stale stamp would make
           // reports.timeToResolve count it as still-closed.
           resolvedAt: null,
         };
@@ -1423,31 +1438,31 @@ export const reopenBug = mutation(
       ["status", "resolution", "duplicateOfId", "isConfirmed"],
     );
   },
-  { id: "bugs.reopen" },
+  { id: "issues.reopen" },
 );
 
-export const markBugDuplicate = mutation(
+export const markIssueDuplicate = mutation(
   async ({ id, duplicateOfId }: { id: string; duplicateOfId: string }) => {
     const actor = await requireActor();
     const sourceId = requireId(id, "id");
     const [source, target] = await Promise.all([
-      getRequired(db.bugs, sourceId, "Bug"),
-      bugByIdOrKey(duplicateOfId),
+      getRequired(db.issues, sourceId, "Issue"),
+      issueByIdOrKey(duplicateOfId),
     ]);
-    if (source.id === target.id) invalid("a bug cannot duplicate itself");
-    await assertBugAccessible(source, actor);
-    await assertBugAccessible(target, actor);
+    if (source.id === target.id) invalid("an issue cannot duplicate itself");
+    await assertIssueAccessible(source, actor);
+    await assertIssueAccessible(target, actor);
 
     const result = await db.transaction(
       async (tx) => {
-        const before = await getTxRequired(tx.bugs, source.id, "Bug");
-        await getTxRequired(tx.bugs, target.id, "Duplicate target");
-        const allBugs = await readAllTx(tx.bugs, { duplicateOfId: { $ne: null } });
-        if (wouldCreateDirectedCycle(duplicateEdges(allBugs), source.id, target.id)) {
+        const before = await getTxRequired(tx.issues, source.id, "Issue");
+        await getTxRequired(tx.issues, target.id, "Duplicate target");
+        const allIssues = await readAllTx(tx.issues, { duplicateOfId: { $ne: null } });
+        if (wouldCreateDirectedCycle(duplicateEdges(allIssues), source.id, target.id)) {
           conflict("duplicate relationship would create a cycle");
         }
-        const next = markDuplicateBugState(bugState(before));
-        const after = await tx.bugs.update(source.id, {
+        const next = markDuplicateIssueState(issueState(before));
+        const after = await tx.issues.update(source.id, {
           status: next.status,
           resolution: next.resolution,
           duplicateOfId: target.id,
@@ -1457,7 +1472,7 @@ export const markBugDuplicate = mutation(
           // reports.timeToResolve.
           resolvedAt: portableTimestamp(Date.now()),
         });
-        if (!after) notFound("Bug");
+        if (!after) notFound("Issue");
         await recordChanges(
           tx.activities,
           source.id,
@@ -1466,30 +1481,30 @@ export const markBugDuplicate = mutation(
           after,
           ["status", "resolution", "duplicateOfId", "isConfirmed"],
         );
-        return normalizeBugRow(after);
+        return normalizeIssueRow(after);
       },
       { isolationLevel: "serializable" },
     );
     const marked = must(result);
     // Notified explicitly, because this handler runs its OWN transaction for
-    // cycle detection and never goes through updateBugWithHistory -- where the
+    // cycle detection and never goes through updateIssueWithHistory -- where the
     // central fanout lives. Marking a duplicate is a real closure, exactly
-    // like bugs.resolve, and it was the one closure that told nobody. The
-    // comment on the central fanout claimed it covered every bug mutation; it
+    // like issues.resolve, and it was the one closure that told nobody. The
+    // comment on the central fanout claimed it covered every issue mutation; it
     // covers the eight that route through that helper.
-    await notifyBugChange(marked, actor.id, `${marked.summary} was closed as a duplicate`);
+    await notifyIssueChange(marked, actor.id, `${marked.summary} was closed as a duplicate`);
     return marked;
   },
-  { id: "bugs.markDuplicate" },
+  { id: "issues.markDuplicate" },
 );
 
-export const reassignBug = mutation(
+export const reassignIssue = mutation(
   async ({ id, assigneeId }: { id: string; assigneeId: string | null }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
     if (assigneeId) await getRequired(db.users, assigneeId, "Assignee");
-    return updateBugWithHistory(
+    return updateIssueWithHistory(
       id,
       actor.id,
       (before) => {
@@ -1501,62 +1516,82 @@ export const reassignBug = mutation(
       ["assigneeId"],
     );
   },
-  { id: "bugs.reassign" },
+  { id: "issues.reassign" },
 );
 
-export const setBugSeverity = mutation(
-  async ({ id, severity }: { id: string; severity: BugSeverity }) => {
+/**
+ * Reclassify an issue: a defect that turns out to be a feature request, a
+ * request that turns out to be a chore.
+ *
+ * Filing already picks a kind, and without this it could never be corrected --
+ * `issues.update` refuses fields with a dedicated mutation, so `kind` would
+ * have been a write-once column set by whoever filed. It routes through
+ * `updateIssueWithHistory` like setSeverity and setPriority, so the change
+ * lands in the issue's history and its watchers hear about it.
+ */
+export const setIssueKind = mutation(
+  async ({ id, kind }: { id: string; kind: IssueKind }) => {
     const actor = await requireActor();
-    if (!BUG_SEVERITIES.includes(severity)) invalid("invalid severity");
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
-    return updateBugWithHistory(id, actor.id, () => ({ severity }), ["severity"]);
+    if (!ISSUE_KINDS.includes(kind)) invalid("invalid kind");
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    return updateIssueWithHistory(id, actor.id, () => ({ kind }), ["kind"]);
   },
-  { id: "bugs.setSeverity" },
+  { id: "issues.setKind" },
 );
 
-export const setBugPriority = mutation(
-  async ({ id, priority }: { id: string; priority: BugPriority }) => {
+export const setIssueSeverity = mutation(
+  async ({ id, severity }: { id: string; severity: IssueSeverity }) => {
     const actor = await requireActor();
-    if (!BUG_PRIORITIES.includes(priority)) invalid("invalid priority");
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
-    return updateBugWithHistory(id, actor.id, () => ({ priority }), ["priority"]);
+    if (!ISSUE_SEVERITIES.includes(severity)) invalid("invalid severity");
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    return updateIssueWithHistory(id, actor.id, () => ({ severity }), ["severity"]);
   },
-  { id: "bugs.setPriority" },
+  { id: "issues.setSeverity" },
 );
 
-export const moveBug = mutation(
+export const setIssuePriority = mutation(
+  async ({ id, priority }: { id: string; priority: IssuePriority }) => {
+    const actor = await requireActor();
+    if (!ISSUE_PRIORITIES.includes(priority)) invalid("invalid priority");
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
+    return updateIssueWithHistory(id, actor.id, () => ({ priority }), ["priority"]);
+  },
+  { id: "issues.setPriority" },
+);
+
+export const moveIssue = mutation(
   async ({ id, productId, componentId }: { id: string; productId: string; componentId: string }) => {
     const actor = await requireActor();
-    const current = await getRequired(db.bugs, id, "Bug");
-    await assertBugAccessible(current, actor);
+    const current = await getRequired(db.issues, id, "Issue");
+    await assertIssueAccessible(current, actor);
 
     // The version and milestone are REMAPPED to same-named entries in the
     // target product, which is what Bugzilla does. They cannot simply be
     // carried over -- both are product-scoped, so keeping the old ids would
-    // leave the bug pointing at another product's rows -- and they cannot be
+    // leave the issue pointing at another product's rows -- and they cannot be
     // cleared either, because env.db has no SQL NULL update.
     //
-    // This procedure previously refused any bug with a version or milestone.
-    // Since `bugs.versionId` is NOT NULL, that was every bug that can exist:
-    // an exported, policy-listed procedure whose success path no input could
-    // reach. It then got worse -- `validateProductChildren` gained a required
-    // versionId check, and this call site passes none, so the refusal became
-    // "versionId is required" about a field the caller never sends.
-    // `bugs.versionId` is NOT NULL in the schema, but BugRow types it optional
-    // (it was nullable before the rework). Checked rather than asserted: if a
-    // row ever does lack one, a clear conflict beats a cast that produces
-    // `getRequired(undefined)` and a confusing "Version id" error.
-    if (!current.versionId) conflict("this bug has no version and cannot be moved");
-    const currentVersion = await getRequired(db.versions, current.versionId, "Version");
-    const targetVersions = await readAll(db.versions, { productId });
-    const mappedVersion = targetVersions.find((row) => row.name === currentVersion.name);
-    if (!mappedVersion) {
-      conflict(
-        `the target product has no version named "${currentVersion.name}"; ` +
-          `create it there before moving this bug`,
-      );
+    // BOTH are optional now, and the version arm is new: `issues.versionId` is
+    // nullable, so an issue filed without a version -- which is every
+    // enhancement -- moves and simply stays without one. This used to refuse
+    // that case outright ("this bug has no version and cannot be moved"), a
+    // refusal no input could reach while the column was NOT NULL and which
+    // would now reject the most ordinary feature request.
+    let mappedVersionId: string | undefined;
+    if (current.versionId) {
+      const currentVersion = await getRequired(db.versions, current.versionId, "Version");
+      const targetVersions = await readAll(db.versions, { productId });
+      const mappedVersion = targetVersions.find((row) => row.name === currentVersion.name);
+      if (!mappedVersion) {
+        conflict(
+          `the target product has no version named "${currentVersion.name}"; ` +
+            `create it there before moving this issue`,
+        );
+      }
+      mappedVersionId = mappedVersion.id;
     }
 
     let mappedMilestoneId: string | undefined;
@@ -1567,7 +1602,7 @@ export const moveBug = mutation(
       if (!mapped) {
         conflict(
           `the target product has no milestone named "${currentMilestone.name}"; ` +
-            `create it there before moving this bug`,
+            `create it there before moving this issue`,
         );
       }
       mappedMilestoneId = mapped.id;
@@ -1576,24 +1611,24 @@ export const moveBug = mutation(
     const structure = await validateProductChildren(
       productId,
       componentId,
-      mappedVersion.id,
+      mappedVersionId,
       mappedMilestoneId,
     );
     await assertCanViewProduct(structure.product.id, actor);
 
-    return updateBugWithHistory(
+    return updateIssueWithHistory(
       id,
       actor.id,
       () => ({
         productId: structure.product.id,
         componentId: structure.component.id,
-        versionId: mappedVersion.id,
+        ...(mappedVersionId ? { versionId: mappedVersionId } : {}),
         ...(mappedMilestoneId ? { milestoneId: mappedMilestoneId } : {}),
       }),
       ["productId", "componentId", "versionId", "milestoneId"],
     );
   },
-  { id: "bugs.move" },
+  { id: "issues.move" },
 );
 
 // ---------------------------------------------------------------------------
@@ -1602,28 +1637,28 @@ export const moveBug = mutation(
 
 export const addComment = mutation(
   async ({
-    bugId,
+    issueId,
     body,
     isPrivate = false,
   }: {
-    bugId: string;
+    issueId: string;
     body: string;
     isPrivate?: boolean;
   }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     const cleanBody = requireNonEmpty(body, "body");
 
     const result = await db.transaction(async (tx) => {
-      const before = await getTxRequired(tx.bugs, bugId, "Bug");
-      const after = await tx.bugs.update(bugId, {
+      const before = await getTxRequired(tx.issues, issueId, "Issue");
+      const after = await tx.issues.update(issueId, {
         commentCount: { $inc: 1 },
       });
-      if (!after) notFound("Bug");
+      if (!after) notFound("Issue");
       const commentNumber = after.commentCount - 1;
       const comment = await tx.comments.insert({
-        bugId,
+        issueId,
         authorId: actor.id,
         body: cleanBody,
         commentNumber,
@@ -1631,7 +1666,7 @@ export const addComment = mutation(
       });
       await recordChanges(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         before,
         after,
@@ -1643,10 +1678,10 @@ export const addComment = mutation(
     // A private comment's BODY must not travel in a notification -- the
     // recipients of a fanout are not the same set as the people allowed to
     // read a private comment, so only the fact of a new comment goes out.
-    await notifyBugChange(
-      bug,
+    await notifyIssueChange(
+      issue,
       actor.id,
-      `New comment on ${bug.summary}`,
+      `New comment on ${issue.summary}`,
       isPrivate ? undefined : cleanBody.slice(0, 200),
     );
     return comment;
@@ -1655,27 +1690,27 @@ export const addComment = mutation(
 );
 
 export const listComments = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = optionalIdentity();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugVisible(bug, identity);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueVisible(issue, identity);
     const user = await appUserForIdentity(identity);
     const filter: DbFilter = user?.isAdmin
-      ? { bugId }
+      ? { issueId }
       : user
         ? {
             $and: [
-              { bugId },
+              { issueId },
               { $or: [{ isPrivate: false }, { authorId: user.id }] },
             ],
           }
-        : { bugId, isPrivate: false };
+        : { issueId, isPrivate: false };
     const rows = must(
       await db.comments.find(filter).sort({ commentNumber: 1 }).limit(500),
     );
     // The author is resolved here rather than left to the client, following
     // `cc.list`. A comment is attributable or it is not worth much, and the
-    // client cannot do this itself on a public bug: `users.list` requires
+    // client cannot do this itself on a public issue: `users.list` requires
     // authentication, so an anonymous reader would be stuck with the id.
     // `publicUserView` and not the row -- this is reachable anonymously.
     const authors = await readByIds(db.users, rows.map((row) => row.authorId));
@@ -1689,8 +1724,8 @@ export const editComment = mutation(
   async ({ id, body }: { id: string; body: string }) => {
     const actor = await requireActor();
     const comment = await getRequired(db.comments, id, "Comment");
-    const bug = await getRequired(db.bugs, comment.bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, comment.issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     if (!actor.isAdmin && comment.authorId !== actor.id) {
       forbidden("Only the comment author or an administrator can edit it");
     }
@@ -1702,7 +1737,7 @@ export const editComment = mutation(
       if (!after) notFound("Comment");
       await recordRelatedChange(
         tx.activities,
-        before.bugId,
+        before.issueId,
         actor.id,
         `comment.${before.commentNumber}.body`,
         "previous text",
@@ -1719,8 +1754,8 @@ export const setCommentPrivate = mutation(
   async ({ id, isPrivate }: { id: string; isPrivate: boolean }) => {
     const actor = await requireActor();
     const comment = await getRequired(db.comments, id, "Comment");
-    const bug = await getRequired(db.bugs, comment.bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, comment.issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     if (!actor.isAdmin && comment.authorId !== actor.id) {
       forbidden("Only the comment author or an administrator can change privacy");
     }
@@ -1731,7 +1766,7 @@ export const setCommentPrivate = mutation(
       if (!after) notFound("Comment");
       await recordRelatedChange(
         tx.activities,
-        before.bugId,
+        before.issueId,
         actor.id,
         `comment.${before.commentNumber}.isPrivate`,
         String(before.isPrivate),
@@ -1750,7 +1785,7 @@ export const setCommentPrivate = mutation(
 
 export const uploadAttachment = mutation(
   async ({
-    bugId,
+    issueId,
     commentId,
     filename,
     contentBase64,
@@ -1758,7 +1793,7 @@ export const uploadAttachment = mutation(
     description,
     isPatch = false,
   }: {
-    bugId: string;
+    issueId: string;
     /** The comment this file arrived with, if it arrived with one. */
     commentId?: string | null;
     filename: string;
@@ -1768,8 +1803,8 @@ export const uploadAttachment = mutation(
     isPatch?: boolean;
   }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     const cleanFilename = safeFilename(filename);
     const cleanType = requireNonEmpty(contentType, "contentType").slice(0, 200);
     const cleanBase64 = contentBase64.replace(/\s/gu, "");
@@ -1783,24 +1818,24 @@ export const uploadAttachment = mutation(
     }
 
     // A file may name the comment it arrived with, but only a comment ON THIS
-    // BUG. Without the check, a caller could hang a file off someone else's
-    // comment and it would render under their name, on a bug they may not be
+    // ISSUE. Without the check, a caller could hang a file off someone else's
+    // comment and it would render under their name, on an issue they may not be
     // able to read -- the id is caller-supplied, so it is checked rather than
     // trusted.
     let attachedComment: string | null = null;
     if (commentId) {
       const comment = await getRequired(db.comments, requireId(commentId, "commentId"), "Comment");
-      if (comment.bugId !== bug.id) invalid("that comment belongs to a different bug");
+      if (comment.issueId !== issue.id) invalid("that comment belongs to a different issue");
       attachedComment = comment.id;
     }
 
-    const storageKey = attachmentStorageKey(bugId, cleanFilename);
+    const storageKey = attachmentStorageKey(issueId, cleanFilename);
     const put = parseNativeJson<{ bucket: string; key: string; size: number }>(
       await storage().put(ATTACHMENT_BUCKET, storageKey, cleanBase64, cleanType),
     );
     const result = await db.transaction(async (tx) => {
       const attachment = await tx.attachments.insert({
-        bugId,
+        issueId,
         ...(attachedComment ? { commentId: attachedComment } : {}),
         uploaderId: actor.id,
         filename: cleanFilename,
@@ -1813,7 +1848,7 @@ export const uploadAttachment = mutation(
       });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "attachment",
         null,
@@ -1836,12 +1871,12 @@ export const uploadAttachment = mutation(
 );
 
 export const listAttachments = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugVisible(bug, identity);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueVisible(issue, identity);
     return must(
-      await db.attachments.find({ bugId }).sort({ created_at: 1 }).limit(500),
+      await db.attachments.find({ issueId }).sort({ created_at: 1 }).limit(500),
     );
   },
   { id: "attachments.list" },
@@ -1851,8 +1886,8 @@ export const getAttachment = query(
   async ({ id }: { id: string }) => {
     const identity = requireIdentity();
     const attachment = await getRequired(db.attachments, id, "Attachment");
-    const bug = await getRequired(db.bugs, attachment.bugId, "Bug");
-    await assertBugVisible(bug, identity);
+    const issue = await getRequired(db.issues, attachment.issueId, "Issue");
+    await assertIssueVisible(issue, identity);
     const raw = await storage().get(ATTACHMENT_BUCKET, attachment.storageKey);
     if (raw === "null") notFound("Attachment content");
     const object = parseNativeJson<{
@@ -1874,15 +1909,15 @@ export const setAttachmentObsolete = mutation(
   async ({ id, isObsolete }: { id: string; isObsolete: boolean }) => {
     const actor = await requireActor();
     const attachment = await getRequired(db.attachments, id, "Attachment");
-    const bug = await getRequired(db.bugs, attachment.bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, attachment.issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
       const before = await getTxRequired(tx.attachments, id, "Attachment");
       const after = await tx.attachments.update(id, { isObsolete });
       if (!after) notFound("Attachment");
       await recordRelatedChange(
         tx.activities,
-        before.bugId,
+        before.issueId,
         actor.id,
         `attachment.${id}.isObsolete`,
         String(before.isObsolete),
@@ -1899,8 +1934,8 @@ export const deleteAttachment = mutation(
   async ({ id }: { id: string }) => {
     const actor = await requireActor();
     const attachment = await getRequired(db.attachments, id, "Attachment");
-    const bug = await getRequired(db.bugs, attachment.bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, attachment.issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
 
     const raw = await storage().get(ATTACHMENT_BUCKET, attachment.storageKey);
     await storage().delete(ATTACHMENT_BUCKET, attachment.storageKey);
@@ -1910,7 +1945,7 @@ export const deleteAttachment = mutation(
         await tx.flags.delete(flag.id);
         await recordRelatedChange(
           tx.activities,
-          attachment.bugId,
+          attachment.issueId,
           actor.id,
           `flag.${flag.flagTypeId}`,
           flag.status,
@@ -1921,7 +1956,7 @@ export const deleteAttachment = mutation(
       if (!deleted) notFound("Attachment");
       await recordRelatedChange(
         tx.activities,
-        deleted.bugId,
+        deleted.issueId,
         actor.id,
         "attachment",
         `${deleted.id}:${deleted.filename}`,
@@ -1961,45 +1996,45 @@ export const deleteAttachment = mutation(
 // ---------------------------------------------------------------------------
 
 export const addDependency = mutation(
-  async ({ bugId, dependsOnId }: { bugId: string; dependsOnId: string }) => {
+  async ({ issueId, dependsOnId }: { issueId: string; dependsOnId: string }) => {
     const actor = await requireActor();
-    const sourceId = requireId(bugId, "bugId");
-    // By UUID or by PARSER-12, for the reason bugs.get already gives: the
+    const sourceId = requireId(issueId, "issueId");
+    // By UUID or by PARSER-12, for the reason issues.get already gives: the
     // identifier the app puts on screen must be one it accepts back. This is
-    // the field where that matters most -- nothing renders a bug's UUID where
+    // the field where that matters most -- nothing renders an issue's UUID where
     // a person could copy it, so demanding one here made the control usable
     // only by someone reading the address bar.
-    const [bug, dependency] = await Promise.all([
-      getRequired(db.bugs, sourceId, "Bug"),
-      bugByIdOrKey(dependsOnId),
+    const [issue, dependency] = await Promise.all([
+      getRequired(db.issues, sourceId, "Issue"),
+      issueByIdOrKey(dependsOnId),
     ]);
-    if (bug.id === dependency.id) invalid("a bug cannot depend on itself");
+    if (issue.id === dependency.id) invalid("an issue cannot depend on itself");
     const targetId = dependency.id;
-    await assertBugAccessible(bug, actor);
-    // The DEPENDENCY needs the same bug-level check as the bug being edited.
-    // Checking only its product let a caller point an edge at a restricted bug
+    await assertIssueAccessible(issue, actor);
+    // The DEPENDENCY needs the same issue-level check as the issue being edited.
+    // Checking only its product let a caller point an edge at a restricted issue
     // they cannot open -- and an edge is itself a disclosure: it confirms the
-    // bug exists and names it in the tree. Missed by the earlier sweep because
-    // this variable is `dependency`, not `bug`/`current`/`source`/`target`,
+    // issue exists and names it in the tree. Missed by the earlier sweep because
+    // this variable is `dependency`, not `issue`/`current`/`source`/`target`,
     // which is what a mechanical rename catches and a reading pass does not.
-    await assertBugAccessible(dependency, actor);
+    await assertIssueAccessible(dependency, actor);
 
     const result = await db.transaction(
       async (tx) => {
-        const rows = await readAllTx(tx.bugDependencies);
-        if (rows.some((row) => row.bugId === bug.id && row.dependsOnId === dependency.id)) {
+        const rows = await readAllTx(tx.issueDependencies);
+        if (rows.some((row) => row.issueId === issue.id && row.dependsOnId === dependency.id)) {
           conflict("dependency already exists");
         }
-        if (wouldCreateDirectedCycle(dependencyEdges(rows), bug.id, dependency.id)) {
+        if (wouldCreateDirectedCycle(dependencyEdges(rows), issue.id, dependency.id)) {
           conflict("dependency would create a cycle");
         }
-        const inserted = await tx.bugDependencies.insert({
-          bugId: bug.id,
+        const inserted = await tx.issueDependencies.insert({
+          issueId: issue.id,
           dependsOnId: dependency.id,
         });
         await recordRelatedChange(
           tx.activities,
-          bug.id,
+          issue.id,
           actor.id,
           "dependsOn",
           null,
@@ -2015,26 +2050,26 @@ export const addDependency = mutation(
 );
 
 export const removeDependency = mutation(
-  async ({ bugId, dependsOnId }: { bugId: string; dependsOnId: string }) => {
+  async ({ issueId, dependsOnId }: { issueId: string; dependsOnId: string }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
 
-    // BOTH ends, matching deps.add. Checking only `bugId` made this an
+    // BOTH ends, matching deps.add. Checking only `issueId` made this an
     // existence oracle -- probe `dependsOnId` and a 404 ("Dependency") is
-    // distinguishable from a success, which confirms an edge to a bug the
+    // distinguishable from a success, which confirms an edge to an issue the
     // caller cannot open -- and let that caller quietly delete a restricted
-    // bug's blocker bookkeeping from the public side.
-    const dependency = await getRequired(db.bugs, dependsOnId, "Dependency");
-    await assertBugAccessible(dependency, actor);
+    // issue's blocker bookkeeping from the public side.
+    const dependency = await getRequired(db.issues, dependsOnId, "Dependency");
+    await assertIssueAccessible(dependency, actor);
 
     const result = await db.transaction(async (tx) => {
-      const existing = await tx.bugDependencies.get({ bugId, dependsOnId });
+      const existing = await tx.issueDependencies.get({ issueId, dependsOnId });
       if (!existing) notFound("Dependency");
-      await tx.bugDependencies.deleteMany({ bugId, dependsOnId });
+      await tx.issueDependencies.deleteMany({ issueId, dependsOnId });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "dependsOn",
         dependsOnId,
@@ -2048,27 +2083,27 @@ export const removeDependency = mutation(
 );
 
 async function visibleGraphRows(identity: PlatformUser): Promise<{
-  bugs: BugRow[];
+  issues: IssueRow[];
   dependencies: DependencyRow[];
 }> {
   const visible = await visibleProductIds(identity, true);
   const productBatches = chunks([...visible]);
-  const [bugPages, dependencies] = await Promise.all([
-    Promise.all(productBatches.map((ids) => readAll(db.bugs, { productId: { $in: ids } }))),
-    readAll(db.bugDependencies),
+  const [issuePages, dependencies] = await Promise.all([
+    Promise.all(productBatches.map((ids) => readAll(db.issues, { productId: { $in: ids } }))),
+    readAll(db.issueDependencies),
   ]);
-  // Bug-level restrictions apply to the graph too. Filtering on product
-  // visibility alone put a restricted bug into deps.tree and deps.graph as a
+  // Issue-level restrictions apply to the graph too. Filtering on product
+  // visibility alone put a restricted issue into deps.tree and deps.graph as a
   // named node -- summary included -- for anyone who could see its product.
   // The edge filter below then keeps only edges whose BOTH ends survive, so a
-  // hidden bug also stops leaking through its neighbours.
-  const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
-  const bugRows = bugPages.flat().filter((bug) => !hidden.has(bug.id));
-  const ids = new Set(bugRows.map((bug) => bug.id));
+  // hidden issue also stops leaking through its neighbours.
+  const hidden = new Set(await hiddenIssueIds(await appUserForIdentity(identity)));
+  const issueRows = issuePages.flat().filter((issue) => !hidden.has(issue.id));
+  const ids = new Set(issueRows.map((issue) => issue.id));
   return {
-    bugs: bugRows,
+    issues: issueRows,
     dependencies: dependencies.filter(
-      (edge) => ids.has(edge.bugId) && ids.has(edge.dependsOnId),
+      (edge) => ids.has(edge.issueId) && ids.has(edge.dependsOnId),
     ),
   };
 }
@@ -2076,21 +2111,21 @@ async function visibleGraphRows(identity: PlatformUser): Promise<{
 const MAX_DEPENDENCY_TREE_NODES = 2_000;
 
 export const dependencyGraph = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
     const all = await visibleGraphRows(identity);
-    const byId = new Map(all.bugs.map((bug) => [bug.id, bug]));
-    if (!byId.has(bugId)) notFound("Bug");
+    const byId = new Map(all.issues.map((issue) => [issue.id, issue]));
+    if (!byId.has(issueId)) notFound("Issue");
     const component = new Set(
-      weaklyConnectedComponent(dependencyEdges(all.dependencies), bugId),
+      weaklyConnectedComponent(dependencyEdges(all.dependencies), issueId),
     );
     return {
       nodes: [...component]
         .map((id) => byId.get(id))
-        .filter((bug): bug is BugRow => bug !== undefined)
-        .map(normalizeBugRow),
+        .filter((issue): issue is IssueRow => issue !== undefined)
+        .map(normalizeIssueRow),
       edges: all.dependencies.filter(
-        (edge) => component.has(edge.bugId) && component.has(edge.dependsOnId),
+        (edge) => component.has(edge.issueId) && component.has(edge.dependsOnId),
       ),
     };
   },
@@ -2098,22 +2133,22 @@ export const dependencyGraph = query(
 );
 
 type DependencyTreeNode = {
-  bug: BugRow;
+  issue: IssueRow;
   dependencies: DependencyTreeNode[];
   cycle?: true;
 };
 
 export const dependencyTree = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
     const all = await visibleGraphRows(identity);
-    const byId = new Map(all.bugs.map((bug) => [bug.id, bug]));
-    if (!byId.has(bugId)) notFound("Bug");
+    const byId = new Map(all.issues.map((issue) => [issue.id, issue]));
+    if (!byId.has(issueId)) notFound("Issue");
     const children = new Map<string, string[]>();
     for (const edge of all.dependencies) {
-      const values = children.get(edge.bugId) ?? [];
+      const values = children.get(edge.issueId) ?? [];
       values.push(edge.dependsOnId);
-      children.set(edge.bugId, values);
+      children.set(edge.issueId, values);
     }
     let expanded = 0;
     const build = (id: string, path: ReadonlySet<string>): DependencyTreeNode => {
@@ -2121,53 +2156,53 @@ export const dependencyTree = query(
       if (expanded > MAX_DEPENDENCY_TREE_NODES) {
         conflict(`dependency tree exceeds ${MAX_DEPENDENCY_TREE_NODES} expanded nodes`);
       }
-      const storedBug = byId.get(id);
-      if (!storedBug) notFound("Dependency bug");
-      const bug = normalizeBugRow(storedBug);
-      if (path.has(id)) return { bug, dependencies: [], cycle: true };
+      const storedIssue = byId.get(id);
+      if (!storedIssue) notFound("Dependency issue");
+      const issue = normalizeIssueRow(storedIssue);
+      if (path.has(id)) return { issue, dependencies: [], cycle: true };
       const nextPath = new Set(path).add(id);
       return {
-        bug,
+        issue,
         dependencies: (children.get(id) ?? []).map((child) => build(child, nextPath)),
       };
     };
-    return build(bugId, new Set());
+    return build(issueId, new Set());
   },
   { id: "deps.tree" },
 );
 
 export const listDuplicates = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
     const visible = await visibleProductIds(identity, true);
     const all = (
       await Promise.all(
-        chunks([...visible]).map((ids) => readAll(db.bugs, { productId: { $in: ids } })),
+        chunks([...visible]).map((ids) => readAll(db.issues, { productId: { $in: ids } })),
       )
     ).flat();
 
-    // Bug-level restrictions apply here too. This filtered on product
+    // Issue-level restrictions apply here too. This filtered on product
     // visibility alone, and a duplicate cluster is the classic way a
-    // confidential bug becomes reachable: a PUBLIC bug marked as a duplicate
-    // of a restricted one put the restricted bug's whole row -- summary,
+    // confidential issue becomes reachable: a PUBLIC issue marked as a duplicate
+    // of a restricted one put the restricted issue's whole row -- summary,
     // status, assignee -- into this response for anyone who could see the
     // public one.
     //
     // The filter runs BEFORE the existence check, not after. Checking
     // existence against the unfiltered set makes this an oracle: a caller
-    // could tell a restricted bug id (404 vs a result) from a nonexistent one.
-    const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
-    const bugs = all.filter((bug) => !hidden.has(bug.id));
+    // could tell a restricted issue id (404 vs a result) from a nonexistent one.
+    const hidden = new Set(await hiddenIssueIds(await appUserForIdentity(identity)));
+    const issues = all.filter((issue) => !hidden.has(issue.id));
 
-    if (!bugs.some((bug) => bug.id === bugId)) notFound("Bug");
-    const ids = new Set(weaklyConnectedComponent(duplicateEdges(bugs), bugId));
-    // `duplicateOfId` is masked when it points at a bug the caller cannot see.
+    if (!issues.some((issue) => issue.id === issueId)) notFound("Issue");
+    const ids = new Set(weaklyConnectedComponent(duplicateEdges(issues), issueId));
+    // `duplicateOfId` is masked when it points at an issue the caller cannot see.
     // Dropping the restricted ROW is not enough on its own: the surviving
-    // public row still named the restricted bug's id, which confirms it exists
+    // public row still named the restricted issue's id, which confirms it exists
     // -- the same disclosure the dependency-edge check closes.
-    return bugs
-      .filter((bug) => ids.has(bug.id))
-      .map((bug) => maskHiddenBugLinks(normalizeBugRow(bug), hidden));
+    return issues
+      .filter((issue) => ids.has(issue.id))
+      .map((issue) => maskHiddenIssueLinks(normalizeIssueRow(issue), hidden));
   },
   { id: "dupes.list" },
 );
@@ -2201,20 +2236,20 @@ export const createKeyword = mutation(
 );
 
 export const attachKeyword = mutation(
-  async ({ bugId, keywordId }: { bugId: string; keywordId: string }) => {
+  async ({ issueId, keywordId }: { issueId: string; keywordId: string }) => {
     const actor = await requireActor();
-    const [bug, keyword] = await Promise.all([
-      getRequired(db.bugs, bugId, "Bug"),
+    const [issue, keyword] = await Promise.all([
+      getRequired(db.issues, issueId, "Issue"),
       getRequired(db.keywords, keywordId, "Keyword"),
     ]);
-    await assertBugAccessible(bug, actor);
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
-      const existing = await tx.bugKeywords.get({ bugId, keywordId });
+      const existing = await tx.issueKeywords.get({ issueId, keywordId });
       if (existing) return existing;
-      const row = await tx.bugKeywords.insert({ bugId, keywordId });
+      const row = await tx.issueKeywords.insert({ issueId, keywordId });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "keywords",
         null,
@@ -2229,20 +2264,20 @@ export const attachKeyword = mutation(
 );
 
 export const detachKeyword = mutation(
-  async ({ bugId, keywordId }: { bugId: string; keywordId: string }) => {
+  async ({ issueId, keywordId }: { issueId: string; keywordId: string }) => {
     const actor = await requireActor();
-    const [bug, keyword] = await Promise.all([
-      getRequired(db.bugs, bugId, "Bug"),
+    const [issue, keyword] = await Promise.all([
+      getRequired(db.issues, issueId, "Issue"),
       getRequired(db.keywords, keywordId, "Keyword"),
     ]);
-    await assertBugAccessible(bug, actor);
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
-      const existing = await tx.bugKeywords.get({ bugId, keywordId });
-      if (!existing) notFound("Bug keyword");
-      await tx.bugKeywords.deleteMany({ bugId, keywordId });
+      const existing = await tx.issueKeywords.get({ issueId, keywordId });
+      if (!existing) notFound("Issue keyword");
+      await tx.issueKeywords.deleteMany({ issueId, keywordId });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "keywords",
         keyword.name,
@@ -2258,13 +2293,13 @@ export const detachKeyword = mutation(
 export const setFlag = mutation(
   async ({
     flagTypeId,
-    bugId,
+    issueId,
     attachmentId,
     requesteeId,
     status,
   }: {
     flagTypeId: string;
-    bugId?: string | null;
+    issueId?: string | null;
     attachmentId?: string | null;
     requesteeId?: string | null;
     status: "+" | "-" | "?";
@@ -2272,16 +2307,16 @@ export const setFlag = mutation(
     const actor = await requireActor();
     if (!["+", "-", "?"].includes(status)) invalid("flag status must be +, -, or ?");
     const flagType = await getRequired(db.flagTypes, flagTypeId, "Flag type");
-    if (flagType.targetType !== "bug" && flagType.targetType !== "attachment") {
+    if (flagType.targetType !== "issue" && flagType.targetType !== "attachment") {
       invalid("flag type has an invalid targetType");
     }
-    const target = assertFlagTarget(flagType.targetType, { bugId, attachmentId });
-    const targetBugId = target.bugId
-      ? target.bugId
-      : (await getRequired(db.attachments, target.attachmentId!, "Attachment")).bugId;
-    const bug = await getRequired(db.bugs, targetBugId, "Bug");
-    await assertBugAccessible(bug, actor);
-    if (flagType.productId && flagType.productId !== bug.productId) {
+    const target = assertFlagTarget(flagType.targetType, { issueId, attachmentId });
+    const targetIssueId = target.issueId
+      ? target.issueId
+      : (await getRequired(db.attachments, target.attachmentId!, "Attachment")).issueId;
+    const issue = await getRequired(db.issues, targetIssueId, "Issue");
+    await assertIssueAccessible(issue, actor);
+    if (flagType.productId && flagType.productId !== issue.productId) {
       invalid("flag type does not apply to the target product");
     }
     if (status === "?" && !flagType.isRequestable) {
@@ -2289,8 +2324,8 @@ export const setFlag = mutation(
     }
     if (requesteeId) await getRequired(db.users, requesteeId, "Requestee");
 
-    const targetFilter: DbFilter = target.bugId
-      ? { flagTypeId, bugId: target.bugId }
+    const targetFilter: DbFilter = target.issueId
+      ? { flagTypeId, issueId: target.issueId }
       : { flagTypeId, attachmentId: target.attachmentId };
     const result = await db.transaction(async (tx) => {
       const existing = !flagType.isMultiplicable
@@ -2309,7 +2344,7 @@ export const setFlag = mutation(
           })
         : await tx.flags.insert({
             flagTypeId,
-            ...(target.bugId ? { bugId: target.bugId } : {}),
+            ...(target.issueId ? { issueId: target.issueId } : {}),
             ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
             setterId: actor.id,
             ...(requesteeId ? { requesteeId } : {}),
@@ -2318,7 +2353,7 @@ export const setFlag = mutation(
       if (!flag) notFound("Flag");
       await recordRelatedChange(
         tx.activities,
-        targetBugId,
+        targetIssueId,
         actor.id,
         `flag.${flagType.name}`,
         existing?.status ?? null,
@@ -2326,7 +2361,7 @@ export const setFlag = mutation(
       );
       await recordRelatedChange(
         tx.activities,
-        targetBugId,
+        targetIssueId,
         actor.id,
         `flag.${flagType.name}.requesteeId`,
         existing?.requesteeId ?? null,
@@ -2343,18 +2378,18 @@ export const clearFlag = mutation(
   async ({ id }: { id: string }) => {
     const actor = await requireActor();
     const flag = await getRequired(db.flags, id, "Flag");
-    const [bugId, flagType] = await Promise.all([
-      bugIdForFlag(flag),
+    const [issueId, flagType] = await Promise.all([
+      issueIdForFlag(flag),
       getRequired(db.flagTypes, flag.flagTypeId, "Flag type"),
     ]);
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
       const deleted = await tx.flags.delete(id);
       if (!deleted) notFound("Flag");
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         `flag.${flagType.name}`,
         deleted.status,
@@ -2380,13 +2415,13 @@ export const listFlagRequests = query(
     const byId = new Map(must(types).map((type) => [type.id, type]));
     const hydrate = (flag: FlagRow) => ({ flag, flagType: byId.get(flag.flagTypeId) ?? null });
 
-    // A flag row names its bug, and the bug can be restricted AFTER the flag
+    // A flag row names its issue, and the issue can be restricted AFTER the flag
     // was set -- the request survives the access that created it. Being named
-    // on the flag is not itself permission to know the bug still exists, so
-    // rows pointing at a now-hidden bug are dropped here as they are
-    // everywhere else. Attachment-scoped flags carry no bugId and are kept.
-    const hidden = new Set(await hiddenBugIds(user));
-    const visible = (flag: FlagRow) => !flag.bugId || !hidden.has(flag.bugId);
+    // on the flag is not itself permission to know the issue still exists, so
+    // rows pointing at a now-hidden issue are dropped here as they are
+    // everywhere else. Attachment-scoped flags carry no issueId and are kept.
+    const hidden = new Set(await hiddenIssueIds(user));
+    const visible = (flag: FlagRow) => !flag.issueId || !hidden.has(flag.issueId);
 
     return {
       setByMe: must(setByMe).filter(visible).map(hydrate),
@@ -2396,9 +2431,9 @@ export const listFlagRequests = query(
   { id: "flags.listRequests" },
 );
 
-// The flags currently on a bug, and on each of its attachments.
+// The flags currently on an issue, and on each of its attachments.
 //
-// WHY THIS EXISTS. Without it the only way a client could know a bug's flags
+// WHY THIS EXISTS. Without it the only way a client could know an issue's flags
 // was to replay the `activities` log and reconstruct them, which is wrong for
 // any multiplicable flag type (several live flags of one type collapse to the
 // last write) and leaves `flags.clear` unusable: clearing needs a flag id, and
@@ -2406,18 +2441,18 @@ export const listFlagRequests = query(
 // session could never be cleared at all. Reconstructing state from a history
 // log is not a substitute for reading it.
 export const listFlags = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugVisible(bug, identity);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueVisible(issue, identity);
 
-    const attachments = await readAll(db.attachments, { bugId });
+    const attachments = await readAll(db.attachments, { issueId });
     const attachmentIds = new Set(attachments.map((row) => row.id));
 
-    // Attachment flags carry no bugId, so they are found through the bug's
+    // Attachment flags carry no issueId, so they are found through the issue's
     // attachments rather than in one query.
-    const [onBug, types] = await Promise.all([
-      readAll(db.flags, { bugId }),
+    const [onIssue, types] = await Promise.all([
+      readAll(db.flags, { issueId }),
       readAll(db.flagTypes, {}),
     ]);
     const onAttachments = (
@@ -2430,8 +2465,8 @@ export const listFlags = query(
 
     const byType = new Map(types.map((type) => [type.id, type]));
     const users = await readByIds(db.users, [
-      ...onBug.map((flag) => flag.setterId),
-      ...onBug.map((flag) => flag.requesteeId),
+      ...onIssue.map((flag) => flag.setterId),
+      ...onIssue.map((flag) => flag.requesteeId),
       ...onAttachments.map((flag) => flag.setterId),
       ...onAttachments.map((flag) => flag.requesteeId),
     ].filter((id): id is string => Boolean(id)));
@@ -2445,7 +2480,7 @@ export const listFlags = query(
     });
 
     return {
-      onBug: onBug.map(hydrate),
+      onIssue: onIssue.map(hydrate),
       onAttachments: onAttachments
         .filter((flag) => flag.attachmentId && attachmentIds.has(flag.attachmentId))
         .map(hydrate),
@@ -2455,20 +2490,20 @@ export const listFlags = query(
 );
 
 export const addCc = mutation(
-  async ({ bugId, userId }: { bugId: string; userId: string }) => {
+  async ({ issueId, userId }: { issueId: string; userId: string }) => {
     const actor = await requireActor();
-    const [bug, user] = await Promise.all([
-      getRequired(db.bugs, bugId, "Bug"),
+    const [issue, user] = await Promise.all([
+      getRequired(db.issues, issueId, "Issue"),
       getRequired(db.users, userId, "User"),
     ]);
-    await assertBugAccessible(bug, actor);
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
-      const existing = await tx.bugCc.get({ bugId, userId });
+      const existing = await tx.issueCc.get({ issueId, userId });
       if (existing) return existing;
-      const row = await tx.bugCc.insert({ bugId, userId });
+      const row = await tx.issueCc.insert({ issueId, userId });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "cc",
         null,
@@ -2489,20 +2524,20 @@ export const addCc = mutation(
 );
 
 export const removeCc = mutation(
-  async ({ bugId, userId }: { bugId: string; userId: string }) => {
+  async ({ issueId, userId }: { issueId: string; userId: string }) => {
     const actor = await requireActor();
-    const [bug, user] = await Promise.all([
-      getRequired(db.bugs, bugId, "Bug"),
+    const [issue, user] = await Promise.all([
+      getRequired(db.issues, issueId, "Issue"),
       getRequired(db.users, userId, "User"),
     ]);
-    await assertBugAccessible(bug, actor);
+    await assertIssueAccessible(issue, actor);
     const result = await db.transaction(async (tx) => {
-      const existing = await tx.bugCc.get({ bugId, userId });
+      const existing = await tx.issueCc.get({ issueId, userId });
       if (!existing) notFound("CC entry");
-      await tx.bugCc.deleteMany({ bugId, userId });
+      await tx.issueCc.deleteMany({ issueId, userId });
       await recordRelatedChange(
         tx.activities,
-        bugId,
+        issueId,
         actor.id,
         "cc",
         user.handle,
@@ -2516,11 +2551,11 @@ export const removeCc = mutation(
 );
 
 export const listCc = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugVisible(bug, identity);
-    const rows = (await readAll(db.bugCc, { bugId })).sort(
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueVisible(issue, identity);
+    const rows = (await readAll(db.issueCc, { issueId })).sort(
       (left, right) => left.created_at - right.created_at,
     );
     if (rows.length === 0) return [];
@@ -2531,13 +2566,13 @@ export const listCc = query(
   { id: "cc.list" },
 );
 
-// The bugs the caller is CC'd on -- the reverse of `cc.list`, and the query
+// The issues the caller is CC'd on -- the reverse of `cc.list`, and the query
 // behind the dashboard's "CC'd to me" section.
 //
-// The schema was already indexed for this direction (`bug_cc_user_idx` on
-// bugCc.userId) but no procedure read it, so the dashboard had an index and no
+// The schema was already indexed for this direction (`issue_cc_user_idx` on
+// issueCc.userId) but no procedure read it, so the dashboard had an index and no
 // way to reach it. Visibility is re-applied here rather than trusted from the
-// CC row: being CC'd on a bug does not by itself grant access to a product the
+// CC row: being CC'd on an issue does not by itself grant access to a product the
 // viewer can no longer see.
 export const listMyCc = query(
   async ({}: EmptyInput) => {
@@ -2545,20 +2580,20 @@ export const listMyCc = query(
     const user = await appUserForIdentity(identity);
     if (!user) return [];
 
-    const rows = await readAll(db.bugCc, { userId: user.id });
+    const rows = await readAll(db.issueCc, { userId: user.id });
     if (rows.length === 0) return [];
 
-    const bugs = await readByIds(db.bugs, rows.map((row) => row.bugId));
+    const issues = await readByIds(db.issues, rows.map((row) => row.issueId));
     const visible = await visibleProductIds(identity);
-    // BOTH layers, not just the product one. Restricting a bug does not clear
+    // BOTH layers, not just the product one. Restricting an issue does not clear
     // its CC list -- in Bugzilla or here -- so a user CC'd before the
-    // restriction keeps the row and would otherwise read the bug through this
-    // list while `bugs.get` returns 403 for the same id. The comment above
+    // restriction keeps the row and would otherwise read the issue through this
+    // list while `issues.get` returns 403 for the same id. The comment above
     // used to claim visibility was re-applied while only half of it was.
-    const hidden = new Set(await hiddenBugIds(user));
-    return bugs
-      .filter((bug) => visible.has(bug.productId) && !hidden.has(bug.id))
-      .map(normalizeBugRow)
+    const hidden = new Set(await hiddenIssueIds(user));
+    return issues
+      .filter((issue) => visible.has(issue.productId) && !hidden.has(issue.id))
+      .map(normalizeIssueRow)
       .sort((left, right) => right.updated_at - left.updated_at);
   },
   { id: "cc.listMine" },
@@ -2593,7 +2628,7 @@ export const listProducts = query(
 /**
  * The number of ids one resolve call will look up.
  *
- * A page of bugs is 100 rows and each names one product and one assignee, so
+ * A page of issues is 100 rows and each names one product and one assignee, so
  * 200 covers a full page with room to spare while keeping the request bounded.
  * Callers that need more are paging anyway.
  */
@@ -2611,7 +2646,7 @@ function resolveIds(ids: readonly string[] | undefined, noun: string): string[] 
  * Names for a specific set of product ids.
  *
  * The counterpart to `products.list`, and the thing that makes paginating it
- * possible. Every bug table renders a product column by looking the id up in a
+ * possible. Every issue table renders a product column by looking the id up in a
  * map, and that map was built by fetching the ENTIRE product list -- so a limit
  * on the list would have silently turned rows past the limit back into
  * `prod_034607nk...`, which is the defect the map exists to prevent.
@@ -2631,8 +2666,8 @@ export const resolveProducts = query(
       db.products,
       wanted.filter((id) => visible.has(id)),
     );
-    // Carries the key as well: a bug table renders PARSER-12 from the
-    // product key and the bug number, so resolving the name without the key
+    // Carries the key as well: an issue table renders PARSER-12 from the
+    // product key and the issue number, so resolving the name without the key
     // would leave the id column unable to name its own rows.
     return rows.map((row) => ({ id: row.id, name: row.name, key: row.key }));
   },
@@ -2642,8 +2677,8 @@ export const resolveProducts = query(
 /**
  * Handles for a specific set of user ids.
  *
- * `users.list` caps at 100 rows, so the map every bug table built from it was
- * already wrong on a tracker with more than 100 people: bugs assigned to the
+ * `users.list` caps at 100 rows, so the map every issue table built from it was
+ * already wrong on a tracker with more than 100 people: issues assigned to the
  * hundred-and-first rendered a raw `user_...` id. This is not a scale worry,
  * it is a live bug at an ordinary size.
  *
@@ -2709,8 +2744,8 @@ export const createProduct = mutation(
     if (must(await db.products.get({ name: cleanName }))) conflict("product name already exists");
     // Derived from the name when the caller does not supply one, so filing
     // stays a one-field action, but validated either way: the key is half of
-    // every bug identifier and a bad one is not fixable later without
-    // renaming every bug reference in prose.
+    // every issue identifier and a bad one is not fixable later without
+    // renaming every issue reference in prose.
     // Named separately so the failure can say WHY. A name of "!!!" derives to
     // the empty string, and letting that fall through to requireProductKey
     // reported "key is required" for a call that supplied no key on purpose.
@@ -2730,7 +2765,7 @@ export const createProduct = mutation(
       // Gateway v2" both reduce to PAYMENTGAT, and a bare "key is in use" is
       // baffling.
       //
-      // Refused rather than auto-suffixed. A key is half of every bug
+      // Refused rather than auto-suffixed. A key is half of every issue
       // reference this product will ever have, printed in commit messages and
       // read aloud; silently handing out PAYMENTGA2 because PAYMENTGAT was
       // taken picks something permanent on the creator's behalf.
@@ -2763,7 +2798,7 @@ type ProductPatch = {
   allowsUnconfirmed?: boolean;
   isActive?: boolean;
   votesPerUser?: number;
-  maxVotesPerBug?: number;
+  maxVotesPerIssue?: number;
   votesToConfirm?: number;
 };
 
@@ -2782,7 +2817,7 @@ export const updateProduct = mutation(
       // The voting limits are editable, or voting can never be turned on:
       // every product is created with all three at 0, which means disabled.
       "votesPerUser",
-      "maxVotesPerBug",
+      "maxVotesPerIssue",
       "votesToConfirm",
     ];
     if (Object.keys(changes).length === 0) invalid("changes must not be empty");
@@ -2844,7 +2879,7 @@ export const createComponent = mutation(
       conflict("component name already exists in this product");
     }
     // `defaultAssigneeId` is NOT NULL in the schema, because a Bugzilla
-    // component must have an initial owner -- that is what `bugs.create` falls
+    // component must have an initial owner -- that is what `issues.create` falls
     // back to when no assignee is given. Omitting it therefore cannot mean
     // "leave it empty"; it means "the person creating the component owns it",
     // which is the useful default and the only one that satisfies the column.
@@ -3022,6 +3057,7 @@ type SearchField =
   | "versionId"
   | "milestoneId"
   | "summary"
+  | "kind"
   | "status"
   | "resolution"
   | "severity"
@@ -3062,6 +3098,7 @@ const SEARCH_FIELDS = new Set<SearchField>([
   "versionId",
   "milestoneId",
   "summary",
+  "kind",
   "status",
   "resolution",
   "severity",
@@ -3086,6 +3123,7 @@ const STRING_SEARCH_FIELDS = new Set<SearchField>([
   "versionId",
   "milestoneId",
   "summary",
+  "kind",
   "status",
   "resolution",
   "severity",
@@ -3101,21 +3139,27 @@ const STRING_SEARCH_FIELDS = new Set<SearchField>([
 
 function validateEnumCondition(field: SearchField, value: unknown): void {
   const values = Array.isArray(value) ? value : [value];
-  if (field === "status" && values.some((item) => !isBugStatus(item))) {
+  if (field === "status" && values.some((item) => !isIssueStatus(item))) {
     invalid("advanced search contains an invalid status");
   }
-  if (field === "resolution" && values.some((item) => item !== null && !isBugResolution(item))) {
+  if (field === "resolution" && values.some((item) => item !== null && !isIssueResolution(item))) {
     invalid("advanced search contains an invalid resolution");
   }
   if (
+    field === "kind" &&
+    values.some((item) => !ISSUE_KINDS.includes(item as IssueKind))
+  ) {
+    invalid("advanced search contains an invalid kind");
+  }
+  if (
     field === "severity" &&
-    values.some((item) => !BUG_SEVERITIES.includes(item as BugSeverity))
+    values.some((item) => !ISSUE_SEVERITIES.includes(item as IssueSeverity))
   ) {
     invalid("advanced search contains an invalid severity");
   }
   if (
     field === "priority" &&
-    values.some((item) => !BUG_PRIORITIES.includes(item as BugPriority))
+    values.some((item) => !ISSUE_PRIORITIES.includes(item as IssuePriority))
   ) {
     invalid("advanced search contains an invalid priority");
   }
@@ -3151,12 +3195,12 @@ function compileAdvancedSearch(
   validateEnumCondition(node.field, node.value);
   switch (node.operator) {
     case "eq":
-      if (node.value === null && NULLABLE_BUG_TEXT_FIELDS.has(node.field)) {
+      if (node.value === null && NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
         return { $or: [{ [node.field]: null }, { [node.field]: "" }] };
       }
       return { [node.field]: node.value };
     case "ne":
-      if (node.value === null && NULLABLE_BUG_TEXT_FIELDS.has(node.field)) {
+      if (node.value === null && NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
         return {
           $and: [
             { [node.field]: { $ne: null } },
@@ -3170,7 +3214,7 @@ function compileAdvancedSearch(
       if (node.value.length === 0) return impossibleFilter();
       if (node.value.length > 100) invalid("in accepts at most 100 values");
       if (node.value.includes(null)) {
-        if (!NULLABLE_BUG_TEXT_FIELDS.has(node.field)) {
+        if (!NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
           invalid("null membership requires a nullable field");
         }
         const nonNull = node.value.filter((value) => value !== null);
@@ -3188,7 +3232,7 @@ function compileAdvancedSearch(
       if (node.value.length === 0) return {};
       if (node.value.length > 100) invalid("notIn accepts at most 100 values");
       if (node.value.includes(null)) {
-        if (!NULLABLE_BUG_TEXT_FIELDS.has(node.field)) {
+        if (!NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
           invalid("null membership requires a nullable field");
         }
         const nonNull = node.value.filter((value) => value !== null);
@@ -3233,11 +3277,11 @@ export const structuredSearch = query(
     where: AdvancedSearchNode;
     limit?: number;
     offset?: number;
-    sortBy?: BugSearchInput["sortBy"];
+    sortBy?: IssueSearchInput["sortBy"];
     sortDirection?: 1 | -1;
   }) => {
     const identity = requireIdentity();
-    return searchBugsInternal(
+    return searchIssuesInternal(
       { limit, offset, sortBy, sortDirection },
       identity,
       compileAdvancedSearch(where),
@@ -3256,6 +3300,8 @@ async function quickClauseFilter(clause: QuickSearchClause): Promise<DbFilter> {
       return { resolution: clause.value };
     case "severity":
       return { severity: clause.value };
+    case "kind":
+      return { kind: clause.value };
     case "text": {
       const pattern = `%${clause.value}%`;
       return {
@@ -3310,12 +3356,12 @@ export const quickSearch = query(
     const identity = requireIdentity();
     const clauses = parseQuickSearch(text);
     const filters = await Promise.all(clauses.map(quickClauseFilter));
-    const bugs = await searchBugsInternal(
+    const issues = await searchIssuesInternal(
       { limit, offset },
       identity,
       filters.length > 0 ? { $and: filters } : undefined,
     );
-    return { clauses, bugs };
+    return { clauses, issues };
   },
   { id: "search.quick" },
 );
@@ -3487,7 +3533,7 @@ export const listUsers = query(
  * `users.get` and `users.list` returned the raw row to any authenticated
  * caller: email, isAdmin, isDisabled, and `prefs` -- a free-form bag holding
  * whatever that user stored. Email is PII and the rest is nobody else's
- * business, so a non-admin sees only what a bug page needs to render an
+ * business, so a non-admin sees only what an issue page needs to render an
  * assignee. `reports.byAssignee` already projected exactly this shape, so the
  * two directory reads were the outliers.
  *
@@ -3635,41 +3681,41 @@ function reportDays(value: number | undefined): number {
   return value;
 }
 
-async function reportBugs(productId?: string): Promise<BugRow[]> {
+async function reportIssues(productId?: string): Promise<IssueRow[]> {
   const identity = optionalIdentity();
   const visible = await visibleProductIds(identity);
   if (productId && !visible.has(productId)) return [];
   if (visible.size === 0) return [];
 
   const rows = productId
-    ? await readAll(db.bugs, { productId })
+    ? await readAll(db.issues, { productId })
     : (
         await Promise.all(
-          chunks([...visible]).map((ids) => readAll(db.bugs, { productId: { $in: ids } })),
+          chunks([...visible]).map((ids) => readAll(db.issues, { productId: { $in: ids } })),
         )
       ).flat();
 
-  // Bug-level restrictions apply to AGGREGATES too. This filtered on product
-  // visibility only, so a bug restricted to a security group still landed in
+  // Issue-level restrictions apply to AGGREGATES too. This filtered on product
+  // visibility only, so an issue restricted to a security group still landed in
   // reports.summary, byComponent, byAssignee and trend -- leaking its
   // existence, status, severity and assignee to everyone who could see the
   // product. reports.* are anon-accessible, so that audience was "anyone".
   //
   // A count is not a lesser disclosure than a row: "this product has 3 open
-  // blockers" is most of what a confidential bug is trying not to say.
-  const hidden = new Set(await hiddenBugIds(await appUserForIdentity(identity)));
+  // blockers" is most of what a confidential issue is trying not to say.
+  const hidden = new Set(await hiddenIssueIds(await appUserForIdentity(identity)));
   return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(row.id));
 }
 
-async function activityEventsForBugs(
-  bugIds: readonly string[],
+async function activityEventsForIssues(
+  issueIds: readonly string[],
   filter: DbFilter,
 ): Promise<ActivityRow[]> {
   return (
     await Promise.all(
-      chunks([...new Set(bugIds)]).map((ids) =>
+      chunks([...new Set(issueIds)]).map((ids) =>
         readAll(db.activities, {
-          $and: [{ bugId: { $in: ids } }, filter],
+          $and: [{ issueId: { $in: ids } }, filter],
         }),
       ),
     )
@@ -3691,14 +3737,14 @@ function countsBy<Row>(rows: readonly Row[], key: (row: Row) => string): Record<
 
 export const reportSummary = query(
   async ({ productId }: ReportInput) => {
-    const all = await reportBugs(productId);
-    const open = all.filter((bug) => OPEN_STATUSES.includes(bug.status as BugStatus));
+    const all = await reportIssues(productId);
+    const open = all.filter((issue) => OPEN_STATUSES.includes(issue.status as IssueStatus));
     return {
       total: all.length,
       open: open.length,
-      byStatus: countsBy(open, (bug) => bug.status),
-      bySeverity: countsBy(open, (bug) => bug.severity),
-      byPriority: countsBy(open, (bug) => bug.priority),
+      byStatus: countsBy(open, (issue) => issue.status),
+      bySeverity: countsBy(open, (issue) => issue.severity),
+      byPriority: countsBy(open, (issue) => issue.priority),
     };
   },
   { id: "reports.summary" },
@@ -3706,26 +3752,26 @@ export const reportSummary = query(
 
 export const reportByComponent = query(
   async ({ productId }: ReportInput) => {
-    const open = (await reportBugs(productId)).filter((bug) =>
-      OPEN_STATUSES.includes(bug.status as BugStatus),
+    const open = (await reportIssues(productId)).filter((issue) =>
+      OPEN_STATUSES.includes(issue.status as IssueStatus),
     );
     if (open.length === 0) return [];
     const components = await readByIds(
       db.components,
-      open.map((bug) => bug.componentId),
+      open.map((issue) => issue.componentId),
     );
     const byId = new Map(components.map((component) => [component.id, component]));
-    const grouped = new Map<string, BugRow[]>();
-    for (const bug of open) {
-      const values = grouped.get(bug.componentId) ?? [];
-      values.push(bug);
-      grouped.set(bug.componentId, values);
+    const grouped = new Map<string, IssueRow[]>();
+    for (const issue of open) {
+      const values = grouped.get(issue.componentId) ?? [];
+      values.push(issue);
+      grouped.set(issue.componentId, values);
     }
     return [...grouped.entries()]
-      .map(([componentId, bugs]) => ({
+      .map(([componentId, issues]) => ({
         component: byId.get(componentId) ?? null,
-        count: bugs.length,
-        byStatus: countsBy(bugs, (bug) => bug.status),
+        count: issues.length,
+        byStatus: countsBy(issues, (issue) => issue.status),
       }))
       .sort((a, b) => b.count - a.count);
   },
@@ -3734,23 +3780,23 @@ export const reportByComponent = query(
 
 export const reportByAssignee = query(
   async ({ productId }: ReportInput) => {
-    const open = (await reportBugs(productId)).filter((bug) =>
-      OPEN_STATUSES.includes(bug.status as BugStatus),
+    const open = (await reportIssues(productId)).filter((issue) =>
+      OPEN_STATUSES.includes(issue.status as IssueStatus),
     );
     const assigneeIds = [
-      ...new Set(open.flatMap((bug) => (bug.assigneeId ? [bug.assigneeId] : []))),
+      ...new Set(open.flatMap((issue) => (issue.assigneeId ? [issue.assigneeId] : []))),
     ];
     const users = await readByIds(db.users, assigneeIds);
     const byId = new Map(users.map((user) => [user.id, user]));
-    const grouped = new Map<string, BugRow[]>();
-    for (const bug of open) {
-      const key = bug.assigneeId ?? "unassigned";
+    const grouped = new Map<string, IssueRow[]>();
+    for (const issue of open) {
+      const key = issue.assigneeId ?? "unassigned";
       const values = grouped.get(key) ?? [];
-      values.push(bug);
+      values.push(issue);
       grouped.set(key, values);
     }
     return [...grouped.entries()]
-      .map(([assigneeId, bugs]) => ({
+      .map(([assigneeId, issues]) => ({
         assignee: assigneeId === "unassigned"
           ? null
           : (() => {
@@ -3759,8 +3805,8 @@ export const reportByAssignee = query(
                 ? { id: user.id, handle: user.handle, name: user.name }
                 : null;
             })(),
-        count: bugs.length,
-        byPriority: countsBy(bugs, (bug) => bug.priority),
+        count: issues.length,
+        byPriority: countsBy(issues, (issue) => issue.priority),
       }))
       .sort((a, b) => b.count - a.count);
   },
@@ -3781,9 +3827,9 @@ export const reportTrend = query(
       new Date(now).getUTCDate(),
     );
     const start = today - (windowDays - 1) * 86_400_000;
-    const bugs = await reportBugs(productId);
-    const activities = await activityEventsForBugs(
-      bugs.map((bug) => bug.id),
+    const issues = await reportIssues(productId);
+    const activities = await activityEventsForIssues(
+      issues.map((issue) => issue.id),
       {
         fieldName: "status",
         newValue: "RESOLVED",
@@ -3795,9 +3841,9 @@ export const reportTrend = query(
       const date = utcDay(start + index * 86_400_000);
       buckets.set(date, { date, created: 0, resolved: 0 });
     }
-    for (const bug of bugs) {
-      if (bug.created_at < start) continue;
-      const bucket = buckets.get(utcDay(bug.created_at));
+    for (const issue of issues) {
+      if (issue.created_at < start) continue;
+      const bucket = buckets.get(utcDay(issue.created_at));
       if (bucket) bucket.created += 1;
     }
     for (const activity of activities) {
@@ -3815,20 +3861,20 @@ export const reportTimeToResolve = query(
     const start = Date.now() - windowDays * 86_400_000;
     // Read the stamped column rather than replaying history. The previous
     // implementation scanned `activities` for fieldName="status",
-    // newValue="RESOLVED" and took the earliest per bug -- a scan with string
+    // newValue="RESOLVED" and took the earliest per issue -- a scan with string
     // matching, and env.db has no raw SQL to make it cheaper. `resolvedAt` is
-    // maintained by bugs.resolve / bugs.markDuplicate / bugs.reopen and is
-    // indexed (bugs_resolved_at_idx).
+    // maintained by issues.resolve / issues.markDuplicate / issues.reopen and is
+    // indexed (issues_resolved_at_idx).
     //
     // The `typeof === "number"` test is load-bearing and not defensive noise:
     // clearing this column on reopen stores an EMPTY STRING rather than SQL
-    // NULL (measured 2026-08-12 on the SQLite dev backend -- a reopened bug
+    // NULL (measured 2026-08-12 on the SQLite dev backend -- a reopened issue
     // reads back `resolvedAt: ""`). A `!= null` test would let that through
     // and `"" - created_at` is NaN, which would silently poison the average.
-    const bugs = await reportBugs(productId);
-    const durations = bugs
-      .filter((bug) => typeof bug.resolvedAt === "number" && bug.resolvedAt >= start)
-      .map((bug) => (bug.resolvedAt as number) - bug.created_at)
+    const issues = await reportIssues(productId);
+    const durations = issues
+      .filter((issue) => typeof issue.resolvedAt === "number" && issue.resolvedAt >= start)
+      .map((issue) => (issue.resolvedAt as number) - issue.created_at)
       .filter((duration) => duration >= 0)
       .sort((a, b) => a - b);
     if (durations.length === 0) {
@@ -3852,7 +3898,7 @@ export const reportTimeToResolve = query(
 // Groups and access restrictions
 //
 // These exist because the enforcement code did not: `productGroups` and
-// `bugGroups` were both readable by the visibility helpers and writable by
+// `issueGroups` were both readable by the visibility helpers and writable by
 // nothing, so no restriction could ever be created and every visibility branch
 // was dead. A permission check that cannot be switched on is not a permission
 // check -- it reads like protection in the source and denies nobody at runtime.
@@ -3873,7 +3919,7 @@ export const createGroup = mutation(
       await db.groups.insert({
         name: cleanName,
         ...(description ? { description } : {}),
-        isBugGroup: true,
+        isIssueGroup: true,
       }),
     );
   },
@@ -3890,8 +3936,8 @@ export const createGroup = mutation(
  * one-way door.
  *
  * It REFUSES while the group still restricts something, and says what. The
- * tempting alternative -- delete the group and let its `bugGroups` and
- * `productGroups` rows dangle -- silently widens who can read those bugs, and
+ * tempting alternative -- delete the group and let its `issueGroups` and
+ * `productGroups` rows dangle -- silently widens who can read those issues, and
  * does it at the moment an admin is tidying up and least expects a visibility
  * change. Memberships are different: a membership grants nothing once the
  * group restricts nothing, so those are purged with the group rather than
@@ -3908,14 +3954,14 @@ export const deleteGroup = mutation(
     const group = must(await db.groups.get(groupId));
     if (!group) notFound("group not found");
 
-    const [bugRestrictions, productRestrictions] = await Promise.all([
-      readAll(db.bugGroups, { groupId }),
+    const [issueRestrictions, productRestrictions] = await Promise.all([
+      readAll(db.issueGroups, { groupId }),
       readAll(db.productGroups, { groupId }),
     ]);
-    if (bugRestrictions.length > 0 || productRestrictions.length > 0) {
+    if (issueRestrictions.length > 0 || productRestrictions.length > 0) {
       const parts: string[] = [];
-      if (bugRestrictions.length > 0) {
-        parts.push(`${bugRestrictions.length} bug${bugRestrictions.length === 1 ? "" : "s"}`);
+      if (issueRestrictions.length > 0) {
+        parts.push(`${issueRestrictions.length} issue${issueRestrictions.length === 1 ? "" : "s"}`);
       }
       if (productRestrictions.length > 0) {
         parts.push(
@@ -3939,10 +3985,10 @@ export const deleteGroup = mutation(
  * Flag types, without which the whole flag feature is unreachable.
  *
  * `flags.set`, `flags.clear`, `flags.list` and `flags.listRequests` all take or
- * return a `flagTypeId`, the bug page renders a Flags panel, and SPEC.md lists
+ * return a `flagTypeId`, the issue page renders a Flags panel, and SPEC.md lists
  * flags as delivered -- but nothing in the app, the migration or any seed ever
  * inserted a row into `flagTypes`. Every product reported "defines no
- * bug-level flag types" and always would have. Four procedures and a panel
+ * issue-level flag types" and always would have. Four procedures and a panel
  * were dead surface behind a table nobody could populate.
  *
  * Admin-gated, matching `groups.create`: in Bugzilla flag types are
@@ -3953,25 +3999,25 @@ export const createFlagType = mutation(
   async ({
     name,
     description,
-    targetType = "bug",
+    targetType = "issue",
     isRequestable = true,
     isMultiplicable = false,
     productId,
   }: {
     name: string;
     description?: string | null;
-    targetType?: "bug" | "attachment";
+    targetType?: "issue" | "attachment";
     isRequestable?: boolean;
     isMultiplicable?: boolean;
     productId?: string | null;
   }) => {
     await requireAdmin();
     const cleanName = requireNonEmpty(name, "name");
-    if (targetType !== "bug" && targetType !== "attachment") {
-      invalid('targetType must be "bug" or "attachment"');
+    if (targetType !== "issue" && targetType !== "attachment") {
+      invalid('targetType must be "issue" or "attachment"');
     }
     // The unique index is on (name, targetType), so the conflict check has to
-    // be as well -- "review" for a bug and "review" for an attachment are two
+    // be as well -- "review" for an issue and "review" for an attachment are two
     // legitimate types, and checking the name alone would refuse the second.
     if (must(await db.flagTypes.get({ name: cleanName, targetType }))) {
       conflict(`a ${targetType} flag type named "${cleanName}" already exists`);
@@ -4088,53 +4134,53 @@ export const unrestrictProduct = mutation(
   { id: "products.unrestrict" },
 );
 
-export const restrictBug = mutation(
-  async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
+export const restrictIssue = mutation(
+  async ({ issueId, groupId }: { issueId: string; groupId: string }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    if (!(await canViewBug(bug, actor))) forbiddenBug();
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    if (!(await canViewIssue(issue, actor))) forbiddenIssue();
     await getRequired(db.groups, groupId, "Group");
 
-    // Bugzilla requires you to be IN a group to put a bug into it, and the
+    // Bugzilla requires you to be IN a group to put an issue into it, and the
     // reason is not bureaucratic: without this an ordinary user could restrict
-    // a bug to a group they are not in and lock themselves -- and everyone
-    // else outside it -- out of a bug they could previously read.
+    // an issue to a group they are not in and lock themselves -- and everyone
+    // else outside it -- out of an issue they could previously read.
     if (!actor.isAdmin) {
       const membership = must(await db.groupMembers.get({ groupId, userId: actor.id }));
-      if (!membership) forbidden("You must belong to a group to restrict a bug to it");
+      if (!membership) forbidden("You must belong to a group to restrict an issue to it");
     }
 
     // The restriction row and its history entry go in together: a restriction
     // with no audit trail is exactly the change someone later needs to explain.
     return must(
       await db.transaction(async (tx) => {
-        const existing = await tx.bugGroups.get({ bugId, groupId });
+        const existing = await tx.issueGroups.get({ issueId, groupId });
         if (existing) return existing;
-        const row = await tx.bugGroups.insert({ bugId, groupId });
-        await recordRelatedChange(tx.activities, bugId, actor.id, "bug_group", null, groupId);
+        const row = await tx.issueGroups.insert({ issueId, groupId });
+        await recordRelatedChange(tx.activities, issueId, actor.id, "issue_group", null, groupId);
         return row;
         // Serializable for the same reason as cc.add: idempotent
         // get-then-insert. This one guards a restriction, so a spurious 500
-        // reads as "the bug may not be protected" and invites a retry that
+        // reads as "the issue may not be protected" and invites a retry that
         // was never needed.
       }, { isolationLevel: "serializable" }),
     );
   },
-  { id: "bugs.restrict" },
+  { id: "issues.restrict" },
 );
 
-export const unrestrictBug = mutation(
-  async ({ bugId, groupId }: { bugId: string; groupId: string }) => {
+export const unrestrictIssue = mutation(
+  async ({ issueId, groupId }: { issueId: string; groupId: string }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    if (!(await canViewBug(bug, actor))) forbiddenBug();
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    if (!(await canViewIssue(issue, actor))) forbiddenIssue();
 
     // Membership is required to REMOVE a restriction, exactly as it is to add
-    // one. Without this, a bug restricted to two groups could have group B's
-    // restriction stripped by a member of group A -- who can see the bug
+    // one. Without this, an issue restricted to two groups could have group B's
+    // restriction stripped by a member of group A -- who can see the issue
     // through their own group and so passes the check above. That downgrades
     // confidentiality somebody else set, which is why Bugzilla gates edits to
-    // a bug's group set in both directions, not just on the way in.
+    // an issue's group set in both directions, not just on the way in.
     if (!actor.isAdmin) {
       const membership = must(await db.groupMembers.get({ groupId, userId: actor.id }));
       if (!membership) forbidden("You must belong to a group to remove its restriction");
@@ -4142,64 +4188,64 @@ export const unrestrictBug = mutation(
 
     return must(
       await db.transaction(async (tx) => {
-        const existing = await tx.bugGroups.get({ bugId, groupId });
-        if (!existing) notFound("Bug restriction");
-        await tx.bugGroups.delete(existing.id);
-        await recordRelatedChange(tx.activities, bugId, actor.id, "bug_group", groupId, null);
+        const existing = await tx.issueGroups.get({ issueId, groupId });
+        if (!existing) notFound("Issue restriction");
+        await tx.issueGroups.delete(existing.id);
+        await recordRelatedChange(tx.activities, issueId, actor.id, "issue_group", groupId, null);
         return { removed: true };
       }),
     );
   },
-  { id: "bugs.unrestrict" },
+  { id: "issues.unrestrict" },
 );
 
 // ---------------------------------------------------------------------------
 // Voting
 //
 // The `votes` table and the three product columns (votesPerUser,
-// maxVotesPerBug, votesToConfirm) were added for this and then nothing used
+// maxVotesPerIssue, votesToConfirm) were added for this and then nothing used
 // them: zero server references, so the schema described a feature the app did
 // not have and a migration comment claimed it enabled "the classic
 // votes-auto-confirm flow" that no code performed.
 //
 // Bugzilla's rules, which are the point of the three columns:
 //   - a user spends at most `votesPerUser` votes across a product,
-//   - at most `maxVotesPerBug` of them on any one bug,
-//   - and when a bug reaches `votesToConfirm`, an UNCONFIRMED bug is confirmed.
+//   - at most `maxVotesPerIssue` of them on any one issue,
+//   - and when an issue reaches `votesToConfirm`, an UNCONFIRMED issue is confirmed.
 // A product with the columns left at 0 has voting disabled, which is why 0 is
 // the default rather than something permissive.
 // ---------------------------------------------------------------------------
 
 export const castVote = mutation(
-  async ({ bugId, count }: { bugId: string; count: number }) => {
+  async ({ issueId, count }: { issueId: string; count: number }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
 
     if (!Number.isInteger(count) || count < 0) invalid("count must be a non-negative integer");
-    const product = await getRequired(db.products, bug.productId, "Product");
+    const product = await getRequired(db.products, issue.productId, "Product");
     if (product.votesPerUser <= 0) conflict("voting is disabled for this product");
-    if (product.maxVotesPerBug > 0 && count > product.maxVotesPerBug) {
-      invalid(`at most ${product.maxVotesPerBug} votes may be cast on one bug`);
+    if (product.maxVotesPerIssue > 0 && count > product.maxVotesPerIssue) {
+      invalid(`at most ${product.maxVotesPerIssue} votes may be cast on one issue`);
     }
 
     return must(
       await db.transaction(async (tx) => {
-        // The per-product budget counts this user's votes on OTHER bugs in the
+        // The per-product budget counts this user's votes on OTHER issues in the
         // same product, so replacing an existing vote frees its own allowance
         // rather than counting twice.
         const mine = await readAllTx(tx.votes, { userId: actor.id });
-        const existing = mine.find((row) => row.bugId === bugId) ?? null;
-        const bugIds = mine.map((row) => row.bugId).filter((id) => id !== bugId);
-        const otherBugs: BugRow[] = [];
-        for (const id of bugIds) {
-          const row = await tx.bugs.get(id);
-          if (row) otherBugs.push(row);
+        const existing = mine.find((row) => row.issueId === issueId) ?? null;
+        const issueIds = mine.map((row) => row.issueId).filter((id) => id !== issueId);
+        const otherIssues: IssueRow[] = [];
+        for (const id of issueIds) {
+          const row = await tx.issues.get(id);
+          if (row) otherIssues.push(row);
         }
-        const spentElsewhere = otherBugs
-          .filter((other) => other.productId === bug.productId)
+        const spentElsewhere = otherIssues
+          .filter((other) => other.productId === issue.productId)
           .reduce((total, other) => {
-            const row = mine.find((entry) => entry.bugId === other.id);
+            const row = mine.find((entry) => entry.issueId === other.id);
             return total + (row?.count ?? 0);
           }, 0);
         if (spentElsewhere + count > product.votesPerUser) {
@@ -4214,30 +4260,30 @@ export const castVote = mutation(
         } else if (existing) {
           await tx.votes.update(existing.id, { count });
         } else if (count > 0) {
-          await tx.votes.insert({ bugId, userId: actor.id, count });
+          await tx.votes.insert({ issueId, userId: actor.id, count });
         }
 
         // voteCount is SUM(count), not COUNT(*) -- a vote row carries a
         // quantity. Recomputed from the rows rather than incremented, so it
         // cannot drift away from them.
-        const after = await readAllTx(tx.votes, { bugId });
+        const after = await readAllTx(tx.votes, { issueId });
         const total = after.reduce((sum, row) => sum + row.count, 0);
 
         const patch: DbPatch = { voteCount: total };
 
         // The status is re-read INSIDE the transaction. Deciding from the row
         // fetched before it opened is a lost update with teeth: a concurrent
-        // bugs.resolve moves the bug to RESOLVED/FIXED, this transaction still
+        // issues.resolve moves the issue to RESOLVED/FIXED, this transaction still
         // sees the stale UNCONFIRMED, and writes status=CONFIRMED while
         // leaving resolution=FIXED. That pair is a state assertValidState
         // rejects, so every later changeStatus, resolve, reopen and
         // markDuplicate throws on the way in -- and since resolution can only
         // be cleared through those same transitions, no RPC can repair it. The
-        // bug is wedged permanently.
-        const current = await getTxRequired(tx.bugs, bugId, "Bug");
+        // issue is wedged permanently.
+        const current = await getTxRequired(tx.issues, issueId, "Issue");
 
-        // Bugzilla's auto-confirm: enough votes turn an UNCONFIRMED bug into a
-        // CONFIRMED one. Only from UNCONFIRMED -- votes never move a bug that
+        // Bugzilla's auto-confirm: enough votes turn an UNCONFIRMED issue into a
+        // CONFIRMED one. Only from UNCONFIRMED -- votes never move an issue that
         // is already resolved.
         const confirms =
           product.votesToConfirm > 0 &&
@@ -4247,12 +4293,12 @@ export const castVote = mutation(
           patch.status = "CONFIRMED";
           patch.isConfirmed = true;
         }
-        const updated = await tx.bugs.update(bugId, patch);
-        if (!updated) notFound("Bug");
+        const updated = await tx.issues.update(issueId, patch);
+        if (!updated) notFound("Issue");
 
         await recordRelatedChange(
           tx.activities,
-          bugId,
+          issueId,
           actor.id,
           "votes",
           String(current.voteCount),
@@ -4261,14 +4307,14 @@ export const castVote = mutation(
         if (confirms) {
           await recordRelatedChange(
             tx.activities,
-            bugId,
+            issueId,
             actor.id,
             "status",
             "UNCONFIRMED",
             "CONFIRMED",
           );
         }
-        return { bugId, count, voteCount: total, confirmed: confirms };
+        return { issueId, count, voteCount: total, confirmed: confirms };
         // Serializable, like every other read-modify-write in this file.
         // Without it the recompute below read committed does NOT make the
         // counter safe: two concurrent voters each sum the votes without
@@ -4290,16 +4336,16 @@ export const listMyVotes = query(
     if (!user) return [];
     const rows = await readAll(db.votes, { userId: user.id });
     if (rows.length === 0) return [];
-    const bugs = await readByIds(db.bugs, rows.map((row) => row.bugId));
-    const hidden = new Set(await hiddenBugIds(user));
+    const issues = await readByIds(db.issues, rows.map((row) => row.issueId));
+    const hidden = new Set(await hiddenIssueIds(user));
     const visible = await visibleProductIds(identity);
-    const byId = new Map(bugs.map((bug) => [bug.id, bug]));
+    const byId = new Map(issues.map((issue) => [issue.id, issue]));
     return rows
       .filter((row) => {
-        const bug = byId.get(row.bugId);
-        return bug && !hidden.has(bug.id) && visible.has(bug.productId);
+        const issue = byId.get(row.issueId);
+        return issue && !hidden.has(issue.id) && visible.has(issue.productId);
       })
-      .map((row) => ({ ...row, bug: normalizeBugRow(byId.get(row.bugId)!) }));
+      .map((row) => ({ ...row, issue: normalizeIssueRow(byId.get(row.issueId)!) }));
   },
   { id: "votes.listMine" },
 );
@@ -4314,21 +4360,21 @@ export const listMyVotes = query(
 //
 // Fanout runs AFTER the mutation's transaction commits, not inside it. That is
 // a deliberate trade: a notification is a side effect, and losing one is much
-// better than rolling back the bug change that caused it. It does mean a crash
+// better than rolling back the issue change that caused it. It does mean a crash
 // between commit and fanout drops the notification silently.
 // ---------------------------------------------------------------------------
 
 /**
- * Everyone who should hear about a change to this bug: assignee, reporter, QA
+ * Everyone who should hear about a change to this issue: assignee, reporter, QA
  * contact, the CC list, and the watchers of each of those -- minus the actor,
  * who already knows.
  *
- * Recipients are filtered by `canViewBug`. Notifying someone about a bug they
+ * Recipients are filtered by `canViewIssue`. Notifying someone about an issue they
  * cannot open would leak its summary in the notification title, which is
- * exactly what a restricted bug is hiding.
+ * exactly what a restricted issue is hiding.
  */
-async function notifyBugChange(
-  bug: BugRow,
+async function notifyIssueChange(
+  issue: IssueRow,
   actorId: string,
   title: string,
   body?: string,
@@ -4336,7 +4382,7 @@ async function notifyBugChange(
   // The WHOLE body is guarded, not just the insert.
   //
   // This runs after the caller's transaction has committed, and it makes five
-  // more database reads (CC list, watchers, users, canViewBug's own reads, the
+  // more database reads (CC list, watchers, users, canViewIssue's own reads, the
   // unread recount). Only the insert error was swallowed, so a transient
   // failure in any of the others threw out of a mutation that had ALREADY
   // committed: comments.add would return 500 with the comment saved, and a
@@ -4344,24 +4390,24 @@ async function notifyBugChange(
   // hiccup became duplicated user data, which is exactly what the old comment
   // promised could not happen.
   try {
-    await fanOutBugChange(bug, actorId, title, body);
+    await fanOutIssueChange(issue, actorId, title, body);
   } catch (error) {
-    console.warn(`notification fanout failed for bug ${bug.id}: ${String(error)}`);
+    console.warn(`notification fanout failed for issue ${issue.id}: ${String(error)}`);
   }
 }
 
-async function fanOutBugChange(
-  bug: BugRow,
+async function fanOutIssueChange(
+  issue: IssueRow,
   actorId: string,
   title: string,
   body?: string,
 ): Promise<void> {
   const direct = new Set<string>(
-    [bug.assigneeId, bug.reporterId, bug.qaContactId].filter(
+    [issue.assigneeId, issue.reporterId, issue.qaContactId].filter(
       (id): id is string => Boolean(id),
     ),
   );
-  for (const row of await readAll(db.bugCc, { bugId: bug.id })) direct.add(row.userId);
+  for (const row of await readAll(db.issueCc, { issueId: issue.id })) direct.add(row.userId);
 
   // Watchers of each interested party also hear about it -- Bugzilla's
   // "user watching", where a lead follows everything their reports touch.
@@ -4377,11 +4423,11 @@ async function fanOutBugChange(
   const recipients = await readByIds(db.users, [...watched]);
   for (const user of recipients) {
     if (user.isDisabled) continue;
-    if (!(await canViewBug(bug, user))) continue;
+    if (!(await canViewIssue(issue, user))) continue;
     const inserted = await db.notifications.insert({
       userId: user.id,
-      bugId: bug.id,
-      kind: "bug_changed",
+      issueId: issue.id,
+      kind: "issue_changed",
       title,
       ...(body ? { body } : {}),
       isRead: false,
@@ -4468,7 +4514,7 @@ export const listWatchers = query(
 // ---------------------------------------------------------------------------
 // See Also
 //
-// Bugzilla's cross-tracker links: a bug in another system that is the same
+// Bugzilla's cross-tracker links: an issue in another system that is the same
 // issue, or related to it. The table existed with zero server references, so
 // the schema described the feature and nothing implemented it.
 //
@@ -4477,10 +4523,10 @@ export const listWatchers = query(
 // ---------------------------------------------------------------------------
 
 export const addSeeAlso = mutation(
-  async ({ bugId, url }: { bugId: string; url: string }) => {
+  async ({ issueId, url }: { issueId: string; url: string }) => {
     const actor = await requireActor();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
 
     const clean = requireNonEmpty(url, "url");
     // Scheme-checked rather than accepted verbatim: this value is rendered as
@@ -4495,12 +4541,12 @@ export const addSeeAlso = mutation(
       invalid("url must be http or https");
     }
 
-    const existing = must(await db.bugSeeAlso.get({ bugId, url: clean }));
+    const existing = must(await db.issueSeeAlso.get({ issueId, url: clean }));
     if (existing) return existing;
     return must(
       await db.transaction(async (tx) => {
-        const row = await tx.bugSeeAlso.insert({ bugId, url: clean });
-        await recordRelatedChange(tx.activities, bugId, actor.id, "see_also", null, clean);
+        const row = await tx.issueSeeAlso.insert({ issueId, url: clean });
+        await recordRelatedChange(tx.activities, issueId, actor.id, "see_also", null, clean);
         return row;
         // Serializable for the same reason as cc.add: idempotent
         // get-then-insert. Note the existence check for this one sits OUTSIDE
@@ -4514,14 +4560,14 @@ export const addSeeAlso = mutation(
 export const removeSeeAlso = mutation(
   async ({ id }: { id: string }) => {
     const actor = await requireActor();
-    const row = must(await db.bugSeeAlso.get(requireId(id, "id")));
+    const row = must(await db.issueSeeAlso.get(requireId(id, "id")));
     if (!row) notFound("See Also link");
-    const bug = await getRequired(db.bugs, row.bugId, "Bug");
-    await assertBugAccessible(bug, actor);
+    const issue = await getRequired(db.issues, row.issueId, "Issue");
+    await assertIssueAccessible(issue, actor);
     return must(
       await db.transaction(async (tx) => {
-        await tx.bugSeeAlso.delete(row.id);
-        await recordRelatedChange(tx.activities, row.bugId, actor.id, "see_also", row.url, null);
+        await tx.issueSeeAlso.delete(row.id);
+        await recordRelatedChange(tx.activities, row.issueId, actor.id, "see_also", row.url, null);
         return { removed: true };
       }),
     );
@@ -4530,11 +4576,11 @@ export const removeSeeAlso = mutation(
 );
 
 export const listSeeAlso = query(
-  async ({ bugId }: { bugId: string }) => {
+  async ({ issueId }: { issueId: string }) => {
     const identity = requireIdentity();
-    const bug = await getRequired(db.bugs, bugId, "Bug");
-    await assertBugVisible(bug, identity);
-    return readAll(db.bugSeeAlso, { bugId });
+    const issue = await getRequired(db.issues, issueId, "Issue");
+    await assertIssueVisible(issue, identity);
+    return readAll(db.issueSeeAlso, { issueId });
   },
   { id: "seeAlso.list" },
 );

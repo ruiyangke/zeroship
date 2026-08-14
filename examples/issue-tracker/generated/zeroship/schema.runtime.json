@@ -32,9 +32,9 @@
         "deleted_at": {
           "type": "date"
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id",
           "required": true
         },
@@ -67,15 +67,15 @@
       },
       "indexes": [
         {
-          "name": "activities_bug_idx",
+          "name": "activities_issue_idx",
           "fields": [
-            "bugId"
+            "issueId"
           ]
         },
         {
-          "name": "activities_bug_field_idx",
+          "name": "activities_issue_field_idx",
           "fields": [
-            "bugId",
+            "issueId",
             "fieldName"
           ]
         },
@@ -130,9 +130,9 @@
         "deleted_at": {
           "type": "date"
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id",
           "required": true
         },
@@ -186,9 +186,9 @@
       },
       "indexes": [
         {
-          "name": "attachments_bug_idx",
+          "name": "attachments_issue_idx",
           "fields": [
-            "bugId"
+            "issueId"
           ]
         },
         {
@@ -211,643 +211,6 @@
         },
         {
           "name": "attachments_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugCc": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "bugId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        },
-        "userId": {
-          "type": "string",
-          "refTarget": "users",
-          "refColumn": "id",
-          "required": true
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bug_cc_pair_uniq",
-          "fields": [
-            "bugId",
-            "userId"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bug_cc_user_idx",
-          "fields": [
-            "userId"
-          ]
-        },
-        {
-          "name": "bugCc_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugCc_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugCc_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugDependencies": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "bugId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        },
-        "dependsOnId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bug_deps_pair_uniq",
-          "fields": [
-            "bugId",
-            "dependsOnId"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bug_deps_depends_idx",
-          "fields": [
-            "dependsOnId"
-          ]
-        },
-        {
-          "name": "bugDependencies_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugDependencies_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugDependencies_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugGroups": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "bugId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        },
-        "groupId": {
-          "type": "string",
-          "refTarget": "groups",
-          "refColumn": "id",
-          "required": true
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bug_groups_pair_uniq",
-          "fields": [
-            "bugId",
-            "groupId"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bug_groups_group_idx",
-          "fields": [
-            "groupId"
-          ]
-        },
-        {
-          "name": "bugGroups_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugGroups_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugGroups_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugKeywords": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "bugId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        },
-        "keywordId": {
-          "type": "string",
-          "refTarget": "keywords",
-          "refColumn": "id",
-          "required": true
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bug_keywords_pair_uniq",
-          "fields": [
-            "bugId",
-            "keywordId"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bug_keywords_keyword_idx",
-          "fields": [
-            "keywordId"
-          ]
-        },
-        {
-          "name": "bugKeywords_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugKeywords_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugKeywords_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugSeeAlso": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "bugId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id",
-          "required": true
-        },
-        "url": {
-          "type": "string",
-          "required": true
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bug_see_also_pair_uniq",
-          "fields": [
-            "bugId",
-            "url"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bugSeeAlso_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugSeeAlso_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugSeeAlso_created_by_idx",
-          "fields": [
-            "created_by"
-          ]
-        }
-      ]
-    },
-    "bugs": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "maxLength": 255,
-          "required": true
-        },
-        "created_at": {
-          "type": "date",
-          "required": true
-        },
-        "updated_at": {
-          "type": "date",
-          "required": true
-        },
-        "created_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "updated_by": {
-          "type": "string",
-          "maxLength": 255
-        },
-        "version": {
-          "type": "int",
-          "required": true,
-          "default": 1
-        },
-        "deleted_at": {
-          "type": "date"
-        },
-        "productId": {
-          "type": "string",
-          "refTarget": "products",
-          "refColumn": "id",
-          "required": true
-        },
-        "componentId": {
-          "type": "string",
-          "refTarget": "components",
-          "refColumn": "id",
-          "required": true
-        },
-        "versionId": {
-          "type": "string",
-          "refTarget": "versions",
-          "refColumn": "id",
-          "required": true
-        },
-        "milestoneId": {
-          "type": "string",
-          "refTarget": "milestones",
-          "refColumn": "id"
-        },
-        "alias": {
-          "type": "string"
-        },
-        "number": {
-          "type": "int",
-          "required": true
-        },
-        "summary": {
-          "type": "string",
-          "required": true
-        },
-        "status": {
-          "type": "string",
-          "required": true,
-          "default": "UNCONFIRMED"
-        },
-        "resolution": {
-          "type": "string"
-        },
-        "severity": {
-          "type": "string",
-          "required": true,
-          "default": "normal"
-        },
-        "priority": {
-          "type": "string",
-          "required": true,
-          "default": "P3"
-        },
-        "reporterId": {
-          "type": "string",
-          "refTarget": "users",
-          "refColumn": "id",
-          "required": true
-        },
-        "assigneeId": {
-          "type": "string",
-          "refTarget": "users",
-          "refColumn": "id"
-        },
-        "qaContactId": {
-          "type": "string",
-          "refTarget": "users",
-          "refColumn": "id"
-        },
-        "duplicateOfId": {
-          "type": "string",
-          "refTarget": "bugs",
-          "refColumn": "id"
-        },
-        "whiteboard": {
-          "type": "string"
-        },
-        "opSys": {
-          "type": "string",
-          "required": true,
-          "default": "Unspecified"
-        },
-        "platform": {
-          "type": "string",
-          "required": true,
-          "default": "Unspecified"
-        },
-        "url": {
-          "type": "string"
-        },
-        "isConfirmed": {
-          "type": "boolean",
-          "required": true,
-          "default": false
-        },
-        "voteCount": {
-          "type": "int",
-          "required": true,
-          "default": 0
-        },
-        "commentCount": {
-          "type": "int",
-          "required": true,
-          "default": 0
-        },
-        "deadline": {
-          "type": "date"
-        },
-        "resolvedAt": {
-          "type": "date"
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "bugs_product_idx",
-          "fields": [
-            "productId"
-          ]
-        },
-        {
-          "name": "bugs_product_number_uniq",
-          "fields": [
-            "productId",
-            "number"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bugs_component_idx",
-          "fields": [
-            "componentId"
-          ]
-        },
-        {
-          "name": "bugs_status_idx",
-          "fields": [
-            "status"
-          ]
-        },
-        {
-          "name": "bugs_assignee_idx",
-          "fields": [
-            "assigneeId"
-          ]
-        },
-        {
-          "name": "bugs_reporter_idx",
-          "fields": [
-            "reporterId"
-          ]
-        },
-        {
-          "name": "bugs_duplicate_of_idx",
-          "fields": [
-            "duplicateOfId"
-          ]
-        },
-        {
-          "name": "bugs_resolved_at_idx",
-          "fields": [
-            "resolvedAt"
-          ]
-        },
-        {
-          "name": "bugs_alias_uniq",
-          "fields": [
-            "alias"
-          ],
-          "unique": true
-        },
-        {
-          "name": "bugs_deleted_at_idx",
-          "fields": [
-            "deleted_at"
-          ]
-        },
-        {
-          "name": "bugs_updated_at_idx",
-          "fields": [
-            "updated_at"
-          ]
-        },
-        {
-          "name": "bugs_created_by_idx",
           "fields": [
             "created_by"
           ]
@@ -885,9 +248,9 @@
         "deleted_at": {
           "type": "date"
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id",
           "required": true
         },
@@ -919,9 +282,9 @@
       },
       "indexes": [
         {
-          "name": "comments_bug_number_uniq",
+          "name": "comments_issue_number_uniq",
           "fields": [
-            "bugId",
+            "issueId",
             "commentNumber"
           ],
           "unique": true
@@ -1091,7 +454,7 @@
         "targetType": {
           "type": "string",
           "required": true,
-          "default": "bug"
+          "default": "issue"
         },
         "isRequestable": {
           "type": "boolean",
@@ -1180,9 +543,9 @@
           "refColumn": "id",
           "required": true
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id"
         },
         "attachmentId": {
@@ -1214,9 +577,9 @@
       },
       "indexes": [
         {
-          "name": "flags_bug_idx",
+          "name": "flags_issue_idx",
           "fields": [
-            "bugId"
+            "issueId"
           ]
         },
         {
@@ -1380,7 +743,7 @@
         "description": {
           "type": "string"
         },
-        "isBugGroup": {
+        "isIssueGroup": {
           "type": "boolean",
           "required": true,
           "default": true
@@ -1413,6 +776,653 @@
         },
         {
           "name": "groups_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issueCc": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "issueId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        },
+        "userId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issue_cc_pair_uniq",
+          "fields": [
+            "issueId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issue_cc_user_idx",
+          "fields": [
+            "userId"
+          ]
+        },
+        {
+          "name": "issueCc_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issueCc_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issueCc_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issueDependencies": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "issueId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        },
+        "dependsOnId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issue_deps_pair_uniq",
+          "fields": [
+            "issueId",
+            "dependsOnId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issue_deps_depends_idx",
+          "fields": [
+            "dependsOnId"
+          ]
+        },
+        {
+          "name": "issueDependencies_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issueDependencies_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issueDependencies_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issueGroups": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "issueId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        },
+        "groupId": {
+          "type": "string",
+          "refTarget": "groups",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issue_groups_pair_uniq",
+          "fields": [
+            "issueId",
+            "groupId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issue_groups_group_idx",
+          "fields": [
+            "groupId"
+          ]
+        },
+        {
+          "name": "issueGroups_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issueGroups_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issueGroups_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issueKeywords": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "issueId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        },
+        "keywordId": {
+          "type": "string",
+          "refTarget": "keywords",
+          "refColumn": "id",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issue_keywords_pair_uniq",
+          "fields": [
+            "issueId",
+            "keywordId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issue_keywords_keyword_idx",
+          "fields": [
+            "keywordId"
+          ]
+        },
+        {
+          "name": "issueKeywords_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issueKeywords_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issueKeywords_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issueSeeAlso": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "issueId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id",
+          "required": true
+        },
+        "url": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issue_see_also_pair_uniq",
+          "fields": [
+            "issueId",
+            "url"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issueSeeAlso_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issueSeeAlso_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issueSeeAlso_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "issues": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1
+        },
+        "deleted_at": {
+          "type": "date"
+        },
+        "productId": {
+          "type": "string",
+          "refTarget": "products",
+          "refColumn": "id",
+          "required": true
+        },
+        "componentId": {
+          "type": "string",
+          "refTarget": "components",
+          "refColumn": "id",
+          "required": true
+        },
+        "versionId": {
+          "type": "string",
+          "refTarget": "versions",
+          "refColumn": "id"
+        },
+        "milestoneId": {
+          "type": "string",
+          "refTarget": "milestones",
+          "refColumn": "id"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "number": {
+          "type": "int",
+          "required": true
+        },
+        "summary": {
+          "type": "string",
+          "required": true
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "default": "defect"
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "UNCONFIRMED"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "required": true,
+          "default": "normal"
+        },
+        "priority": {
+          "type": "string",
+          "required": true,
+          "default": "P3"
+        },
+        "reporterId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id",
+          "required": true
+        },
+        "assigneeId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "qaContactId": {
+          "type": "string",
+          "refTarget": "users",
+          "refColumn": "id"
+        },
+        "duplicateOfId": {
+          "type": "string",
+          "refTarget": "issues",
+          "refColumn": "id"
+        },
+        "whiteboard": {
+          "type": "string"
+        },
+        "opSys": {
+          "type": "string",
+          "required": true,
+          "default": "Unspecified"
+        },
+        "platform": {
+          "type": "string",
+          "required": true,
+          "default": "Unspecified"
+        },
+        "url": {
+          "type": "string"
+        },
+        "isConfirmed": {
+          "type": "boolean",
+          "required": true,
+          "default": false
+        },
+        "voteCount": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "commentCount": {
+          "type": "int",
+          "required": true,
+          "default": 0
+        },
+        "deadline": {
+          "type": "date"
+        },
+        "resolvedAt": {
+          "type": "date"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "issues_product_idx",
+          "fields": [
+            "productId"
+          ]
+        },
+        {
+          "name": "issues_product_number_uniq",
+          "fields": [
+            "productId",
+            "number"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issues_component_idx",
+          "fields": [
+            "componentId"
+          ]
+        },
+        {
+          "name": "issues_status_idx",
+          "fields": [
+            "status"
+          ]
+        },
+        {
+          "name": "issues_kind_idx",
+          "fields": [
+            "kind"
+          ]
+        },
+        {
+          "name": "issues_assignee_idx",
+          "fields": [
+            "assigneeId"
+          ]
+        },
+        {
+          "name": "issues_reporter_idx",
+          "fields": [
+            "reporterId"
+          ]
+        },
+        {
+          "name": "issues_duplicate_of_idx",
+          "fields": [
+            "duplicateOfId"
+          ]
+        },
+        {
+          "name": "issues_resolved_at_idx",
+          "fields": [
+            "resolvedAt"
+          ]
+        },
+        {
+          "name": "issues_alias_uniq",
+          "fields": [
+            "alias"
+          ],
+          "unique": true
+        },
+        {
+          "name": "issues_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "issues_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "issues_created_by_idx",
           "fields": [
             "created_by"
           ]
@@ -1621,15 +1631,15 @@
           "refColumn": "id",
           "required": true
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id"
         },
         "kind": {
           "type": "string",
           "required": true,
-          "default": "bug_changed"
+          "default": "issue_changed"
         },
         "title": {
           "type": "string",
@@ -1827,7 +1837,7 @@
           "required": true,
           "default": 0
         },
-        "maxVotesPerBug": {
+        "maxVotesPerIssue": {
           "type": "int",
           "required": true,
           "default": 0
@@ -2190,9 +2200,9 @@
         "deleted_at": {
           "type": "date"
         },
-        "bugId": {
+        "issueId": {
           "type": "string",
-          "refTarget": "bugs",
+          "refTarget": "issues",
           "refColumn": "id",
           "required": true
         },
@@ -2217,7 +2227,7 @@
         {
           "name": "votes_pair_uniq",
           "fields": [
-            "bugId",
+            "issueId",
             "userId"
           ],
           "unique": true

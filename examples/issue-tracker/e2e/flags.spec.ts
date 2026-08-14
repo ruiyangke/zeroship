@@ -6,12 +6,12 @@ import { productKey } from "./keys";
 import { openMorePanels } from "./more";
 
 /**
- * Setting a flag on a bug, through the UI, end to end.
+ * Setting a flag on an issue, through the UI, end to end.
  *
  * This spec could not have been written before the change it guards. Every
  * `flags.*` procedure takes or returns a `flagTypeId`, and nothing in the app,
- * the migration or any seed could insert a row into `flagTypes` -- so the bug
- * page's Flags panel said "This product defines no bug-level flag types" for
+ * the migration or any seed could insert a row into `flagTypes` -- so the issue
+ * page's Flags panel said "This product defines no issue-level flag types" for
  * every product that would ever exist. Four procedures, a panel and a section
  * of SPEC.md described a feature that could not be reached.
  *
@@ -24,7 +24,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("an admin defines a flag type, and it becomes settable on a bug", async ({
+test("an admin defines a flag type, and it becomes settable on an issue", async ({
   page,
   baseURL,
   context,
@@ -45,7 +45,7 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -57,12 +57,12 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   // was broken for some other reason would look the same as one correctly
   // reporting that no types are defined.
   const typeName = `review-${RUN}`.slice(0, 30);
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await openMorePanels(page);
   const flags = page.locator("section.flags-panel");
   await expect(flags).toBeVisible();
   // About THIS type, not "no types at all". A flag type with no product is
-  // global and shows up on every bug, so an absolute assertion here passes
+  // global and shows up on every issue, so an absolute assertion here passes
   // only against a virgin database -- it passed alone and failed in the suite,
   // decided by whether an earlier spec had left a global type behind.
   await expect(flags, "this type does not exist yet").not.toContainText(typeName);
@@ -72,24 +72,24 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
   const admin = page.locator("section.flag-types-admin");
   await expect(admin).toBeVisible();
   await admin.getByLabel("New flag type").fill(typeName);
-  // Scoped to this run's product. Left global it would appear on every bug in
+  // Scoped to this run's product. Left global it would appear on every issue in
   // the database, which is what made the first version of this spec order-
   // dependent.
   await chooseOption(page, admin, "Product", `Flags ${RUN}`);
   await admin.getByRole("button", { name: "Create" }).click();
   await expect(admin.locator("ul.flag-type-list")).toContainText(typeName);
 
-  // The bug page now offers it. `products.get` already returned the product's
+  // The issue page now offers it. `products.get` already returned the product's
   // flag types, so nothing there needed changing -- the table was simply
   // always empty.
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   // The fold resets on navigation, as it should -- it is view state, not a
   // preference. Re-opened here rather than made sticky, because a page that
-  // silently remembers a disclosure across bugs is its own surprise.
+  // silently remembers a disclosure across issues is its own surprise.
   await openMorePanels(page);
   await expect(flags).toBeVisible();
-  await expect(flags, "the new type should be offered on the bug").toContainText(typeName);
-  await expect(flags).not.toContainText(/defines no bug-level flag types/i);
+  await expect(flags, "the new type should be offered on the issue").toContainText(typeName);
+  await expect(flags).not.toContainText(/defines no issue-level flag types/i);
 
   // And it must NOT have leaked onto an unrelated product.
   const other = await rpc("products.create", { key: productKey("UNRE"),
@@ -100,18 +100,18 @@ test("an admin defines a flag type, and it becomes settable on a bug", async ({
     description: "core",
   });
   const otherVersion = await rpc("versions.create", { productId: other.id, name: "1.0" });
-  const otherBug = await rpc("bugs.create", {
+  const otherIssue = await rpc("issues.create", {
     productId: other.id,
     componentId: otherComponent.id,
     versionId: otherVersion.id,
-    summary: `Unrelated bug ${RUN}`,
+    summary: `Unrelated issue ${RUN}`,
     description: "no flags here",
   });
-  await page.goto(`/bugs/${otherBug.id}`);
+  await page.goto(`/issues/${otherIssue.id}`);
   // Open the fold again. Under the old hash router this goto changed only the
   // fragment, so the document never reloaded and the fold stayed open across
   // it -- the assertion below was reading a panel left over from the previous
-  // bug. On real paths this is a genuine navigation, so the panel has to be
+  // issue. On real paths this is a genuine navigation, so the panel has to be
   // asked for, which is also what a person does.
   await openMorePanels(page);
   await expect(flags, "a product-scoped type must not appear on another product").not.toContainText(

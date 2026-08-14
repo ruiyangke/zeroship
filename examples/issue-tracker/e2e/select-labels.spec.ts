@@ -46,7 +46,7 @@ test("a picker shows its placeholder when empty and a name when chosen", async (
     description: "picker",
   });
 
-  await page.goto("/bugs/new");
+  await page.goto("/issues/new");
   const product = page.getByRole("combobox", { name: "Product" });
 
   await expect(product, "an untouched picker shows its placeholder").toHaveText(

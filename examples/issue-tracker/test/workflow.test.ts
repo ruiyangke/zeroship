@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUG_STATUSES,
+  ISSUE_STATUSES,
   STATUS_TRANSITIONS,
-  InvalidBugTransitionError,
-  markDuplicateBugState,
-  reopenBugState,
-  resolveBugState,
-  transitionBugState,
-  type BugState,
-  type BugStatus,
+  InvalidIssueTransitionError,
+  markDuplicateIssueState,
+  reopenIssueState,
+  resolveIssueState,
+  transitionIssueState,
+  type IssueState,
+  type IssueStatus,
 } from "../src/lib/workflow";
 
-const stateFor = (status: BugStatus): BugState => ({
+const stateFor = (status: IssueStatus): IssueState => ({
   status,
   resolution:
     status === "RESOLVED" || status === "VERIFIED" || status === "CLOSED"
@@ -19,11 +19,11 @@ const stateFor = (status: BugStatus): BugState => ({
       : null,
 });
 
-describe("bug status workflow", () => {
+describe("issue status workflow", () => {
   it("accepts every edge in the transition table", () => {
-    for (const from of BUG_STATUSES) {
+    for (const from of ISSUE_STATUSES) {
       for (const to of STATUS_TRANSITIONS[from]) {
-        const result = transitionBugState(stateFor(from), {
+        const result = transitionIssueState(stateFor(from), {
           status: to,
           ...(to === "RESOLVED" ? { resolution: "FIXED" as const } : {}),
         });
@@ -39,23 +39,23 @@ describe("bug status workflow", () => {
   });
 
   it("rejects every edge absent from the transition table, including no-ops", () => {
-    for (const from of BUG_STATUSES) {
-      for (const to of BUG_STATUSES) {
+    for (const from of ISSUE_STATUSES) {
+      for (const to of ISSUE_STATUSES) {
         if (STATUS_TRANSITIONS[from].includes(to)) continue;
         expect(() =>
-          transitionBugState(stateFor(from), {
+          transitionIssueState(stateFor(from), {
             status: to,
             ...(to === "RESOLVED" ? { resolution: "FIXED" as const } : {}),
           }),
-        ).toThrow(InvalidBugTransitionError);
+        ).toThrow(InvalidIssueTransitionError);
       }
     }
   });
 
   it.each(["UNCONFIRMED", "CONFIRMED", "IN_PROGRESS"] as const)(
-    "resolves an open %s bug",
+    "resolves an open %s issue",
     (status) => {
-      expect(resolveBugState(stateFor(status), "WONTFIX")).toEqual({
+      expect(resolveIssueState(stateFor(status), "WONTFIX")).toEqual({
         status: "RESOLVED",
         resolution: "WONTFIX",
       });
@@ -63,25 +63,25 @@ describe("bug status workflow", () => {
   );
 
   it.each(["RESOLVED", "VERIFIED", "CLOSED"] as const)(
-    "rejects resolving an already non-open %s bug",
+    "rejects resolving an already non-open %s issue",
     (status) => {
-      expect(() => resolveBugState(stateFor(status), "FIXED")).toThrow(
-        InvalidBugTransitionError,
+      expect(() => resolveIssueState(stateFor(status), "FIXED")).toThrow(
+        InvalidIssueTransitionError,
       );
     },
   );
 
   it("reserves DUPLICATE for markDuplicate", () => {
     expect(() =>
-      resolveBugState(stateFor("CONFIRMED"), "DUPLICATE" as never),
-    ).toThrow(/bugs\.markDuplicate/u);
+      resolveIssueState(stateFor("CONFIRMED"), "DUPLICATE" as never),
+    ).toThrow(/issues\.markDuplicate/u);
     expect(() =>
-      transitionBugState(stateFor("CONFIRMED"), {
+      transitionIssueState(stateFor("CONFIRMED"), {
         status: "RESOLVED",
         resolution: "DUPLICATE",
       }),
-    ).toThrow(/bugs\.markDuplicate/u);
-    expect(markDuplicateBugState(stateFor("CONFIRMED"))).toEqual({
+    ).toThrow(/issues\.markDuplicate/u);
+    expect(markDuplicateIssueState(stateFor("CONFIRMED"))).toEqual({
       status: "RESOLVED",
       resolution: "DUPLICATE",
     });
@@ -90,7 +90,7 @@ describe("bug status workflow", () => {
   it.each(["RESOLVED", "VERIFIED", "CLOSED"] as const)(
     "reopens %s as CONFIRMED and clears its resolution",
     (status) => {
-      expect(reopenBugState(stateFor(status))).toEqual({
+      expect(reopenIssueState(stateFor(status))).toEqual({
         status: "CONFIRMED",
         resolution: null,
       });
@@ -98,20 +98,20 @@ describe("bug status workflow", () => {
   );
 
   it.each(["UNCONFIRMED", "CONFIRMED", "IN_PROGRESS"] as const)(
-    "rejects reopening an open %s bug",
+    "rejects reopening an open %s issue",
     (status) => {
-      expect(() => reopenBugState(stateFor(status))).toThrow(
-        InvalidBugTransitionError,
+      expect(() => reopenIssueState(stateFor(status))).toThrow(
+        InvalidIssueTransitionError,
       );
     },
   );
 
   it("requires a resolution when entering RESOLVED", () => {
     expect(() =>
-      transitionBugState(stateFor("CONFIRMED"), { status: "RESOLVED" }),
+      transitionIssueState(stateFor("CONFIRMED"), { status: "RESOLVED" }),
     ).toThrow(/requires a valid resolution/u);
     expect(() =>
-      transitionBugState(stateFor("CONFIRMED"), {
+      transitionIssueState(stateFor("CONFIRMED"), {
         status: "RESOLVED",
         resolution: "NOT_A_RESOLUTION" as never,
       }),
@@ -119,12 +119,12 @@ describe("bug status workflow", () => {
   });
 
   it("retains the resolution while verifying or closing", () => {
-    const verified = transitionBugState(
+    const verified = transitionIssueState(
       { status: "RESOLVED", resolution: "INVALID" },
       { status: "VERIFIED" },
     );
     expect(verified).toEqual({ status: "VERIFIED", resolution: "INVALID" });
-    expect(transitionBugState(verified, { status: "CLOSED" })).toEqual({
+    expect(transitionIssueState(verified, { status: "CLOSED" })).toEqual({
       status: "CLOSED",
       resolution: "INVALID",
     });
@@ -132,7 +132,7 @@ describe("bug status workflow", () => {
 
   it("does not permit a verify or close transition to rewrite resolution", () => {
     expect(() =>
-      transitionBugState(
+      transitionIssueState(
         { status: "RESOLVED", resolution: "FIXED" },
         { status: "VERIFIED", resolution: "INVALID" },
       ),
@@ -141,22 +141,22 @@ describe("bug status workflow", () => {
 
   it("rejects internally inconsistent or unknown stored state", () => {
     expect(() =>
-      transitionBugState(
+      transitionIssueState(
         { status: "CONFIRMED", resolution: "FIXED" },
         { status: "RESOLVED", resolution: "FIXED" },
       ),
     ).toThrow(/open status CONFIRMED/u);
     expect(() =>
-      transitionBugState(
+      transitionIssueState(
         { status: "RESOLVED", resolution: null },
         { status: "VERIFIED" },
       ),
     ).toThrow(/requires a resolution/u);
     expect(() =>
-      transitionBugState(
+      transitionIssueState(
         { status: "UNKNOWN" as never, resolution: null },
         { status: "CONFIRMED" },
       ),
-    ).toThrow(/unknown bug status/u);
+    ).toThrow(/unknown issue status/u);
   });
 });

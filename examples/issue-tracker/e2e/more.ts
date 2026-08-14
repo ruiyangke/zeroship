@@ -1,9 +1,9 @@
 import type { Page } from "@playwright/test";
 
 /**
- * Open the bug page's folded panels.
+ * Open the issue page's folded panels.
  *
- * Flags, votes and security sit behind a disclosure: on a typical bug all
+ * Flags, votes and security sit behind a disclosure: on a typical issue all
  * three report absence, and cards saying "nothing here" directly under the
  * conversation are grid carrying no information.
  *
@@ -25,7 +25,7 @@ export async function openMorePanels(page: Page): Promise<void> {
   await toggle.waitFor({ state: "visible" });
   if ((await toggle.getAttribute("aria-expanded")) === "true") return;
   await toggle.click();
-  await page.locator(".bug-detail-more section").first().waitFor({ state: "visible" });
+  await page.locator(".issue-detail-more section").first().waitFor({ state: "visible" });
 }
 
 /**

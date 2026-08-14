@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom";
 /**
  * A piece of state that lives in the URL's query string.
  *
- * The bug list's filters were component state, so a narrowed list was
+ * The issue list's filters were component state, so a narrowed list was
  * something you could look at and not something you could send: no bookmark,
  * no link in a chat, no Back to undo a filter, and a reload dropped it. That
  * is the half of routing the hash never made worth doing -- now that the app

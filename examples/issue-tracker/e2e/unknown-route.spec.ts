@@ -3,9 +3,9 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 
 /**
- * A hash that matches nothing says so, instead of rendering the bug list.
+ * A hash that matches nothing says so, instead of rendering the issue list.
  *
- * The router's default arm returned `{ name: "bugs" }`, so `/reprots`, a
+ * The router's default arm returned `{ name: "issues" }`, so `/reprots`, a
  * stale bookmark, or a link with a dropped segment all answered with a
  * plausible, fully populated page. That is the worst shape of wrong: nothing
  * looks broken, so you conclude the data is missing rather than the URL.
@@ -17,7 +17,7 @@ import { signIn } from "./session";
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
-test("an unknown hash reports itself rather than impersonating the bug list", async ({
+test("an unknown hash reports itself rather than impersonating the issue list", async ({
   page,
   baseURL,
 }) => {
@@ -39,10 +39,10 @@ test("an unknown hash reports itself rather than impersonating the bug list", as
   ).toContainText("reprots");
   await expect(
     page.locator("table"),
-    "the bug list is NOT rendered in its place",
+    "the issue list is NOT rendered in its place",
   ).toHaveCount(0);
 
   // The way out works.
-  await page.getByRole("link", { name: "bug list" }).click();
-  await expect(page.locator("h1")).toContainText("Bugs");
+  await page.getByRole("link", { name: "issue list" }).click();
+  await expect(page.locator("h1")).toContainText("Issues");
 });

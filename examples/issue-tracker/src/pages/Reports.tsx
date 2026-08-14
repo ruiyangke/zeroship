@@ -114,7 +114,7 @@ function ByComponentSection({
       onRetry={reload}
       loadingLabel="Loading component report..."
       isEmpty={(data) => data.length === 0}
-      emptyTitle="No open bugs in any component."
+      emptyTitle="No open issues in any component."
     >
       {(rows) => (
         <section className="report-section">
@@ -152,7 +152,7 @@ function ByAssigneeSection({ productId }: { productId: string }) {
       onRetry={reload}
       loadingLabel="Loading assignee report..."
       isEmpty={(data) => data.length === 0}
-      emptyTitle="No open bugs assigned to anyone."
+      emptyTitle="No open issues assigned to anyone."
     >
       {(rows) => (
         <section className="report-section">
@@ -190,7 +190,7 @@ function TrendSection({ productId, days }: { productId: string; days: number }) 
       onRetry={reload}
       loadingLabel="Loading trend..."
       isEmpty={(data) => data.every((d) => d.created === 0 && d.resolved === 0)}
-      emptyTitle="No created or resolved bugs in this window."
+      emptyTitle="No created or resolved issues in this window."
     >
       {(rows) => {
         const max = Math.max(1, ...rows.flatMap((r) => [r.created, r.resolved]));
@@ -241,7 +241,7 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
         data.resolvedCount === 0 ? (
           <section className="report-section">
             <h2>Time to resolve</h2>
-            <p className="state-hint small">No bugs resolved in this window.</p>
+            <p className="state-hint small">No issues resolved in this window.</p>
           </section>
         ) : (
           <section className="report-section">

@@ -6,7 +6,7 @@ import { errorMessage } from "./rpc";
 import { UserPicker } from "./UserPicker";
 
 /**
- * Bugzilla's user watching: you also hear about bugs the watched person is
+ * Bugzilla's user watching: you also hear about issues the watched person is
  * involved in.
  *
  * The three procedures behind this existed with no UI at all, so the feature
@@ -70,7 +70,7 @@ export function WatchingPanel() {
     <section className="dashboard-section watching-panel">
       <h2>People I watch</h2>
       <p className="state-hint small">
-        You are notified about bugs they report, are assigned, or are CC'd on.
+        You are notified about issues they report, are assigned, or are CC'd on.
       </p>
 
       {watching.length === 0 ? (

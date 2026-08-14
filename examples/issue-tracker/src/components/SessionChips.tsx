@@ -16,7 +16,7 @@ import type { CurrentUser } from "./types";
  * The way in, wearing the app's clothes.
  *
  * @zeroship/auth ships SignInButton, but it renders an unstyled <button> --
- * next to the design system's filled "New bug" it read as a browser default
+ * next to the design system's filled "New issue" it read as a browser default
  * someone forgot about. It also takes no asChild, so it cannot lend its
  * behaviour to a DS Button.
  *
@@ -85,7 +85,7 @@ function AccountMenu({
     <Menu>
       {/* render, not a nested button: Menu.Trigger renders a bare <button>,
           which with no app rule for buttons is the browser's grey box -- next
-          to the filled "New bug" it looked like a disabled control. Base UI
+          to the filled "New issue" it looked like a disabled control. Base UI
           lets the trigger BE the design system's button instead. Plain, so
           the name reads as text you can press rather than a second action
           competing with the primary one. */}

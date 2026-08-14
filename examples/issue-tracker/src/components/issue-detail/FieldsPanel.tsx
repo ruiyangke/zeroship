@@ -1,39 +1,79 @@
 import { useState } from "react";
 import { Button, Cluster, DescriptionList, Field, Input, Select } from "@zeroship/ui";
-import { moveBug, reassignBug, setBugPriority, setBugSeverity, updateBug } from "../../api";
-import { BUG_PRIORITIES, BUG_SEVERITIES, type BugPriority, type BugSeverity } from "../../lib/quicksearch";
+import {
+  moveIssue,
+  reassignIssue,
+  setIssueKind,
+  setIssuePriority,
+  setIssueSeverity,
+  updateIssue,
+} from "../../api";
+import {
+  ISSUE_KINDS,
+  ISSUE_PRIORITIES,
+  ISSUE_SEVERITIES,
+  type IssueKind,
+  type IssuePriority,
+  type IssueSeverity,
+} from "../../lib/quicksearch";
 
-import { PriorityBadge, SeverityBadge } from "../Badges";
+import { KindBadge, PriorityBadge, SeverityBadge } from "../Badges";
 import { RailChoice } from "./RailChoice";
 import { RailProperty } from "./RailProperty";
 import { errorMessage, toPromise } from "../rpc";
-import type { BugDetail, ProductDetail } from "../types";
+import type { IssueDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
 import { personName, type PeopleMap } from "./people";
 import { StatusControl } from "./StatusControl";
 import { Absent } from "./Absent";
 
-type Bug = BugDetail["bug"];
-type BugProduct = NonNullable<BugDetail["product"]>;
-type BugComponent = NonNullable<BugDetail["component"]>;
+type Issue = IssueDetail["issue"];
+type IssueProduct = NonNullable<IssueDetail["product"]>;
+type IssueComponent = NonNullable<IssueDetail["component"]>;
 
-function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) => void }) {
-  const [busy, setBusy] = useState<"severity" | "priority" | null>(null);
+/**
+ * Kind, severity and priority: what it is, how bad it is, when we do it.
+ *
+ * Kind leads because it is the question the other two are read against.
+ * Severity used to carry `enhancement`, so the rail could say EITHER what a
+ * row was or how much it hurt, never both -- a critical feature request had
+ * to pick one. These are three independent lines now.
+ */
+function Classification({ issue, onUpdated }: { issue: Issue; onUpdated: (b: Issue) => void }) {
+  const [busy, setBusy] = useState<"kind" | "severity" | "priority" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   return (
     <>
       <RailChoice
-        label="Severity"
-        value={bug.severity}
-        display={<SeverityBadge severity={bug.severity} />}
+        label="Kind"
+        value={issue.kind}
+        display={<KindBadge kind={issue.kind} />}
         disabled={busy !== null}
-        options={BUG_SEVERITIES.map((value) => ({ value, label: value }))}
+        options={ISSUE_KINDS.map((value) => ({ value, label: value }))}
+        onChange={async (next) => {
+          setBusy("kind");
+          setError(null);
+          try {
+            onUpdated(await setIssueKind({ id: issue.id, kind: next as IssueKind }));
+          } catch (err) {
+            setError(errorMessage(err));
+          } finally {
+            setBusy(null);
+          }
+        }}
+      />
+      <RailChoice
+        label="Severity"
+        value={issue.severity}
+        display={<SeverityBadge severity={issue.severity} />}
+        disabled={busy !== null}
+        options={ISSUE_SEVERITIES.map((value) => ({ value, label: value }))}
         onChange={async (next) => {
           setBusy("severity");
           setError(null);
           try {
-            onUpdated(await setBugSeverity({ id: bug.id, severity: next as BugSeverity }));
+            onUpdated(await setIssueSeverity({ id: issue.id, severity: next as IssueSeverity }));
           } catch (err) {
             setError(errorMessage(err));
           } finally {
@@ -43,15 +83,15 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
       />
       <RailChoice
         label="Priority"
-        value={bug.priority}
-        display={<PriorityBadge priority={bug.priority} />}
+        value={issue.priority}
+        display={<PriorityBadge priority={issue.priority} />}
         disabled={busy !== null}
-        options={BUG_PRIORITIES.map((value) => ({ value, label: value }))}
+        options={ISSUE_PRIORITIES.map((value) => ({ value, label: value }))}
         onChange={async (next) => {
           setBusy("priority");
           setError(null);
           try {
-            onUpdated(await setBugPriority({ id: bug.id, priority: next as BugPriority }));
+            onUpdated(await setIssuePriority({ id: issue.id, priority: next as IssuePriority }));
           } catch (err) {
             setError(errorMessage(err));
           } finally {
@@ -65,13 +105,13 @@ function SeverityPriority({ bug, onUpdated }: { bug: Bug; onUpdated: (b: Bug) =>
 }
 
 function AssigneeControl({
-  bug,
+  issue,
   people,
   onUpdated,
 }: {
-  bug: Bug;
+  issue: Issue;
   people: PeopleMap;
-  onUpdated: (b: Bug) => void;
+  onUpdated: (b: Issue) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +120,7 @@ function AssigneeControl({
     setBusy(true);
     setError(null);
     try {
-      onUpdated(await reassignBug({ id: bug.id, assigneeId }));
+      onUpdated(await reassignIssue({ id: issue.id, assigneeId }));
       done();
     } catch (err) {
       // Deliberately stays open on failure: closing would discard the choice
@@ -95,7 +135,7 @@ function AssigneeControl({
     <>
       <RailProperty
         label="Assignee"
-        display={bug.assigneeId ? personName(bug.assigneeId, people) : <Absent />}
+        display={issue.assigneeId ? personName(issue.assigneeId, people) : <Absent />}
         disabled={busy}
         wide
       >
@@ -107,14 +147,14 @@ function AssigneeControl({
 }
 
 function MoveControl({
-  bug,
+  issue,
   products,
   onUpdated,
   fetchProductDetail,
 }: {
-  bug: Bug;
+  issue: Issue;
   products: { id: string; name: string }[];
-  onUpdated: (b: Bug) => void;
+  onUpdated: (b: Issue) => void;
   fetchProductDetail: (id: string) => Promise<ProductDetail>;
 }) {
   const [open, setOpen] = useState(false);
@@ -141,7 +181,7 @@ function MoveControl({
     setBusy(true);
     setError(null);
     try {
-      onUpdated(await moveBug({ id: bug.id, productId: targetProductId, componentId: targetComponentId }));
+      onUpdated(await moveIssue({ id: issue.id, productId: targetProductId, componentId: targetComponentId }));
       setOpen(false);
     } catch (err) {
       setError(errorMessage(err));
@@ -161,7 +201,7 @@ function MoveControl({
           {/* Short enough to fit the rail. The full sentence ran past the
               column edge, which is how a rail says "this control does not
               belong here" -- the dialog it opens explains the rest. */}
-          {open ? "Cancel" : "Move bug..."}
+          {open ? "Cancel" : "Move issue..."}
         </Button>
       </div>
       {open ? (
@@ -206,7 +246,7 @@ function MoveControl({
             Confirm move
           </Button>
           <p className="state-hint small">
-            Moving a bug that already has a version or milestone set is rejected by the
+            Moving an issue that already has a version or milestone set is rejected by the
             server today (it cannot clear those fields).
           </p>
         </div>
@@ -228,17 +268,17 @@ function RailSection({ title }: { title: string }) {
 }
 
 function GeneralField({
-  bug,
+  issue,
   field,
   label,
   value,
   onUpdated,
 }: {
-  bug: Bug;
+  issue: Issue;
   field: "summary" | "whiteboard" | "opSys" | "platform" | "url";
   label: string;
   value: string;
-  onUpdated: (b: Bug) => void;
+  onUpdated: (b: Issue) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -249,7 +289,7 @@ function GeneralField({
     setBusy(true);
     setError(null);
     try {
-      onUpdated(await updateBug({ id: bug.id, changes: { [field]: draft } }));
+      onUpdated(await updateIssue({ id: issue.id, changes: { [field]: draft } }));
       setEditing(false);
     } catch (err) {
       setError(errorMessage(err));
@@ -260,7 +300,7 @@ function GeneralField({
 
   // Read until asked. Four of these -- whiteboard, OS, platform, URL -- sat
   // open as text inputs in a 352px rail, so the column that should let you
-  // GLANCE at a bug's metadata was mostly empty edit boxes for fields almost
+  // GLANCE at an issue's metadata was mostly empty edit boxes for fields almost
   // nobody sets. A value you are not changing is something to read.
   if (!editing) {
     return (
@@ -312,7 +352,7 @@ function GeneralField({
 }
 
 export function FieldsPanel({
-  bug,
+  issue,
   people,
   product,
   component,
@@ -322,14 +362,14 @@ export function FieldsPanel({
   onUpdated,
   readOnly = false,
 }: {
-  bug: Bug;
+  issue: Issue;
   people: PeopleMap;
-  product: BugProduct;
-  component: BugComponent;
+  product: IssueProduct;
+  component: IssueComponent;
   productDetail: ProductDetail | null;
   products: { id: string; name: string }[];
   fetchProductDetail: (id: string) => Promise<ProductDetail>;
-  onUpdated: (b: Bug) => void;
+  onUpdated: (b: Issue) => void;
   /**
    * No identity: every control here would 401 on use, so none is offered.
    *
@@ -343,13 +383,13 @@ export function FieldsPanel({
 }) {
   const [versionMilestoneError, setVersionMilestoneError] = useState<string | null>(null);
   const [showOther, setShowOther] = useState(false);
-  // "Unspecified" is the server's default for opSys and platform, so a bug
+  // "Unspecified" is the server's default for opSys and platform, so an issue
   // that has never been touched reads as unset rather than as configured.
   const hasOther = Boolean(
-    bug.whiteboard ||
-      bug.url ||
-      (bug.opSys && bug.opSys !== "Unspecified") ||
-      (bug.platform && bug.platform !== "Unspecified"),
+    issue.whiteboard ||
+      issue.url ||
+      (issue.opSys && issue.opSys !== "Unspecified") ||
+      (issue.platform && issue.platform !== "Unspecified"),
   );
   return (
     <div className="fields-panel">
@@ -361,10 +401,10 @@ export function FieldsPanel({
       {/* Not a permanent text box. The page heading already states the
           summary in full; a second copy in a 22rem rail truncated it and
           invited edits nobody came to make. Editing is a deliberate act. */}
-      <StatusControl bug={bug} onUpdated={onUpdated} />
+      <StatusControl issue={issue} onUpdated={onUpdated} />
       <RailSection title="Classification" />
-      <SeverityPriority bug={bug} onUpdated={onUpdated} />
-      <AssigneeControl bug={bug} people={people} onUpdated={onUpdated} />
+      <Classification issue={issue} onUpdated={onUpdated} />
+      <AssigneeControl issue={issue} people={people} onUpdated={onUpdated} />
 
       {/* The facts you read rather than change, as a description list. They
           were four spans in a row with hand-rolled "Label: value" strings and
@@ -381,12 +421,12 @@ export function FieldsPanel({
         </DescriptionList.Item>
         <DescriptionList.Item>
           <DescriptionList.Term>Reporter</DescriptionList.Term>
-          <DescriptionList.Detail>{personName(bug.reporterId, people)}</DescriptionList.Detail>
+          <DescriptionList.Detail>{personName(issue.reporterId, people)}</DescriptionList.Detail>
         </DescriptionList.Item>
         <DescriptionList.Item>
           <DescriptionList.Term>QA contact</DescriptionList.Term>
           <DescriptionList.Detail>
-            {bug.qaContactId ? personName(bug.qaContactId, people) : <Absent />}
+            {issue.qaContactId ? personName(issue.qaContactId, people) : <Absent />}
           </DescriptionList.Detail>
         </DescriptionList.Item>
       </DescriptionList>
@@ -398,32 +438,32 @@ export function FieldsPanel({
               rhythms: facts you read, and controls you fill in. */}
           <RailChoice
             label="Version"
-            value={bug.versionId ?? ""}
+            value={issue.versionId ?? ""}
             display={
-              productDetail.versions.find((v) => v.id === bug.versionId)?.name ?? (
+              productDetail.versions.find((v) => v.id === issue.versionId)?.name ?? (
                 <Absent />
               )
             }
             options={productDetail.versions.map((v) => ({ value: v.id, label: v.name }))}
             onChange={(next) => {
               setVersionMilestoneError(null);
-              toPromise(updateBug({ id: bug.id, changes: { versionId: next } }))
+              toPromise(updateIssue({ id: issue.id, changes: { versionId: next } }))
                 .then(onUpdated)
                 .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
             }}
           />
           <RailChoice
             label="Milestone"
-            value={bug.milestoneId ?? ""}
+            value={issue.milestoneId ?? ""}
             display={
-              productDetail.milestones.find((m) => m.id === bug.milestoneId)?.name ?? (
+              productDetail.milestones.find((m) => m.id === issue.milestoneId)?.name ?? (
                 <Absent />
               )
             }
             options={productDetail.milestones.map((m) => ({ value: m.id, label: m.name }))}
             onChange={(next) => {
               setVersionMilestoneError(null);
-              toPromise(updateBug({ id: bug.id, changes: { milestoneId: next } }))
+              toPromise(updateIssue({ id: issue.id, changes: { milestoneId: next } }))
                 .then(onUpdated)
                 .catch((err: unknown) => setVersionMilestoneError(errorMessage(err)));
             }}
@@ -437,26 +477,26 @@ export function FieldsPanel({
       {/* After the properties, not among them. It sat between "QA contact"
           and "Version", so a column of "label: value" lines was interrupted
           by a lone button and the reader lost the rhythm mid-scan. Moving a
-          bug changes product AND component, so it belongs to the whole group
+          issue changes product AND component, so it belongs to the whole group
           rather than to any one line in it. */}
-      <MoveControl bug={bug} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
+      <MoveControl issue={issue} products={products} onUpdated={onUpdated} fetchProductDetail={fetchProductDetail} />
 
       {/* Four rows that usually say nothing.
-          Whiteboard, OS, platform and URL are unset on most bugs, so the rail
+          Whiteboard, OS, platform and URL are unset on most issues, so the rail
           ended with "Whiteboard --", "OS Unspecified", "Platform Unspecified",
           "URL --" -- four lines of absence at the bottom of a column whose job
           is to be glanceable. They appear when they HAVE a value, and behind
           one line when they do not, so setting them is still one click and
-          reading a bug that never used them costs nothing. */}
+          reading an issue that never used them costs nothing. */}
       <RailSection title="Other" />
       {hasOther || showOther ? (
         <>
-          <GeneralField bug={bug} field="whiteboard" label="Whiteboard" value={bug.whiteboard ?? ""} onUpdated={onUpdated} />
+          <GeneralField issue={issue} field="whiteboard" label="Whiteboard" value={issue.whiteboard ?? ""} onUpdated={onUpdated} />
           <div className="field-row">
-            <GeneralField bug={bug} field="opSys" label="OS" value={bug.opSys} onUpdated={onUpdated} />
-            <GeneralField bug={bug} field="platform" label="Platform" value={bug.platform} onUpdated={onUpdated} />
+            <GeneralField issue={issue} field="opSys" label="OS" value={issue.opSys} onUpdated={onUpdated} />
+            <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} onUpdated={onUpdated} />
           </div>
-          <GeneralField bug={bug} field="url" label="URL" value={bug.url ?? ""} onUpdated={onUpdated} />
+          <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} onUpdated={onUpdated} />
         </>
       ) : (
         <Button variant="plain" size="small" onClick={() => setShowOther(true)}>

@@ -6,7 +6,7 @@ import { Placeholder } from "@tiptap/extensions";
 import { useEffect, useState } from "react";
 
 /**
- * Rich text for bug descriptions and comments, on tiptap.
+ * Rich text for issue descriptions and comments, on tiptap.
  *
  * WHY RENDERING GOES THROUGH TIPTAP TOO, rather than dangerouslySetInnerHTML.
  *
@@ -14,7 +14,7 @@ import { useEffect, useState } from "react";
  * RPC, so a caller can send whatever they like -- markdown, embedded HTML,
  * anything -- without ever touching this editor. Rendering that with
  * `dangerouslySetInnerHTML` is stored XSS: one crafted comment and every
- * reader of the bug runs it.
+ * reader of the issue runs it.
  *
  * A read-only editor parses the HTML through the SAME schema that produced it,
  * so the sanitiser and the writer are the same object -- the only version of
@@ -49,9 +49,9 @@ import { useEffect, useState } from "react";
 /**
  * Bodies are stored as MARKDOWN, not HTML.
  *
- * A bug tracker's comments end up in more places than the page that wrote
+ * An issue tracker's comments end up in more places than the page that wrote
  * them: notification emails, the database when someone greps it, a CLI or an
- * agent filing a bug over `comments.add`. Markdown is legible in all of those;
+ * agent filing an issue over `comments.add`. Markdown is legible in all of those;
  * a wall of serialised HTML is legible in none.
  *
  * This does NOT make the XSS story go away, and it is worth being explicit
@@ -240,7 +240,7 @@ export function RichTextEditor({
   /**
    * Keep the toolbar out of the way until there is something to format.
    *
-   * The comment composer sits at the foot of every bug page, so twelve
+   * The comment composer sits at the foot of every issue page, so twelve
    * formatting buttons were permanently on screen under the thread -- more
    * chrome than the empty box they belonged to, and all of it addressing a
    * task nobody had started. Editing an existing comment does NOT set this:

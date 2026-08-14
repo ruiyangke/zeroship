@@ -5,30 +5,30 @@
 // status dropdown.
 import { useState } from "react";
 import { Button, Field, Input, Select } from "@zeroship/ui";
-import { changeBugStatus, markBugDuplicate, reopenBug, resolveBug } from "../../api";
+import { changeIssueStatus, markIssueDuplicate, reopenIssue, resolveIssue } from "../../api";
 import {
-  BUG_RESOLUTIONS,
+  ISSUE_RESOLUTIONS,
   STATUS_TRANSITIONS,
-  isBugStatus,
-  isOpenBugStatus,
-  type BugResolution,
-  type BugStatus,
+  isIssueStatus,
+  isOpenIssueStatus,
+  type IssueResolution,
+  type IssueStatus,
 } from "../../lib/workflow";
 import { ResolutionBadge } from "../Badges";
 import { errorMessage } from "../rpc";
-import type { BugDetail } from "../types";
+import type { IssueDetail } from "../types";
 
-type NonDuplicateResolution = Exclude<BugResolution, "DUPLICATE">;
-const NON_DUPLICATE_RESOLUTIONS = BUG_RESOLUTIONS.filter(
+type NonDuplicateResolution = Exclude<IssueResolution, "DUPLICATE">;
+const NON_DUPLICATE_RESOLUTIONS = ISSUE_RESOLUTIONS.filter(
   (r): r is NonDuplicateResolution => r !== "DUPLICATE",
 );
 
 export function StatusControl({
-  bug,
+  issue,
   onUpdated,
 }: {
-  bug: BugDetail["bug"];
-  onUpdated: (bug: BugDetail["bug"]) => void;
+  issue: IssueDetail["issue"];
+  onUpdated: (issue: IssueDetail["issue"]) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,11 +37,11 @@ export function StatusControl({
   const [duplicateOf, setDuplicateOf] = useState("");
   const [showDuplicate, setShowDuplicate] = useState(false);
 
-  const currentStatus: BugStatus | null = isBugStatus(bug.status) ? bug.status : null;
+  const currentStatus: IssueStatus | null = isIssueStatus(issue.status) ? issue.status : null;
   const targets = currentStatus ? STATUS_TRANSITIONS[currentStatus] : [];
   const openTargets = targets.filter((t) => t !== "RESOLVED");
 
-  const run = async (action: () => BugDetail["bug"] | Promise<BugDetail["bug"]>) => {
+  const run = async (action: () => IssueDetail["issue"] | Promise<IssueDetail["issue"]>) => {
     setBusy(true);
     setError(null);
     try {
@@ -61,18 +61,18 @@ export function StatusControl({
         <Field>
           <Field.Label>Status</Field.Label>
           <Select
-            value={bug.status}
+            value={issue.status}
             disabled={busy || targets.length === 0}
             aria-label="Status"
             onValueChange={(next) => {
-              if (!next || next === bug.status || !isBugStatus(next)) return;
-              void run(() => changeBugStatus({ id: bug.id, status: next }));
+              if (!next || next === issue.status || !isIssueStatus(next)) return;
+              void run(() => changeIssueStatus({ id: issue.id, status: next }));
             }}
           >
             {/* The current status is listed first so the control can show it,
                 then the states it can legally move to. The workflow decides
                 that set -- this is not every status. */}
-            <Select.Item value={bug.status}>{bug.status}</Select.Item>
+            <Select.Item value={issue.status}>{issue.status}</Select.Item>
             {openTargets.map((t) => (
               <Select.Item key={t} value={t}>
                 {t}
@@ -87,8 +87,8 @@ export function StatusControl({
             true. */}
         <div className="status-resolution">
           <span className="field-label">Resolution</span>
-          {bug.resolution ? (
-            <ResolutionBadge resolution={bug.resolution} />
+          {issue.resolution ? (
+            <ResolutionBadge resolution={issue.resolution} />
           ) : (
             <span className="dim">Unresolved</span>
           )}
@@ -101,8 +101,8 @@ export function StatusControl({
             Resolve...
           </Button>
         ) : null}
-        {currentStatus && !isOpenBugStatus(currentStatus) ? (
-          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopenBug({ id: bug.id }))}>
+        {currentStatus && !isOpenIssueStatus(currentStatus) ? (
+          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopenIssue({ id: issue.id }))}>
             Reopen
           </Button>
         ) : null}
@@ -129,7 +129,7 @@ export function StatusControl({
           </Field>
           <Button variant="filled" size="small"
             disabled={busy}
-            onClick={() => void run(() => resolveBug({ id: bug.id, resolution }))}
+            onClick={() => void run(() => resolveIssue({ id: issue.id, resolution }))}
           >
             Confirm resolve
           </Button>
@@ -148,7 +148,7 @@ export function StatusControl({
           </Field>
           <Button variant="filled" size="small"
             disabled={busy || !duplicateOf.trim()}
-            onClick={() => void run(() => markBugDuplicate({ id: bug.id, duplicateOfId: duplicateOf.trim() }))}
+            onClick={() => void run(() => markIssueDuplicate({ id: issue.id, duplicateOfId: duplicateOf.trim() }))}
           >
             Confirm duplicate
           </Button>

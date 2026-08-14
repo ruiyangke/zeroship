@@ -5,7 +5,7 @@ import type {
   currentUser,
   dependencyGraph,
   dependencyTree,
-  getBug,
+  getIssue,
   getProduct,
   listAttachments,
   listCc,
@@ -26,18 +26,18 @@ import type {
   reportSummary,
   reportTimeToResolve,
   reportTrend,
-  searchBugs,
+  searchIssues,
 } from "../api";
 
-export type Bug = Awaited<ReturnType<typeof searchBugs>>[number];
-export type BugDetail = Awaited<ReturnType<typeof getBug>>;
-export type Activity = BugDetail["activities"][number];
+export type Issue = Awaited<ReturnType<typeof searchIssues>>[number];
+export type IssueDetail = Awaited<ReturnType<typeof getIssue>>;
+export type Activity = IssueDetail["activities"][number];
 export type Comment = Awaited<ReturnType<typeof listComments>>[number];
 export type Attachment = Awaited<ReturnType<typeof listAttachments>>[number];
 export type CcEntry = Awaited<ReturnType<typeof listCc>>[number];
 export type DependencyGraph = Awaited<ReturnType<typeof dependencyGraph>>;
 export type DependencyTreeNode = Awaited<ReturnType<typeof dependencyTree>>;
-export type DuplicateBug = Awaited<ReturnType<typeof listDuplicates>>[number];
+export type DuplicateIssue = Awaited<ReturnType<typeof listDuplicates>>[number];
 export type Keyword = Awaited<ReturnType<typeof listKeywords>>[number];
 export type FlagRequests = Awaited<ReturnType<typeof listFlagRequests>>;
 export type FlagRequestEntry = FlagRequests["setByMe"][number];

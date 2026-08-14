@@ -1,4 +1,4 @@
-export const BUG_STATUSES = [
+export const ISSUE_STATUSES = [
   "UNCONFIRMED",
   "CONFIRMED",
   "IN_PROGRESS",
@@ -7,7 +7,7 @@ export const BUG_STATUSES = [
   "CLOSED",
 ] as const;
 
-export const BUG_RESOLUTIONS = [
+export const ISSUE_RESOLUTIONS = [
   "FIXED",
   "INVALID",
   "WONTFIX",
@@ -16,16 +16,16 @@ export const BUG_RESOLUTIONS = [
   "INCOMPLETE",
 ] as const;
 
-export type BugStatus = (typeof BUG_STATUSES)[number];
-export type BugResolution = (typeof BUG_RESOLUTIONS)[number];
+export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+export type IssueResolution = (typeof ISSUE_RESOLUTIONS)[number];
 
-export type BugState = {
-  status: BugStatus;
-  resolution: BugResolution | null;
+export type IssueState = {
+  status: IssueStatus;
+  resolution: IssueResolution | null;
 };
 
 export const STATUS_TRANSITIONS: Readonly<
-  Record<BugStatus, readonly BugStatus[]>
+  Record<IssueStatus, readonly IssueStatus[]>
 > = {
   UNCONFIRMED: ["CONFIRMED", "IN_PROGRESS", "RESOLVED"],
   CONFIRMED: ["IN_PROGRESS", "RESOLVED"],
@@ -35,55 +35,55 @@ export const STATUS_TRANSITIONS: Readonly<
   CLOSED: ["CONFIRMED"],
 };
 
-const STATUS_SET = new Set<string>(BUG_STATUSES);
-const RESOLUTION_SET = new Set<string>(BUG_RESOLUTIONS);
-const OPEN_STATUS_SET = new Set<BugStatus>([
+const STATUS_SET = new Set<string>(ISSUE_STATUSES);
+const RESOLUTION_SET = new Set<string>(ISSUE_RESOLUTIONS);
+const OPEN_STATUS_SET = new Set<IssueStatus>([
   "UNCONFIRMED",
   "CONFIRMED",
   "IN_PROGRESS",
 ]);
 
-export class InvalidBugTransitionError extends Error {
-  readonly code = "INVALID_BUG_TRANSITION";
+export class InvalidIssueTransitionError extends Error {
+  readonly code = "INVALID_ISSUE_TRANSITION";
   readonly status = 409;
 
   constructor(message: string) {
     super(message);
-    this.name = "InvalidBugTransitionError";
+    this.name = "InvalidIssueTransitionError";
   }
 }
 
-export function isBugStatus(value: unknown): value is BugStatus {
+export function isIssueStatus(value: unknown): value is IssueStatus {
   return typeof value === "string" && STATUS_SET.has(value);
 }
 
-export function isBugResolution(value: unknown): value is BugResolution {
+export function isIssueResolution(value: unknown): value is IssueResolution {
   return typeof value === "string" && RESOLUTION_SET.has(value);
 }
 
-export function isOpenBugStatus(status: BugStatus): boolean {
+export function isOpenIssueStatus(status: IssueStatus): boolean {
   return OPEN_STATUS_SET.has(status);
 }
 
-function assertValidState(state: BugState): void {
-  if (!isBugStatus(state.status)) {
-    throw new InvalidBugTransitionError(`unknown bug status: ${String(state.status)}`);
+function assertValidState(state: IssueState): void {
+  if (!isIssueStatus(state.status)) {
+    throw new InvalidIssueTransitionError(`unknown issue status: ${String(state.status)}`);
   }
 
-  if (state.resolution !== null && !isBugResolution(state.resolution)) {
-    throw new InvalidBugTransitionError(
-      `unknown bug resolution: ${String(state.resolution)}`,
+  if (state.resolution !== null && !isIssueResolution(state.resolution)) {
+    throw new InvalidIssueTransitionError(
+      `unknown issue resolution: ${String(state.resolution)}`,
     );
   }
 
-  if (isOpenBugStatus(state.status) && state.resolution !== null) {
-    throw new InvalidBugTransitionError(
+  if (isOpenIssueStatus(state.status) && state.resolution !== null) {
+    throw new InvalidIssueTransitionError(
       `open status ${state.status} cannot have a resolution`,
     );
   }
 
-  if (!isOpenBugStatus(state.status) && state.resolution === null) {
-    throw new InvalidBugTransitionError(
+  if (!isOpenIssueStatus(state.status) && state.resolution === null) {
+    throw new InvalidIssueTransitionError(
       `closed status ${state.status} requires a resolution`,
     );
   }
@@ -95,39 +95,39 @@ function assertValidState(state: BugState): void {
  * Entering RESOLVED requires a resolution. VERIFIED and CLOSED carry the
  * existing resolution forward. Reopening into an open state clears it.
  */
-export function transitionBugState(
-  current: BugState,
-  next: { status: BugStatus; resolution?: BugResolution | null },
-): BugState {
+export function transitionIssueState(
+  current: IssueState,
+  next: { status: IssueStatus; resolution?: IssueResolution | null },
+): IssueState {
   assertValidState(current);
 
-  if (!isBugStatus(next.status)) {
-    throw new InvalidBugTransitionError(`unknown bug status: ${String(next.status)}`);
+  if (!isIssueStatus(next.status)) {
+    throw new InvalidIssueTransitionError(`unknown issue status: ${String(next.status)}`);
   }
 
   if (!STATUS_TRANSITIONS[current.status].includes(next.status)) {
-    throw new InvalidBugTransitionError(
-      `cannot transition bug from ${current.status} to ${next.status}`,
+    throw new InvalidIssueTransitionError(
+      `cannot transition issue from ${current.status} to ${next.status}`,
     );
   }
 
   if (next.status === "RESOLVED") {
-    if (!isBugResolution(next.resolution)) {
-      throw new InvalidBugTransitionError(
+    if (!isIssueResolution(next.resolution)) {
+      throw new InvalidIssueTransitionError(
         "transitioning to RESOLVED requires a valid resolution",
       );
     }
     if (next.resolution === "DUPLICATE") {
-      throw new InvalidBugTransitionError(
-        "DUPLICATE resolution must be set through bugs.markDuplicate",
+      throw new InvalidIssueTransitionError(
+        "DUPLICATE resolution must be set through issues.markDuplicate",
       );
     }
     return { status: "RESOLVED", resolution: next.resolution };
   }
 
-  if (isOpenBugStatus(next.status)) {
+  if (isOpenIssueStatus(next.status)) {
     if (next.resolution !== undefined && next.resolution !== null) {
-      throw new InvalidBugTransitionError(
+      throw new InvalidIssueTransitionError(
         `open status ${next.status} cannot have a resolution`,
       );
     }
@@ -135,7 +135,7 @@ export function transitionBugState(
   }
 
   if (next.resolution !== undefined && next.resolution !== current.resolution) {
-    throw new InvalidBugTransitionError(
+    throw new InvalidIssueTransitionError(
       `transitioning to ${next.status} cannot change the resolution`,
     );
   }
@@ -143,35 +143,35 @@ export function transitionBugState(
   return { status: next.status, resolution: current.resolution };
 }
 
-/** Resolve an open bug. DUPLICATE is reserved for bugs.markDuplicate. */
-export function resolveBugState(
-  current: BugState,
-  resolution: Exclude<BugResolution, "DUPLICATE">,
-): BugState {
-  if (resolution === ("DUPLICATE" as BugResolution)) {
-    throw new InvalidBugTransitionError(
-      "DUPLICATE resolution must be set through bugs.markDuplicate",
+/** Resolve an open issue. DUPLICATE is reserved for issues.markDuplicate. */
+export function resolveIssueState(
+  current: IssueState,
+  resolution: Exclude<IssueResolution, "DUPLICATE">,
+): IssueState {
+  if (resolution === ("DUPLICATE" as IssueResolution)) {
+    throw new InvalidIssueTransitionError(
+      "DUPLICATE resolution must be set through issues.markDuplicate",
     );
   }
-  return transitionBugState(current, { status: "RESOLVED", resolution });
+  return transitionIssueState(current, { status: "RESOLVED", resolution });
 }
 
-/** Reopen a resolved, verified, or closed bug as CONFIRMED with no resolution. */
-export function reopenBugState(current: BugState): BugState {
-  if (isOpenBugStatus(current.status)) {
-    throw new InvalidBugTransitionError(
-      `cannot reopen bug in open status ${current.status}`,
+/** Reopen a resolved, verified, or closed issue as CONFIRMED with no resolution. */
+export function reopenIssueState(current: IssueState): IssueState {
+  if (isOpenIssueStatus(current.status)) {
+    throw new InvalidIssueTransitionError(
+      `cannot reopen issue in open status ${current.status}`,
     );
   }
-  return transitionBugState(current, { status: "CONFIRMED" });
+  return transitionIssueState(current, { status: "CONFIRMED" });
 }
 
-/** State portion of bugs.markDuplicate; the duplicate target is updated with it. */
-export function markDuplicateBugState(current: BugState): BugState {
+/** State portion of issues.markDuplicate; the duplicate target is updated with it. */
+export function markDuplicateIssueState(current: IssueState): IssueState {
   assertValidState(current);
   if (!STATUS_TRANSITIONS[current.status].includes("RESOLVED")) {
-    throw new InvalidBugTransitionError(
-      `cannot transition bug from ${current.status} to RESOLVED`,
+    throw new InvalidIssueTransitionError(
+      `cannot transition issue from ${current.status} to RESOLVED`,
     );
   }
   return { status: "RESOLVED", resolution: "DUPLICATE" };

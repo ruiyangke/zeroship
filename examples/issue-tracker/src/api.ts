@@ -3,19 +3,20 @@
 // file must stick to plain re-exports of the "use server" procedures in
 // ./index -- never a hand-rolled fetch to /__zeroship/v1/<id>.
 export {
-  // Bugs
-  createBug,
-  getBug,
-  searchBugs,
-  updateBug,
-  changeBugStatus,
-  resolveBug,
-  reopenBug,
-  markBugDuplicate,
-  reassignBug,
-  setBugSeverity,
-  setBugPriority,
-  moveBug,
+  // Issues
+  createIssue,
+  getIssue,
+  searchIssues,
+  updateIssue,
+  changeIssueStatus,
+  resolveIssue,
+  reopenIssue,
+  markIssueDuplicate,
+  reassignIssue,
+  setIssueKind,
+  setIssueSeverity,
+  setIssuePriority,
+  moveIssue,
   // Comments
   addComment,
   listComments,
@@ -79,7 +80,7 @@ export {
   reportTrend,
   reportTimeToResolve,
 
-  // Access control -- groups, and product- and bug-level restriction
+  // Access control -- groups, and product- and issue-level restriction
   createFlagType,
   createGroup,
   deleteGroup,
@@ -92,8 +93,8 @@ export {
   removeGroupMember,
   restrictProduct,
   unrestrictProduct,
-  restrictBug,
-  unrestrictBug,
+  restrictIssue,
+  unrestrictIssue,
 
   // Voting
   castVote,

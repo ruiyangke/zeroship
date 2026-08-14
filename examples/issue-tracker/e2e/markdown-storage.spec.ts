@@ -14,7 +14,7 @@ import { productKey } from "./keys";
  *
  * The point of the format is that the stored value is legible outside this app:
  * in a notification email, in a grep of the table, to a CLI or an agent filing
- * a bug over `comments.add`.
+ * an issue over `comments.add`.
  */
 
 const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
@@ -40,7 +40,7 @@ test("bodies are stored as markdown and render as rich text", async ({ page, bas
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -48,7 +48,7 @@ test("bodies are stored as markdown and render as rich text", async ({ page, bas
     description: "seed",
   });
 
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   const editor = page.getByLabel("Add a comment");
   await expect(editor).toBeVisible();
 
@@ -64,7 +64,7 @@ test("bodies are stored as markdown and render as rich text", async ({ page, bas
   await expect(page.locator("li.comment")).toHaveCount(2);
 
   // What actually landed in the database.
-  const comments = (await rpc("comments.list", { bugId: bug.id })) as Array<{
+  const comments = (await rpc("comments.list", { issueId: issue.id })) as Array<{
     commentNumber: number;
     body: string;
   }>;

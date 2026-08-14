@@ -13,7 +13,7 @@ import { signIn } from "./session";
  * chrome instead, and the copies drifted: 8px radius against 9.6px, and a
  * focus treatment that changed a border colour against one that did nothing
  * whatsoever. Measured on 2026-08-14, `.rich-text-editor` was BYTE-IDENTICAL
- * at rest and focused -- the most-used control on the bug page told a keyboard
+ * at rest and focused -- the most-used control on the issue page told a keyboard
  * user nothing about where they were.
  *
  * The fix is one `.app-field-shell` class built from the DS's published focus
@@ -78,16 +78,16 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
     description: "parser",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
-    summary: `Ring bug ${RUN}`,
+    summary: `Ring issue ${RUN}`,
     description: "d",
   });
 
   // The reference: a real DS Input, in this app, in this theme.
-  await page.goto("/bugs");
+  await page.goto("/issues");
   await page.locator("input.zs-input__control").first().waitFor();
   const ds = await shadows(page, ".zs-input", "input.zs-input__control");
   expect(ds.rest, "the reference Input actually changes on focus").not.toBe(ds.focus);
@@ -96,7 +96,7 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
   // 1. The comment composer -- a contenteditable, so focus lands on a CHILD of
   //    the shell. A rule keyed on the shell itself never fires, which is the
   //    exact shape of the bug this spec exists for.
-  await page.goto(`/bugs/${bug.id}`);
+  await page.goto(`/issues/${issue.id}`);
   await page.locator(".rich-text-editor").first().waitFor();
   const editor = await shadows(page, ".rich-text-editor", ".rich-text-input");
   expect(editor.rest, "the composer rests like a DS field").toBe(ds.rest);
@@ -104,7 +104,7 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
   expect(editor.radius, "same corner as a DS field, not a hand-picked 0.6rem").toBe(ds.radius);
 
   // 2. The description textarea, which only exists once a product is chosen.
-  await page.goto("/bugs/new");
+  await page.goto("/issues/new");
   await chooseOption(page, page, "Product", `Ring ${RUN}`);
   await chooseOption(page, page, "Component", "Parser");
   const area = await shadows(page, "textarea.app-textarea", "textarea.app-textarea");

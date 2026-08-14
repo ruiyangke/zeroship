@@ -1,13 +1,13 @@
-export type FlagTargetType = "bug" | "attachment";
+export type FlagTargetType = "issue" | "attachment";
 
 export type FlagTargetInput = {
-  bugId?: string | null;
+  issueId?: string | null;
   attachmentId?: string | null;
 };
 
 export type FlagTarget =
-  | { bugId: string; attachmentId: null }
-  | { bugId: null; attachmentId: string };
+  | { issueId: string; attachmentId: null }
+  | { issueId: null; attachmentId: string };
 
 export class InvalidFlagTargetError extends Error {
   readonly code = "INVALID_FLAG_TARGET";
@@ -32,26 +32,26 @@ export function assertFlagTarget(
   targetType: FlagTargetType,
   input: FlagTargetInput,
 ): FlagTarget {
-  if (targetType !== "bug" && targetType !== "attachment") {
+  if (targetType !== "issue" && targetType !== "attachment") {
     throw new InvalidFlagTargetError(
       `unsupported flag target type: ${String(targetType)}`,
     );
   }
 
-  const bugId = optionalId(input.bugId, "bugId");
+  const issueId = optionalId(input.issueId, "issueId");
   const attachmentId = optionalId(input.attachmentId, "attachmentId");
 
-  if ((bugId === null) === (attachmentId === null)) {
+  if ((issueId === null) === (attachmentId === null)) {
     throw new InvalidFlagTargetError(
-      "exactly one of bugId and attachmentId must be set",
+      "exactly one of issueId and attachmentId must be set",
     );
   }
 
-  if (targetType === "bug") {
-    if (bugId === null) {
-      throw new InvalidFlagTargetError("bug flag type requires bugId");
+  if (targetType === "issue") {
+    if (issueId === null) {
+      throw new InvalidFlagTargetError("issue flag type requires issueId");
     }
-    return { bugId, attachmentId: null };
+    return { issueId, attachmentId: null };
   }
 
   if (attachmentId === null) {
@@ -59,5 +59,5 @@ export function assertFlagTarget(
       "attachment flag type requires attachmentId",
     );
   }
-  return { bugId: null, attachmentId };
+  return { issueId: null, attachmentId };
 }

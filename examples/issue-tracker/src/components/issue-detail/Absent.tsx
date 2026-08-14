@@ -7,7 +7,7 @@ import { Skeleton } from "@zeroship/ui";
  * The rail said both with the same glyph. `CcPanel` and `RelationsPanel`
  * rendered a dim `--` while their query was in flight, and four rows above
  * them `QA contact` rendered a dim `--` because nobody is assigned. Same
- * column, same styling, two unrelated facts -- so a bug whose CC list was
+ * column, same styling, two unrelated facts -- so an issue whose CC list was
  * still loading was indistinguishable from one with an empty CC list, and the
  * only way to tell was to wait and see whether it changed.
  *
@@ -16,7 +16,7 @@ import { Skeleton } from "@zeroship/ui";
  * `none` for the two set summaries. They all mean the same thing. A column you
  * are meant to GLANCE at should not ask you to learn four words for empty, so
  * absence is now `--` in every shape -- scalar, person, or set -- matching what
- * the bug tables already print.
+ * the issue tables already print.
  */
 export const ABSENT = "--";
 

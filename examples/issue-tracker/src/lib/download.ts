@@ -5,10 +5,11 @@ import { getAttachment } from "../api";
  *
  * Shared because the same file is offered in two places -- the FILES panel and
  * the chip on the comment it arrived with -- and the second one had no way to
- * do this. It linked to `#/bugs/<id>?attachment=<fileId>`, which looks like a
- * deep link and is not one: the app routed on the hash and split it on "/",
- * so the query rode along inside the bug id and produced a request for a bug
- * called "bug_0346...?attachment=atta_...". Nothing read the parameter either.
+ * do this. It linked to `#/issues/<id>?attachment=<fileId>`, which looks like
+ * a deep link and is not one: the app routed on the hash and split it on "/",
+ * so the query rode along inside the issue id and produced a request for an
+ * issue called "issue_0346...?attachment=atta_...". Nothing read the parameter
+ * either.
  *
  * There is no URL to link to -- attachments come back over RPC as base64, not
  * from a path -- so the honest affordance is an action, not an anchor.

@@ -17,12 +17,12 @@ import { Absent, Pending } from "./Absent";
  * `rel="noreferrer noopener"` because these point at trackers this app knows
  * nothing about.
  */
-export function SeeAlsoPanel({ bugId }: { bugId: string }) {
+export function SeeAlsoPanel({ issueId }: { issueId: string }) {
   const [links, setLinks] = useState<Awaited<ReturnType<typeof listSeeAlso>>>([]);
   // Distinct from `links.length === 0`. Seeding the list empty makes "no links"
-  // and "not asked yet" the same value, so the rail asserted the bug had no
+  // and "not asked yet" the same value, so the rail asserted the issue had no
   // See Also entries for as long as the request took -- and if it failed, for
-  // good. Only after this flips is an empty list a fact about the bug.
+  // good. Only after this flips is an empty list a fact about the issue.
   const [loaded, setLoaded] = useState(false);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -30,13 +30,13 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
 
   const load = useCallback(async () => {
     try {
-      setLinks(await listSeeAlso({ bugId }));
+      setLinks(await listSeeAlso({ issueId }));
       setLoaded(true);
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [bugId]);
+  }, [issueId]);
 
   useEffect(() => {
     void load();
@@ -47,7 +47,7 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
     setBusy(true);
     setError(null);
     try {
-      await addSeeAlso({ bugId, url: url.trim() });
+      await addSeeAlso({ issueId, url: url.trim() });
       setUrl("");
       await load();
     } catch (err) {

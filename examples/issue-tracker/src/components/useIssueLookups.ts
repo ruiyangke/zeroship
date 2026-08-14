@@ -6,9 +6,9 @@ import { useAsync } from "./rpc";
 type Row = { productId?: string | null; assigneeId?: string | null; reporterId?: string | null };
 
 /**
- * The id-to-label maps a bug table needs, for the rows it is actually showing.
+ * The id-to-label maps an issue table needs, for the rows it is actually showing.
  *
- * A bug row carries `productId` and `assigneeId`, and a table that renders
+ * An issue row carries `productId` and `assigneeId`, and a table that renders
  * them raw prints `prod_034607nk...` and `user_0345pl8p...` in the columns a
  * reader scans.
  *
@@ -21,7 +21,7 @@ type Row = { productId?: string | null; assigneeId?: string | null; reporterId?:
  * back into ids, silently, which is the defect these maps exist to prevent.
  *
  * Both queries are allowed to fail. `users.resolve` needs authentication while
- * bug search does not, so an anonymous reader legitimately gets nothing back
+ * issue search does not, so an anonymous reader legitimately gets nothing back
  * and the table falls back to the id, as it always could.
  */
 // `rows` is REQUIRED and has no default. A default of `[]` typechecks at every
@@ -29,7 +29,7 @@ type Row = { productId?: string | null; assigneeId?: string | null; reporterId?:
 // again with the compiler silent -- the same shape as the optional
 // `productsById` prop this hook was written to replace. Defaulting it once here
 // would have undone the fix it implements.
-export function useBugLookups(rows: readonly Row[]): {
+export function useIssueLookups(rows: readonly Row[]): {
   productsById: Record<string, string>;
   productKeysById: Record<string, string>;
   usersById: Record<string, string>;

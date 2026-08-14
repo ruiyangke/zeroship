@@ -59,6 +59,22 @@ describe("QuickSearch parser", () => {
     ]);
   });
 
+  it("reads kind as its own axis, beside severity", () => {
+    expect(parseQuickSearch("kind:Enhancement sev:critical")).toEqual([
+      { field: "kind", value: "enhancement" },
+      { field: "severity", value: "critical" },
+    ]);
+  });
+
+  it("no longer accepts enhancement as a severity", () => {
+    // The value moved from the severity vocabulary to the kind vocabulary, so
+    // the old spelling has to stop parsing rather than quietly keep matching
+    // nothing: `sev:enhancement` used to be how a feature request was found.
+    expect(() => parseQuickSearch("sev:enhancement")).toThrow(
+      QuickSearchSyntaxError,
+    );
+  });
+
   it("preserves repeated clauses instead of overwriting them", () => {
     expect(parseQuickSearch("P1 P2 comp:parser comp:lexer")).toEqual([
       { field: "priority", value: "P1" },

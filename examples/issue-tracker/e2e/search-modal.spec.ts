@@ -5,7 +5,7 @@ import { signIn } from "./session";
 import { productKey } from "./keys";
 
 /**
- * Advanced search is a modal over the bug list, not a page of its own.
+ * Advanced search is a modal over the issue list, not a page of its own.
  *
  * It used to be a separate route with its own results table, so running a
  * search left you somewhere other than the list you started from, looking at
@@ -21,7 +21,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 const RUN = `${process.pid}-${Date.now()}`;
 
-test("the builder runs a search into the bug list and hands it back", async ({
+test("the builder runs a search into the issue list and hands it back", async ({
   page,
   baseURL,
   context,
@@ -46,7 +46,7 @@ test("the builder runs a search into the bug list and hands it back", async ({
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
   const summary = `Findable by builder ${RUN}`;
-  await rpc("bugs.create", {
+  await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -54,7 +54,7 @@ test("the builder runs a search into the bug list and hands it back", async ({
     description: "d",
   });
 
-  await page.goto("/bugs");
+  await page.goto("/issues");
   await expect(page.locator("table tbody tr").first()).toBeVisible();
 
   // There is no Search destination in the rail any more.

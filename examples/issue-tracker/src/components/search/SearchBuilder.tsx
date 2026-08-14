@@ -1,5 +1,5 @@
 // The structured field builder and saved searches, rendered as a modal over
-// the bug list.
+// the issue list.
 //
 // The QuickSearch box that used to live beside them is gone: its shorthand is
 // parsed in the list's own search input now, so the feature is reachable
@@ -15,18 +15,19 @@ import {
   saveSavedSearch,
   structuredSearch,
 } from "../../api";
-import { ALL_BUG_COLUMNS, BugResultsTable, type BugColumnKey } from "../BugResultsTable";
+import { ALL_ISSUE_COLUMNS, IssueResultsTable, type IssueColumnKey } from "../IssueResultsTable";
 import { AsyncSection, ErrorState, Loading } from "../StateViews";
 import { errorMessage, isUnauthenticated, toPromise, useAsync } from "../rpc";
-import type { Bug } from "../types";
+import type { Issue } from "../types";
 
-const RESULT_COLUMNS: BugColumnKey[] = ["id", "status", "resolution", "severity", "priority", "summary", "updated"];
+const RESULT_COLUMNS: IssueColumnKey[] = ["id", "status", "resolution", "kind", "severity", "priority", "summary", "updated"];
 
 type Field =
   | "id"
   | "productId"
   | "componentId"
   | "summary"
+  | "kind"
   | "status"
   | "resolution"
   | "severity"
@@ -39,6 +40,7 @@ type Operator = "eq" | "ne" | "contains" | "exists";
 
 const FIELDS: Field[] = [
   "summary",
+  "kind",
   "status",
   "resolution",
   "severity",
@@ -82,7 +84,7 @@ function conditionsToWhere(conditions: Condition[]): WhereNode {
   return { op: "and", clauses };
 }
 
-export function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }) {
+export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => void }) {
   const [conditions, setConditions] = useState<Condition[]>([newCondition()]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +96,8 @@ export function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }
     try {
       const where = conditionsToWhere(conditions);
       setLastWhere(where);
-      const bugs = await structuredSearch({ where, limit: 100 });
-      onResults(bugs);
+      const issues = await structuredSearch({ where, limit: 100 });
+      onResults(issues);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -107,7 +109,7 @@ export function FieldBuilder({ onResults }: { onResults: (bugs: Bug[]) => void }
     <section className="field-builder">
       {/* Not "Advanced search" again. The page heading already says that, and
           the two sat one above the other -- the same duplicate-heading defect
-          the bug page had. This names what the section IS: the structured
+          the issue page had. This names what the section IS: the structured
           builder, as opposed to the QuickSearch box above it. */}
       <h2>Field builder</h2>
       {conditions.map((condition, index) => (

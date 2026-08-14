@@ -3,13 +3,13 @@ import { expect, test } from "@playwright/test";
 import { signIn } from "./session";
 
 /**
- * Every bug table names its product and assignee.
+ * Every issue table names its product and assignee.
  *
- * `BugResultsTable` takes `productsById` and `usersById` and falls back to the
+ * `IssueResultsTable` takes `productsById` and `usersById` and falls back to the
  * raw id for anything missing. Those props were optional and three of the four
  * call sites -- the dashboard and both advanced-search tables -- left them out
  * entirely, so those pages printed `prod_034607nk...` and `user_0345pl8p...`
- * in the columns a reader scans. Only the bug list passed them, which is why
+ * in the columns a reader scans. Only the issue list passed them, which is why
  * looking at one page made the table seem fine.
  *
  * The props are required now, so a NEW call site cannot repeat this. This spec
@@ -25,7 +25,7 @@ const RUN = `${process.pid}-${Date.now()}`;
 // quietly stop this from matching.
 const RAW_ID = /\b(prod|user)_[A-Za-z0-9]{10,}/;
 
-test("no bug table falls back to raw product or user ids", async ({ page, baseURL, context }) => {
+test("no issue table falls back to raw product or user ids", async ({ page, baseURL, context }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
   const rpc = async (proc: string, json: unknown) => {
@@ -42,7 +42,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
     description: "core",
   });
   const version = await rpc("versions.create", { productId: product.id, name: "1.0" });
-  const bug = await rpc("bugs.create", {
+  const issue = await rpc("issues.create", {
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
@@ -52,19 +52,19 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
   const me = await rpc("users.me", {});
   // Assigned and CC'd so the row reaches the dashboard's sections, which are
   // the ones that were wrong.
-  await rpc("bugs.reassign", { id: bug.id, assigneeId: me.id });
-  await rpc("cc.add", { bugId: bug.id, userId: me.id });
+  await rpc("issues.reassign", { id: issue.id, assigneeId: me.id });
+  await rpc("cc.add", { issueId: issue.id, userId: me.id });
 
   const tableOf = (page_: typeof page) => page_.locator("table").first();
 
-  // The bug list, filtered to this run so the assertion is about this row.
-  await page.goto("/bugs");
+  // The issue list, filtered to this run so the assertion is about this row.
+  await page.goto("/issues");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(tableOf(page)).toContainText(productName);
   expect(
     ((await tableOf(page).textContent()) ?? "").match(RAW_ID)?.[0] ?? null,
-    "the bug list should not print raw ids",
+    "the issue list should not print raw ids",
   ).toBeNull();
 
   // The dashboard. Its three tables are the ones that were rendering ids, and
@@ -82,7 +82,7 @@ test("no bug table falls back to raw product or user ids", async ({ page, baseUR
     "the dashboard should not print raw ids in any of its three tables",
   ).toBeNull();
 
-  // The advanced-search page is gone: the builder is a modal over the bug
+  // The advanced-search page is gone: the builder is a modal over the issue
   // list now, so there is no second results table to check. The dashboard
   // assertion above already covers a table that had the same defect.
 });

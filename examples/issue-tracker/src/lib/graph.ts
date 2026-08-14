@@ -57,9 +57,9 @@ export function wouldCreateDirectedCycle(
 /**
  * Return the complete duplicate cluster around `start`.
  *
- * Duplicate links are directed toward the canonical bug, but a cluster is
+ * Duplicate links are directed toward the canonical issue, but a cluster is
  * intentionally traversed in both directions so it includes the canonical
- * bug, direct duplicates, and duplicates-of-duplicates.
+ * issue, direct duplicates, and duplicates-of-duplicates.
  */
 export function weaklyConnectedComponent(
   edges: Iterable<DirectedEdge>,
