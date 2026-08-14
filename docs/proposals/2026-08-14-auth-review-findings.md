@@ -368,7 +368,39 @@ evidence belongs to that decision; whoever lands it should pick this up.
 
 ---
 
-## 12. The `CI` fail-loud guard has never fired - OPEN, low priority
+## 12. TOTP 2FA cannot be switched on by a user - OPEN (status corrected)
+
+`docs/feature-map.md` marked TOTP 2FA 🟢, which that file's own legend defines
+as "Implemented, wired, and exercised end-to-end". It is implemented and it is
+exercised - `crates/auth/tests/totp_enroll_reauth_test.rs` drives the real route,
+and there are four more TOTP test files. It is not WIRED.
+
+The three enrolment routes are POST-only (`/me/2fa/enroll`, `/me/2fa/confirm`,
+`/me/2fa/disable`, `server.rs:156-166`), so reaching them needs a caller, and a
+repo-wide search finds none outside the routes themselves, the tests, and two
+docs. `me.html` - the account page that owns the `/me` namespace those routes
+sit under - renders exactly three sections: the profile, linked accounts, and
+"Link an account", the last of which even says "coming soon". Two-factor is not
+mentioned. So `totp_challenge.html` is reachable only for an account somehow
+enrolled by other means.
+
+A security feature a user cannot switch on is, from that user's side, absent.
+
+Corrected to 🟡 ("Core works, but a documented sub-capability or wiring is
+incomplete") with the gap named in the Notes column. The status is what was
+fixed; BUILDING the enrolment UI is left open deliberately - it needs a QR or
+`otpauth://` render, a confirm step, and one-time backup-code display, and where
+that surface belongs (this page, or the console) is a product decision, not a
+review one.
+
+Two greps missed this before one found it, which is worth recording: the routes
+are `/me/2fa/*`, not the `/totp/*` the handler module name suggests. Searching
+for the module's name rather than the route's spelling returns nothing and reads
+exactly like "no callers, as expected".
+
+---
+
+## 13. The `CI` fail-loud guard has never fired - OPEN, low priority
 
 `auth_token_anchors_test.rs` panics if `CI` is set while
 `GATEWAY_ANCHORS_DB_URL` is not, so the coverage hole cannot survive in CI. The
