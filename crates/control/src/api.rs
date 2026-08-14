@@ -137,19 +137,59 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
     }
 }
 
+/// Log the real cause, return a generic body -- plus the correlation id
+/// that joins the two.
+///
+/// The id was already minted and already logged here; it just never left
+/// the function. That made every control-plane infrastructure failure
+/// undiagnosable from the outside: a creator could report "it returned
+/// internal error" and an operator had no key to search the logs by. The
+/// message stays generic on purpose. This is not a message redesign; it is
+/// the difference between undiagnosable and reportable.
+///
+/// ## Why `trace_id` and not `request_id`
+///
+/// The wire contract already chose. `sdks/rpc/src/error.ts` documents the
+/// envelope as `{ code, message, details?, retryable, trace_id? }` and lifts
+/// `trace_id`/`traceId`; `RpcCtx` (`crates/runtime/src/rpc/ctx_holder.rs`)
+/// carries a `trace_id` field. This tree already has more request-id
+/// concepts than it can join -- the gateway's `X-Request-Id`, the runtime's
+/// per-isolate `u64`, and `authz_guard::request_id` in this very crate --
+/// and adding a fourth spelling of "the id in the error body" would make
+/// that worse, not better. So the id goes out under the name the clients
+/// already read.
+///
+/// The log field is renamed to match: the body value and the log value are
+/// the same string under the same key, so an operator handed a `trace_id`
+/// greps for `trace_id` and finds the cause. A field that is emitted under
+/// one name and logged under another correlates nothing.
+///
+/// ## What this does NOT close
+///
+/// Only the control plane. A creator app's own 5xx goes through
+/// `crates/runtime/src/core/dispatch.rs`'s rail, which emits its per-isolate
+/// `u64` dispatch counter -- so a cold app's first failure still reads
+/// `"1"`. `trace_id` there falls back to `format_trace_id_hex(counter)`
+/// because nothing upstream sets `traceparent`, and workflow runs carry no
+/// trace context at all. Joining those needs the edge id propagated through
+/// the worker into the runtime and into workflow runs, which is separate
+/// work; see the header of `is_public_error_code` for the shape of the gap.
 fn infrastructure_error_response(
     status: StatusCode,
     context: &'static str,
     detail: impl std::fmt::Display,
 ) -> web::HttpResponse {
-    let request_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4().to_string();
     tracing::error!(
-        request_id = %request_id,
+        trace_id = %trace_id,
         context,
         error = %detail,
         "control-plane infrastructure error"
     );
-    web::HttpResponse::build(status).json(&serde_json::json!({"error": "internal error"}))
+    web::HttpResponse::build(status).json(&serde_json::json!({
+        "error": "internal error",
+        "trace_id": trace_id,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2250,6 +2290,48 @@ mod error_response_tests {
         serde_json::from_slice(&buf).expect("body is JSON")
     }
 
+    /// Assert the two properties every infrastructure body must hold, and
+    /// return the correlation id.
+    ///
+    /// 1. The message is still generic. Emitting the id is NOT permission
+    ///    to emit the cause; `detail` goes to `tracing` and nowhere else.
+    /// 2. A `trace_id` is present and is a parseable UUID -- the key an
+    ///    operator greps the logs by. The field is named `trace_id`
+    ///    because that is the spelling the SDKs already read; see
+    ///    `infrastructure_error_response` for why a fourth id name was
+    ///    not introduced.
+    ///
+    /// WHAT THIS DOES NOT CATCH: that the id in the body is the SAME id
+    /// the `tracing::error!` recorded, nor that both use the same field
+    /// name. Both come from one local binding, so a divergence would need
+    /// someone to mint a second UUID; no test here reads the log line back.
+    fn assert_sanitized_with_id(body: &serde_json::Value) -> String {
+        assert_eq!(
+            body.get("error").and_then(serde_json::Value::as_str),
+            Some("internal error"),
+            "the cause must stay out of the body: {body}"
+        );
+        let id = body
+            .get("trace_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("body must carry trace_id: {body}"))
+            .to_string();
+        uuid::Uuid::parse_str(&id)
+            .unwrap_or_else(|e| panic!("trace_id must be a UUID ({id}): {e}"));
+        assert!(
+            body.get("request_id").is_none(),
+            "the id rides under `trace_id` only; a second spelling would be a \
+             fourth id concept: {body}"
+        );
+        // Exactly two keys: emitting the id must not have opened the body up.
+        assert_eq!(
+            body.as_object().map(serde_json::Map::len),
+            Some(2),
+            "body carries error + trace_id and nothing else: {body}"
+        );
+        id
+    }
+
     #[compio::test]
     async fn registry_database_error_response_is_sanitized() {
         let resp = error_response(RegistryError::Database(
@@ -2257,7 +2339,11 @@ mod error_response_tests {
         ));
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        assert_sanitized_with_id(&body);
+        assert!(
+            !body.to_string().contains("postgres://"),
+            "the DSN must not ride out: {body}"
+        );
     }
 
     #[compio::test]
@@ -2267,14 +2353,14 @@ mod error_response_tests {
         ));
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        assert_sanitized_with_id(&body);
 
         let resp = ingest_error_to_response(IngestError::Internal(
             "put_manifest: postgres://internal".into(),
         ));
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        assert_sanitized_with_id(&body);
     }
 
     #[compio::test]
@@ -2286,7 +2372,26 @@ mod error_response_tests {
         );
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        let id = assert_sanitized_with_id(&body);
+        assert!(
+            !body.to_string().contains("worker.internal"),
+            "the upstream host must not ride out: {body}"
+        );
+        assert!(
+            !body.to_string().contains("secret body"),
+            "the upstream body must not ride out: {body}"
+        );
+
+        // ONE-VARIABLE CONTROL on the id itself: a second call with a
+        // different `detail` must get a DIFFERENT id. A constant would
+        // satisfy every assertion above and correlate nothing.
+        let other = infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            "a different failure",
+        );
+        let other_id = assert_sanitized_with_id(&body_json(other).await);
+        assert_ne!(id, other_id, "each response gets its own correlation id");
     }
 }
 
