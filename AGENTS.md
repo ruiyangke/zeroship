@@ -360,9 +360,13 @@ cargo build --release
 zeroship serve myapp.js --port 3000
 
 # Run platform (multi-node)
-zeroship-control --port 9090 --db postgres://... --blob-store ./bundles --control-key <k>
-zeroship-worker --port 8080 --threads 16 --control-url http://localhost:9090 --control-key <k> --blob-store ./bundles
-zeroship-gate    --port 80   --control-url http://localhost:9090 --control-key <k> --worker-urls http://localhost:8080 --blob-store ./bundles
+# Secrets are PATH flags: `--<name>-file`. There is no `--control-key <k>` and
+# no `--db <dsn>` value flag; both were deleted. `zeroship dev init` writes the
+# key material, and every flag below has a canonical ZEROSHIP_* env twin
+# (docs/reference/env-vars.md).
+zeroship-control --port 9090 --database-url-file ./secrets/control-dsn --blob-store ./bundles --control-key-file ./secrets/control-key
+zeroship-worker --port 8080 --threads 16 --control-url http://localhost:9090 --control-key-file ./secrets/control-key --blob-store ./bundles
+zeroship-gate    --port 80   --control-url http://localhost:9090 --control-key-file ./secrets/control-key --worker-urls http://localhost:8080 --blob-store ./bundles
 
 # Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<PAT>, or ZEROSHIP_TOKEN)
 zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>

@@ -405,10 +405,10 @@ mod tests {
 
     #[test]
     fn require_nonempty_rejects_missing_values() {
-        let err = require_nonempty("CONTROL_KEY / --control-key", "")
+        let err = require_nonempty("ZEROSHIP_CONTROL_KEY / --control-key-file", "")
             .expect_err("missing secret");
-        assert_eq!(err, "CONTROL_KEY / --control-key is required");
-        require_nonempty("CONTROL_KEY / --control-key", "secret").expect("present");
+        assert_eq!(err, "ZEROSHIP_CONTROL_KEY / --control-key-file is required");
+        require_nonempty("ZEROSHIP_CONTROL_KEY / --control-key-file", "secret").expect("present");
     }
 
     /// A label no declaration could ever produce, so a message that carries it
