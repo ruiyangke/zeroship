@@ -300,30 +300,30 @@ SQL
 
 # --- THE PRE-MIGRATE CONTROL ------------------------------------------------
 #
-# The app is deployed and serving, and its schema does not exist yet. This is
-# the state a creator reaches by following the documented chain up to `zeroship
-# deploy`, and the arm below is the failure it produces: `env.db` opens a
-# transaction, issues `SET LOCAL ROLE "app_<id>_role"`
-# (crates/plugin-db/src/auth/bootstrap.rs), and Postgres answers that the role
-# does not exist. The worker turns that into an opaque `internal error` at the
-# edge, which is why the cause has to be read out of the worker log rather than
-# the response.
+# The app is deployed and serving, and its database schema does not exist yet.
+# That is the state a creator reaches by following the documented chain up to
+# `zeroship deploy`, and this arm pins the thing that is missing: the per-app
+# role. Every `env.db` call opens a transaction and issues
+# `SET LOCAL ROLE "app_<id>_role"` (crates/plugin-db/src/auth/bootstrap.rs), so
+# an absent role fails the first database call and reaches the end user as an
+# opaque `internal error`.
 #
-# It is a CONTROL, not a spec: it pins that the next stage's green is caused by
-# the migrate step and not by an app that would have worked anyway. Without it,
-# a `zeroship migrate` that silently did nothing would still leave every later
-# assertion passing.
-PRE_BODY="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/hit/ready")"
-PRE_WROTE="$(printf '%s' "$PRE_BODY" | jget '.wrote')"
-if [ "$PRE_WROTE" = "true" ]; then
-  fail "env.db worked BEFORE migrations were applied - the control proves nothing; \
-the app's schema already existed (leftover Postgres volume?)"
-else
-  pass "env.db fails on the deployed, unmigrated app (the failure this command fixes)"
-  grep -qi 'does not exist' "$WORK/worker.log" \
-    && pass "the worker log names the missing per-app role" \
-    || echo "    note: worker log did not name the role; body=$(printf '%s' "$PRE_BODY" | head -c 120)"
-fi
+# READ FROM pg_roles, NOT BY CALLING THE APP. The obvious control -- send one
+# request and watch it fail -- was written first and MEASURED to break stage 5:
+# with it, `requests` came back 32 against 33 sent, because a dispatch that
+# fails this way did not produce a `requests` row. That is its own question and
+# this harness is not the place to answer it; what matters here is that the
+# control must not perturb the counters stage 5 asserts exactly. Reading the
+# catalog costs no request and states the fact more directly than a 500 does.
+#
+# It is a CONTROL, not a spec: it pins that stage 4's green is caused by the
+# migrate step. Without it, a `zeroship migrate` that silently did nothing would
+# leave every later assertion passing.
+APP_ROLE="app_${APP}_role"
+ROLE_BEFORE="$(psql_exec -tA -c "SELECT count(*) FROM pg_roles WHERE rolname='$APP_ROLE'" 2>/dev/null | tr -d '[:space:]')"
+[ "$ROLE_BEFORE" = "0" ] \
+  && pass "the per-app role $APP_ROLE does NOT exist on the deployed, unmigrated app" \
+  || fail "$APP_ROLE already existed before migrate (count=$ROLE_BEFORE) - the control proves nothing"
 
 # --- APPLY THROUGH THE CLI, THROUGH CONTROL ---------------------------------
 #
@@ -361,6 +361,14 @@ MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CON
 grep -qE 'Applied 0 migration op' <<<"$MIGRATE_AGAIN" \
   && pass "a second zeroship migrate is a no-op (idempotent)" \
   || fail "re-running zeroship migrate was not a no-op: $MIGRATE_AGAIN"
+
+# The other half of the control: the role the apply path is the sole producer of
+# now exists. Paired with the count of 0 above, this is one variable changed --
+# the migrate step -- and one observation changed.
+ROLE_AFTER="$(psql_exec -tA -c "SELECT count(*) FROM pg_roles WHERE rolname='$APP_ROLE'" 2>/dev/null | tr -d '[:space:]')"
+[ "$ROLE_AFTER" = "1" ] \
+  && pass "$APP_ROLE exists after zeroship migrate (0 -> 1 across the one step)" \
+  || fail "$APP_ROLE still missing after migrate (count=$ROLE_AFTER)"
 sleep 5
 
 echo ""
@@ -385,14 +393,7 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-# PRE_MIGRATE_REQUESTS is the single gateway call the pre-migrate control made
-# in stage 3. It FAILED inside the app (no per-app role), and the worker meters
-# the platform counters per DISPATCH, not per success, so it is billed like any
-# other request and has to be counted here. Leaving it out is how the exact
-# `requests` equality below turns into an off-by-one that reads as a metering
-# bug.
-PRE_MIGRATE_REQUESTS=1
-APP_REQUESTS=$((PRE_MIGRATE_REQUESTS + READY_TRIES + N_REQ))
+APP_REQUESTS=$((READY_TRIES + N_REQ))
 echo "    env.db response on readiness attempt $READY_TRIES of 30: $READY_RESP"
 [ "$READY" = "1" ] && pass "probe response has wrote=true and readBack=$READBACK" || { fail "env.db probe did not succeed"; tail -50 "$WORK/worker.log"; exit 1; }
 
@@ -544,7 +545,7 @@ done
 # The one counter the harness knows exactly, because it made every request.
 [ "$REQ" = "$APP_REQUESTS" ] 2>/dev/null \
   && pass "requests=$REQ EQUALS the $APP_REQUESTS requests this harness sent" \
-  || { fail "requests=$REQ but this harness sent $APP_REQUESTS ($PRE_MIGRATE_REQUESTS pre-migrate control + $READY_TRIES readiness + $N_REQ)"; tail -50 "$WORK/control.log"; exit 1; }
+  || { fail "requests=$REQ but this harness sent $APP_REQUESTS ($READY_TRIES readiness + $N_REQ)"; tail -50 "$WORK/control.log"; exit 1; }
 
 # NOT AN AMOUNT CHECK, and the pass line says so. EXPECTED_CHARGE is computed
 # from the very rows this queries, so it can only establish that db_reads and
