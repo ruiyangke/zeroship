@@ -15,10 +15,33 @@ sandbox / hosted-build environment is **deferred** (extracted to the standalone
 ```
 agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   → pnpm build  (@zeroship/vite-plugin)        → dist/app.zship
+                                               + generated/zeroship/migrations.ir.json
   → zeroship deploy dist/app.zship --app=<id> --token=<PAT>
   → control plane ingests → BlobStore + route registry
+  → zeroship migrate --app=<id> --token=<PAT>   ← env.db apps ONLY, and REQUIRED
+  → control authorizes → zeroship-migrated applies → per-app schema + role
   → gateway pulls routes (5s) → serves the app (static + RPC + env.* primitives)
 ```
+
+**Deploy is not the last step for an app that uses `env.db`.** The `.zship`
+carries the app's code and the folded runtime schema *descriptor*; it does not
+carry the migration documents, and the deploy endpoint refuses to apply them
+(`crates/control/src/api.rs`, `migration_approval_removed`). Applying them is
+what creates the per-app schema and the `app_<id>_role` the runtime does
+`SET LOCAL ROLE` to on every database call, and `zeroship-migrated`'s apply path
+is that role's only producer. Deploy without migrating and the app serves its
+static assets, dispatches its RPCs, and fails the first `env.db` call with
+`role "app_..._role" does not exist` — which reaches the end user as
+`{"message":"internal error"}`.
+
+`zeroship migrate` posts to the CONTROL plane, which authorizes the caller for
+that app and forwards to `migrated`. It is not a shortcut around the migration
+service's trust profile: control forwards the caller's own bearer, `migrated`
+re-verifies it independently, and the operator-ceiling ⊓ creator-draft policy
+composition is unchanged. The hop exists because `migrated` holds the superuser
+provisioning DSN and binds loopback in every deployment we ship, so control is
+the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
+`migrated` service: "Creators drive it through control").
 
 - **Scaffold:** `examples/starter/` — a minimal, agent-facing zeroship app
   (fetch/static SPA + `getMessages`/`addMessage` RPCs via `@zeroship/rpc/server`,
@@ -43,6 +66,10 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   `dist/app.zship`. Applies to `examples/starter/` and the
   `create-zeroship-app` template.
 - **Deploy:** `zeroship deploy ./dist/app.zship --app=<id> --control=<url> --token=<PAT>`.
+- **Migrate** (apps that use `env.db`): `zeroship migrate --app=<id> --control=<url> --token=<PAT>`.
+  Defaults to `generated/zeroship/migrations.ir.json`, which the build writes
+  beside the other two gen-types artifacts. Idempotent — re-running with nothing
+  new to apply reports `Applied 0 migration op(s)`.
 
 ## What is validated today (`tests/golden_path.sh`)
 
