@@ -68,6 +68,12 @@ export default defineApp({
     "rpc:seeAlso.remove": { auth: "user" },
     "rpc:seeAlso.list": { auth: "user" },
     "rpc:groups.create": { auth: "user" },
+    // Was MISSING until the policy list was diffed against the procedure list.
+    // It fell through to the fail-closed `auth: "user"` default, which happens
+    // to be the right answer for a destructive admin operation -- so nothing
+    // broke, and nothing would have. That is the problem: the safety here was
+    // the default, not the review this file exists to make possible.
+    "rpc:groups.delete": { auth: "user" },
     "rpc:flagTypes.create": { auth: "user" },
     "rpc:flagTypes.list": { auth: "user" },
     "rpc:groups.list": { auth: "user" },
