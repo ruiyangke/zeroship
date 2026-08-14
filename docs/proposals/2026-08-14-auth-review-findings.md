@@ -339,7 +339,36 @@ consistent with the headers being absent everywhere.
 
 ---
 
-## 11. The `CI` fail-loud guard has never fired - OPEN, low priority
+## 11. Re-clicking a verification link says "session expired" - OPEN
+
+`crates/auth/src/ui/verify.rs:90-102` collapses three outcomes into one arm.
+`verification::redeem_and_mark_verified` returns `Ok(None)` when the token is
+invalid, when it is expired, AND when it has already been redeemed; all three
+render `PublicErrorMessage::SessionExpired` - the words "session expired" plus
+`Error code: session_expired`.
+
+The already-redeemed case is not a rare one. People double-click links in mail
+clients, forward the mail to themselves, and - the case that costs the most -
+some corporate mail scanners fetch every link in an incoming message before the
+recipient ever sees it, which consumes the single-use token. The user then
+clicks their own link and is told a session expired.
+
+Three things are wrong with that for the user: nothing expired, their email IS
+verified, and the page offers no next step. The honest version needs no
+weakening of the single-use property and no distinguishing of the three cases -
+something closer to "This link is no longer valid. If you have already verified,
+sign in." with a link to `/login` would be true of all three arms at once.
+
+**Why this is filed rather than fixed.** There is an in-flight
+`docs/proposals/2026-08-14-error-message-quality.md` doing a read-only census of
+user-reachable error text across `crates/`, `sdks/` and `libs/`, explicitly
+"investigation only; nothing implemented". Rewording one auth error while a
+taxonomy for all of them is being designed would pre-empt its conclusions. The
+evidence belongs to that decision; whoever lands it should pick this up.
+
+---
+
+## 12. The `CI` fail-loud guard has never fired - OPEN, low priority
 
 `auth_token_anchors_test.rs` panics if `CI` is set while
 `GATEWAY_ANCHORS_DB_URL` is not, so the coverage hole cannot survive in CI. The
