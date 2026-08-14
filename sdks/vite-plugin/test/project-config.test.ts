@@ -154,6 +154,13 @@ describe("validation", () => {
     assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /rpcEndpoint/);
   });
 
+  // Symmetry with the Rust reader, which refuses the same thing. One tool
+  // loading a file the other rejects is the divergence class this file removes.
+  test("a foreign $schema id is refused", () => {
+    const body = FULL.replace("project-v1.json", "project-v9.json");
+    assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /project-v9/);
+  });
+
   test("a bad runtime_date is refused", () => {
     assert.throws(
       () => parseProjectConfig("zeroship.jsonc", FULL.replace('"2026-08-14"', '"August 2026"')),

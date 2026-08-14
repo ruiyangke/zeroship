@@ -29,6 +29,7 @@ import {
   FIELD_RULES,
   FORBIDDEN_KEY_NAMES,
   ROOT_KNOWN_KEYS,
+  SCHEMA_ID,
   ROOT_REQUIRED_KEYS,
   BUILD_KNOWN_KEYS,
   BUILD_REQUIRED_KEYS,
@@ -120,6 +121,14 @@ export function loadProjectConfig(path: string): LoadedProjectConfig {
 
 function validate(path: string, root: Json): void {
   rejectForbiddenNames(path, root, "");
+  // A `$schema` naming a different contract is a file written against other
+  // rules. Validating it against v1 would report the mismatches as the
+  // creator's typos. The Rust reader refuses the same thing; an asymmetry here
+  // would mean one tool loading a file the other rejects, which is the class of
+  // divergence this whole file exists to remove.
+  if (typeof root.$schema === "string" && root.$schema !== SCHEMA_ID) {
+    throw new Error(`${path}: $schema is ${root.$schema}, but this build reads ${SCHEMA_ID}`);
+  }
   checkObject(path, root, "", ROOT_KNOWN_KEYS, ROOT_REQUIRED_KEYS);
   checkMembers(path, root, "", true);
 
