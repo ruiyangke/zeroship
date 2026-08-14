@@ -1022,6 +1022,7 @@ Errors carry a `.code` property where applicable:
 | `VALIDATION`                | Input fails schema validation.                      |
 | `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
 | `OPTIMISTIC_CONCURRENCY`    | `update` with a CAS version that didn't match.     |
+| `SCHEMA_NOT_PROVISIONED`    | The app's database was never provisioned: its per-app Postgres role does not exist. Run `zeroship migrate` for the app. Deploying alone does not create it, so the first `env.db` call is what discovers it. |
 | `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
 | `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
 

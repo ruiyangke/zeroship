@@ -323,7 +323,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
         let mut err = DbError::from_pg(&e);
         crate::error::prefix_message(
             &mut err,
-            "db: autocommit session setup (per-app §17.5 + DB-1 guards): ",
+            "db: per-app session setup: ",
         );
         err
     })?;

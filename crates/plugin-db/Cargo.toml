@@ -204,5 +204,16 @@ name = "distributed_live"
 path = "tests/distributed_live.rs"
 required-features = ["live-db-tests"]
 
+# The missing-per-app-role classification (`schema_not_provisioned`). Needs
+# a live server because `compio_postgres::Error` has no public constructor,
+# so the SQLSTATE this classifies can only be produced by PostgreSQL itself.
+# It touches no `test-helpers` symbol, but carries the guard anyway so bare
+# `cargo test -p zeroship-plugin-db` does not auto-discover a target that
+# panics without a database.
+[[test]]
+name = "missing_role"
+path = "tests/missing_role.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true
