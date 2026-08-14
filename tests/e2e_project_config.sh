@@ -52,7 +52,9 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 : "${ZEROSHIP_WORKER_PORT:=8091}"
 : "${ZEROSHIP_GATEWAY_PORT:=8021}"
 : "${ZEROSHIP_MIGRATED_PORT:=9231}"
-: "${PG_PORT:=5461}"
+# 5461 was taken by an unrelated container on the machine this was written on.
+# The band below is checked free; every value is overridable.
+: "${PG_PORT:=5471}"
 : "${PG_CONTAINER:=zs-e2e-projcfg-pg}"
 
 PASS=0; FAIL=0; PIDS=()
