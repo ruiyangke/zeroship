@@ -1,11 +1,24 @@
 //! `/signup` GET + POST handlers.
 //!
 //! Signup creates the `zeroship.users` row, then redirects back to `/login`
-//! with the same native OP `return_to` continuation target.
+//! carrying a `return_to` continuation, so the new account lands wherever it
+//! was headed once it signs in.
+//!
+//! The continuation is sanitized by the SAME rule `/login` uses -- one call
+//! to `return_to::sanitize(raw, return_to::SAFE_DEFAULT)`. Any target that is
+//! absent, over-long, or not a same-origin path becomes `SAFE_DEFAULT`; none
+//! of them is an error. This is not decoration: `/login` renders
+//! `href="/signup?return_to={{ return_to }}"` with its own already-sanitized
+//! value, which on a plain visit is `SAFE_DEFAULT` (`/me`). Signup used to
+//! demand that the continuation parse as an `/oauth2/authorize` request and
+//! that exactly one copy of it be present, so BOTH the link the login page
+//! renders and a bare `/signup` answered 400 "invalid request" on a page that
+//! still drew the form. Only an OIDC RP continuation could reach signup at
+//! all.
 //!
 //! Account-enumeration defense: a duplicate-email INSERT is treated the
 //! same as a fresh INSERT (same redirect, same status, same response). The
-//! attacker can already learn this via `/login` timing if we leaked here —
+//! attacker can already learn this via `/login` timing if we leaked here --
 //! and the OWASP guidance is to make signup look uniform.
 
 use askama::Template;
@@ -14,14 +27,13 @@ use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
-use url::form_urlencoded;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password, verification};
-use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use crate::return_to;
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 use zeroship_mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
@@ -53,17 +65,11 @@ pub struct SignupForm {
 //
 // ntex's per-thread service futures are intentionally `!Send`.
 #[allow(clippy::unused_async, clippy::future_not_send)]
-pub async fn get(
-    query: ntex::web::types::Query<SignupQuery>,
-    cfg: ntex::web::types::State<Arc<AuthConfig>>,
-) -> HttpResponse {
-    let continuation = match SignupContinuation::from_query(&query) {
-        Ok(continuation) => continuation,
-        Err(_) => return render_signup_bad_request(None, &cfg, "invalid request"),
-    };
+pub async fn get(query: ntex::web::types::Query<SignupQuery>) -> HttpResponse {
+    let return_to = continuation(query.return_to.as_deref());
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
-        return_to: continuation.return_to(),
+        return_to: &return_to,
         csrf: &csrf_token,
         error: None,
     };
@@ -86,10 +92,9 @@ pub async fn post(
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     mailer: ntex::web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
-    let continuation = match SignupContinuation::from_post(&query, &form) {
-        Ok(continuation) => continuation,
-        Err(_) => return render_signup_bad_request(None, &cfg, "invalid request"),
-    };
+    // Form field first, query second -- the same precedence `/login`'s POST
+    // uses, so a form that echoes its hidden field wins over a stale query.
+    let return_to = continuation(form.return_to.as_deref().or(query.return_to.as_deref()));
 
     // 1. CSRF.
     let cookie_header = req
@@ -102,32 +107,24 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_signup_error(Some(&continuation), &cfg, "invalid request");
+        return render_signup_error(&return_to, "invalid request");
     }
 
     // 2. Password length (NIST 800-63B Rev 4: 15 char minimum). We count
     // characters, not bytes, so multibyte passphrases aren't penalised.
     if form.password.chars().count() < 15 {
-        return render_signup_error(
-            Some(&continuation),
-            &cfg,
-            "password must be at least 15 characters",
-        );
+        return render_signup_error(&return_to, "password must be at least 15 characters");
     }
 
     // 3. Email sanity before we enter rate limits, hashing, or storage.
     let email = form.email.trim().to_ascii_lowercase();
     if email_validation::validate_email(&email).is_err() {
-        return render_signup_bad_request(Some(&continuation), &cfg, "enter a valid email");
+        return render_signup_bad_request(&return_to, "enter a valid email");
     }
 
     // 4. Name sanity before entering rate limits, hashing, or storage.
     let Some(name) = normalize_signup_name(&form.name) else {
-        return render_signup_bad_request(
-            Some(&continuation),
-            &cfg,
-            "name must be 1-200 characters",
-        );
+        return render_signup_bad_request(&return_to, "name must be 1-200 characters");
     };
     let name = name.to_string();
 
@@ -150,7 +147,7 @@ pub async fn post(
                 },
             )
             .await;
-            return redirect_to_login(&continuation);
+            return redirect_to_login(&return_to);
         }
         Err(e) => {
             tracing::error!(error = %e, bucket = %signup_ip_key, "signup rate-limit consume failed");
@@ -278,78 +275,32 @@ pub async fn post(
     // 8. Redirect to /login carrying the same continuation so the user can
     // immediately sign in. The verification email is in their inbox; verifying
     // is decoupled from sign-in.
-    redirect_to_login(&continuation)
+    redirect_to_login(&return_to)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SignupContinuation {
-    ReturnTo(String),
+/// The post-signup continuation.
+///
+/// One rule, shared with `/login`: keep a same-origin path, otherwise fall
+/// back to `return_to::SAFE_DEFAULT`. Absent, over-long, cross-origin and
+/// control-character targets all take the fallback -- none of them is an
+/// error, because a signup form the user can see but never submit is worse
+/// than a signup that lands on the default page.
+///
+/// The length bound is applied before `sanitize` so an absurd query string
+/// cannot be echoed back into the rendered form or a `Location` header.
+fn continuation(raw: Option<&str>) -> String {
+    let bounded = raw.filter(|value| value.len() <= MAX_RETURN_TO_BYTES);
+    return_to::sanitize(bounded, return_to::SAFE_DEFAULT)
 }
 
-impl SignupContinuation {
-    fn from_query(query: &SignupQuery) -> Result<Self, SignupContinuationError> {
-        Self::from_inputs(query.return_to.as_deref(), None)
-    }
-
-    fn from_post(query: &SignupQuery, form: &SignupForm) -> Result<Self, SignupContinuationError> {
-        Self::from_inputs(query.return_to.as_deref(), form.return_to.as_deref())
-    }
-
-    fn from_inputs(
-        query_return_to: Option<&str>,
-        form_return_to: Option<&str>,
-    ) -> Result<Self, SignupContinuationError> {
-        let mut targets = Vec::new();
-
-        for return_to in [query_return_to, form_return_to] {
-            if let Some(return_to) = bounded_return_to(return_to)? {
-                targets.push(Self::ReturnTo(return_to));
-            }
-        }
-
-        if targets.len() == 1 {
-            Ok(targets.remove(0))
-        } else {
-            Err(SignupContinuationError)
-        }
-    }
-
-    fn return_to(&self) -> &str {
-        match self {
-            Self::ReturnTo(return_to) => return_to,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SignupContinuationError;
-
-fn redirect_to_login(continuation: &SignupContinuation) -> HttpResponse {
-    let to = match continuation {
-        SignupContinuation::ReturnTo(return_to) => {
-            let return_to_enc: String =
-                form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
-            format!("/login?return_to={return_to_enc}")
-        }
-    };
+fn redirect_to_login(return_to: &str) -> HttpResponse {
+    let to = return_to::login_location(return_to);
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
         HeaderValue::from_str(&to).unwrap_or_else(|_| HeaderValue::from_static("/login")),
     );
     resp.finish()
-}
-
-fn bounded_return_to(return_to: Option<&str>) -> Result<Option<String>, SignupContinuationError> {
-    let Some(return_to) = return_to.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    if return_to.len() > MAX_RETURN_TO_BYTES {
-        return Err(SignupContinuationError);
-    }
-    let request =
-        AuthRequest::parse_return_to(return_to).map_err(|_| SignupContinuationError)?;
-    Ok(Some(request.return_to))
 }
 
 fn normalize_signup_name(name: &str) -> Option<&str> {
@@ -361,31 +312,22 @@ fn normalize_signup_name(name: &str) -> Option<&str> {
     }
 }
 
-fn render_signup_error(
-    continuation: Option<&SignupContinuation>,
-    cfg: &AuthConfig,
-    err: &str,
-) -> HttpResponse {
-    render_signup_error_with_status(continuation, cfg, err, StatusCode::OK)
+fn render_signup_error(return_to: &str, err: &str) -> HttpResponse {
+    render_signup_error_with_status(return_to, err, StatusCode::OK)
 }
 
-fn render_signup_bad_request(
-    continuation: Option<&SignupContinuation>,
-    cfg: &AuthConfig,
-    err: &str,
-) -> HttpResponse {
-    render_signup_error_with_status(continuation, cfg, err, StatusCode::BAD_REQUEST)
+fn render_signup_bad_request(return_to: &str, err: &str) -> HttpResponse {
+    render_signup_error_with_status(return_to, err, StatusCode::BAD_REQUEST)
 }
 
 fn render_signup_error_with_status(
-    continuation: Option<&SignupContinuation>,
-    _cfg: &AuthConfig,
+    return_to: &str,
     err: &str,
     status: StatusCode,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
-        return_to: continuation.map(SignupContinuation::return_to).unwrap_or(""),
+        return_to,
         csrf: &csrf_token,
         error: Some(err),
     };
@@ -426,38 +368,80 @@ mod tests {
     fn redirect_to_login_url_encodes_return_to() {
         let return_to =
             "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
-        let continuation = SignupContinuation::ReturnTo(return_to.into());
-        let resp = redirect_to_login(&continuation);
+        let resp = redirect_to_login(return_to);
         assert_eq!(
             location(&resp),
             "/login?return_to=%2Foauth2%2Fauthorize%3Fclient_id%3Doac_123%26redirect_uri%3Dhttps%253A%252F%252Fapp.test%252Fcb"
         );
     }
 
+    /// THE regression: `/login` renders `href="/signup?return_to=/me"` from
+    /// its own sanitized value, and `/me` is not an `/oauth2/authorize`
+    /// request. The old intake called that an error, so the login page's own
+    /// link answered 400.
     #[test]
-    fn signup_continuation_accepts_exactly_one_native_target() {
-        let return_to =
-            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
-        assert_eq!(
-            SignupContinuation::from_inputs(Some(return_to), None),
-            Ok(SignupContinuation::ReturnTo(return_to.into()))
-        );
-        assert!(SignupContinuation::from_inputs(None, None).is_err());
-        assert!(SignupContinuation::from_inputs(
-            Some(return_to),
-            Some(return_to)
-        )
-        .is_err());
+    fn continuation_keeps_the_target_the_login_page_links_to() {
+        assert_eq!(continuation(Some(return_to::SAFE_DEFAULT)), "/me");
+        assert_eq!(continuation(Some("/me")), "/me");
+        assert_eq!(continuation(Some("/apps/new")), "/apps/new");
     }
 
     #[test]
-    fn signup_continuation_rejects_invalid_return_to_at_intake() {
-        for bad in ["//evil.com", "https://evil.com", "/me"] {
-            assert!(
-                SignupContinuation::from_inputs(Some(bad), None).is_err(),
-                "must reject {bad:?}"
+    fn continuation_keeps_a_native_authorize_target() {
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        assert_eq!(continuation(Some(return_to)), return_to);
+    }
+
+    /// An absent continuation is the bare `/signup` visit. It used to be an
+    /// error too: `from_inputs` required exactly one target, and zero is not
+    /// one, so `return_to: Option<String>` was a lie.
+    #[test]
+    fn continuation_falls_back_when_absent_or_empty() {
+        assert_eq!(continuation(None), return_to::SAFE_DEFAULT);
+        assert_eq!(continuation(Some("")), return_to::SAFE_DEFAULT);
+        assert_eq!(continuation(Some("   ")), return_to::SAFE_DEFAULT);
+    }
+
+    /// Falling back is not the same as accepting: an off-origin or
+    /// control-character target must never survive into the form or the
+    /// `Location` header, it must be REPLACED by the safe default.
+    #[test]
+    fn continuation_replaces_unsafe_targets_with_the_safe_default() {
+        for bad in [
+            "//evil.com",
+            "///evil.com",
+            "https://evil.com",
+            "/\\evil.com",
+            "evil.com",
+            "/me\r\nSet-Cookie: x=1",
+            "/me\u{0000}foo",
+        ] {
+            assert_eq!(
+                continuation(Some(bad)),
+                return_to::SAFE_DEFAULT,
+                "must not carry {bad:?} forward"
             );
         }
+    }
+
+    #[test]
+    fn continuation_falls_back_on_an_over_long_target() {
+        let long = format!("/{}", "a".repeat(MAX_RETURN_TO_BYTES));
+        assert!(long.len() > MAX_RETURN_TO_BYTES);
+        assert_eq!(continuation(Some(&long)), return_to::SAFE_DEFAULT);
+
+        let at_limit = format!("/{}", "a".repeat(MAX_RETURN_TO_BYTES - 1));
+        assert_eq!(at_limit.len(), MAX_RETURN_TO_BYTES);
+        assert_eq!(continuation(Some(&at_limit)), at_limit);
+    }
+
+    /// The redirect a signup actually issues, for the default continuation.
+    /// Before the fix this code path was unreachable from the login page.
+    #[test]
+    fn redirect_to_login_carries_the_safe_default() {
+        let resp = redirect_to_login(&continuation(None));
+        assert_eq!(location(&resp), "/login?return_to=%2Fme");
     }
 
     #[test]

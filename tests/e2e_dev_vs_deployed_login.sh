@@ -687,11 +687,16 @@ brokered="$(docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc \
 # create them.
 DEPLOY_JAR="$WORK/op-jar.txt"
 rm -f "$DEPLOY_JAR"
-# /signup insists on EXACTLY ONE `return_to`, and it must parse as a real
-# `/oauth2/authorize?client_id=...&redirect_uri=...` request target
-# (crates/auth/src/ui/signup.rs:298-315). Zero, or one in the query AND one in
-# the body, is a 400. So the continuation is built from the app's own brokered
-# client, and the POST carries it in the BODY only.
+# The continuation is the app's own brokered `/oauth2/authorize` request
+# because the REST of this harness needs the signed-up user to land back in
+# that authorize flow -- not because `/signup` demands it. It did demand it
+# until 2026-08-14: exactly one `return_to`, parsing as an `/oauth2/authorize`
+# target, or 400. That rule also rejected `/me`, the target `/login` puts in
+# its own signup link, so the product's own route into signup was a 400 while
+# this harness (which hand-builds the RP shape) stayed green.
+# `tests/e2e_device_login.sh` is the one that now enters signup the way a
+# human does. `/signup` sanitizes like `/login` today: any same-origin path
+# is fine and anything else becomes `/me`.
 SIGNUP_RETURN_TO="/oauth2/authorize?response_type=code&client_id=$OAC&redirect_uri=$REDIRECT_URI&scope=openid&state=s&nonce=n&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
 op_signup() {  # op_signup <password> <jar> <out-body> -> echoes the status
   local password="$1" jar="$2" out="$3"

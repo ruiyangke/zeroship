@@ -9,13 +9,24 @@
 # in the tree performs: it opens the verification URI the CLI printed, in the
 # browser's shoes, and submits the approval FORM.
 #
+#   GET  /login  and read the href it renders for signup
+#     -> GET  that exact URL, and fill the form it returns
+#     -> POST /signup                          (a real creator row)
+#     -> follow signup's own redirect and sign in
 #   real `zeroship login` process
 #     -> control POST /api/device/auth        (user code + verification URI)
-#     -> GET  {verification_uri}?user_code=..  with a real signed-in session
+#     -> GET  {verification_uri}?user_code=..  with that signed-in session
 #     -> POST /device  csrf + user_code + confirm=authorize
 #     -> the CLI's poll returns a token
 #     -> `zeroship deploy` with that token
 #     -> the gateway serves the deployed app
+#
+# The signup leg reads its URL off the login page for the same reason the
+# approval leg loads the device page: a harness that composes the URL itself
+# tests its author's idea of a valid one. Signup accepted ONLY an
+# `/oauth2/authorize` continuation while the login page linked to
+# `/signup?return_to=/me`, so the product's own path into signup was a 400 and
+# every harness that hand-built an RP continuation stayed green.
 #
 # `tests/supabase_deploy_e2e.sh` curls `/api/device/approve` directly, which is
 # exactly the shortcut that let the browser leg stay broken in BOTH provider
@@ -92,6 +103,28 @@ if(!m){process.stdout.write("");process.exit(0)}
 const v=m[0].match(/value="([^"]*)"/i);
 process.stdout.write(v?v[1].replace(/&amp;/g,"&").replace(/&quot;/g,"\"").replace(/&#x27;/g,"'"'"'").replace(/&lt;/g,"<").replace(/&gt;/g,">"):"");
 ' "$1" "$2"
+}
+
+# Read the FIRST `href` on the page that points at $2 (e.g. `/signup`).
+#
+# The point of reading it rather than composing it: the signup continuation is
+# whatever the login page decided to put in its own link, so a signup endpoint
+# that cannot accept it fails this harness. Composing the URL here would test
+# the harness author's idea of a valid continuation instead.
+page_href() {
+  node -e '
+const fs=require("fs");
+const html=fs.readFileSync(process.argv[1],"utf8");
+const re=new RegExp("href=\"("+process.argv[2]+"[^\"]*)\"","i");
+const m=html.match(re);
+if(!m){process.stdout.write("");process.exit(0)}
+process.stdout.write(m[1].replace(/&amp;/g,"&").replace(/&quot;/g,"\"").replace(/&#x27;/g,"'"'"'").replace(/&lt;/g,"<").replace(/&gt;/g,">"));
+' "$1" "$2"
+}
+
+# `Location:` out of a `curl -D` header dump.
+header_location() {
+  tr -d '\r' < "$1" | awk 'tolower($1) == "location:" { print $2; exit }'
 }
 
 jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -180,11 +213,98 @@ curl -sf "$GATE_URL/readyz" >/dev/null 2>&1 \
 
 # ---------------------------------------------------------------------------
 step "Create the human, through the product's own signup"
-# `/signup` requires exactly one `return_to` and it must parse as a real
-# `/oauth2/authorize` target (crates/auth/src/ui/signup.rs). That continuation
-# is scaffolding for reaching signup at all, not the subject of this test, so
-# the client it names is inserted directly rather than brokered through a
-# deploy we have not done yet.
+# WALK THE LINK THE LOGIN PAGE RENDERS. Nothing below composes a signup URL.
+#
+# The regression this leg exists for: `/login` renders
+# `href="/signup?return_to=/me"` from its own sanitized continuation, and
+# `/signup` used to demand that the continuation parse as an
+# `/oauth2/authorize` request AND that exactly one copy of it arrive. `/me` is
+# neither, so the login page's own "Create an account" link answered 400
+# "invalid request" -- on a page that still drew the form, the CSRF token and
+# a banner, so it looked usable. A bare `/signup` was 400 too (zero targets is
+# not one). Signup was reachable ONLY from an OIDC RP continuation.
+#
+# A harness that composes its own `/oauth2/authorize` return_to walks the one
+# arm that worked and reports green. This one starts at `/login`.
+EMAIL="creator-$$@zeroship.test"
+PASSWORD="correct horse battery staple $$"
+JAR="$WORK/session-jar.txt"
+rm -f "$JAR"
+
+curl -s -c "$JAR" -m 15 -o "$WORK/login-entry.html" "$AUTH_URL/login" >/dev/null
+SIGNUP_HREF="$(page_href "$WORK/login-entry.html" /signup)"
+[ -n "$SIGNUP_HREF" ] \
+  && pass "the login page offers signup at $SIGNUP_HREF" \
+  || { fail "GET /login rendered no /signup link"; head -40 "$WORK/login-entry.html"; exit 1; }
+
+SIGNUP_GET_CODE="$(curl -s -b "$JAR" -c "$JAR" -m 15 -o "$WORK/signup.html" -w '%{http_code}' \
+  "$AUTH_URL$SIGNUP_HREF")"
+echo "  GET $AUTH_URL$SIGNUP_HREF -> HTTP $SIGNUP_GET_CODE"
+[ "$SIGNUP_GET_CODE" = "200" ] \
+  && pass "the link the login page renders reaches the signup form" \
+  || { fail "the login page's own signup link returned HTTP $SIGNUP_GET_CODE"
+       grep -o '<div class="error">[^<]*</div>' "$WORK/signup.html" || head -20 "$WORK/signup.html"
+       exit 1; }
+grep -q '<div class="error">' "$WORK/signup.html" \
+  && { fail "the signup form rendered an error banner: $(grep -o '<div class="error">[^<]*</div>' "$WORK/signup.html")"; exit 1; } \
+  || pass "the signup form carries no error banner"
+
+SIGNUP_CSRF="$(form_field "$WORK/signup.html" csrf)"
+SIGNUP_RETURN_TO="$(form_field "$WORK/signup.html" return_to)"
+[ -n "$SIGNUP_CSRF" ] || { fail "no csrf on the signup form"; exit 1; }
+[ -n "$SIGNUP_RETURN_TO" ] \
+  && pass "the form echoes a continuation to sign in against ($SIGNUP_RETURN_TO)" \
+  || fail "the signup form echoed an empty return_to"
+
+SIGNUP_HDRS="$WORK/signup-post.headers"
+SIGNUP_CODE="$(curl -s -b "$JAR" -c "$JAR" -m 30 -D "$SIGNUP_HDRS" \
+  -o "$WORK/signup-post.html" -w '%{http_code}' \
+  -X POST "$AUTH_URL/signup" \
+  --data-urlencode "csrf=$SIGNUP_CSRF" --data-urlencode "return_to=$SIGNUP_RETURN_TO" \
+  --data-urlencode "name=Device Login Creator" --data-urlencode "email=$EMAIL" \
+  --data-urlencode "password=$PASSWORD")"
+SIGNUP_LOCATION="$(header_location "$SIGNUP_HDRS")"
+echo "  POST $AUTH_URL/signup -> HTTP $SIGNUP_CODE  Location: ${SIGNUP_LOCATION:-none}"
+USER_ID="$(psql_q "SELECT id FROM zeroship.users WHERE email = '$EMAIL'::citext")"
+[ -n "$USER_ID" ] && pass "signup created $EMAIL ($USER_ID), HTTP $SIGNUP_CODE" \
+  || { fail "signup did not create a user (HTTP $SIGNUP_CODE)"
+       grep -o '<div class="error">[^<]*</div>' "$WORK/signup-post.html" || true
+       exit 1; }
+[ "$SIGNUP_CODE" = "302" ] && [ -n "$SIGNUP_LOCATION" ] \
+  && pass "signup redirected the new account onward ($SIGNUP_LOCATION)" \
+  || fail "signup answered HTTP $SIGNUP_CODE with Location '${SIGNUP_LOCATION:-none}'"
+
+# Account-enumeration defense, on the live server: re-signing up the SAME
+# email must be indistinguishable from a fresh one. `crates/auth` owns the
+# byte-level assertion (tests/signup_continuation_test.rs); this checks the
+# shipped binary agrees, since a divergence here is a live email oracle.
+dup_signup() {
+  local email="$1" out="$2" hdrs="$3" page="$WORK/dup-get.html" csrf
+  curl -s -b "$JAR" -c "$JAR" -m 15 -o "$page" "$AUTH_URL$SIGNUP_HREF" >/dev/null
+  csrf="$(form_field "$page" csrf)"
+  curl -s -b "$JAR" -c "$JAR" -m 30 -D "$hdrs" -o "$out" -w '%{http_code}' \
+    -X POST "$AUTH_URL/signup" \
+    --data-urlencode "csrf=$csrf" --data-urlencode "return_to=$SIGNUP_RETURN_TO" \
+    --data-urlencode "name=Device Login Creator" --data-urlencode "email=$email" \
+    --data-urlencode "password=$PASSWORD"
+}
+DUP_CODE="$(dup_signup "$EMAIL" "$WORK/dup.html" "$WORK/dup.headers")"
+FRESH_CODE="$(dup_signup "fresh-$$@zeroship.test" "$WORK/fresh.html" "$WORK/fresh.headers")"
+DUP_LOC="$(header_location "$WORK/dup.headers")"
+FRESH_LOC="$(header_location "$WORK/fresh.headers")"
+echo "  duplicate: HTTP $DUP_CODE Location=$DUP_LOC   fresh: HTTP $FRESH_CODE Location=$FRESH_LOC"
+if [ "$DUP_CODE" = "$FRESH_CODE" ] && [ "$DUP_LOC" = "$FRESH_LOC" ] \
+   && cmp -s "$WORK/dup.html" "$WORK/fresh.html"; then
+  pass "a duplicate signup is byte-identical to a fresh one (no email oracle)"
+else
+  fail "duplicate signup is distinguishable: $DUP_CODE/$DUP_LOC vs $FRESH_CODE/$FRESH_LOC"
+fi
+DUP_USERS="$(psql_q "SELECT count(*) FROM zeroship.users WHERE email = '$EMAIL'::citext")"
+[ "$DUP_USERS" = "1" ] && pass "the duplicate did not create a second row" \
+  || fail "expected 1 row for $EMAIL, found $DUP_USERS"
+
+# The OIDC RP continuation -- the ONLY shape signup used to accept -- must
+# still round-trip. The fix widened the intake; it must not have moved it.
 SIGNUP_CLIENT="oac_devlogin_$$"
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -q >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes)
@@ -192,24 +312,21 @@ VALUES ('$SIGNUP_CLIENT', 'device login harness', ARRAY['http://localhost/cb'], 
 ON CONFLICT (client_id) DO NOTHING;
 SQL
 RETURN_TO="/oauth2/authorize?response_type=code&client_id=$SIGNUP_CLIENT&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&scope=openid&state=s&nonce=n&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+RP_CODE="$(curl -s -m 15 -o "$WORK/signup-rp.html" -w '%{http_code}' -G "$AUTH_URL/signup" \
+  --data-urlencode "return_to=$RETURN_TO")"
+RP_ECHOED="$(form_field "$WORK/signup-rp.html" return_to)"
+[ "$RP_CODE" = "200" ] && [ "$RP_ECHOED" = "$RETURN_TO" ] \
+  && pass "an OIDC RP continuation still reaches signup and is echoed intact" \
+  || fail "RP continuation: HTTP $RP_CODE, echoed '$RP_ECHOED'"
 
-EMAIL="creator-$$@zeroship.test"
-PASSWORD="correct horse battery staple $$"
-JAR="$WORK/session-jar.txt"
-rm -f "$JAR"
-
-curl -s -c "$JAR" -m 15 -o "$WORK/signup.html" -G "$AUTH_URL/signup" \
-  --data-urlencode "return_to=$RETURN_TO" >/dev/null
-SIGNUP_CSRF="$(form_field "$WORK/signup.html" csrf)"
-[ -n "$SIGNUP_CSRF" ] || { fail "no csrf on the signup form"; exit 1; }
-SIGNUP_CODE="$(curl -s -b "$JAR" -c "$JAR" -m 30 -o "$WORK/signup-post.html" -w '%{http_code}' \
-  -X POST "$AUTH_URL/signup" \
-  --data-urlencode "csrf=$SIGNUP_CSRF" --data-urlencode "return_to=$RETURN_TO" \
-  --data-urlencode "name=Device Login Creator" --data-urlencode "email=$EMAIL" \
-  --data-urlencode "password=$PASSWORD")"
-USER_ID="$(psql_q "SELECT id FROM zeroship.users WHERE email = '$EMAIL'::citext")"
-[ -n "$USER_ID" ] && pass "signup created $EMAIL ($USER_ID), HTTP $SIGNUP_CODE" \
-  || { fail "signup did not create a user (HTTP $SIGNUP_CODE)"; exit 1; }
+# An off-origin continuation must be REPLACED, not echoed and not 400'd.
+EVIL_CODE="$(curl -s -m 15 -o "$WORK/signup-evil.html" -w '%{http_code}' -G "$AUTH_URL/signup" \
+  --data-urlencode "return_to=//evil.example")"
+EVIL_ECHOED="$(form_field "$WORK/signup-evil.html" return_to)"
+case "$EVIL_ECHOED" in
+  *evil*) fail "signup echoed an off-origin continuation: $EVIL_ECHOED" ;;
+  *) pass "an off-origin continuation is replaced, not echoed (HTTP $EVIL_CODE, return_to='$EVIL_ECHOED')" ;;
+esac
 
 # B2 regression, checked BEFORE the login: the auth service cannot write
 # `zeroship.principal_grants` (grants.ts gives that table to zeroship_control
@@ -221,8 +338,12 @@ GRANTS_AT_SIGNUP="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE
   || fail "expected 0 grants at signup, got $GRANTS_AT_SIGNUP"
 
 step "Log in, the way a browser does"
+# Follow the redirect signup issued rather than inventing a login URL: the
+# whole point of the continuation is that it survives the signup hop.
 rm -f "$JAR"
-curl -s -c "$JAR" -m 15 -o "$WORK/login.html" "$AUTH_URL/login" >/dev/null
+LOGIN_ENTRY="$AUTH_URL${SIGNUP_LOCATION:-/login}"
+echo "  following the signup redirect: $LOGIN_ENTRY"
+curl -s -c "$JAR" -m 15 -o "$WORK/login.html" "$LOGIN_ENTRY" >/dev/null
 LOGIN_CSRF="$(form_field "$WORK/login.html" csrf)"
 [ -n "$LOGIN_CSRF" ] || { fail "no csrf on the login form"; exit 1; }
 LOGIN_CODE="$(curl -s -b "$JAR" -c "$JAR" -m 30 -o "$WORK/login-post.html" -w '%{http_code}' \
