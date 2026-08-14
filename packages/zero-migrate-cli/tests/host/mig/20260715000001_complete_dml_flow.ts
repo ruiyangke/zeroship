@@ -1,19 +1,9 @@
-import { byteValue, table, t } from "zero-migrate";
+import { byteValue, table } from "zero-migrate";
 
 export const name = "complete_dml_flow";
 
 export default {
-  up() {
-    table("dml_flow_items").create({
-      columns: {
-        id: t.int().primaryKey(),
-        label: t.text().notNull(),
-        stage: t.text().notNull(),
-        score: t.int().notNull(),
-        payload: t.bytes().notNull(),
-      },
-    });
-
+  data() {
     table("dml_flow_items").insert({
       rows: [
         {
@@ -57,5 +47,8 @@ export default {
       batchSize: 1,
       name: "raise_remaining_scores",
     });
+  },
+  inverse() {
+    table("dml_flow_items").delete({ where: (column) => column("id").in([1, 3]) });
   },
 };

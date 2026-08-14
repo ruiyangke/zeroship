@@ -44,7 +44,7 @@ export default {
         ]),
     });
     table("job_grades").delete({
-      where: (col) => col("id").in([int64("1"), int64("2"), int64("3"), int64("4")]),
+      where: (col) => col("id").in(["1", "2", "3", "4"]),
     });
     table("departments").delete({
       where: (col) =>

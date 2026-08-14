@@ -48,12 +48,23 @@ const RENAME = "rename_email";
 const CREATE = `import { table, t } from "zero-migrate";
 export const name = "create_people";
 export default {
-  up() {
+  schema() {
     table("people").create({
       columns: { id: t.int().notNull(), email: t.text() },
       primaryKey: ["id"],
     });
+  },
+};
+`;
+
+const SEED = `import { table } from "zero-migrate";
+export const name = "seed_people";
+export default {
+  data() {
     table("people").insert({ rows: { id: 1, email: "ada@example.test" } });
+  },
+  inverse() {
+    table("people").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `;
@@ -96,6 +107,7 @@ scope = "all"
   );
   writeFileSync(join(work, "registry.json"), JSON.stringify({ people: OWNER_APP }));
   writeFileSync(join(work, "migrations", "20260101000000_create_people.ts"), CREATE);
+  writeFileSync(join(work, "migrations", "20260101000001_seed_people.ts"), SEED);
   writeFileSync(join(work, "migrations", "20260102000000_rename_email.ts"), RENAME_MIG);
   return work;
 }

@@ -1,6 +1,6 @@
 // The shipped `hr-system` example, applied end to end against live PostgreSQL.
 //
-// `packages/zero-migrate-cli/hr-system/` is a complete 16-migration project with
+// `packages/zero-migrate-cli/hr-system/` is a complete 17-migration project with
 // its own policy and registry - the thing a reader copies to start. It is
 // referenced by NOTHING: no test, no package script, no doc. If a change broke it,
 // the suite would stay green and the breakage would ship.

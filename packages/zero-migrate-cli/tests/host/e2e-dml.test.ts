@@ -19,7 +19,7 @@ import "./addon.js";
 const PG_URL = pgUrl();
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_complete_dml_flow";
-const MIGRATION_NAME = "complete_dml_flow";
+const MIGRATION_NAMES = ["create_dml_flow_items", "complete_dml_flow"] as const;
 const TABLE = "dml_flow_items";
 
 const STEP_NAMES = [
@@ -54,8 +54,12 @@ function normalizeTaggedCursor(value: unknown): BackfillProgress["lastCursor"] {
   return (typeof value === "string" ? JSON.parse(value) : value) as BackfillProgress["lastCursor"];
 }
 
-async function loadMigration(): Promise<MigrationModule> {
-  return import("./mig/20260715000001_complete_dml_flow.ts");
+async function loadMigrations(): Promise<readonly [MigrationModule, MigrationModule]> {
+  const [schema, data] = await Promise.all([
+    import("./mig/20260715000000_create_dml_flow_items.ts"),
+    import("./mig/20260715000001_complete_dml_flow.ts"),
+  ]);
+  return [schema, data];
 }
 
 function uniqueName(prefix: string): string {
@@ -64,6 +68,7 @@ function uniqueName(prefix: string): string {
 
 function applyOptions(
   migration: MigrationModule,
+  nameFallback: string,
   projectSchema: string,
   driver: DriverConfig,
   approved = true,
@@ -73,12 +78,39 @@ function applyOptions(
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
-    registry: {},
+    registry: { [TABLE]: OWNER_APP },
     policy: [noInjectPolicy(projectSchema)],
     approved,
     appliedBy: "dml-e2e",
-    nameFallback: MIGRATION_NAME,
+    nameFallback,
   } as const;
+}
+
+async function applyPair(
+  migrations: readonly MigrationModule[],
+  projectSchema: string,
+  driver: DriverConfig,
+  approved = true,
+): Promise<{ applied: string[]; skipped: string[]; recovered: string[] }> {
+  const outcomes = [];
+  for (let index = 0; index < migrations.length; index += 1) {
+    outcomes.push(
+      await apply(
+        applyOptions(
+          migrations[index],
+          MIGRATION_NAMES[index] ?? `migration_${index}`,
+          projectSchema,
+          driver,
+          approved,
+        ),
+      ),
+    );
+  }
+  return {
+    applied: outcomes.flatMap((outcome) => outcome.applied),
+    skipped: outcomes.flatMap((outcome) => outcome.skipped),
+    recovered: outcomes.flatMap((outcome) => outcome.recovered),
+  };
 }
 
 function normalizeRows(rows: Array<Record<string, unknown>>): VisibleRow[] {
@@ -104,8 +136,8 @@ function assertAuthoredOrder(journalNames: string[]): void {
   }
 }
 
-async function assertAppliedPlan(
-  migration: MigrationModule,
+async function assertAppliedPlans(
+  migrations: readonly MigrationModule[],
   projectSchema: string,
   driver: DriverConfig,
   appliedVersions: string[],
@@ -114,38 +146,46 @@ async function assertAppliedPlan(
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
-    registry: {},
+    registry: { [TABLE]: OWNER_APP },
     policy: [noInjectPolicy(projectSchema)],
-    migrations: [migration],
-    nameFallbacks: [MIGRATION_NAME],
+    migrations: [...migrations],
+    nameFallbacks: [...MIGRATION_NAMES],
   });
-  assert.equal(reply.plans?.length, 1, "status returns the authored plan");
-  assert.equal(reply.plans?.[0]?.state, "applied", "the complete data plan is applied");
+  assert.equal(reply.plans?.length, 2, "status returns the schema and data plans");
+  assert.ok(reply.plans?.every((plan) => plan.state === "applied"), "both plans are applied");
+  const steps = reply.plans?.flatMap((plan) => plan.steps) ?? [];
   assert.deepEqual(
-    reply.plans?.[0]?.steps.map((step) => step.name),
+    steps.map((step) => step.name),
     STEP_NAMES,
     "status retains every authored step in order",
   );
   assert.deepEqual(
-    [...(reply.plans?.[0]?.steps.map((step) => step.version) ?? [])].sort(),
+    [...steps.map((step) => step.version)].sort(),
     [...appliedVersions].sort(),
     "status reconciles the exact versions returned by apply",
   );
 }
 
-test("the shared migration authors the complete portable data flow", async () => {
-  const migration = await loadMigration();
-  const envelope = buildEnvelope(migration, {
+test("the shared migration pair authors the complete portable data flow", async () => {
+  const [schemaMigration, dataMigration] = await loadMigrations();
+  const schemaEnvelope = buildEnvelope(schemaMigration, {
     irVersion: currentIrVersion(),
-    nameFallback: MIGRATION_NAME,
+    nameFallback: MIGRATION_NAMES[0],
   });
-  assert.equal(envelope.name, MIGRATION_NAME);
+  const dataEnvelope = buildEnvelope(dataMigration, {
+    irVersion: currentIrVersion(),
+    nameFallback: MIGRATION_NAMES[1],
+  });
+  assert.equal(schemaEnvelope.name, MIGRATION_NAMES[0]);
+  assert.equal(dataEnvelope.name, MIGRATION_NAMES[1]);
   assert.deepEqual(
-    (envelope.ops as Array<{ op: string }>).map((op) => op.op),
+    [schemaEnvelope, dataEnvelope].flatMap((envelope) =>
+      (envelope.ops as Array<{ op: string }>).map((op) => op.op),
+    ),
     ["createTable", "insert", "update", "delete", "backfill"],
     "the recorder preserves the user's authored order",
   );
-  const backfill = envelope.ops[4] as {
+  const backfill = dataEnvelope.ops[3] as {
     cursorColumns: string[];
     cursorStability: { mode: string };
     batchSize: number;
@@ -171,7 +211,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
   const client = await connectLivePg(t);
   if (!client) return;
 
-  const migration = await loadMigration();
+  const migrations = await loadMigrations();
   const projectSchema = uniqueName("e2e_dml_pg");
   const metaSchema = `${projectSchema}_migrations`;
   const driver = { kind: "postgres" as const, url: PG_URL };
@@ -202,7 +242,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
   try {
     await client.query(`CREATE SCHEMA "${projectSchema}"`);
 
-    const first = await apply(applyOptions(migration, projectSchema, driver));
+    const first = await applyPair(migrations, projectSchema, driver);
     assert.equal(first.applied.length, STEP_NAMES.length, "every authored step applied");
     assert.deepEqual(first.skipped, [], "a fresh apply skips nothing");
     assert.deepEqual(first.recovered, [], "a clean apply needs no recovery");
@@ -222,9 +262,9 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
     );
     const journalNames = journal.rows.map((row: { name: string }) => row.name);
     assertAuthoredOrder(journalNames);
-    await assertAppliedPlan(migration, projectSchema, driver, first.applied);
+    await assertAppliedPlans(migrations, projectSchema, driver, first.applied);
 
-    const second = await apply(applyOptions(migration, projectSchema, driver, false));
+    const second = await applyPair(migrations, projectSchema, driver, false);
     assert.deepEqual(second.applied, [], "an identical rerun applies nothing");
     assert.deepEqual(second.recovered, [], "an identical rerun needs no recovery");
     assert.deepEqual(
@@ -271,7 +311,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
     supportBigNumbers: true,
     bigNumberStrings: true,
   });
-  const migration = await loadMigration();
+  const migrations = await loadMigrations();
   const projectSchema = uniqueName("e2e_dml_mysql");
   const metaSchema = `${projectSchema}_migrations`;
   const driver = { kind: "mysql" as const, url: MYSQL_URL };
@@ -303,7 +343,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
   try {
     await admin.query(`CREATE DATABASE \`${projectSchema}\``);
 
-    const first = await apply(applyOptions(migration, projectSchema, driver));
+    const first = await applyPair(migrations, projectSchema, driver);
     assert.equal(first.applied.length, STEP_NAMES.length, "every authored step applied");
     assert.deepEqual(first.skipped, [], "a fresh apply skips nothing");
     assert.deepEqual(first.recovered, [], "a clean apply needs no recovery");
@@ -324,7 +364,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
     const journal = journalRows as Array<Record<string, unknown>>;
     const journalNames = journal.map((row) => String(row.name ?? row.NAME));
     assertAuthoredOrder(journalNames);
-    await assertAppliedPlan(migration, projectSchema, driver, first.applied);
+    await assertAppliedPlans(migrations, projectSchema, driver, first.applied);
     const journalOnly = await status({
       ownerApp: OWNER_APP,
       projectSchema,
@@ -338,7 +378,7 @@ test("MySQL: create, insert, update, delete, and backfill apply in order and rer
       "journal-only MySQL status reads every applied step through the MySQL backend",
     );
 
-    const second = await apply(applyOptions(migration, projectSchema, driver, false));
+    const second = await applyPair(migrations, projectSchema, driver, false);
     assert.deepEqual(second.applied, [], "an identical rerun applies nothing");
     assert.deepEqual(second.recovered, [], "an identical rerun needs no recovery");
     assert.deepEqual(
