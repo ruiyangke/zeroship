@@ -47,7 +47,7 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
 describe('"use server" + wrappers — discovery', () => {
   test("wrapped exports are discovered; helpers are NOT", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -86,7 +86,7 @@ export const create = mutation(async (input) => input, { id: "create.v2" });
 
   test("server transform copies only id/kind/wire metadata", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -107,7 +107,7 @@ export const list = query(async () => []);
 
   test("aliased import: `query as q` works", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -126,7 +126,7 @@ export const addFoo = m(async (x) => x);
 
   test("import from `@zeroship/rpc/server` is recognized", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -141,7 +141,7 @@ export const ping = procedure(async () => "pong");
 
   test("import from a random package is NOT recognized as a marker", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     // `procedure` imported from somewhere else is just a function call,
@@ -161,7 +161,7 @@ export const ping = procedure(async () => "pong");
 
   test("namespace-import (`* as zs`) is NOT recognized — must be a named import", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -181,7 +181,7 @@ export const ping = zs.procedure(async () => "pong");
 
   test("stream() implies isStream: true even when handler isn't a generator", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";

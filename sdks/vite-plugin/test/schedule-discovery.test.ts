@@ -54,7 +54,7 @@ describe("schedule discovery", () => {
   test("discovers schedule registrations and emits manifest schedules", async () => {
     await withRoot(async (root) => {
       const state = makeState();
-      const plugin = transformPlugin("/_rpc", state);
+      const plugin = transformPlugin(state);
       (plugin.configResolved as (c: unknown) => void).call(plugin, { root });
 
       const code = `
@@ -104,7 +104,7 @@ schedule({
   test("bad schedule fails manifest compilation with a clear error", async () => {
     await withRoot(async (root) => {
       const state = makeState();
-      const plugin = transformPlugin("/_rpc", state);
+      const plugin = transformPlugin(state);
       (plugin.configResolved as (c: unknown) => void).call(plugin, { root });
 
       const code = `
