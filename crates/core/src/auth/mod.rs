@@ -249,7 +249,7 @@ pub fn is_pairwise_subject(sub: &str) -> bool {
 /// *rotatable* "short-lived OIDC stash cookie" HMAC — which meant rotating that
 /// operational key would silently re-key every app's `pws_` for every user and
 /// break their stored FKs. This input is therefore its OWN config secret
-/// (`PAIRWISE_SALT` / `--pairwise-salt[-file]`), documented as a permanent,
+/// (`ZEROSHIP_PAIRWISE_SALT` / `--pairwise-salt-file`), documented as a permanent,
 /// never-rotate-without-migration value, independent of the stash/signing key
 /// lifecycle. The SAME value must be configured on gateway AND control.
 ///
