@@ -139,6 +139,7 @@ impl Fixture {
             stripe_secret_key: SecretString::new(stripe_secret_key.to_string()),
             stripe_base_url: stripe_base_url.to_string(),
             gateway_url: "http://127.0.0.1:9".to_string(),
+            migrated_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),

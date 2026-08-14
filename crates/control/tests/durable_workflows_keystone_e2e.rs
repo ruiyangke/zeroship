@@ -228,6 +228,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "http://127.0.0.1:9".to_string(),
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
+            migrated_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),

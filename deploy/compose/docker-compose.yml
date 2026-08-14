@@ -299,6 +299,13 @@ services:
       # migrated verifies against this SAME file: that is what lets a
       # control-issued creator PAT authorize a migration apply.
       ZEROSHIP_CONTROL_SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
+      # Where `POST /api/apps/{id}/migrations/apply` forwards. This is the
+      # compose-network address of the `migrated` service below, NOT the
+      # loopback publish (`127.0.0.1:9091`) an operator tunnels to - control
+      # reaches it as a peer container. The compiled default is localhost, which
+      # is right for a single-host dev run and wrong inside a container, so it
+      # is spelled here rather than inherited.
+      ZEROSHIP_CONTROL_MIGRATED_URL: ${ZEROSHIP_CONTROL_MIGRATED_URL:-http://migrated:9091}
       # control ALSO needs the worker key: it refuses to start without one,
       # because it calls the worker's admin endpoints. MUST match the worker's
       # value - it is ONE setting with several consumers, which is why it has
