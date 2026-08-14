@@ -21,40 +21,37 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 const RUN = `${process.pid}-${Date.now()}`;
 
 /**
- * KNOWN BROKEN UPSTREAM, 2026-08-14. `test.fail` asserts this DOES fail, so
- * the day the platform is fixed this spec errors with "expected to fail but
- * passed" and someone deletes this block. It is a tracking device, not a mute.
+ * This spec was marked `test.fail()` for a day against a platform bug that
+ * does not exist. Worth the paragraph, because the false bug was reproducible.
  *
- * env.db drops `attachments.commentId` on every READ while accepting it on
- * write. Narrowed with direct RPC calls:
+ * `attachments.get` really did return a row with no `commentId` key while
+ * SQLite held a value for it, and `find({commentId})` really did match that
+ * row -- filter sees the column, projection does not. Every artifact agreed
+ * the column was declared: the table, the migration, the generated schema.
  *
- *   attachments.upload  -> returns commentId: "comm_0346..."   (persisted)
- *   sqlite               -> trace.log|comm_0346...             (stored)
- *   generated schema     -> attachments: { commentId: t.string() }
- *   attachments.list     -> key ABSENT from the row
- *   attachments.get      -> key ABSENT from .attachment
+ * The projection is built from the schema the RUNNING isolate registered
+ * (`implicit_read_projection_parts`, crates/zeroship-schema/src/query.rs), and
+ * this runtime process had booted two seconds BEFORE the commit that added the
+ * column. It was serving a schema that predated it. Nothing was stale on disk,
+ * which is why re-reading the files kept confirming the bug.
  *
- * Not nullable-ref in general: bugs.milestoneId has a BYTE-IDENTICAL column
- * definition -- {"type":"string","refTarget":...,"refColumn":"id"}, no
- * "required" -- and comes back with its key present. So the column shape is
- * not what distinguishes them.
+ * Dev is supposed to survive that: a migration edit regenerates the descriptor,
+ * ships it on the next HMR poll, and calls `resetSchemaInstalled()` so the next
+ * request re-registers (sdks/vite-plugin/src/dev-bootstrap/index.ts). That path
+ * is wired and reads correctly. Why it did not take effect here is NOT known --
+ * no reproduction, so no claim.
  *
- * It is the PROJECTION, not the query. A probe procedure run against the dev
- * runtime showed both halves at once:
+ * The tell was in the same response and I read past it twice: `bugs.get`
+ * returned two junk keys named with literal quote marks, `"\"estimatedTime
+ * Minutes\"": "estimatedTimeMinutes"`, for columns dropped an hour earlier.
+ * That is SQLite's double-quoted-string fallback -- an unresolvable "ident"
+ * degrades to a string literal -- so the projection was naming columns the
+ * table did not have AND missing one it did. One cause, both directions.
  *
- *   db.attachments.find({ commentId })      -> matched 1 row
- *   the row it returned                     -> no commentId key
- *
- * The WHERE clause resolves the column against the real table; the returned
- * row is assembled from a column list that lacks it. Values are not shifted
- * either (uploaderId still holds a user id), so it is an exclusion rather
- * than an off-by-one in the decoder.
- *
- * The app code is correct -- the composer sends commentId and the panel groups
- * on it -- so the user-visible symptom is a file that uploads, appears in
- * FILES, and never appears on the comment it arrived with.
+ * Restarting the runtime fixed both. If a read ever disagrees with the schema
+ * again, restart before you go into the Rust: a live process is the one input
+ * that grep cannot check.
  */
-test.fail();
 test("a file attached while commenting appears with that comment", async ({ page, baseURL }) => {
   await signIn(page.context(), { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
 
