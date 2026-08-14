@@ -21,14 +21,19 @@
 // there. The destructive posture is different in kind: it is a property of the
 // OPERATION, not of any SQL text, so it belongs where every dialect can see it.
 //
-// TWO ARMS PER DIALECT, and the second is the control:
+// THREE ARMS PER DIALECT, and only the first is about the refusal:
 //
 //   1. default posture (the policy never mentions the knob) + a drop -> REFUSED,
 //      and the table is still there afterwards;
+//   1b. default posture + a WHERE-bounded row update -> APPLIED. PostgreSQL applies
+//      it, so anything stricter is a regression rather than parity. The first
+//      version of this fix reused `Op::is_destructive` - the APPROVAL notion,
+//      which includes DML - and made two dialects refuse what PostgreSQL allows;
 //   2. `safety.destructive_ops = "allow"` + the same drop -> APPLIED.
 //
 // Without arm 2 every arm 1 would pass on a build where drops never work at all,
-// which is the failure mode a parity fix is most likely to introduce.
+// which is the failure mode a parity fix is most likely to introduce; without arm
+// 1b it would pass on one that refuses far too much.
 //
 // GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`. SQLite needs no
 // server and always runs.
@@ -101,12 +106,33 @@ function project(namespace: string | null, posture: "allow" | null): string {
 export const name = "make_doomed";
 export default {
   up() {
-    table("doomed").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("doomed").create({ columns: { id: t.int().notNull(), val: t.int().notNull() }, primaryKey: ["id"] });
   },
 };
 `,
   );
   return work;
+}
+
+/** A WHERE-bounded row update. PostgreSQL APPLIES this under the default forbid
+ *  posture, because DML lowers to a bound `PlanStep::Dml` its SQL-text guard never
+ *  inspects. Any IR-side enforcement must match that, or the dialects it covers end
+ *  up STRICTER than PostgreSQL. */
+function addUpdate(work: string): void {
+  writeFileSync(
+    join(work, "migrations", "20260102000000_bump.ts"),
+    `import { table } from "zero-migrate";
+export const name = "bump_rows";
+export default {
+  up() {
+    table("doomed").update({
+      set: { val: (col) => col("val").add(1) },
+      where: (col) => col("id").gt(0),
+    });
+  },
+};
+`,
+  );
 }
 
 function addDrop(work: string): void {
@@ -279,6 +305,31 @@ async function runParity(target: Target): Promise<void> {
         await target.exists(namespace, work),
         true,
         `${target.name}: the refused drop must leave the table in place`,
+      );
+    } finally {
+      await target.cleanUp(namespace, work);
+    }
+  }
+
+  // ARM 1b, the OVER-BLOCK regression arm. The first version of the parity fix
+  // reused `Op::is_destructive`, which is the APPROVAL notion and includes row
+  // DML. That made MySQL and SQLite refuse an `update` PostgreSQL applies — not
+  // parity but a stricter dialect, and the kind of regression a "make it enforce
+  // everywhere" change invites. This arm fails if the posture ever widens past
+  // what PostgreSQL denies.
+  {
+    const { url, namespace, work } = await target.open(null);
+    try {
+      const made = await cli(work, url, namespace);
+      assert.equal(made.code, 0, `${target.name}: the table must be created; ${made.text}`);
+
+      addUpdate(work);
+      const bumped = await cli(work, url, namespace);
+      assert.equal(
+        bumped.code,
+        0,
+        `${target.name}: a bounded update must APPLY under the default posture, as it ` +
+          `does on PostgreSQL — the posture covers object drops, not row DML; ${bumped.text}`,
       );
     } finally {
       await target.cleanUp(namespace, work);

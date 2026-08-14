@@ -3191,10 +3191,32 @@ pub fn check_ir_data_security_policy(
     //
     // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
     // the leg THIS dialect will actually run.
+    // NOT `Op::is_destructive` on its own. That is the APPROVAL notion, and it is
+    // wider on purpose: `safety.require_approval = on_destructive` reasonably wants
+    // a human to look at row-affecting DML. The POSTURE must match what PostgreSQL
+    // actually denies, which was measured rather than read off the classifier -
+    // `destructive_update_operation` returns `Some("UPDATE")` unconditionally, yet
+    // PostgreSQL applies a bounded `update` under the default `forbid`, because DML
+    // lowers to a bound `PlanStep::Dml` that the SQL-text guard never inspects.
+    //
+    // Enforcing the wider notion here made MySQL and SQLite STRICTER than
+    // PostgreSQL - an `update` that PostgreSQL applies was refused - which is a
+    // regression, not parity. Row DML is therefore excluded, leaving the
+    // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
+    //
+    // `PgRaw` is excluded because it cannot reach these dialects at all:
+    // `SqlGuard::check` refuses non-Postgres raw text outright.
+    let posture_denies = |op: &Op| {
+        op.is_destructive()
+            && !matches!(
+                op,
+                Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::PgRaw { .. }
+            )
+    };
     if !matches!(cfg.dialect(), SqlDialect::Postgres)
         && matches!(cfg.destructive_ops(), DestructiveOps::Forbid)
     {
-        if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| op.is_destructive()) {
+        if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| posture_denies(op)) {
             return Err(IrDataSecurityError {
                 op_index,
                 source: GuardError::DataSecurityPolicy {
