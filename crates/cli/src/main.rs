@@ -370,6 +370,7 @@ fn cmd_deploy(args: &[String]) {
     let auto_create = deploy_auto_create(args);
 
     project_config::print_provenance("deploy", &[("app", &app), ("control", &control_url)]);
+    let app_source = app.source.clone();
     let (app, control_url) = (app.value, control_url.value);
 
     let input_path = PathBuf::from(&input);
@@ -390,7 +391,12 @@ fn cmd_deploy(args: &[String]) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id);
-                record_created_app(config.as_ref(), flag_str(args, "--env=").as_deref(), &created.id);
+                record_created_app(
+                    config.as_ref(),
+                    flag_str(args, "--env=").as_deref(),
+                    &app_source,
+                    &created.id,
+                );
             }
             eprintln!("Deployed successfully!");
             if let Some(hash) = outcome.deploy_hash {
@@ -488,21 +494,22 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
     Ok((config, resolved, app, control_url, input))
 }
 
-/// Put the freshly minted app id where the next command will find it.
+/// Report where to put an id created from the file's `name` fallback.
 ///
-/// WRITEBACK IS DELIBERATELY TINY (proposal 5.2): one field, one code path, a
-/// splice rather than a re-serialise. Not `control` - a `--control=` typo
-/// becoming permanent is worse than typing it twice. Not on a normal deploy -
-/// if `app` already resolved, the file is never opened for writing.
+/// WRITEBACK IS DELIBERATELY TINY (proposal 5.2): one field and one code path.
+/// Not `control` - a `--control=` typo becoming permanent is worse than typing
+/// it twice. An existing config `app` or an explicit `--app` is never a
+/// writeback target, even if that target is auto-created; only a missing `app`
+/// that fell back to `name` reaches the file.
 ///
 /// When the member is absent the CLI REFUSES to insert it and prints the line
 /// to paste. Inserting into arbitrary JSONC means guessing which comment the
 /// new member belongs under and at what indentation, which is where
-/// round-trip libraries get ugly; a splice is provably byte-safe and a printed
-/// line is honest about the rest.
+/// round-trip libraries get ugly; a printed line is honest about the edit.
 fn record_created_app(
     config: Option<&project_config::ProjectConfig>,
     environment: Option<&str>,
+    app_source: &project_config::Source,
     id: &str,
 ) {
     let Some(config) = config else {
@@ -520,6 +527,9 @@ fn record_created_app(
             "  add this under environments.{env} in {}:\n    \"app\": \"{id}\",",
             config.path.display()
         );
+        return;
+    }
+    if app_source != &project_config::Source::FileMember("name") {
         return;
     }
     match config.write_app(id) {
@@ -1357,33 +1367,74 @@ mod tests {
     }
 
     #[test]
-    fn deploy_name_create_path_resolves_before_upload() {
+    fn deploy_flag_auto_create_preserves_configured_app() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "app": "11111111-1111-4111-8111-111111111111",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+        let resolved = config.resolve(None).expect("resolve config");
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "dist/app.zship",
+            "--app=scratch-test",
+        ]);
+        let app = project_config::resolve_value(
+            &args,
+            "--app",
+            None,
+            None,
+            Some(&resolved),
+            "app",
+            None,
+        )
+        .expect("resolve flag app");
+        assert_eq!(app.source, project_config::Source::Flag("--app"));
+
         let mut client = FakeControlClient::default()
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"calendar"}"#,
+                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"scratch-test"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:def"}"#);
 
         let outcome = deploy_archive(
             &mut client,
             "http://control.test",
-            "calendar",
+            &app.value,
             "token",
             b"zship",
             true,
         )
         .expect("name deploy should create and retry by id");
 
+        let created = outcome.created_app.expect("scratch app was created");
+        record_created_app(Some(&config), None, &app.source, &created.id);
+
         assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:def"));
         assert_eq!(
             client.calls,
             vec![
                 FakeCall::List,
-                FakeCall::Create("calendar".to_string()),
+                FakeCall::Create("scratch-test".to_string()),
                 FakeCall::Deploy("22222222-2222-4222-8222-222222222222".to_string()),
             ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an auto-created --app target must not replace the committed app",
         );
     }
 
