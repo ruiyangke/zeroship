@@ -1214,6 +1214,10 @@ else
     ZEROSHIP_CONTROL_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     ZEROSHIP_CONTROL_SIGNING_KEY_FILE=/etc/zeroship/secrets/control-signing.pem
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
+    # The issuer above is the PUBLIC name a token's `iss` carries; this is the
+    # address control dials to mint one. Two settings on purpose, and control
+    # refuses to start with only the first.
+    ZEROSHIP_AUTH_PLATFORM_MINT_URL=http://auth:9092
   )
   # The GOOD overlay is the one this repo ships, so the control below is not a
   # hand-written minimum that happens to parse.

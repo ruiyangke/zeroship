@@ -89,6 +89,23 @@ fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
+/// Read one claim out of a JWT payload WITHOUT verifying it.
+///
+/// Deliberately unverified: a test that wants to assert what the issuer STAMPED
+/// must read the bytes, not ask the verifier. Asking the verifier would make a
+/// verifier that stopped comparing `iss` invisible.
+fn json_claim(token: &str, claim: &str) -> String {
+    let payload = token.split('.').nth(1).expect("JWT has a payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("JWT payload is base64url");
+    let claims: Value = serde_json::from_slice(&bytes).expect("JWT payload is JSON");
+    claims[claim]
+        .as_str()
+        .unwrap_or_else(|| panic!("claim {claim} is not a string"))
+        .to_owned()
+}
+
 /// A well-formed random user code.
 ///
 /// Production now validates every incoming `user_code` against
@@ -166,6 +183,22 @@ struct MockPlatformAuth {
 
 impl MockPlatformAuth {
     fn start() -> Self {
+        Self::start_advertising(None)
+    }
+
+    /// Start a mock whose tokens carry `issuer` in `iss`, while it still LISTENS
+    /// on loopback.
+    ///
+    /// This is the production topology in miniature: the OP's identity is a
+    /// public name and its reachable address is something else entirely. Pass an
+    /// unresolvable name and any code that dials the issuer instead of the
+    /// configured mint URL fails with the same `Connect` error the live
+    /// deployment produced.
+    fn start_advertising_public_issuer(issuer: &str) -> Self {
+        Self::start_advertising(Some(issuer.to_owned()))
+    }
+
+    fn start_advertising(public_issuer: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind platform auth mock");
         listener
             .set_nonblocking(true)
@@ -183,7 +216,8 @@ impl MockPlatformAuth {
         // itself is still served at `{base}/internal/platform-token` (root, no
         // `/oauth2`), matching how `handle_platform_auth_request` below routes it -
         // `op_public_url` strips the suffix back off before the mint call.
-        let issuer_url = format!("{base}{}", device_grant::OP_PATH_PREFIX);
+        let issuer_url =
+            public_issuer.unwrap_or_else(|| format!("{base}{}", device_grant::OP_PATH_PREFIX));
         let issuer = Arc::new(
             Issuer::from_signing_key(&signing, [13u8; 32], issuer_url)
                 .expect("platform issuer"),
@@ -216,10 +250,18 @@ impl MockPlatformAuth {
         format!("{}/.well-known/jwks.json", self.base)
     }
 
-    /// The configured `platform_issuer` string, `{base}/oauth2`. What
-    /// `device_grant::op_public_url` strips back down to `base`.
+    /// The configured `platform_issuer` string. `{base}/oauth2` by default, or
+    /// whatever public name [`Self::start_advertising_public_issuer`] was given.
+    /// It is a NAME: what a token's `iss` must equal, never an address to dial.
     fn issuer(&self) -> &str {
         self.issuer.issuer()
+    }
+
+    /// The configured `platform_mint_url`: the loopback origin this mock is
+    /// actually listening on, which is where `/internal/platform-token` is
+    /// served. Always the real address, never derived from [`Self::issuer`].
+    fn mint_url(&self) -> String {
+        self.base.clone()
     }
 
     fn issue_access_token(&self, principal_id: Uuid, scopes: &[String]) -> String {
@@ -412,6 +454,25 @@ struct Fixture {
     device_hashes: Vec<String>,
 }
 
+/// How the platform OP's NAME relates to its ADDRESS in a fixture.
+///
+/// Every test here except the two that name it uses `Colocated`, where the
+/// public issuer origin and the reachable address are the same string. That is
+/// the degenerate case, and it is exactly why the shipped bug survived every
+/// existing test: when the two agree, deriving one from the other is
+/// indistinguishable from configuring it.
+#[derive(Clone, Copy)]
+enum PlatformTopology {
+    /// Issuer is `{listener}/oauth2`; the mint URL is `{listener}`.
+    Colocated,
+    /// Issuer is the given public name, which does NOT resolve; the mint URL is
+    /// still the loopback listener. The production shape.
+    PublicIssuer(&'static str),
+    /// Issuer configured, mint URL absent. The state a fallback would paper
+    /// over, and the one boot refuses.
+    NoMintUrl,
+}
+
 #[derive(Clone, Copy)]
 enum FixtureProvider {
     Platform,
@@ -427,7 +488,26 @@ impl Fixture {
     }
 
     async fn new_with_provider(provider: FixtureProvider) -> Self {
-        Self::build(provider, Quota::per_minute(10_000, 100), false).await
+        Self::build(
+            provider,
+            Quota::per_minute(10_000, 100),
+            false,
+            PlatformTopology::Colocated,
+        )
+        .await
+    }
+
+    /// A fixture whose platform-OP topology is something other than the
+    /// degenerate "the public name IS the reachable address" case every other
+    /// test here uses.
+    async fn new_with_topology(topology: PlatformTopology) -> Self {
+        Self::build(
+            FixtureProvider::Platform,
+            Quota::per_minute(10_000, 100),
+            false,
+            topology,
+        )
+        .await
     }
 
     /// Builds a fixture whose admin limiter can actually be reached.
@@ -444,13 +524,23 @@ impl Fixture {
         provider: FixtureProvider,
         admin_quota: Quota,
     ) -> Self {
-        Self::build(provider, admin_quota, true).await
+        Self::build(provider, admin_quota, true, PlatformTopology::Colocated).await
     }
 
-    async fn build(provider: FixtureProvider, admin_quota: Quota, trust_proxy: bool) -> Self {
+    async fn build(
+        provider: FixtureProvider,
+        admin_quota: Quota,
+        trust_proxy: bool,
+        topology: PlatformTopology,
+    ) -> Self {
         let db_url = db_url();
         let mock_supabase = MockSupabase::start();
-        let mock_platform = MockPlatformAuth::start();
+        let mock_platform = match topology {
+            PlatformTopology::PublicIssuer(issuer) => {
+                MockPlatformAuth::start_advertising_public_issuer(issuer)
+            }
+            PlatformTopology::Colocated | PlatformTopology::NoMintUrl => MockPlatformAuth::start(),
+        };
         let issuer = mock_supabase.issuer();
         let (control_pg_client, control_pg_conn) =
             connect(&db_url, NoTls).await.expect("control-pg connect");
@@ -531,6 +621,15 @@ impl Fixture {
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider,
+            // The ADDRESS, taken from the listener, not derived from the
+            // issuer. `platform_mint_url_is_used_instead_of_the_public_issuer`
+            // is the case where the two deliberately disagree.
+            platform_mint_url: match topology {
+                PlatformTopology::NoMintUrl => None,
+                PlatformTopology::Colocated | PlatformTopology::PublicIssuer(_) => {
+                    Some(mock_platform.mint_url())
+                }
+            },
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,
@@ -1485,6 +1584,197 @@ async fn platform_only_provider_completes_the_control_device_flow() {
 
     fx.cleanup().await;
 
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The mint is POSTed to the CONFIGURED address, and the token it returns still
+/// verifies against the PUBLIC issuer.
+///
+/// The one case that separates the two jobs one string used to do. The platform
+/// OP here advertises `https://auth.mint-url-regression.invalid/oauth2` - a
+/// reserved TLD, guaranteed never to resolve (RFC 2606) - while listening on
+/// loopback, which is what `platform_mint_url` names. So:
+///
+///   * TRUST is unchanged. The minted token carries `iss` =
+///     `...invalid/oauth2`, control's trusted issuer is that same string, and
+///     the assertion below is that verification SUCCEEDS. Nothing about
+///     changing where we POST widened or narrowed what we trust.
+///   * ROUTE is the configured one. If any code path derived the mint target
+///     from the issuer it would dial a name that cannot resolve, and this test
+///     would fail with a 500 from the transport arm.
+///
+/// FAILS ON THE PRE-FIX CODE for exactly that reason: it computed
+/// `device_grant::op_public_url(platform_issuer)` and posted there. That is the
+/// shipped bug - on the live single-host deployment the public name resolves to
+/// a CDN with no route back in, so control logged `platform token mint transport
+/// failed / hyper client error (Connect)` and `zeroship login` answered
+/// `{"error":"internal error"}` after the human had already approved.
+///
+/// What it does NOT cover: that the mint URL an OPERATOR configured is
+/// reachable. Nothing in-process can know that; the boot guard checks the value
+/// is a well-formed absolute origin, not that anything answers on it.
+#[compio::test]
+async fn platform_mint_url_is_used_instead_of_the_public_issuer() {
+    const PUBLIC_ISSUER: &str = "https://auth.mint-url-regression.invalid/oauth2";
+
+    let mut fx =
+        Fixture::new_with_topology(PlatformTopology::PublicIssuer(PUBLIC_ISSUER)).await;
+    // The premise, checked rather than assumed: the two settings really do
+    // disagree in this fixture. If the mock ever started advertising its own
+    // address again, everything below would pass while proving nothing.
+    assert_eq!(
+        fx.state.auth_provider.platform_issuer(),
+        Some(PUBLIC_ISSUER),
+        "the trust anchor must be the unreachable public name"
+    );
+    let mint_url = fx
+        .state
+        .platform_mint_url
+        .clone()
+        .expect("the fixture configures a mint URL");
+    assert!(
+        mint_url.starts_with("http://127.0.0.1:"),
+        "the route must be the loopback address the mock listens on, got {mint_url}"
+    );
+    assert_ne!(
+        device_grant::op_public_url(PUBLIC_ISSUER),
+        Some(mint_url.as_str()),
+        "the issuer-derived origin and the configured route must differ, or this \
+         test cannot tell them apart"
+    );
+
+    let principal_id = fx.create_platform_principal().await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "openid offline_access apps:deploy apps:read apps:write"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    let device_code = auth_body["device_code"].as_str().expect("device_code");
+    let user_code = auth_body["user_code"].as_str().expect("user_code");
+    let device_code_hash = fx.track_hash(device_code);
+
+    let approval_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let _ = device_code_hash;
+
+    let token_req = test::TestRequest::post()
+        .uri("/api/device/token")
+        .set_json(&json!({
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .to_request();
+    let token_resp = test::call_service(&app, token_req).await;
+    assert_eq!(
+        token_resp.status(),
+        StatusCode::OK,
+        "the mint must reach the configured address, not the unresolvable issuer host"
+    );
+    let token_body: Value =
+        serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
+    let access_token = token_body["access_token"].as_str().expect("access_token");
+
+    // HALF TWO: the token that came back is trusted, and it is trusted because
+    // its `iss` equals the PUBLIC issuer. Read the claim rather than believing
+    // the verifier, so a verifier that stopped checking `iss` could not make
+    // this pass.
+    let issued_iss = json_claim(access_token, "iss");
+    assert_eq!(
+        issued_iss, PUBLIC_ISSUER,
+        "the OP must still stamp the public issuer into the token it minted"
+    );
+    let verified = fx
+        .state
+        .auth_provider
+        .verify_token(access_token)
+        .await
+        .expect("a token minted over the internal route still verifies as public-issued");
+    assert_eq!(
+        verified.provider_authz,
+        ProviderAuthz::OAuthScope("apps:deploy apps:read apps:write".to_string())
+    );
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A device flow with no configured mint destination is refused UP FRONT.
+///
+/// The failure mode chosen for a missing mint URL is "refuse", never "fall back
+/// to the issuer" - a fallback is bit-for-bit the shipped bug, and it would
+/// reappear on exactly the deployments that did not know to set the new value.
+/// A real process cannot reach this state (boot refuses the same combination in
+/// `crates/control/src/main.rs`), so this pins the handler's own precondition.
+///
+/// It is refused at `/api/device/auth`, before a code is printed, rather than at
+/// the token poll: the alternative makes a human read a code, open a page and
+/// approve, and only then learn the deployment cannot mint.
+#[compio::test]
+async fn a_missing_mint_url_refuses_the_device_flow_rather_than_falling_back() {
+    let mut fx = Fixture::new_with_topology(PlatformTopology::NoMintUrl).await;
+    let issuer = fx
+        .state
+        .auth_provider
+        .platform_issuer()
+        .expect("platform fixture has an issuer")
+        .to_owned();
+    // The issuer stays configured, and the origin the OLD code derived from it
+    // is BOTH derivable and live here - the mock is listening on it. That is
+    // what makes this a measurement of the fallback's absence rather than of a
+    // broken fixture: pre-fix, this exact state minted successfully.
+    assert_eq!(
+        device_grant::op_public_url(&issuer),
+        Some(fx._mock_platform.base.as_str()),
+        "the address the old code would have fallen back to must still be serving"
+    );
+    assert!(fx.state.platform_mint_url.is_none());
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({ "client_id": "zeroship-cli" }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(
+        auth_resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an unconfigured mint destination must refuse before a code is printed"
+    );
+    let body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    assert_eq!(body["error"], "unsupported_provider");
+
+    fx.cleanup().await;
     drop(app);
     drop(fx);
     common::drain_pg().await;

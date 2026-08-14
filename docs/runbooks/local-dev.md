@@ -82,11 +82,20 @@ Terminal 1:
 ```bash
 ZEROSHIP_CONTROL_DATABASE_URL=postgres://localhost:5432/zeroship \
 ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
+ZEROSHIP_AUTH_PLATFORM_MINT_URL="http://localhost:9092" \
 ./target/release/zeroship-control \
   --port 9090 \
   --blob-store ./bundles \
   --signing-key-file deploy/compose/secrets/control-signing.pem
 ```
+
+Those last two are DIFFERENT settings and control refuses to start with only the
+first. `ZEROSHIP_AUTH_PLATFORM_ISSUER` is the `iss` a platform token must carry;
+`ZEROSHIP_AUTH_PLATFORM_MINT_URL` is where control POSTs the deploy-token mint,
+carrying `ZEROSHIP_CONTROL_KEY`. They happen to name the same host here because
+everything runs on one loopback machine - on a deployment whose public name is
+served by a CDN or an ingress they are necessarily different values. See
+`docs/reference/env-vars.md`, "A name is not an address".
 
 `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is not in the generated overlay and
 `dev init` does not generate it: only Stripe issues a value that verifies.

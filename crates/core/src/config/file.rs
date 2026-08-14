@@ -407,6 +407,13 @@ pub struct AuthSection {
     pub platform_issuer: Option<String>,
     /// Platform OP JWKS URL. Defaults to `{platform_issuer}/.well-known/jwks.json`.
     pub platform_jwks_url: Option<String>,
+    /// Base URL control POSTs the platform deploy-token mint to.
+    ///
+    /// Distinct from `platform_issuer` on purpose: that is the `iss` a token
+    /// must carry (a NAME, always public), this is where `control_key` is sent
+    /// (a ROUTE, which must be reachable from control). See
+    /// `ControlSettings::auth_platform_mint_url`.
+    pub platform_mint_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
     ///
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
@@ -595,6 +602,7 @@ mod tests {
         assert!(config.auth.supabase_anon_key.is_none());
         assert!(config.auth.platform_issuer.is_none());
         assert!(config.auth.platform_jwks_url.is_none());
+        assert!(config.auth.platform_mint_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
         assert!(config.observability.log_filter.is_none());
@@ -641,6 +649,7 @@ supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-test-key"
 platform_issuer = "https://auth.zeroship.ai"
 platform_jwks_url = "https://auth.zeroship.ai/.well-known/jwks.json"
+platform_mint_url = "http://auth:9092"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
@@ -679,6 +688,13 @@ log_format = "json"
         assert_eq!(
             config.auth.platform_jwks_url.as_deref(),
             Some("https://auth.zeroship.ai/.well-known/jwks.json")
+        );
+        // The address, which the overlay must be able to carry SEPARATELY from
+        // the issuer above. A schema that accepted only the issuer would force
+        // every deployment behind an edge back onto a derived route.
+        assert_eq!(
+            config.auth.platform_mint_url.as_deref(),
+            Some("http://auth:9092")
         );
         assert_eq!(
             config.auth.trusted_oauth_clients.as_deref(),

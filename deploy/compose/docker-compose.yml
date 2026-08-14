@@ -252,7 +252,33 @@ services:
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
       # Control validates platform-issued access tokens against this explicit
       # issuer. It is deployment topology, not a switch that relaxes checks.
+      #
+      # PUBLIC on purpose: it is the exact string a token's `iss` claim carries,
+      # so it must be the name the OP advertises to everyone. It is NOT an
+      # address control dials - the two settings below are.
       ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
+      # The two OUTBOUND platform-OP targets, both on the compose network.
+      #
+      # Literals, not `${VAR}` interpolations, because they name a service on
+      # THIS network: `auth:9092` is the auth container's address, and it is
+      # correct regardless of which public domain the deployment serves. Making
+      # them follow ZEROSHIP_DOMAIN is precisely the derivation that broke:
+      # control would then dial the public hostname, egress to the CDN in front
+      # of it, and get nothing back on a host with no hairpin route. Measured on
+      # the live single-host deployment: `auth:9092/healthz` -> 200,
+      # `https://auth.<domain>/healthz` -> 000, so every `zeroship login`
+      # approval ended in `{"error":"internal error"}`.
+      #
+      # The mint URL carries ZEROSHIP_CONTROL_KEY in an Authorization header,
+      # so it is a credential destination; control validates it at boot (bare
+      # http/https origin, no userinfo, no path) and refuses to start without it
+      # whenever an issuer is set.
+      ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092
+      # Same split for the key fetch, using the setting that already existed:
+      # the JWKS is FETCHED, so it needs a reachable address, while the `iss`
+      # it validates stays the public issuer above. Without this the mint would
+      # succeed and the verify-back would fail with the same `Connect` error.
+      ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
       # NO provisioning DSN here. The privileged CREATE SCHEMA / CREATE ROLE
       # work belongs to `migrated`, which is the only code that reads one; this
       # service used to carry it and nothing consumed it.
@@ -398,9 +424,16 @@ services:
       # Seals the server-composed migration policy. It is stable across restarts
       # and independent from the platform encryption and transport keys.
       ZEROSHIP_MIGRATED_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}
-      # OAuth issuer topology, not a relaxed security posture. Containers reach
-      # this public hostname through Caddy's compose-network alias.
+      # OAuth issuer topology, not a relaxed security posture. This is the
+      # trust anchor - the `iss` a platform token must carry - so it is the
+      # public name and stays that way.
       ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
+      # The key fetch is an OUTBOUND call, so it gets the address on this
+      # network rather than the public name. migrated does not mint, so it has
+      # no mint URL; this is the only outbound platform-OP target it has.
+      # Compose used to leave this unset, which defaulted it to
+      # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
+      ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
     volumes:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
