@@ -191,8 +191,21 @@ test("an issue I am CC'd on appears on my dashboard", async ({ page, baseURL }) 
   // against a panel that was never rendered, which is the strongest way to make
   // this test meaningless.
   const openCcTab = async () => {
-    await page.getByRole("tab", { name: /CC'd on/ }).click();
-    await page.locator("section.my-work table").waitFor({ state: "visible" });
+    const tab = page.getByRole("tab", { name: /CC'd on/ });
+    await tab.click();
+    // Wait for the TAB to be selected, not for a table inside it.
+    //
+    // This waited for `section.my-work table`, which only renders when the
+    // list has rows -- and the first call is deliberately made while the CC
+    // list is still EMPTY, so that the negative assertion below means
+    // something. It passed anyway, because the dev database held 1701 leaked
+    // fixture issues and this user was CC'd on plenty of them, so a table was
+    // always there. Sweeping the fixtures removed that prop and the wait timed
+    // out on a legitimately empty tab.
+    //
+    // A wait that depends on the data being non-empty cannot be used to set up
+    // an assertion about the data being empty.
+    await expect(tab).toHaveAttribute("aria-selected", "true");
   };
   await page.goto("/dashboard");
   const ccSection = page.locator("section.my-work");

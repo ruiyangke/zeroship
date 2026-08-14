@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import {
+import { Cluster,
   Badge,
   Banner,
   Button,
@@ -22,6 +22,7 @@ import {
   createProduct,
   createVersion,
   updateComponent,
+  deleteProduct,
   updateProduct,
 } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -442,6 +443,23 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
   const busy = save.isPending;
   const error = save.error;
 
+  /**
+   * Deleting takes the product's issues with it, so this asks twice.
+   *
+   * The server refuses the first call and answers with the issue count; the
+   * second passes `deleteIssues`. That is deliberately the same two-step a
+   * script gets, rather than a UI-only confirm over a one-shot endpoint --
+   * the guard lives where the data does.
+   *
+   * `confirming` holds the server's refusal message, so the confirmation
+   * quotes the real count rather than the page's guess at it.
+   */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const remove = useAppMutation(
+    (input: { id: string; deleteIssues?: boolean }) => deleteProduct(input),
+    () => invalidatedBy.productStructureChanged(),
+  );
+
   return (
     <Stack gap={4} className="product-editor">
       {/* LABELLED. These two were bare <Input>s with neither a label nor a
@@ -487,6 +505,55 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
           </Button>
         </div>
         {error ? <p className="field-error">{errorMessage(error)}</p> : null}
+
+        {/* Apart from Save, and quieter than it. A destructive action sitting
+            next to the primary one at the same weight is how it gets pressed
+            by accident; this is the only control on the page that cannot be
+            undone. */}
+        <div className="product-danger">
+          {confirming === null ? (
+            <Button
+              variant="plain"
+              size="small"
+              disabled={remove.isPending}
+              onClick={async () => {
+                try {
+                  await remove.mutateAsync({ id: product.id });
+                } catch (err) {
+                  // The refusal IS the information: it carries the count.
+                  setConfirming(errorMessage(err));
+                }
+              }}
+            >
+              Delete product
+            </Button>
+          ) : (
+            <Stack gap={2}>
+              {/* The server refusal minus its last sentence. That sentence tells
+                  an API caller to pass `deleteIssues`, which is right for a
+                  script and wrong here: the buttons below ARE the
+                  confirmation, and telling someone to pass a parameter they
+                  cannot see is the interface describing itself rather than
+                  their choice. The count, which is the part that matters,
+                  stays. */}
+              <p className="field-error">{confirming.replace(/\s*Pass deleteIssues to confirm\.?$/, "")}</p>
+              <Cluster gap={2}>
+                <Button
+                  variant="filled"
+                  intent="destructive"
+                  size="small"
+                  disabled={remove.isPending}
+                  onClick={() => remove.mutate({ id: product.id, deleteIssues: true })}
+                >
+                  Delete it and its issues
+                </Button>
+                <Button variant="plain" size="small" onClick={() => setConfirming(null)}>
+                  Keep it
+                </Button>
+              </Cluster>
+            </Stack>
+          )}
+        </div>
       </Stack>
 
       {/* Stacked, not three columns. The 3-up grid was laid out for the width
