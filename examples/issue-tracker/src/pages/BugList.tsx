@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
 import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import { listProducts, searchBugs } from "../api";
 import {
@@ -57,7 +58,8 @@ function loadColumns(): BugColumnKey[] {
   }
 }
 
-type SortBy = "created_at" | "updated_at" | "priority" | "severity" | "status";
+const SORTABLE = ["created_at", "updated_at", "priority", "severity", "status"] as const;
+type SortBy = (typeof SORTABLE)[number];
 
 // The table speaks in COLUMN keys and the server in sort fields; these map
 // between them. Kept as a pair rather than reusing one vocabulary because the
@@ -78,14 +80,37 @@ const SORT_COLUMN: Record<SortBy, string> = {
 };
 
 export function BugListPage() {
-  const [text, setText] = useState("");
-  const [status, setStatus] = useState<BugStatus | "">("");
-  const [severity, setSeverity] = useState<(typeof BUG_SEVERITIES)[number] | "">("");
-  const [priority, setPriority] = useState<(typeof BUG_PRIORITIES)[number] | "">("");
-  const [productId, setProductId] = useState("");
-  const [sortBy, setSortBy] = useState<SortBy>("updated_at");
-  const [sortDirection, setSortDirection] = useState<1 | -1>(-1);
-  const [offset, setOffset] = useState(0);
+  // The query lives in the URL, so a narrowed list is a link you can send.
+  // Typing replaces the entry (one per keystroke would bury the Back button);
+  // the discrete choices push, so Back undoes them one at a time.
+  const [text, setText] = useQueryParam("q", "", { replace: true });
+  const [statusParam, setStatus] = useQueryParam("status");
+  const [severityParam, setSeverity] = useQueryParam("severity");
+  const [priorityParam, setPriority] = useQueryParam("priority");
+  const [productId, setProductId] = useQueryParam("product");
+  const [sortByParam, setSortByParam] = useQueryParam("sort", "updated_at");
+  const [sortDirParam, setSortDirParam] = useQueryParam("dir", "-1");
+  const [offset, setOffset] = useNumericQueryParam("offset", 0);
+
+  // The URL is a string typed by anyone; the rest of this page expects the
+  // unions. An unknown value reads as "no filter" rather than being passed to
+  // the server, so a hand-edited ?status=nonsense narrows nothing instead of
+  // erroring.
+  const status = (BUG_STATUSES as readonly string[]).includes(statusParam)
+    ? (statusParam as BugStatus)
+    : "";
+  const severity = (BUG_SEVERITIES as readonly string[]).includes(severityParam)
+    ? (severityParam as (typeof BUG_SEVERITIES)[number])
+    : "";
+  const priority = (BUG_PRIORITIES as readonly string[]).includes(priorityParam)
+    ? (priorityParam as (typeof BUG_PRIORITIES)[number])
+    : "";
+  const sortBy = (SORTABLE as readonly string[]).includes(sortByParam)
+    ? (sortByParam as SortBy)
+    : "updated_at";
+  const sortDirection: 1 | -1 = sortDirParam === "1" ? 1 : -1;
+  const setSortBy = (next: SortBy) => setSortByParam(next);
+  const setSortDirection = (next: 1 | -1) => setSortDirParam(String(next));
   const [columns, setColumns] = useState<BugColumnKey[]>(loadColumns);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Results from the advanced builder REPLACE the filtered list while they
@@ -150,14 +175,8 @@ export function BugListPage() {
     });
   };
 
-  const resetFilters = () => {
-    setText("");
-    setStatus("");
-    setSeverity("");
-    setPriority("");
-    setProductId("");
-    setOffset(0);
-  };
+  // One write, not six. See useClearQuery.
+  const resetFilters = useClearQuery();
 
   // Applying resets to the first page. Staying on page 4 of the old result set
   // while the filter changes shows an empty table for a query that matched
@@ -429,7 +448,7 @@ export function BugListPage() {
             <div className="pager">
               <Button variant="gray" size="small"
                 disabled={offset === 0}
-                onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
               >
                 Previous
               </Button>
@@ -438,7 +457,7 @@ export function BugListPage() {
               </span>
               <Button variant="gray" size="small"
                 disabled={bugs.length < PAGE_SIZE}
-                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+                onClick={() => setOffset(offset + PAGE_SIZE)}
               >
                 Next
               </Button>
