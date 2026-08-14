@@ -394,12 +394,40 @@ fn cmd_deploy(args: &[String]) {
             if let Some(hash) = outcome.deploy_hash {
                 eprintln!("  deploy_hash: {hash}");
             }
+            print_migrate_reminder(&app, &control_url);
         }
         Err(e) => {
             eprintln!("zeroship deploy: {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// After a successful deploy, name the migrate step when this working directory
+/// has migrations to apply.
+///
+/// DELIBERATELY A CLIENT-SIDE HINT, and a weak one. It fires on the presence of
+/// the build's own artifact in the CURRENT directory, which is where `pnpm build
+/// && zeroship deploy ./dist/app.zship` leaves it - so it is silent for a deploy
+/// run from somewhere else, and it does not know whether the app's migrations
+/// are already applied. It cannot tell you that you FORGOT; only that there is
+/// something to run.
+///
+/// The check that could tell you is server-side: the deploy handler knows
+/// whether the bundle carries a `runtime_descriptor` (i.e. the app uses
+/// `env.db`) and could report whether the app has ever had a migration applied.
+/// That is the right place for it and it is not built. This is the cheap half,
+/// and it is here because the expensive half not existing is what let a deploy
+/// answer 200 over an app that could not serve a single database call.
+fn print_migrate_reminder(app: &str, control_url: &str) {
+    let ir = PathBuf::from(migrate::DEFAULT_IR_PATH);
+    if !ir.is_file() {
+        return;
+    }
+    eprintln!();
+    eprintln!("This app has committed migrations. Deploy does NOT apply them:");
+    eprintln!("  zeroship migrate --app={app} --control={control_url}");
+    eprintln!("Until you do, every env.db call fails with a missing-role error.");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
