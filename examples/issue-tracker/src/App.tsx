@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAuth } from "@zeroship/auth/react";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
@@ -129,9 +129,22 @@ export function App() {
     reloadUser();
   }, [user?.id, reloadUser]);
 
+  // ...and remount the PAGE, because refetching identity alone is not enough.
+  //
+  // Every page runs its own useAsync at mount. Signed out those calls 401 and
+  // the page renders "Sign-in required"; signing in refetched users.me, so the
+  // header changed and the page did not -- it kept the 401 it was holding and
+  // went on advising a reload, which was the only thing that actually worked.
+  //
+  // A key on the routed content, not a manual reload of each query: pages come
+  // and go, and the next one added would have to remember to subscribe. This
+  // is one line that cannot be forgotten. Remounting on a session change is
+  // cheap because it happens twice a session.
+  const sessionKey = user?.id ?? "anon";
+
   return (
     <Shell route={route.name} userState={userState}>
-      {renderRoute(route)}
+      <Fragment key={sessionKey}>{renderRoute(route)}</Fragment>
     </Shell>
   );
 }

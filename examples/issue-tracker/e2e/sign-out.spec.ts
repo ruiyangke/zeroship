@@ -18,7 +18,7 @@ const RUNTIME_PORT = Number(process.env.ISSUE_TRACKER_API_PORT ?? 3007);
 
 test("signing out ends the session", async ({ page, baseURL, context }) => {
   await signIn(context, { runtimePort: RUNTIME_PORT, baseURL: baseURL! });
-  await page.goto("/#/bugs");
+  await page.goto("/#/dashboard");
 
   // Signed in: the account menu names you.
   const account = page.getByRole("button", { name: /Alice Dev/ });
@@ -41,5 +41,13 @@ test("signing out ends the session", async ({ page, baseURL, context }) => {
   await expect(
     page.getByRole("button", { name: "Sign in" }),
     "the app offers a way back in",
+  ).toBeVisible({ timeout: 15000 });
+
+  // The PAGE too, and this is the direction that matters most: a dashboard
+  // still showing the previous person's work after they signed out is a
+  // privacy problem, not a refresh problem.
+  await expect(
+    page.getByText("Sign-in required"),
+    "the page re-ran its query and now refuses, instead of showing what it fetched for the signed-in user",
   ).toBeVisible({ timeout: 15000 });
 });
