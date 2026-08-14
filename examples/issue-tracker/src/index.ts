@@ -3743,6 +3743,13 @@ export const reportSummary = query(
       total: all.length,
       open: open.length,
       byStatus: countsBy(open, (issue) => issue.status),
+      // Reported ALONGSIDE severity rather than folded into it. While a feature
+      // request was `severity: enhancement`, "by severity" silently answered
+      // two questions at once and neither cleanly: the enhancement bar was a
+      // count of things that have no severity, and every other bar was a
+      // defect count wearing a general label. Splitting the column made this
+      // breakdown wrong by omission until it split too.
+      byKind: countsBy(open, (issue) => issue.kind),
       bySeverity: countsBy(open, (issue) => issue.severity),
       byPriority: countsBy(open, (issue) => issue.priority),
     };
