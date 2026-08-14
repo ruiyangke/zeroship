@@ -50,7 +50,7 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-/** The same two migrations for every dialect: create + seed, then rename. */
+/** The same three migrations for every dialect: create, seed, then rename. */
 function project(scope: string): string {
   const work = mkdtempSync(join(HERE, "renamesplit-"));
   mkdirSync(join(work, "migrations"));
@@ -80,12 +80,25 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "create_users";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.text() },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed_users.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed_users";
+export default {
+  data() {
     table("users").insert({ rows: { id: 1, display_name: "ada" } });
+  },
+  inverse() {
+    table("users").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,

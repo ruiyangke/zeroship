@@ -58,12 +58,23 @@ const OWNER_APP = "app_resolve_lifecycle";
 const CREATE = `import { table, t } from "zero-migrate";
 export const name = "create_users";
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: { id: t.int().notNull(), display_name: t.text() },
       primaryKey: ["id"],
     });
+  },
+};
+`;
+
+const SEED = `import { table } from "zero-migrate";
+export const name = "seed_users";
+export default {
+  data() {
     table("users").insert({ rows: { id: 1, display_name: "ada" } });
+  },
+  inverse() {
+    table("users").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `;
@@ -107,6 +118,7 @@ scope = "all"
   // A rename rewrites a table, so the deploying app must own it.
   writeFileSync(join(work, "registry.json"), JSON.stringify({ users: OWNER_APP }));
   writeFileSync(join(work, "migrations", "20260101000000_create_users.ts"), CREATE);
+  writeFileSync(join(work, "migrations", "20260101000001_seed_users.ts"), SEED);
   writeFileSync(join(work, "migrations", "20260102000000_rename_display_name.ts"), RENAME);
   return work;
 }

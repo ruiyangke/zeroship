@@ -71,13 +71,13 @@ scope = "all"
 `;
 }
 
-/** The doc's step-2 migration. */
+/** The schema half of the doc's step-2 migration. */
 const CREATE_USERS = `import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_users";
 
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: {
         id: ids.typeId({ prefix: "user" }).primaryKey(),
@@ -89,7 +89,17 @@ export default {
     });
 
     table("users").index("users_email_uq").add({ on: ["email"], unique: true });
+  },
+};
+`;
 
+/** The reversible data half of the doc's step-2 migration. */
+const SEED_USERS = `import { table } from "zero-migrate";
+
+export const name = "seed_users";
+
+export default {
+  data() {
     table("users").insert({
       rows: {
         id: ${JSON.stringify(SEEDED_ID)},
@@ -97,6 +107,9 @@ export default {
         display_name: "First user",
       },
     });
+  },
+  inverse() {
+    table("users").delete({ where: (col) => col("id").eq(${JSON.stringify(SEEDED_ID)}) });
   },
 };
 `;
@@ -123,6 +136,7 @@ function project(schema: string): string {
   // The doc's `table-owners.json`.
   writeFileSync(join(work, "table-owners.json"), JSON.stringify({ users: OWNER_APP }, null, 2));
   writeFileSync(join(work, "migrations", "20260101000000_create_users.ts"), CREATE_USERS);
+  writeFileSync(join(work, "migrations", "20260101000001_seed_users.ts"), SEED_USERS);
   return work;
 }
 
@@ -149,6 +163,7 @@ test("the documented walkthrough runs end to end, in order, with the documented 
     "--dir", "./migrations",
     "--database-url", pgUrl(),
     "--policy", "./policy.toml",
+    "--registry", "./table-owners.json",
     "--schema", schema,
     "--owner-app", OWNER_APP,
   ];
@@ -164,7 +179,7 @@ test("the documented walkthrough runs end to end, in order, with the documented 
     assert.equal(status.code, 0, `status must succeed; ${status.err}`);
     const reply = JSON.parse(status.out) as { applied: string[]; pending: string[] };
     assert.equal(reply.pending.length, 0, "nothing may be pending after the first apply");
-    assert.equal(reply.applied.length, 1, "and the first migration must be applied");
+    assert.equal(reply.applied.length, 2, "and both halves of the first migration must be applied");
 
     // Step 7: author the rename, preview it with the documented registry.
     writeFileSync(join(work, "migrations", "20260102000000_rename.ts"), RENAME);
@@ -175,9 +190,7 @@ test("the documented walkthrough runs end to end, in order, with the documented 
     assert.equal(linted.code, 0, `the documented registry must attribute users; ${linted.err}`);
 
     // Step 8: apply it. The window opens, both columns present.
-    const renamed = run(work, [
-      "apply", ...base, "--registry", "./table-owners.json", "--approve",
-    ]);
+    const renamed = run(work, ["apply", ...base, "--approve"]);
     assert.equal(renamed.code, 0, `the rename must apply; ${renamed.err}`);
     const { rows: during } = await client.query(
       `SELECT column_name FROM information_schema.columns
@@ -193,7 +206,7 @@ test("the documented walkthrough runs end to end, in order, with the documented 
     // Step 9: resolve it.
     const resolved = run(work, [
       "resolve", "rename_user_display_name", "--commit", "--approve",
-      ...base, "--registry", "./table-owners.json",
+      ...base,
     ]);
     assert.equal(resolved.code, 0, `the documented resolve must succeed; ${resolved.err}`);
 

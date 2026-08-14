@@ -103,16 +103,18 @@ const CHARTER = confinedCharter();
  * makes for `plan --sql` (`packages/zero-migrate-cli/src/cli.ts`), with the render
  * context `sql_preview.rs::opts()` uses: schema `public`, owner `app_preview`.
  */
-function renderAuthored(mod: MigrationModule, dialect: string): string {
-  const envelope = buildEnvelope(mod, { irVersion: currentIrVersion() });
-  const [sql] = previewSql({
-    envelopes: [JSON.stringify(envelope)],
+function renderAuthored(mod: MigrationModule | readonly MigrationModule[], dialect: string): string {
+  const modules: readonly MigrationModule[] = Array.isArray(mod) ? mod : [mod];
+  const envelopes = modules.map((migration) =>
+    JSON.stringify(buildEnvelope(migration, { irVersion: currentIrVersion() })),
+  );
+  return previewSql({
+    envelopes,
     dialect,
     defaultSchema: "public",
     ownerApp: "app_preview",
     charterLayers: [CHARTER],
-  });
-  return sql;
+  }).join("\n");
 }
 
 // PORT of `sql_preview.rs::mysql_feature_preview_renders_mysql8_sql` (its
@@ -122,9 +124,9 @@ function renderAuthored(mod: MigrationModule, dialect: string): string {
 // supporting index, a replaceable view with a projection and a predicate, and a
 // bound insert. Every expected string below is copied from that Rust test.
 test("authored MySQL feature migration renders the SQL sql_preview.rs pins", () => {
-  const migration: MigrationModule = {
+  const schemaMigration: MigrationModule = {
     name: "mysql_feature",
-    up() {
+    schema() {
       table("teams").create({
         columns: {
           id: t.int().notNull().identity({ always: false }),
@@ -162,12 +164,20 @@ test("authored MySQL feature migration renders the SQL sql_preview.rs pins", () 
             .select(["id", "name"])
             .where((col) => col("name").isNotNull()),
       });
-
-      table("teams").insert({ rows: [{ id: 1, name: "Core" }] });
     },
   };
 
-  const out = renderAuthored(migration, "mysql");
+  const dataMigration: MigrationModule = {
+    name: "mysql_feature_seed",
+    data() {
+      table("teams").insert({ rows: [{ id: 1, name: "Core" }] });
+    },
+    inverse() {
+      table("teams").delete({ where: (col) => col("id").eq(1) });
+    },
+  };
+
+  const out = renderAuthored([schemaMigration, dataMigration], "mysql");
 
   assert.ok(
     !out.includes(RUNTIME_RESOLVED),

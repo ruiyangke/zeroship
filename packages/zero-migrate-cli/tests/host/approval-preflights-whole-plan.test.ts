@@ -2,24 +2,25 @@
 // step runs, so a later unapproved data change cannot follow an already-committed
 // earlier step from that plan."
 //
-// That is an ORDERING guarantee, and it is load-bearing precisely because steps do
-// NOT share a transaction. `partial-deploy-resumes.test.ts` established that a
-// file's ops commit separately: op 0 can land while op 1 fails. So if approval were
-// checked per step rather than per plan, a plan whose first step needs no approval
-// and whose second step does would leave the first step COMMITTED and the second
-// refused - a half-applied deploy that the operator never approved any part of.
+// Under the schema/data protocol, each migration file is its own plan: the schema
+// half can commit before the later data migration is considered. The ordering
+// guarantee remains load-bearing WITHIN that data plan because its operations do
+// not share a transaction. If approval were checked per operation, op 0 could land
+// before op 1 was refused.
 //
 // `approval-gate-scope.test.ts` pins WHICH operations the gate covers, in both
 // directions. It says nothing about WHEN the check happens, and a per-step gate
 // would satisfy every assertion in it.
 //
-// THE PLAN UNDER TEST is deliberately ordered against the guarantee:
+// THE DATA PLAN UNDER TEST is deliberately ordered against the guarantee:
 //
-//   step 1  createTable `fresh`   needs NO approval
+//   step 1  insert into `fresh`   needs NO approval
 //   step 2  delete from `seeded`  approval-gated
 //
-// Run without `--approve`, the README requires that `fresh` does not exist
-// afterwards. Its absence is the whole assertion: a per-step gate creates it.
+// A separate preceding schema migration creates `fresh`; that is the intentional
+// protocol boundary and it remains after refusal. Run without `--approve`, the
+// README requires that `fresh` contain no row afterwards. Its emptiness is the
+// assertion: a per-operation gate inserts the sentinel before refusing the delete.
 //
 // THE APPROVED ARM IS NOT OPTIONAL. Without it, this file passes for a plan that
 // fails for any reason at all - a bad policy, a typo, an unregistered table - and
@@ -48,23 +49,47 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_preflight";
 
-const SEED = `import { table, t } from "zero-migrate";
+const SEED_SCHEMA = `import { table, t } from "zero-migrate";
+export const name = "create_seeded";
+export default {
+  schema() {
+    table("seeded").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  },
+};
+`;
+
+const SEED_DATA = `import { table } from "zero-migrate";
 export const name = "seed";
 export default {
-  up() {
-    table("seeded").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  data() {
     table("seeded").insert({ rows: [{ id: 1 }, { id: 2 }] });
+  },
+  inverse() {
+    table("seeded").delete({ where: (col) => col("id").in([1, 2]) });
   },
 };
 `;
 
 /** Approval-free step FIRST, approval-gated step SECOND. The order is the point. */
-const MIXED = `import { table, t } from "zero-migrate";
-export const name = "mixed";
+const FRESH_SCHEMA = `import { table, t } from "zero-migrate";
+export const name = "create_fresh";
 export default {
-  up() {
+  schema() {
     table("fresh").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
-    table("seeded").delete({ where: (c) => c("id").gt(0) });
+  },
+};
+`;
+
+const DELETE_SEEDED = `import { table } from "zero-migrate";
+export const name = "delete_seeded";
+export default {
+  data() {
+    table("fresh").insert({ rows: [{ id: 1 }] });
+    table("seeded").delete({ where: (col) => col("id").in([1, 2]) });
+  },
+  inverse() {
+    table("seeded").insert({ rows: [{ id: 1 }, { id: 2 }] });
+    table("fresh").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `;
@@ -100,7 +125,8 @@ scope = "all"
     join(work, "registry.json"),
     JSON.stringify({ seeded: OWNER_APP, fresh: OWNER_APP }),
   );
-  writeFileSync(join(work, "migrations", "20260101000000_seed.ts"), SEED);
+  writeFileSync(join(work, "migrations", "20260101000000_create_seeded.ts"), SEED_SCHEMA);
+  writeFileSync(join(work, "migrations", "20260101000001_seed.ts"), SEED_DATA);
   return work;
 }
 
@@ -130,7 +156,7 @@ function apply(work: string, schema: string, approve: boolean) {
   );
 }
 
-test("an unapproved later step stops the whole plan, including its approval-free first step", async (ctx) => {
+test("an unapproved later operation stops the whole data plan, including its approval-free first operation", async (ctx) => {
   const client = await connectLivePg(ctx);
   if (!client) return;
 
@@ -150,6 +176,10 @@ test("an unapproved later step stops the whole plan, including its approval-free
     const { rows } = await client.query(`SELECT count(*)::int AS n FROM "${schema}".seeded`);
     return rows[0].n as number;
   };
+  const freshRows = async (): Promise<number> => {
+    const { rows } = await client.query(`SELECT count(*)::int AS n FROM "${schema}".fresh`);
+    return rows[0].n as number;
+  };
 
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
@@ -157,17 +187,24 @@ test("an unapproved later step stops the whole plan, including its approval-free
     assert.equal(seeded.code, 0, `the seed migration must apply; ${seeded.text}`);
     assert.equal(await seededRows(), 2, "the seed rows must exist for the delete to be meaningful");
 
-    writeFileSync(join(work, "migrations", "20260102000000_mixed.ts"), MIXED);
+    writeFileSync(join(work, "migrations", "20260102000000_create_fresh.ts"), FRESH_SCHEMA);
+    writeFileSync(join(work, "migrations", "20260102000001_delete_seeded.ts"), DELETE_SEEDED);
 
-    // THE ASSERTION: no --approve, so nothing from this plan may reach the database.
+    // No --approve: the separate schema migration may land, but no operation from
+    // the following data migration may reach the database.
     const refused = await apply(work, schema, false);
     assert.equal(refused.code, 1, `the unapproved plan must be refused; ${refused.text}`);
 
     assert.ok(
-      !(await tables()).includes("fresh"),
-      "`fresh` is the plan's FIRST step and needs no approval of its own. Its " +
-        "presence would mean approval is checked per step rather than across the " +
-        "plan, leaving a half-applied deploy the operator approved no part of",
+      (await tables()).includes("fresh"),
+      "the preceding schema migration is a separate plan and must remain applied",
+    );
+    assert.equal(
+      await freshRows(),
+      0,
+      "the insert is the data plan's FIRST operation and needs no approval of its " +
+        "own. A row here would mean approval is checked per operation rather than " +
+        "across the data plan",
     );
     assert.equal(
       await seededRows(),
@@ -182,8 +219,13 @@ test("an unapproved later step stops the whole plan, including its approval-free
     assert.equal(approved.code, 0, `the approved plan must apply; ${approved.text}`);
     assert.ok(
       (await tables()).includes("fresh"),
-      "with approval the first step must land - otherwise the refusal above was " +
-        "not the approval gate",
+      "with approval the separately applied schema must remain",
+    );
+    assert.equal(
+      await freshRows(),
+      1,
+      "with approval the data plan's first operation must land - otherwise the " +
+        "refusal above was not the approval gate",
     );
     assert.equal(
       await seededRows(),
