@@ -25,7 +25,8 @@
 // wrong in isolation -- it was that the two disagreed, so a test of either alone
 // would have missed it.
 //
-// GATE: none. SQLite exercises the same envelope crossing.
+// GATES: the literal arms run everywhere (SQLite exercises the same crossing); the
+// partition-bound arm needs `ZERO_MIGRATE_TEST_PG_URL`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -56,6 +57,11 @@ const VALUES: ReadonlyArray<readonly [string, string]> = [
   ["u32::MAX + 1 (the first failure)", "4294967296"],
   ["a millisecond timestamp", "1786707868430"],
   ["2^53 - 1, the engine's own limit", "9007199254740991"],
+  // The restore keys on |v|, so a future narrowing to a positive-only check
+  // would break these while every case above kept passing.
+  ["negative, just past u32::MAX", "-4294967296"],
+  ["negative millisecond timestamp", "-1786707868430"],
+  ["-(2^53 - 1), the negative limit", "-9007199254740991"],
 ];
 
 function project(value: string): string {
@@ -162,6 +168,114 @@ test("an integer at or beyond 2^53 is still refused, and lint agrees", () => {
     const applied = run(work, "apply", ["--approve"]);
     assert.equal(applied.code, 1, `beyond 2^53 must still be refused; ${applied.text}`);
   } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+/** The same crossing, reached through a DIFFERENT IR node shape.
+ *
+ *  A partition bound is not an `IrScalar` -- it is a bound node carrying its own
+ *  `{ kind: "int", value }` -- so it exercises the restore through a separate part
+ *  of the envelope tree. It is also the most natural home for a large integer in
+ *  real schemas: range-partitioning by millisecond timestamp puts values around
+ *  1.78e12 directly into the DDL.
+ *
+ *  The assertion reads the bound back out of `pg_class.relpartbound` rather than
+ *  trusting the exit code, because a widened value would still produce a valid
+ *  partition -- just one whose boundary is in the wrong place, which is a data
+ *  routing bug rather than an error. */
+test("a large integer partition bound reaches the catalog exactly", async (ctx) => {
+  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
+    return;
+  }
+  const { pgUrl } = await import("./live-db.js");
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: pgUrl() });
+  await client.connect();
+
+  const FROM = "1786707868430";
+  const TO = "1786794268430";
+  const namespace = `bigpart_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
+  const work = mkdtempSync(join(HERE, "bigpart-"));
+  try {
+    mkdirSync(join(work, "migrations"));
+    writeFileSync(
+      join(work, "policy.toml"),
+      `policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+`,
+    );
+    writeFileSync(
+      join(work, "registry.json"),
+      JSON.stringify({ part_t: OWNER_APP, part_t_win: OWNER_APP }),
+    );
+    writeFileSync(
+      join(work, "migrations", "20260101000000_a.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "a";
+export default {
+  up() {
+    table("part_t").create({
+      columns: { id: t.int().notNull(), ms: t.bigInt().notNull() },
+      primaryKey: ["id", "ms"],
+      partitionBy: { range: ["ms"] },
+    });
+    table("part_t").partition("part_t_win").create({ from: [${FROM}], to: [${TO}] });
+  },
+};
+`,
+    );
+    await client.query(`CREATE SCHEMA "${namespace}"`);
+    const applied = spawnSync(
+      process.execPath,
+      [
+        "--import", "tsx", CLI_BIN, "apply", "--approve",
+        "--dir", join(work, "migrations"),
+        "--database-url", pgUrl(),
+        "--policy", join(work, "policy.toml"),
+        "--registry", join(work, "registry.json"),
+        "--schema", namespace,
+        "--owner-app", OWNER_APP,
+      ],
+      {
+        cwd: work,
+        encoding: "utf8",
+        env: { ...process.env, ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, DATABASE_URL: "" },
+      },
+    );
+    assert.equal(
+      applied.status,
+      0,
+      `the partitioned table must apply; ${`${applied.stdout}\n${applied.stderr}`.trim()}`,
+    );
+
+    const { rows } = await client.query(
+      `SELECT pg_get_expr(c.relpartbound, c.oid) AS bound
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = 'part_t_win'`,
+      [namespace],
+    );
+    const bound = String(rows[0]?.bound ?? "");
+    assert.ok(bound.includes(FROM), `the lower bound must be exact; got ${bound}`);
+    assert.ok(bound.includes(TO), `the upper bound must be exact; got ${bound}`);
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${namespace}" CASCADE;
+         DROP SCHEMA IF EXISTS "${namespace}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
 });
