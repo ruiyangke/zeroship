@@ -138,9 +138,22 @@ e2e_export_runtime_secrets() {
   export ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET
 
   ZEROSHIP_AUTH_PLATFORM_ISSUER="${ZEROSHIP_AUTH_PLATFORM_ISSUER:-http://localhost:${AUTH_PORT:-9092}/oauth2}"
+  # The address control POSTs the deploy-token mint to, which is a DIFFERENT
+  # setting from the issuer above: that one is the `iss` a token must carry,
+  # this one is where control_key is sent. Control refuses to start with an
+  # issuer and no mint URL, so every harness that configures the former needs
+  # the latter.
+  #
+  # The default here happens to be the issuer's own origin, because a local
+  # harness runs everything on one loopback host. That degenerate agreement is
+  # exactly why the shipped bug was invisible to every harness, so
+  # tests/e2e_device_login.sh deliberately overrides this with an address the
+  # issuer does NOT name.
+  ZEROSHIP_AUTH_PLATFORM_MINT_URL="${ZEROSHIP_AUTH_PLATFORM_MINT_URL:-http://localhost:${AUTH_PORT:-9092}}"
   ZEROSHIP_ORIGIN_SCHEME="${ZEROSHIP_ORIGIN_SCHEME:-http}"
   ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING="${ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING:-true}"
-  export ZEROSHIP_AUTH_PLATFORM_ISSUER ZEROSHIP_ORIGIN_SCHEME ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING
+  export ZEROSHIP_AUTH_PLATFORM_ISSUER ZEROSHIP_AUTH_PLATFORM_MINT_URL
+  export ZEROSHIP_ORIGIN_SCHEME ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING
 
   # Control mints the PAT/session token the gateway verifies, so both services
   # get the same Ed25519 file. `signing_key_file` is Operational<PathBuf> on
