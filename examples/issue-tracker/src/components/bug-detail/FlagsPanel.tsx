@@ -15,6 +15,7 @@ import { clearFlag, listFlags, setFlag } from "../../api";
 import { errorMessage } from "../rpc";
 import type { FlagType } from "../types";
 import { UserPicker } from "../UserPicker";
+import { Absent } from "./Absent";
 
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];
@@ -77,7 +78,7 @@ function FlagRow({
     <li className="flag-row">
       <span className="flag-name">{flagType.name}</span>
       {mine.length === 0 ? (
-        <span className="dim">not set</span>
+        <Absent />
       ) : (
         mine.map((entry) => (
           <span key={entry.flag.id} className="flag-current">

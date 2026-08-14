@@ -5,6 +5,7 @@ import { addDependency, dependencyGraph, listDuplicates, removeDependency } from
 import { StatusBadge } from "../Badges";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
+import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
 function BugLink({ id, summary, status }: { id: string; summary: string; status: string }) {
@@ -58,9 +59,9 @@ export function DependenciesPanel({ bugId }: { bugId: string }) {
         }
       : null;
   const summary = !counts ? (
-    <span className="dim">--</span>
+    <Pending width="7rem" />
   ) : counts.dependsOn === 0 && counts.blocks === 0 ? (
-    <span className="dim">none</span>
+    <Absent />
   ) : (
     <>
       {counts.dependsOn} depends on, {counts.blocks} blocks
@@ -155,12 +156,18 @@ export function DuplicatesPanel({
     return state.data.filter((b) => b.id !== bugId);
   }, [state, bugId]);
 
+  // `duplicateOfId` comes from the bug we already have, so it answers before
+  // the cluster query does. Only the LAST branch is a real emptiness claim --
+  // testing `cluster.length > 0` alone would print "no duplicates" for the
+  // moment the list is still in flight.
   const summary = duplicateOfId ? (
     <>duplicate of another bug</>
-  ) : cluster && cluster.length > 0 ? (
+  ) : !cluster ? (
+    <Pending width="8rem" />
+  ) : cluster.length > 0 ? (
     <>{cluster.length} marked duplicate</>
   ) : (
-    <span className="dim">none</span>
+    <Absent />
   );
 
   return (

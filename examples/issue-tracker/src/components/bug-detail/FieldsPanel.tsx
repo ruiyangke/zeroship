@@ -11,6 +11,7 @@ import type { BugDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
 import { personName, type PeopleMap } from "./people";
 import { StatusControl } from "./StatusControl";
+import { Absent } from "./Absent";
 
 type Bug = BugDetail["bug"];
 type BugProduct = NonNullable<BugDetail["product"]>;
@@ -94,7 +95,7 @@ function AssigneeControl({
     <>
       <RailProperty
         label="Assignee"
-        display={personName(bug.assigneeId, people, "unassigned")}
+        display={bug.assigneeId ? personName(bug.assigneeId, people) : <Absent />}
         disabled={busy}
         wide
       >
@@ -265,7 +266,7 @@ function GeneralField({
     return (
       <div className="field-row-compact">
         <span className="field-label">{label}</span>
-        <span className="field-value">{value || "--"}</span>
+        <span className="field-value">{value ? value : <Absent />}</span>
         <Button
           variant="plain"
           size="small"
@@ -384,7 +385,9 @@ export function FieldsPanel({
         </DescriptionList.Item>
         <DescriptionList.Item>
           <DescriptionList.Term>QA contact</DescriptionList.Term>
-          <DescriptionList.Detail>{personName(bug.qaContactId, people)}</DescriptionList.Detail>
+          <DescriptionList.Detail>
+            {bug.qaContactId ? personName(bug.qaContactId, people) : <Absent />}
+          </DescriptionList.Detail>
         </DescriptionList.Item>
       </DescriptionList>
 
@@ -398,7 +401,7 @@ export function FieldsPanel({
             value={bug.versionId ?? ""}
             display={
               productDetail.versions.find((v) => v.id === bug.versionId)?.name ?? (
-                <span className="dim">None</span>
+                <Absent />
               )
             }
             options={productDetail.versions.map((v) => ({ value: v.id, label: v.name }))}
@@ -414,7 +417,7 @@ export function FieldsPanel({
             value={bug.milestoneId ?? ""}
             display={
               productDetail.milestones.find((m) => m.id === bug.milestoneId)?.name ?? (
-                <span className="dim">None</span>
+                <Absent />
               )
             }
             options={productDetail.milestones.map((m) => ({ value: m.id, label: m.name }))}

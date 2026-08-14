@@ -6,6 +6,7 @@ import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
 import type { Activity } from "../types";
 import { RailDisclosure } from "./RailDisclosure";
+import { Absent } from "./Absent";
 
 export function KeywordsPanel({
   bugId,
@@ -61,7 +62,7 @@ export function KeywordsPanel({
   const names = [...attached];
   const summary =
     names.length === 0 ? (
-      <span className="dim">none</span>
+      <Absent />
     ) : (
       <span className="rail-tags">
         {names.map((name) => (

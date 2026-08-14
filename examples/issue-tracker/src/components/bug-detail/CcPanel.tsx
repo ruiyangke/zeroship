@@ -4,6 +4,7 @@ import { addCc, listCc, removeCc } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage, useAsync } from "../rpc";
 import { UserPicker } from "../UserPicker";
+import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
 
 export function CcPanel({ bugId }: { bugId: string }) {
@@ -43,9 +44,9 @@ export function CcPanel({ bugId }: { bugId: string }) {
   // longer than the rail is wide -- three names is already 30 characters.
   const summary =
     state.status !== "ready" ? (
-      <span className="dim">--</span>
+      <Pending width="5rem" />
     ) : state.data.length === 0 ? (
-      <span className="dim">nobody</span>
+      <Absent />
     ) : state.data.length <= 2 ? (
       <>{state.data.map((row) => row.user?.name ?? row.userId).join(", ")}</>
     ) : (

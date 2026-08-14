@@ -4,6 +4,7 @@ import { Button, Field, Input } from "@zeroship/ui";
 import { addSeeAlso, listSeeAlso, removeSeeAlso } from "../../api";
 import { RailDisclosure } from "./RailDisclosure";
 import { errorMessage } from "../rpc";
+import { Absent, Pending } from "./Absent";
 
 /**
  * Bugzilla's See Also: links to the same issue in other trackers.
@@ -18,6 +19,11 @@ import { errorMessage } from "../rpc";
  */
 export function SeeAlsoPanel({ bugId }: { bugId: string }) {
   const [links, setLinks] = useState<Awaited<ReturnType<typeof listSeeAlso>>>([]);
+  // Distinct from `links.length === 0`. Seeding the list empty makes "no links"
+  // and "not asked yet" the same value, so the rail asserted the bug had no
+  // See Also entries for as long as the request took -- and if it failed, for
+  // good. Only after this flips is an empty list a fact about the bug.
+  const [loaded, setLoaded] = useState(false);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +31,7 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
   const load = useCallback(async () => {
     try {
       setLinks(await listSeeAlso({ bugId }));
+      setLoaded(true);
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
@@ -64,8 +71,10 @@ export function SeeAlsoPanel({ bugId }: { bugId: string }) {
   };
 
   const summary =
-    links.length === 0 ? (
-      <span className="dim">none</span>
+    !loaded ? (
+      <Pending width="5rem" />
+    ) : links.length === 0 ? (
+      <Absent />
     ) : (
       <>{links.length} linked</>
     );

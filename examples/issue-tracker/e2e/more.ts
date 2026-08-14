@@ -32,7 +32,7 @@ export async function openMorePanels(page: Page): Promise<void> {
  * Open one of the rail's collapsed groups (Labels, CC, Dependencies,
  * Duplicates, See also).
  *
- * They rest as a single line -- "CC  nobody  [Add]" -- because the last time
+ * They rest as a single line -- "CC  --  [Add]" -- because the last time
  * these panels lived in the rail they rendered list and form at all times and
  * measured 1856px in a 352px column. The affordance is named per group so a
  * spec says which one it means.
