@@ -9,8 +9,6 @@ import { useState } from "react";
 import { Button, Input, PageHeader, Select } from "@zeroship/ui";
 import {
   deleteSavedSearch,
-  listUsers,
-  quickSearch,
   saveSavedSearch,
   structuredSearch,
 } from "../../api";

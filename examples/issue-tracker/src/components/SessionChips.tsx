@@ -9,7 +9,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@zeroship/auth/react";
 import { Button, Menu } from "@zeroship/ui";
-import { unreadNotificationCount } from "../api";
 import { errorMessage, isUnauthenticated, toPromise } from "./rpc";
 import type { CurrentUser } from "./types";
 import type { Session } from "./session";
