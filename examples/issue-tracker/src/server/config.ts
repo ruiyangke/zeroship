@@ -5,7 +5,7 @@ import { defineApp } from "@zeroship/server";
 // the intended boundary is reviewable and a newly added RPC cannot disappear
 // into a build warning.
 //
-// The nine anonymous procedures are the public Bugzilla-style browsing and
+// The ten anonymous procedures are the public Bugzilla-style browsing and
 // reporting surface. Every write, account-scoped read, and administrative read
 // remains authenticated. Anonymous entries need `publiclyAccessible: true` as
 // an explicit acknowledgement that they are intentionally public.

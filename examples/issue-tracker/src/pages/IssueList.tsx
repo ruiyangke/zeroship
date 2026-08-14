@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
 import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
-import { listProducts, searchIssues } from "../api";
+import { currentUser, listProducts, searchIssues } from "../api";
 import {
   ALL_ISSUE_COLUMNS,
   IssueResultsTable,
@@ -9,7 +9,7 @@ import {
 } from "../components/IssueResultsTable";
 import { FieldBuilder } from "../components/search/SearchBuilder";
 import { AsyncSection } from "../components/StateViews";
-import { useAsync } from "../components/rpc";
+import { isUnauthenticated, useAsync } from "../components/rpc";
 import type { Issue } from "../components/types";
 import { ISSUE_STATUSES, type IssueStatus } from "../lib/workflow";
 import { ISSUE_KINDS, ISSUE_PRIORITIES, ISSUE_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
@@ -132,6 +132,16 @@ export function IssueListPage() {
   const [builderOpen, setBuilderOpen] = useState(false);
 
   const productsQ = useAsync(() => listProducts({}), []);
+
+  // The list itself is public -- `issues.search` and `products.list` are both
+  // `auth: "anon", publiclyAccessible: true` -- so this page does NOT become a
+  // sign-in wall. It is asked only about the one control that is not public:
+  // the advanced builder runs `search.query` and reads `savedSearches.list`,
+  // both `auth: "user"`. Same shape as the issue page (`signedOut` from
+  // `users.me` + `isUnauthenticated`), so there is one way to ask this
+  // question in the app rather than two.
+  const { state: userState } = useAsync(() => currentUser({}), []);
+  const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
 
   /**
    * The search box speaks Bugzilla QuickSearch.
@@ -282,9 +292,18 @@ export function IssueListPage() {
             <Button variant="gray" size="small" onClick={applyFilters}>
               Apply
             </Button>
-            <Button variant="gray" size="small" onClick={() => setBuilderOpen(true)}>
-              Advanced...
-            </Button>
+            {/* The builder needs an identity and the filters do not. Signed
+                out this opened a dialog whose Run search 401s and whose saved
+                searches never load, which is a fully operable-looking control
+                that cannot work -- exactly what the issue page stopped doing
+                with its composer. Filtering, sorting, paging and the column
+                picker stay: they are all served by the anonymous
+                `issues.search`. */}
+            {signedOut ? null : (
+              <Button variant="gray" size="small" onClick={() => setBuilderOpen(true)}>
+                Advanced...
+              </Button>
+            )}
             {/* The menu lives WITH its button, in a positioned wrapper.
                 It used to be a sibling of the whole FilterBar, so
                 `position: absolute; top: 110%` resolved against the nearest

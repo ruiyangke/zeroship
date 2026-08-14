@@ -1,9 +1,11 @@
 // The two session chips the app shell header renders: who you are, and how
 // many unread notifications you have.
 //
-// This file used to hold the horizontal Nav as well. AppShell's sidebar rail
-// replaced it and the component stayed behind, exported and rendered nowhere
-// -- the same orphan QuickSearchBox became. Navigation lives in Shell.tsx.
+// This file used to hold the horizontal Nav as well. The sidebar rail replaced
+// it and the component stayed behind, exported and rendered nowhere -- the same
+// orphan QuickSearchBox became. The rail is gone now and the links are back in
+// the header, but they did NOT come back here: navigation lives in Shell.tsx,
+// which is the one place that knows what the frame is.
 import { useEffect, useState } from "react";
 import { useAuth } from "@zeroship/auth/react";
 import { Button, Menu } from "@zeroship/ui";

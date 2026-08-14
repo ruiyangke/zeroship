@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Button, Checkbox, Input } from "@zeroship/ui";
+import { Banner, Button, Checkbox, Input } from "@zeroship/ui";
 import {
   createComponent,
   createMilestone,
   createProduct,
   createVersion,
+  currentUser,
   getProduct,
   listProducts,
   updateComponent,
@@ -13,7 +14,7 @@ import {
 import { FlagTypesAdmin } from "../components/FlagTypesAdmin";
 import { GroupsAdmin } from "../components/GroupsAdmin";
 import { AsyncSection } from "../components/StateViews";
-import { errorMessage, useAsync } from "../components/rpc";
+import { errorMessage, isUnauthenticated, useAsync } from "../components/rpc";
 import type { ProductDetail } from "../components/types";
 
 function NewProductForm({ onCreated }: { onCreated: () => void }) {
@@ -318,15 +319,31 @@ function MilestonesAdmin({
 export function ProductsAdminPage() {
   const { state, reload } = useAsync(() => listProducts({ includeInactive: true }), []);
   const [selected, setSelected] = useState<string | null>(null);
+  // `products.list` is `auth: "anon", publiclyAccessible: true` and everything
+  // else this page touches is `auth: "user"` -- `products.get` (the editor's
+  // own query), `products.create`, `products.update`, the component / version /
+  // milestone writers, `groups.list` and `flagTypes.list`. So the page is
+  // public and almost every control on it is not: the sharpest case in the app
+  // of a page you can read wearing controls you cannot use.
+  const { state: userState } = useAsync(() => currentUser({}), []);
+  const signedOut = userState.status === "error" && isUnauthenticated(userState.error);
 
   return (
     <div className="page products-admin-page">
       <h1>Products administration</h1>
+      {/* Said once at the top, the way the issue page says it, rather than
+          discovered one 401 at a time. */}
+      {signedOut ? (
+        <Banner intent="info" title="You are not signed in">
+          The product list is public, so you can see what issues can be filed against.
+          Sign in to create or edit a product, or to administer groups and flag types.
+        </Banner>
+      ) : null}
       {/* Products lead the page named after them. Groups and flag types are
           administered HERE for convenience, but they were rendered first, so
           a page titled "Products administration" opened on a list of 176
           groups and the products themselves began below the fold. */}
-      <NewProductForm onCreated={reload} />
+      {signedOut ? null : <NewProductForm onCreated={reload} />}
       <AsyncSection
         state={state}
         onRetry={reload}
@@ -336,35 +353,60 @@ export function ProductsAdminPage() {
         emptyHint="Create the first one above."
       >
         {(products) => (
-          <div className="products-admin-layout">
+          <div
+            className={
+              signedOut ? "products-admin-layout is-readonly" : "products-admin-layout"
+            }
+          >
             {/* Counted, because a scroll container hides how much is inside
                 it -- the same reason the group list and the inbox say so. */}
             <p className="state-hint small">
               {products.length} {products.length === 1 ? "product" : "products"}
             </p>
+            {/* Signed out the names are TEXT, not buttons. The button's only
+                job is to open the editor, and the editor's first act is
+                `products.get`, which is authenticated -- so pressing one
+                answered "sign-in required" in the pane beside it. The names
+                themselves are public and stay readable. */}
             <ul className="product-list">
               {products.map((p) => (
                 <li key={p.id}>
-                  <Button className={selected === p.id ? "btn ghost small active" : "btn ghost small"}
-                    onClick={() => setSelected(p.id)}
-                  >
-                    {p.name} {!p.isActive ? <span className="dim">(inactive)</span> : null}
-                  </Button>
+                  {signedOut ? (
+                    <span className="product-name">
+                      {p.name} {!p.isActive ? <span className="dim">(inactive)</span> : null}
+                    </span>
+                  ) : (
+                    <Button className={selected === p.id ? "btn ghost small active" : "btn ghost small"}
+                      onClick={() => setSelected(p.id)}
+                    >
+                      {p.name} {!p.isActive ? <span className="dim">(inactive)</span> : null}
+                    </Button>
+                  )}
                 </li>
               ))}
             </ul>
-            <div className="product-detail">
-              {selected ? (
-                <ProductEditor productId={selected} onChanged={reload} />
-              ) : (
-                <p className="state-hint">Select a product to manage its structure.</p>
-              )}
-            </div>
+            {signedOut ? null : (
+              <div className="product-detail">
+                {selected ? (
+                  <ProductEditor productId={selected} onChanged={reload} />
+                ) : (
+                  <p className="state-hint">Select a product to manage its structure.</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </AsyncSection>
-      <GroupsAdmin />
-      <FlagTypesAdmin />
+      {/* Both are administration of things a signed-out visitor cannot read,
+          let alone change: `groups.list` and `flagTypes.list` are `auth:
+          "user"`, so without a session these rendered two headed sections
+          whose entire content was an error, each with a create form under it. */}
+      {signedOut ? null : (
+        <>
+          <GroupsAdmin />
+          <FlagTypesAdmin />
+        </>
+      )}
     </div>
   );
 }
