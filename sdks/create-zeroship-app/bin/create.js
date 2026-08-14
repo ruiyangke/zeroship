@@ -23,8 +23,11 @@ function usage() {
 
 const projectName = process.argv[2];
 if (!projectName) usage();
-if (!/^[a-z0-9][a-z0-9\-_]{0,63}$/.test(projectName)) {
-  console.error(`error: "${projectName}" is not a valid npm package name (lowercase, no spaces)`);
+if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(projectName)) {
+  console.error(
+    `error: invalid project name "${projectName}": ` +
+      "use 1-63 lowercase letters, digits, or hyphens; start with a letter or digit",
+  );
   process.exit(1);
 }
 
