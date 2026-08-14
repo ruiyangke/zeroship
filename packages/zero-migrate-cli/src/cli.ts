@@ -510,6 +510,23 @@ function resolveParsedArgs(args: Args): Args {
       policyPaths: [],
     },
   });
+  // Checked HERE, after precedence has collapsed the three sources into one, so
+  // the flag, `ZERO_MIGRATE_SCHEMA`, and a config `schema` field are all covered by
+  // one rule. An empty value does not fall back to `DEFAULT_SCHEMA`: it overrides
+  // it, which is what makes an unset CI variable (`--schema "$DEPLOY_SCHEMA"`)
+  // dangerous rather than merely wrong.
+  //
+  // Without this, nothing downstream agreed on what an empty schema meant. SQLite
+  // applied it cleanly because schema is inert there; PostgreSQL bootstrapped a
+  // journal schema literally named `_migrations` and only then failed on a
+  // zero-length delimited identifier; MySQL got `Incorrect database name ''` from
+  // the server. Every other required setting -- the URL, `--registry`, `--policy`,
+  // `--journal` -- already refuses a zero-length value by name.
+  if (resolved.projectSchema.length === 0) {
+    throw new CliError(
+      "project schema must be non-empty (set --schema, ZERO_MIGRATE_SCHEMA, or the config `schema` field)",
+    );
+  }
   args.databaseUrl = resolved.databaseUrl;
   args.dir = resolved.dir;
   args.ownerApp = resolved.ownerApp;
