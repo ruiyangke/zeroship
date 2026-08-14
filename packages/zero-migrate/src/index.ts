@@ -2,11 +2,18 @@
 // for portable bi-dialect (PG + SQLite) migrations (design
 // `2026-06-25-op-dsl-fluent-redesign.md`).
 //
-// A migration is a `.ts` module that imports `{ table, t }`, and exports a single
-// `default { up }` object whose parameterless `up()` authors against the ambient
-// per-migration recorder via `table()`. There is no authored rollback: a `down()`
-// is refused, because rollback runs an inverse synthesised from the recorded ops
-// and would never execute the authored body. Names are plain
+// A migration is a `.ts` module that imports `{ table, t }` and exports a single
+// `default` object authoring against the ambient per-migration recorder via
+// `table()`. SCHEMA AND DATA ARE SEPARATE MIGRATIONS: a module exports either
+// `schema()` (DDL) or `data()` (DML), never both, so a structural migration is
+// reversible by construction while a data migration has to say what it is.
+//
+// A `data()` module must declare exactly one of `inverse()`, a RECORDED reverse
+// the engine can replay, or `irreversible: "<reason>"`, whose text is what
+// `lint`/`status` print when someone is deciding whether to roll back. `down()`
+// stays refused: the recorder never captured it, so the authored body would
+// never execute. `inverse()` differs precisely because it IS recorded, which
+// makes it checksummed and lintable rather than an opaque body. Names are plain
 // strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
 // builder — there is no ad-hoc raw *expression* escape and no `Raw` expr type
 // (property A). The one deliberate escape hatch is the top-level `raw({ sql,
@@ -16,11 +23,21 @@
 //   import { table, t } from "zero-migrate";
 //
 //   export default {
-//     up() {
-//       table("users")
-//         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c("name").splitPart(" ", 1) } });
+//     schema() {
+//       table("users").column("first_name").add({ type: t.text() });
 //     },
+//   };
+//
+//   // ...and the fill, as its own migration:
+//   export default {
+//     data() {
+//       table("users").backfill({
+//         set: { first_name: c => c("name").splitPart(" ", 1) },
+//         cursorColumns: ["id"],
+//         cursorStability: { mode: "guardUpdates" },
+//       });
+//     },
+//     irreversible: "the original first_name values are not recoverable",
 //   };
 
 export {

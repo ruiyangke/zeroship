@@ -82,12 +82,20 @@ interface RecordedEnvelope {
   ops: unknown[];
 }
 
+/** Temporary import shape for the external corpus swept in a later job. */
+interface LegacyFixtureModule {
+  up?: () => unknown;
+  name?: string;
+  default?: { up?: () => unknown; name?: string };
+}
+
 async function readRecorded(): Promise<Record<string, RecordedEnvelope>> {
   return JSON.parse(await readFile(resolve(fixturesDir, RECORDED_FILE), "utf8"));
 }
 
 /**
- * Import one fixture and drain its `up()` through the production recorder seam.
+ * Import one fixture and drain its migration phase through the production recorder
+ * seam.
  *
  * A `.mig.js` under `crates/` imports the BARE specifier `zero-migrate`. Node
  * resolves a bare specifier by walking up from the IMPORTING file, and nothing
@@ -115,8 +123,20 @@ async function recordFixture(stem: string): Promise<RecordedEnvelope> {
     `${stem}${MIG_SUFFIX} must carry exactly one bare "zero-migrate" import to rewrite`,
   );
   const rewritten = parts.join(`from "${indexUrl}"`);
+  // The committed Rust op corpus is intentionally outside Job A's migration-file
+  // sweep, but this package-local test must exercise the new recorder protocol.
+  // Wrap its imported legacy phase in a test-owned `schema()` module so the
+  // fixture bodies still prove byte-for-byte op recording without adding an
+  // `up()` compatibility path to production. Requiring `up()` here makes the
+  // bridge self-expiring when the later corpus sweep lands.
   const dataUrl = `data:text/javascript;base64,${Buffer.from(rewritten).toString("base64")}`;
-  const mod = (await import(dataUrl)) as MigrationModule;
+  const legacy = (await import(dataUrl)) as LegacyFixtureModule;
+  const phase = typeof legacy.up === "function" ? legacy.up : legacy.default?.up;
+  assert.ok(phase, `${stem}${MIG_SUFFIX} must export its pending legacy up() phase`);
+  const mod: MigrationModule = {
+    schema: phase,
+    name: typeof legacy.name === "string" ? legacy.name : legacy.default?.name,
+  };
   // The name fallback is passed explicitly because `deriveNameFromPath` strips ONE
   // extension, which would turn `views.mig.js` into `views.mig`. The double
   // extension is an artifact of this corpus alone -- real migrations are

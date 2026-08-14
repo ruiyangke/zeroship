@@ -1370,13 +1370,38 @@ export interface DeterminismFinding {
   reason: string;
 }
 
-/** The migration module shape: `export default { name?, up }`.
- *
- *  There is no `down`: rollback runs an inverse the engine synthesises from the
- *  recorded ops, so a hand-written body would never execute. Declaring it here
- *  would advertise an authoring surface the recorder refuses with
- *  `AUTHORED_DOWN_UNSUPPORTED`. */
-export interface Migration {
+interface MigrationIdentity {
   name?: string;
-  up(): void;
+  /** `up()` has no compatibility alias: authors must choose the phase explicitly. */
+  up?: never;
+  /** `down()` was never recorded; a data reverse belongs in `inverse()`. */
+  down?: never;
 }
+
+/** The migration module shape: schema changes and data changes are separate.
+ *
+ * A schema migration has one `schema()` body and relies on the engine's
+ * synthesised structural inverse. A data migration must make reversibility an
+ * explicit choice: either its `inverse()` is recorded through the same DSL seam
+ * (and can therefore become checksummed and lintable), or `irreversible` carries
+ * the non-empty reason an operator needs while deciding whether to roll back.
+ * There is deliberately no `up()` alias and no authored `down()` surface. */
+export type Migration =
+  | (MigrationIdentity & {
+      schema(): void;
+      data?: never;
+      inverse?: never;
+      irreversible?: never;
+    })
+  | (MigrationIdentity & {
+      schema?: never;
+      data(): void;
+      inverse(): void;
+      irreversible?: never;
+    })
+  | (MigrationIdentity & {
+      schema?: never;
+      data(): void;
+      inverse?: never;
+      irreversible: string;
+    });

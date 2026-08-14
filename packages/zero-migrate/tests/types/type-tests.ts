@@ -49,6 +49,7 @@ import {
   type CheckDef,
   type DbFieldType,
   type Int64Value,
+  type Migration,
   type OrderedColumns,
   type BackfillSetValue,
   type IdFormats,
@@ -69,6 +70,20 @@ import { and as removedAnd, or as removedOr, not as removedNot } from "../../src
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
 import type { Classification, MaskKind, VectorMetric } from "../../src/generated/ir.js";
+
+// The public migration union keeps schema and data phases distinct, and makes
+// every data migration declare how rollback is handled.
+// @ts-expect-error — one migration module cannot contain both schema and data phases.
+const mixedPhaseMigration: Migration = { schema() {}, data() {}, inverse() {} };
+void mixedPhaseMigration;
+
+// @ts-expect-error — a data migration must provide either inverse() or an irreversible reason.
+const undeclaredDataRollback: Migration = { data() {} };
+void undeclaredDataRollback;
+
+// @ts-expect-error — irreversible must be an operator-facing reason string, not a boolean marker.
+const booleanIrreversibleMigration: Migration = { data() {}, irreversible: true };
+void booleanIrreversibleMigration;
 
 // The removed universal ID shortcut must stay absent from the migration lexicon.
 const migrationIdShortcutIsAbsent: "id" extends keyof TypeLexicon ? never : true = true;

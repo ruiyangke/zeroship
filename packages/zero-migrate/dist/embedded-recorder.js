@@ -138,8 +138,10 @@ function recorder() {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "migration operations may only be authored synchronously inside up()",
-      { suggested_fix: "move the operation call inside the migration's up() body" }
+      "migration operations may only be authored synchronously inside schema(), data(), or inverse()",
+      {
+        suggested_fix: "move the operation call inside the migration's schema() body (for DDL) or data()/inverse() body (for DML)"
+      }
     );
   }
   return active;

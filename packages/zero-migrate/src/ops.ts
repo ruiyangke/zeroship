@@ -3,12 +3,23 @@
 // This is the TS authoring surface a creator imports:
 //   import { ids, table, t } from "zero-migrate";
 //
+//   // Schema and data are SEPARATE migrations; one module may not do both.
 //   export default {
-//     up() {
-//       table("users")
-//         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: col => col("name").splitPart(" ", 1) } });
+//     schema() {
+//       table("users").column("first_name").add({ type: t.text() });
 //     },
+//   };
+//
+//   // ...and, in its own migration module:
+//   export default {
+//     data() {
+//       table("users").backfill({
+//         set: { first_name: col => col("name").splitPart(" ", 1) },
+//         cursorColumns: ["id"],
+//         cursorStability: { mode: "guardUpdates" },
+//       });
+//     },
+//     irreversible: "the original first_name values are not recoverable",
 //   };
 //
 // It emits the dialect-neutral op objects the closed Rust `Op` enum /
@@ -359,7 +370,8 @@ function structuredError(code: string, message: string, extra?: Record<string, u
   return err;
 }
 
-/** Begin a fresh recording buffer (the build evaluator calls this before `up()`). */
+/** Begin a fresh recording buffer (the build evaluator calls this before each
+ *  recorded phase — `schema()`, `data()`, or `inverse()`). */
 export function __begin(): void {
   active = {
     ops: [],
@@ -405,8 +417,12 @@ function recorder(): Recorder {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "migration operations may only be authored synchronously inside up()",
-      { suggested_fix: "move the operation call inside the migration's up() body" },
+      "migration operations may only be authored synchronously inside schema(), data(), or inverse()",
+      {
+        suggested_fix:
+          "move the operation call inside the migration's schema() body (for DDL) " +
+          "or data()/inverse() body (for DML)",
+      },
     );
   }
   return active;

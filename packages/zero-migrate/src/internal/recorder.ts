@@ -1,9 +1,11 @@
 // Host recorder — the pure-JS half of authoring an IR envelope.
 //
 // It imports a creator migration + `{ __begin, __drain }` from `zero-migrate`,
-// runs `up()` under a fresh ambient recorder, drains the op list, and emits the
-// `{ ir_version, name, ops }` ENVELOPE for the Rust host to read back. The recorder
-// is ordinary ESM, so Node/Bun can drain the op list purely in JS.
+// runs one `schema()` or `data()` forward phase under a fresh ambient recorder,
+// drains the op list, and emits the `{ ir_version, name, ops }` ENVELOPE for the
+// Rust host to read back. A data migration's optional `inverse()` is recorded in
+// a second, independent pass and stays on the recorder-only return value until
+// the IR and Rust host grow that field together.
 //
 // It takes an already-imported migration module (the facade / a bundler resolves
 // the `.ts`), runs the recorder, and returns the envelope. It deliberately DOES NOT
@@ -40,62 +42,168 @@ export interface IrEnvelope {
   ops: unknown[];
 }
 
-/** The two accepted migration-module shapes (mirrors the deploy contract's
- *  discovery order).
+type MigrationPhase = () => unknown;
+type PhaseMember = "schema" | "data" | "inverse" | "up" | "down";
+type RecordablePhase = "schema" | "data" | "inverse";
+
+/** Fields that may arrive as named exports or members of the default export.
  *
- *  `down` is declared here but absent from the public `Migration` type on
- *  purpose: this is the shape of what a module MAY arrive carrying, not of what
- *  may be authored. Dropping it would make the refusal below unable to see the
- *  thing it refuses. */
-export interface MigrationModule {
-  up?: () => void;
-  down?: () => void;
+ * `up` and `down` remain visible here only so the big-bang protocol can refuse
+ * them with an instructive error. `irreversible` is deliberately `unknown`: an
+ * imported JavaScript module can carry any value, and boolean `true` in
+ * particular must reach the reason validator rather than be hidden by the type. */
+interface MigrationMembers {
+  schema?: MigrationPhase;
+  data?: MigrationPhase;
+  inverse?: MigrationPhase;
+  irreversible?: unknown;
+  up?: MigrationPhase;
+  down?: MigrationPhase;
   name?: string;
-  default?: { up?: () => void; down?: () => void; name?: string };
 }
 
-/**
- * Resolve the migration's `up()` (mandatory) from either
- * `export function up()` or `export default { up }`.
- */
-function resolveUp(mod: MigrationModule): () => unknown {
-  const def = mod && mod.default;
-  let up = typeof mod.up === "function" ? mod.up : undefined;
-  if (!up && def && typeof def === "object" && typeof def.up === "function") {
-    up = def.up;
-  }
-  if (!up) {
+/** The two accepted migration-module locations, named exports and `default.*`.
+ * This is the shape a module MAY arrive carrying, not the narrower public
+ * authoring type: invalid and legacy members must remain observable so the
+ * recorder can refuse them. */
+export interface MigrationModule extends MigrationMembers {
+  default?: MigrationMembers;
+}
+
+interface ResolvedSchemaMigration {
+  phase: "schema";
+  forward: MigrationPhase;
+}
+
+interface ResolvedReversibleDataMigration {
+  phase: "data";
+  forward: MigrationPhase;
+  reverse: { kind: "inverse"; phase: MigrationPhase };
+}
+
+interface ResolvedIrreversibleDataMigration {
+  phase: "data";
+  forward: MigrationPhase;
+  reverse: { kind: "irreversible"; reason: string };
+}
+
+type ResolvedMigration =
+  | ResolvedSchemaMigration
+  | ResolvedReversibleDataMigration
+  | ResolvedIrreversibleDataMigration;
+
+function defaultMembers(mod: MigrationModule): MigrationMembers | undefined {
+  const def = mod.default;
+  return def !== null && typeof def === "object" ? def : undefined;
+}
+
+/** Resolve a callable member with the legacy recorder's discovery order: a
+ * named export wins, then the same member on the default-exported object. */
+function resolvePhase(mod: MigrationModule, member: PhaseMember): MigrationPhase | undefined {
+  const named = mod[member];
+  if (typeof named === "function") return named;
+  const fallback = defaultMembers(mod)?.[member];
+  return typeof fallback === "function" ? fallback : undefined;
+}
+
+/** Resolve the reason value without filtering by type: validating a malformed
+ * value is part of the protocol. As with phase functions, the named export wins. */
+function resolveIrreversible(mod: MigrationModule): unknown {
+  if (mod.irreversible !== undefined) return mod.irreversible;
+  return defaultMembers(mod)?.irreversible;
+}
+
+/** Resolve and validate the module shape before any author code executes. The
+ * order intentionally gives obsolete members and malformed reverse declarations
+ * their specific migration-path errors instead of collapsing them into the
+ * generic "neither schema nor data" refusal. */
+function resolveMigration(mod: MigrationModule): ResolvedMigration {
+  if (resolvePhase(mod, "up") !== undefined) {
     throw new Error(
-      "host recorder: the migration module exports no `up()` function " +
-        "(named export `up` or `default.up`)",
+      "host recorder: up() is no longer supported; use schema() for DDL or data() for DML, in separate migration modules",
     );
   }
-  return up;
-}
 
-/**
- * Refuse a migration that authors its own `down()`. The recorder drains a single
- * op list and {@link IrEnvelope} carries no rollback slot, so an authored body is
- * dropped on the floor while rollback runs the engine's synthesised inverse. That
- * is a different rollback from the one written on the page, and nothing downstream
- * can tell the two apart -- refusing at authoring time is the only point where the
- * author is still there to be told.
- */
-function refuseAuthoredDown(mod: MigrationModule): void {
-  const def = mod && mod.default;
-  const authored =
-    typeof mod.down === "function" ||
-    (def && typeof def === "object" && typeof def.down === "function");
-  if (!authored) return;
-  const error = new Error(
-    "migration authors a down() function, which the recorder does not capture; " +
-      "rollback runs the engine's synthesised inverse, so the authored body would " +
-      "never execute",
-  ) as Error & { code: string; suggested_fix: string };
-  error.code = "AUTHORED_DOWN_UNSUPPORTED";
-  error.suggested_fix =
-    "remove down() and let rollback synthesise the inverse from the recorded ops";
-  throw error;
+  if (resolvePhase(mod, "down") !== undefined) {
+    // `down()` was always refused because this recorder never captured it: the
+    // written body disappeared while rollback ran an engine-synthesised inverse.
+    // `inverse()` is different precisely because it is recorded through the DSL
+    // seam below, making the reverse checksummable and lintable instead of an
+    // opaque body that downstream code cannot inspect.
+    const error = new Error(
+      "migration authors a down() function, which the recorder does not capture; rollback runs the engine's synthesised inverse, so the authored body would never execute; inverse() on a data() migration is the supported way to declare a recorded reverse",
+    ) as Error & { code: string; suggested_fix: string };
+    error.code = "AUTHORED_DOWN_UNSUPPORTED";
+    error.suggested_fix =
+      "remove down(); use inverse() on a data() migration when a recorded reverse exists";
+    throw error;
+  }
+
+  const schema = resolvePhase(mod, "schema");
+  const data = resolvePhase(mod, "data");
+  const inverse = resolvePhase(mod, "inverse");
+  const irreversible = resolveIrreversible(mod);
+  const hasIrreversible = irreversible !== undefined;
+
+  if (schema !== undefined && data !== undefined) {
+    throw new Error(
+      "host recorder: schema and data changes must be separate migrations; export schema() and data() from different migration modules",
+    );
+  }
+
+  if (data === undefined && (inverse !== undefined || hasIrreversible)) {
+    throw new Error(
+      "host recorder: inverse() and irreversible may only be declared on a data() migration",
+    );
+  }
+
+  if (schema === undefined && data === undefined) {
+    throw new Error(
+      "host recorder: the migration module exports neither schema() nor data(); export exactly one of schema() or data()",
+    );
+  }
+
+  if (schema !== undefined) return { phase: "schema", forward: schema };
+
+  // The missing-forward refusal above proves this branch has a data phase, but
+  // state it directly so the strict type does not rely on a non-null assertion.
+  if (data === undefined) {
+    throw new Error(
+      "host recorder: the migration module exports neither schema() nor data(); export exactly one of schema() or data()",
+    );
+  }
+
+  if (inverse !== undefined && hasIrreversible) {
+    throw new Error(
+      "host recorder: a data() migration cannot declare both inverse() and irreversible; they are mutually exclusive",
+    );
+  }
+
+  if (inverse === undefined && !hasIrreversible) {
+    throw new Error(
+      "host recorder: a data() migration must declare exactly one of inverse() or irreversible with a non-empty reason",
+    );
+  }
+
+  if (inverse !== undefined) {
+    return {
+      phase: "data",
+      forward: data,
+      reverse: { kind: "inverse", phase: inverse },
+    };
+  }
+
+  if (typeof irreversible !== "string" || irreversible.trim().length === 0) {
+    throw new Error(
+      "host recorder: irreversible must be a non-empty string explaining why this data() migration cannot be reversed; boolean true is not a reason, and lint/status need that text during a rollback decision",
+    );
+  }
+
+  return {
+    phase: "data",
+    forward: data,
+    reverse: { kind: "irreversible", reason: irreversible },
+  };
 }
 
 /**
@@ -104,7 +212,7 @@ function refuseAuthoredDown(mod: MigrationModule): void {
  */
 export function resolveMigrationName(mod: MigrationModule, fallback: string): string {
   if (typeof mod.name === "string" && mod.name.length > 0) return mod.name;
-  const def = mod && mod.default;
+  const def = defaultMembers(mod);
   if (def && typeof def.name === "string" && def.name.length > 0) return def.name;
   return fallback && fallback.length > 0 ? fallback : "migration";
 }
@@ -120,10 +228,10 @@ export function resolveMigrationName(mod: MigrationModule, fallback: string): st
  * singleton). A bundler that duplicates the module would drain an empty list; the
  * facade/oracle imports the migration through the same resolution as this module.
  */
-function recordUp(up: () => unknown): unknown[] {
+function recordPhase(phase: RecordablePhase, author: MigrationPhase): unknown[] {
   __begin();
   try {
-    const result = up();
+    const result = author();
     if (
       result !== null &&
       (typeof result === "object" || typeof result === "function") &&
@@ -134,11 +242,11 @@ function recordUp(up: () => unknown): unknown[] {
       // this synchronous validation error has already been reported.
       void Promise.resolve(result).catch(() => undefined);
       const error = new Error(
-        "migration up() must be synchronous; promises and async functions are not supported",
+        `migration ${phase}() must be synchronous; promises and async functions are not supported`,
       ) as Error & { code: string; suggested_fix: string };
-      error.code = "ASYNC_UP_UNSUPPORTED";
+      error.code = "ASYNC_PHASE_UNSUPPORTED";
       error.suggested_fix =
-        "remove async/await and author every migration operation synchronously inside up()";
+        `remove async/await and author every migration operation synchronously inside ${phase}()`;
       throw error;
     }
     return __drain();
@@ -148,7 +256,7 @@ function recordUp(up: () => unknown): unknown[] {
   }
 }
 
-/** Options for {@link buildEnvelope}. */
+/** Options for {@link recordMigration} and {@link buildEnvelope}. */
 export interface BuildEnvelopeOptions {
   /** The IR-format version. Pass the addon's `irVersion()` (the single source of
    *  truth). Required so this module never re-hardcodes a version. */
@@ -157,29 +265,55 @@ export interface BuildEnvelopeOptions {
   nameFallback?: string;
 }
 
+/** Recorder-owned output that keeps reverse authoring beside, but never inside,
+ * the Rust-bound envelope. A later coordinated IR/Rust change can decide how to
+ * transport these fields without changing today's deny-unknown-fields JSON. */
+export interface RecordedMigration {
+  /** Exactly the historical `{ ir_version, name, ops }` JSON envelope. */
+  envelope: IrEnvelope;
+  /** The independently recorded `inverse()` stream for reversible data. */
+  inverseOps?: unknown[];
+  /** The author's exact reason for an irreversible data migration. */
+  irreversible?: string;
+}
+
 /**
- * Build the IR envelope from an already-imported migration module — the
- * pure-JS authoring path. Runs `up()` under a fresh recorder, drains the ops,
- * and stamps the caller-supplied `irVersion` (from the addon). Does NOT set
- * `owner_app` or fold a checksum — the addon does both in Rust.
- *
- * @throws structured recorder errors (`OP_OUTSIDE_RECORDER`,
- *         `SELECTOR_NOT_TERMINATED`, `ASYNC_UP_UNSUPPORTED`,
- *         `AUTHORED_DOWN_UNSUPPORTED`) verbatim, and a plain `Error` for a
- *         missing `up()`.
+ * Record an already-imported migration module. `schema()` and `data()` each use
+ * one fresh forward pass; a data `inverse()` uses a SECOND fresh pass so it never
+ * executes against a database or perturbs the forward stream and its ordering.
+ */
+export function recordMigration(
+  mod: MigrationModule,
+  opts: BuildEnvelopeOptions,
+): RecordedMigration {
+  const migration = resolveMigration(mod);
+  const ops = recordPhase(migration.phase, migration.forward);
+  const envelope: IrEnvelope = {
+    ir_version: opts.irVersion,
+    name: resolveMigrationName(mod, opts.nameFallback ?? "migration"),
+    ops,
+  };
+
+  if (migration.phase === "schema") return { envelope };
+  if (migration.reverse.kind === "irreversible") {
+    return { envelope, irreversible: migration.reverse.reason };
+  }
+  return {
+    envelope,
+    inverseOps: recordPhase("inverse", migration.reverse.phase),
+  };
+}
+
+/**
+ * Build only the unchanged Rust-bound IR envelope. Reverse metadata remains on
+ * {@link recordMigration}'s wrapper and is deliberately not serialized here:
+ * Rust's current `MigrationIr` denies unknown fields.
  */
 export function buildEnvelope(
   mod: MigrationModule,
   opts: BuildEnvelopeOptions,
 ): IrEnvelope {
-  const up = resolveUp(mod);
-  refuseAuthoredDown(mod);
-  const ops = recordUp(up);
-  return {
-    ir_version: opts.irVersion,
-    name: resolveMigrationName(mod, opts.nameFallback ?? "migration"),
-    ops,
-  };
+  return recordMigration(mod, opts).envelope;
 }
 
 /**

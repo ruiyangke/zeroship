@@ -70,12 +70,22 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
+async function importPlatformCorpusMigration(relativePath: string): Promise<{ schema(): void }> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "zero-migrate"`, `from "${indexUrl}"`);
+  const source = (await readFile(sourcePath, "utf8")).replaceAll(
+    `from "zero-migrate"`,
+    `from "${indexUrl}"`,
+  );
+  // The platform corpus is swept in a later job. Wrap its phase as `schema()` only
+  // in this package-local test process; production deliberately has no `up()` alias.
+  // Requiring the legacy spelling makes this bridge fail once that sweep lands,
+  // so it cannot become accidental compatibility code.
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
-  return import(dataUrl) as Promise<{ up(): void }>;
+  const legacy = (await import(dataUrl)) as { up?: () => void; default?: { up?: () => void } };
+  const phase = typeof legacy.up === "function" ? legacy.up : legacy.default?.up;
+  assert.ok(phase, `${relativePath} must export its pending legacy up() phase`);
+  return { schema: phase };
 }
 
 function recordEngine(up: (api: {
@@ -2758,7 +2768,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
     return;
   }
   const migration = await importPlatformCorpusMigration(corpusRel);
-  const ops = record(() => migration.up());
+  const ops = record(() => migration.schema());
   const domainOps = ops.filter((op) => op.op === "createDomain");
   const inDomain = (name: string, elems: string[]) => ({
     op: "createDomain",
