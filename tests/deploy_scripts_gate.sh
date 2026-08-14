@@ -536,10 +536,15 @@ printf '### docker %s\n' "$*" >>"$ZS_GATE_CAPTURE"
 if [ -n "${ZS_GATE_DOCKER_FAIL:-}" ]; then
   case "$*" in *"$ZS_GATE_DOCKER_FAIL"*) exit 1 ;; esac
 fi
-# The post-roll verification asks which image control is actually running. A
-# stub that says nothing makes the happy path fail for a reason unrelated to
-# anything under test, and a control that cannot succeed is not a control.
-[ "$1" = inspect ] && printf '%s\n' "${ZS_GATE_RUNNING_IMAGE:-}"
+# Two questions the script asks docker that need a real ANSWER, not just an
+# exit status: which images the compose file resolves to, and which image
+# control is actually running. A stub that says nothing makes the happy path
+# fail for reasons unrelated to anything under test, and a control that cannot
+# succeed is not a control.
+case "$*" in
+  *"config --images"*) printf '%s\n' "${ZS_GATE_RENDERED_IMAGE-${ZS_GATE_RUNNING_IMAGE:-}}" ;;
+  inspect*)            printf '%s\n' "${ZS_GATE_RUNNING_IMAGE:-}" ;;
+esac
 exit 0
 STUBEOF
 # Must print something: the real call is \$(openssl rand -hex 32).
@@ -1089,6 +1094,21 @@ run_deploy "$SB_CHK" ZS_GATE_DOCKER_FAIL='--check-config'
 seen "$CAP" '### docker compose up -d' \
   && fail "the deploy restarted the stack after a server had already refused the configuration; the check bought nothing" \
   || pass "NOTHING IS RESTARTED when a server rejects the configuration (the old stack keeps serving)"
+
+# --- the dry run must be of the NEW image ----------------------------------
+#
+# ZEROSHIP_IMAGE is referenced by the server-only docker-compose.override.yml,
+# not by the tracked compose file. A host without that override renders the
+# tracked file's literal tag, so all five --check-config runs would dry-run the
+# OLD binaries and pass -- a green that means the opposite of what it says.
+SB_IMG="$FIX/sb_deploy_wrongimage"; seed_deploy "$SB_IMG"
+run_deploy "$SB_IMG" ZS_GATE_RENDERED_IMAGE=zeroship-platform:dev
+[ "$DEP_RC" != 0 ] && [[ "$DEP_OUT" == *"does not resolve to"* ]] \
+  && pass "a host whose compose does not resolve to the new image is refused, so the dry run can never be of the old binaries" \
+  || fail "the deploy proceeded with the compose file rendering a different image (rc=$DEP_RC): $DEP_OUT"
+seen "$CAP" '--check-config' \
+  && fail "the --check-config runs went ahead against zeroship-platform:dev; every one of them would have passed on the old binaries" \
+  || pass "no --check-config run happens once the rendered image is known to be wrong"
 
 # --- D2 refusal: a missing secret FILE stops the deploy --------------------
 #

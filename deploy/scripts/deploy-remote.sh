@@ -651,24 +651,47 @@ main() {
   # container behind. --entrypoint is required because the gateway's service
   # entrypoint is a shell wrapper.
   say "running --check-config for every server against the new image"
+  # The whole check is worthless if the host's compose does not actually resolve
+  # to the image we are about to roll -- it would dry-run the OLD binaries and
+  # pass. That happens for one concrete reason: ZEROSHIP_IMAGE is referenced by
+  # the server-side docker-compose.override.yml, not by the tracked compose
+  # file, so a host without that override silently pins whatever literal tag the
+  # tracked file carries.
+  RENDERED="$(rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' docker compose config --images 2>/dev/null | sort -u" || true)"
+  echo "$RENDERED" | grep -qx "$IMAGE" || fail "the host's compose does not resolve to $IMAGE; it renders:
+$RENDERED
+  Nothing was restarted. The image reference comes from ZEROSHIP_IMAGE in the
+  server-only docker-compose.override.yml (docs/runbooks/deploy-server.md,
+  \"Control plane access\"); without it every check below would dry-run the
+  OLD binaries and pass."
+
   # Pull first, so the check runs against the image the roll will run and not
   # against whatever tag happens to be cached on the host.
   rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' docker compose pull -q 2>&1 | tail -3" \
     || fail "could not pull $IMAGE on the host; nothing was restarted."
   CHECK_BAD=""
+  # -T, and it is load-bearing. `docker compose run` is interactive by default;
+  # over `ssh host "..."` there is no pseudo-terminal, so without it the run can
+  # fail on the TTY rather than on the configuration -- a refusal that looks
+  # exactly like the one this check exists to produce.
+  CHECK_RUN="docker compose run --rm -T --no-deps --entrypoint"
   for svc in $CHECK_SERVICES; do
-    if rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' docker compose run --rm --no-deps --entrypoint ${svc#*:} ${svc%%:*} --check-config" >/dev/null 2>&1; then
+    if rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' $CHECK_RUN ${svc#*:} ${svc%%:*} --check-config" >/dev/null 2>&1 </dev/null; then
       echo "ok  ${svc%%:*}"
     else
       echo "FAIL: ${svc%%:*}" >&2
-      rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' docker compose run --rm --no-deps --entrypoint ${svc#*:} ${svc%%:*} --check-config 2>&1 | tail -20" >&2 || true
+      rsh "cd '$REMOTE_DIR/compose' && ZEROSHIP_IMAGE='$IMAGE' $CHECK_RUN ${svc#*:} ${svc%%:*} --check-config 2>&1 | tail -20" >&2 </dev/null || true
       CHECK_BAD="$CHECK_BAD ${svc%%:*}"
     fi
   done
   [ -z "$CHECK_BAD" ] || fail "these servers reject the new configuration:$CHECK_BAD
-  NOTHING WAS RESTARTED and the old stack is still serving. Fix the
-  configuration and deploy again; there is no need to roll back. If you want
-  the host put back exactly as it was, --rollback restores the $STAMP snapshot."
+  NOTHING WAS RESTARTED and the old stack is still serving.
+  It is NOT unchanged, though: the new compose file, Caddyfile and ops overlay
+  are already on disk, and the running containers bind-mount the last two. They
+  will not notice until they restart -- and `restart: on-failure` or a host
+  reboot can do that for you, on the new config with the OLD image. So either
+  deploy a fixed image promptly, or --rollback to the $STAMP snapshot and take
+  your time."
   echo "ok  every server accepts the new configuration"
 
   say "rolling the stack to $IMAGE"
