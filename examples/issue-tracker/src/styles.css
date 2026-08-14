@@ -931,11 +931,20 @@ tbody tr:hover { background: var(--surface-2); }
    or one with a heading cannot turn an inbox row into a page. */
 /* Absorbed an earlier definition of this selector; the values below are
    the ones that were already winning by source order. */
+/* LINE-CLAMPED, not height-clipped.
+   `max-block-size: 3.2em; overflow: hidden` cut wherever 3.2em happened to
+   fall, which at 1440px was almost always a line boundary and at 390px was
+   almost never one: the third line was sliced in half, leaving a row of
+   half-glyphs under the text with nothing to say it continued. Clamping by
+   LINES cuts at a line by construction and ellipsizes, at any width. */
 .notification-body {
   margin: 0;
   font-size: 0.82rem;
   color: var(--ink-2);
-  max-block-size: 3.2em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
 }
 .notification-body .rich-text > * { margin-block: 0; font-size: 0.82rem; }
