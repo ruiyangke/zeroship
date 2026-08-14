@@ -30,7 +30,8 @@
 <form method="POST" action="/device">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Device code
-    <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>
+    <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus
+           {% if error.is_some() %}aria-invalid="true" aria-describedby="form-error"{% endif %}>
   </label>
   <button type="submit">Continue</button>
 </form>
