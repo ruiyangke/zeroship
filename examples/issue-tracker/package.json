@@ -18,6 +18,7 @@
     "@tiptap/pm": "^3.30.0",
     "@tiptap/react": "^3.30.0",
     "@tiptap/starter-kit": "^3.30.0",
+    "@zeroship/auth": "workspace:*",
     "@zeroship/db": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",

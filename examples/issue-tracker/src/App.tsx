@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useAuth } from "@zeroship/auth/react";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
 import { useAsync } from "./components/rpc";
@@ -104,7 +105,29 @@ function renderRoute(route: Route): ReactNode {
 
 export function App() {
   const route = useHashRoute();
-  const { state: userState } = useAsync(() => currentUser({}), []);
+  const { state: userState, reload: reloadUser } = useAsync(() => currentUser({}), []);
+
+  // Ask the SERVER again when the browser's session changes.
+  //
+  // Signing in mints a cookie; it does not tell this app anything. Identity
+  // here comes from users.me, fetched once at mount, so the popup would close
+  // on a real success and the header would still read "Sign in" -- the flow
+  // worked and looked exactly like a flow that had not.
+  //
+  // Keyed off the user ID rather than the auth object, which is a new
+  // reference on every publish and would refetch forever.
+  const { user } = useAuth();
+  const lastUserId = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const id = user?.id ?? null;
+    if (lastUserId.current === undefined) {
+      lastUserId.current = id;
+      return;
+    }
+    if (lastUserId.current === id) return;
+    lastUserId.current = id;
+    reloadUser();
+  }, [user?.id, reloadUser]);
 
   return (
     <Shell route={route.name} userState={userState}>

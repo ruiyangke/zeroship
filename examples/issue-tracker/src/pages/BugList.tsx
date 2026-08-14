@@ -247,14 +247,37 @@ export function BugListPage() {
             <Button variant="gray" size="small" onClick={() => setBuilderOpen(true)}>
               Advanced...
             </Button>
-            <Button
-              variant="plain"
-              size="small"
-              onClick={() => setPickerOpen((open) => !open)}
-              aria-expanded={pickerOpen}
-            >
-              Columns
-            </Button>
+            {/* The menu lives WITH its button, in a positioned wrapper.
+                It used to be a sibling of the whole FilterBar, so
+                `position: absolute; top: 110%` resolved against the nearest
+                positioned ancestor -- the page -- and 110% of a tall block put
+                the menu at y=1692 in a 900px viewport. It opened every time
+                and was 792px below the fold, so the button read as dead. */}
+            <div className="column-picker">
+              <Button
+                variant="plain"
+                size="small"
+                onClick={() => setPickerOpen((open) => !open)}
+                aria-expanded={pickerOpen}
+              >
+                Columns
+              </Button>
+              {pickerOpen ? (
+                <Card className="column-picker-menu">
+                  <Cluster gap={3}>
+                    {ALL_BUG_COLUMNS.map((col) => (
+                      <Checkbox
+                        key={col.key}
+                        checked={columns.includes(col.key)}
+                        disabled={col.key === "summary"}
+                        onCheckedChange={() => toggleColumn(col.key)}
+                        label={col.label}
+                      />
+                    ))}
+                  </Cluster>
+                </Card>
+              ) : null}
+            </div>
           </Cluster>
         }
       >
@@ -305,22 +328,6 @@ export function BugListPage() {
             ))}
         </Select>
       </FilterBar>
-      {pickerOpen ? (
-        <Card className="column-picker-menu">
-          <Cluster gap={3}>
-            {ALL_BUG_COLUMNS.map((col) => (
-              <Checkbox
-                key={col.key}
-                checked={columns.includes(col.key)}
-                disabled={col.key === "summary"}
-                onCheckedChange={() => toggleColumn(col.key)}
-                label={col.label}
-              />
-            ))}
-          </Cluster>
-        </Card>
-      ) : null}
-
       {/* No sort bar. Sorting lives on the table headers, where the thing
           being sorted is the thing you click -- a separate control naming a
           column you then have to find is an extra hop and can drift out of

@@ -1215,3 +1215,8 @@ fieldset.bug-detail-extras { display: grid; }
 /* The heading owns the space above the group, so the fieldset does not also
    contribute the Stack's gap on top of it. */
 .rail-section + .rail-groups { margin-block-start: -0.7rem; }
+
+/* The column picker anchors to its own button. Without a positioned wrapper
+   the menu resolved `top: 110%` against the page and opened below the fold. */
+.column-picker { position: relative; }
+.column-picker > .column-picker-menu { top: calc(100% + 0.35rem); }

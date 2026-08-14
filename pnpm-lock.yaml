@@ -677,6 +677,9 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^3.30.0
         version: 3.30.0
+      '@zeroship/auth':
+        specifier: workspace:*
+        version: link:../../sdks/auth
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../sdks/db
