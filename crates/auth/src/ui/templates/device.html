@@ -8,7 +8,7 @@
 <h2>Enter the code shown on your device</h2>
 {% endif %}
 {% if let Some(err) = error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 {% if confirm %}
 <p>This app is asking for permission to:</p>

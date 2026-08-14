@@ -3,7 +3,7 @@
 {% block body %}
 <h2>Sign out{% if let Some(name) = client_name %} of {{ name }}{% endif %}?</h2>
 {% if let Some(err) = error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 <p>You are about to be signed out across every application that shares this session.</p>
 <form method="POST" action="/logout">
