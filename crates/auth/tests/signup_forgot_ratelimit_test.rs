@@ -198,9 +198,20 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
     cleanup_signup_user(pg.as_ref(), &email).await;
 }
 
+/// An off-origin `return_to` is REPLACED by the safe default, not rejected.
+///
+/// This used to assert 400, matching a `/signup` that treated any continuation
+/// it could not parse as an `/oauth2/authorize` request as an error. That rule
+/// also rejected `/me` -- the target `/login` puts in its own signup link --
+/// so the product's own route into signup was a 400. `/signup` now sanitizes
+/// exactly as `/login` does.
+///
+/// The security property is unchanged and is what this test now pins: the
+/// off-origin value must not survive into the form or into a `Location`. A
+/// status code is not that property; the echoed value is.
 #[compio::test]
 #[allow(clippy::future_not_send)]
-async fn signup_rejects_open_redirect_return_to_at_intake() {
+async fn signup_replaces_open_redirect_return_to_at_intake() {
     let Some((dsn, client)) = pg().await else {
         zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
         return;
@@ -233,12 +244,21 @@ async fn signup_rejects_open_redirect_return_to_at_intake() {
         .await;
         assert_eq!(
             resp.status().as_u16(),
-            400,
-            "bad return_to should be rejected: {bad_return_to}"
+            200,
+            "an unusable return_to must still render the form: {bad_return_to}"
         );
         assert!(
             resp.headers().get(LOCATION).is_none(),
             "bad return_to must not redirect: {bad_return_to}"
+        );
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).expect("signup html");
+        assert!(
+            !body.contains("evil.com"),
+            "{bad_return_to} must not be echoed into the form: {body}"
+        );
+        assert!(
+            body.contains("name=\"return_to\" value=\"/me\""),
+            "the form must carry the safe default instead of {bad_return_to}: {body}"
         );
     }
 
