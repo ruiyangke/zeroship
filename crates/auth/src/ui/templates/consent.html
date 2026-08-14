@@ -7,7 +7,7 @@
 <h2>Authorize {{ client_name }}</h2>
 <p class="subtle">{{ client_id }}</p>
 {% if let Some(err) = grant_error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 <p>This app is asking for permission to:</p>
 <ul class="scopes">

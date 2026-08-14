@@ -4,7 +4,7 @@
 <h2>Your account</h2>
 
 {% if let Some(s) = success %}<div class="success">{{ s }}</div>{% endif %}
-{% if let Some(e) = error %}<div class="error">{{ e }}</div>{% endif %}
+{% if let Some(e) = error %}<div class="error" role="alert" id="form-error">{{ e }}</div>{% endif %}
 
 <dl class="profile">
   <dt>Email</dt><dd>{{ email }}</dd>
