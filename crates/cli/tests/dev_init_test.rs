@@ -365,6 +365,36 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         "AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2"
     ));
 
+    // The platform OP's NAME and its ADDRESS are separate settings, and the
+    // rendered compose must keep them separate. The issuer follows
+    // ZEROSHIP_DOMAIN because it is what a token's `iss` carries; the two
+    // outbound targets are LITERALS naming the service on this network,
+    // because a domain-derived value sends control out through the public edge
+    // and back - which on a real single-host deployment has no route, so every
+    // `zeroship login` approval ended in `internal error`.
+    for (label, service, expected) in [
+        ("control mint", control, "ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092"),
+        (
+            "control jwks",
+            control,
+            "ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json",
+        ),
+        (
+            "migrated jwks",
+            migrated,
+            "ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json",
+        ),
+    ] {
+        assert!(
+            service.contains(expected),
+            "{label}: rendered compose must set {expected}"
+        );
+    }
+    assert!(
+        !control.contains("ZEROSHIP_AUTH_PLATFORM_MINT_URL: ${ZEROSHIP_ORIGIN_SCHEME"),
+        "the mint destination must not be derived from the public domain"
+    );
+
     let active_compose = compose
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))

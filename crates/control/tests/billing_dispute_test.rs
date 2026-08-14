@@ -129,6 +129,9 @@ impl Fixture {
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        // No platform deploy-token mint here: that is control's OUTBOUND
+        // destination for the device flow, and no fixture below drives one.
+        platform_mint_url: None,
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,

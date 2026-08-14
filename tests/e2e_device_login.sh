@@ -21,6 +21,16 @@
 #     -> `zeroship deploy` with that token
 #     -> the gateway serves the deployed app
 #
+# The mint leg is OBSERVED, not inferred. Control POSTs the deploy-token mint to
+# `auth.platform_mint_url`, which is a different setting from
+# `auth.platform_issuer`: the issuer is the `iss` a token must carry, the mint
+# URL is where control_key is sent. Every other harness runs both on one
+# loopback host, where the two agree and code that DERIVES one from the other
+# looks identical to code that reads it. So this harness puts a recording proxy
+# on a third port, points the mint there, and asserts both halves: the POST
+# arrived at the configured address, AND the token that came back still carries
+# the public issuer.
+#
 # The signup leg reads its URL off the login page for the same reason the
 # approval leg loads the device page: a harness that composes the URL itself
 # tests its author's idea of a valid one. Signup accepted ONLY an
@@ -63,6 +73,9 @@ export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8481}"
 export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8382}"
 export PG_PORT="${PG_PORT:-5481}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devlogin-pg}"
+# A RECORDING PROXY in front of the OP, on its own port, so the harness can see
+# WHERE control sent the mint rather than only that a token came back.
+MINT_PROXY_PORT="${MINT_PROXY_PORT:-9483}"
 
 AUTH_URL="http://localhost:$AUTH_PORT"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
@@ -86,6 +99,7 @@ cleanup() {
     while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   [ -n "${CLI_PID:-}" ] && kill "$CLI_PID" 2>/dev/null
+  [ -n "${MINT_PROXY_PID:-}" ] && kill "$MINT_PROXY_PID" 2>/dev/null
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] && rm -rf "$WORK"
   return 0
@@ -157,14 +171,76 @@ stack_pg_up || { fail "postgres + migrations"; exit 1; }
 export ZEROSHIP_CONFIG_HOME="$WORK/cli-config"
 mkdir -p "$ZEROSHIP_CONFIG_HOME"
 
-for p in $AUTH_PORT $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do
+for p in $AUTH_PORT $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $MINT_PROXY_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
+
+# ---------------------------------------------------------------------------
+step "Put a RECORDING PROXY in front of the OP, and point the mint at it"
+# WHY: every other harness in this tree runs the whole platform on one loopback
+# host, so the OP's public issuer origin and its reachable address are the same
+# string. When those two agree, code that DERIVES the mint target from the
+# issuer is indistinguishable from code that reads the configured one - which is
+# exactly how a shipped deployment ended up POSTing control_key at its own
+# public CDN hostname, failing Connect on every device approval, while every
+# green harness said the flow worked.
+#
+# So the mint is pointed at a port the issuer does not name. The proxy forwards
+# to the same OP, so a PASS still means the real flow completed; what it adds is
+# an observation of WHERE the mint went. If control fell back to the issuer the
+# login would still succeed and this log would be empty.
+MINT_LOG="$WORK/mint-proxy.log"
+: > "$MINT_LOG"
+cat > "$WORK/mint-proxy.js" <<'PROXY'
+const net = require("net");
+const fs = require("fs");
+const [, , listenPort, targetPort, logPath] = process.argv;
+net
+  .createServer((client) => {
+    const upstream = net.connect(Number(targetPort), "127.0.0.1");
+    let head = "";
+    let logged = false;
+    client.on("data", (chunk) => {
+      if (logged) return;
+      head += chunk.toString("latin1");
+      const nl = head.indexOf("\r\n");
+      if (nl !== -1) {
+        logged = true;
+        fs.appendFileSync(logPath, head.slice(0, nl) + "\n");
+      }
+    });
+    client.pipe(upstream);
+    upstream.pipe(client);
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+  })
+  .listen(Number(listenPort), "127.0.0.1", () => process.stdout.write("ready\n"));
+PROXY
+node "$WORK/mint-proxy.js" "$MINT_PROXY_PORT" "$AUTH_PORT" "$MINT_LOG" \
+  > "$WORK/mint-proxy.out" 2>&1 &
+MINT_PROXY_PID=$!
+for _ in $(seq 1 40); do grep -q ready "$WORK/mint-proxy.out" 2>/dev/null && break; sleep 0.25; done
+grep -q ready "$WORK/mint-proxy.out" \
+  && pass "the mint recording proxy is listening on :$MINT_PROXY_PORT" \
+  || { fail "the mint proxy never started"; cat "$WORK/mint-proxy.out"; exit 1; }
+
+# The two settings, and the assertion that they DISAGREE. Without this the
+# observation below would be vacuous: if the mint URL happened to be the
+# issuer's own origin, a mint that reached the proxy would prove nothing about
+# which of the two control read.
+export ZEROSHIP_AUTH_PLATFORM_MINT_URL="http://127.0.0.1:$MINT_PROXY_PORT"
+ISSUER_ORIGIN="${ZEROSHIP_AUTH_PLATFORM_ISSUER%/oauth2}"
+echo "  trust anchor (issuer):   $ZEROSHIP_AUTH_PLATFORM_ISSUER"
+echo "  outbound (mint URL):     $ZEROSHIP_AUTH_PLATFORM_MINT_URL"
+[ "$ISSUER_ORIGIN" != "$ZEROSHIP_AUTH_PLATFORM_MINT_URL" ] \
+  && pass "the mint destination is not the issuer's origin ($ISSUER_ORIGIN)" \
+  || fail "the mint URL equals the issuer origin; this harness cannot tell them apart"
 
 # ---------------------------------------------------------------------------
 step "Boot the platform-only stack"
 echo "  auth=$AUTH_URL control=$CONTROL_URL gateway=$GATE_URL pg=:$PG_PORT"
 echo "  platform issuer: $ZEROSHIP_AUTH_PLATFORM_ISSUER"
+echo "  platform mint URL: $ZEROSHIP_AUTH_PLATFORM_MINT_URL"
 
 "$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
@@ -457,6 +533,33 @@ echo "  token: sub=$TOKEN_SUB scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
 [ "$TOKEN_TTL" -ge 3600 ] \
   && pass "the deploy token outlives a single command (${TOKEN_TTL}s)" \
   || fail "deploy token TTL is only ${TOKEN_TTL}s"
+
+# ---------------------------------------------------------------------------
+# THE MINT LEG, observed rather than inferred. Two halves, and both must hold:
+# the POST went to the CONFIGURED address, and the token it returned is trusted
+# because its `iss` is the PUBLIC issuer. Changing where we post must not change
+# what we trust.
+# `grep -c` prints the count AND exits 1 on zero matches, so a `|| echo 0`
+# fallback appends a SECOND line and the comparison below dies with "integer
+# expected" instead of reporting the count it found. Let grep's own 0 stand;
+# the default only covers a missing file.
+MINT_HITS="$(grep -c 'POST /internal/platform-token' "$MINT_LOG" 2>/dev/null || true)"
+MINT_HITS="${MINT_HITS:-0}"
+echo "  mint proxy recorded: $(tr '\n' '|' < "$MINT_LOG")"
+[ "$MINT_HITS" -ge 1 ] \
+  && pass "the mint was POSTed to the configured mint URL ($MINT_HITS hit(s) on :$MINT_PROXY_PORT)" \
+  || fail "nothing reached the configured mint URL; the mint went somewhere this harness did not name"
+
+TOKEN_ISS="$(jwt_claim "$TOKEN" iss)"
+[ "$TOKEN_ISS" = "$ZEROSHIP_AUTH_PLATFORM_ISSUER" ] \
+  && pass "the minted token still carries the PUBLIC issuer ($TOKEN_ISS)" \
+  || fail "token iss '$TOKEN_ISS' != configured issuer '$ZEROSHIP_AUTH_PLATFORM_ISSUER'"
+
+# The pre-fix log line, named exactly. A fallback that dialled an unreachable
+# public host produced this and nothing else that a caller could see.
+grep -q 'platform token mint transport failed' "$WORK/control.log" \
+  && fail "control logged a mint transport failure: $(grep -m1 'platform token mint' "$WORK/control.log")" \
+  || pass "control logged no mint transport failure"
 
 GRANTS_AFTER="$(psql_q "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
 [ "$GRANTS_AFTER" = "apps:deploy,apps:read,apps:write" ] \

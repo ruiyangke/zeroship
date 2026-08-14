@@ -215,6 +215,43 @@ pub struct ControlSettings {
     #[config(shared = AUTH_PLATFORM_JWKS_URL, default = String::new())]
     pub auth_platform_jwks_url: Operational<String>,
 
+    /// Base URL control POSTs the platform deploy-token mint to
+    /// (`{mint_url}/internal/platform-token`), under `control_key`.
+    ///
+    /// THIS IS NOT THE ISSUER, and the two cannot be folded back into one
+    /// value. They answer different questions:
+    ///
+    ///   * `auth.platform_issuer` is a TRUST ANCHOR. It is the exact string a
+    ///     minted token's `iss` claim must equal, so it is fixed by what the OP
+    ///     stamps into its tokens and by what every other verifier already
+    ///     trusts. It is a NAME, and it must be the public one.
+    ///   * this is an OUTBOUND DESTINATION. It is where this process opens a
+    ///     socket and sends `control_key`, so it is fixed by what this process
+    ///     can actually reach. It is a ROUTE, and it should be the internal
+    ///     service address.
+    ///
+    /// A deployment whose OP is fronted by an edge that only accepts traffic
+    /// from outside makes them different values by force, and that is not an
+    /// exotic case: on the shipped single-host topology the public name
+    /// resolves to a CDN, control sits behind it with no egress-and-back route,
+    /// and the OP answers instantly one container-network hop away. Control
+    /// used to DERIVE the route from the name
+    /// (`device_grant::op_public_url(platform_issuer)`), so every device
+    /// approval posted to the CDN and failed `Connect`, and `zeroship login`
+    /// returned `internal error` after the human had already approved.
+    ///
+    /// `auth.platform_jwks_url` is this same split, already shipped, for the
+    /// key fetch. This is its peer for the mint, which is why it sits beside it
+    /// rather than under `control.`: an operator setting one of the two
+    /// outbound platform-OP targets almost always has to set the other.
+    ///
+    /// Empty is REFUSED at boot whenever a platform issuer is configured
+    /// (`crates/control/src/main.rs`). There is deliberately no fall back to
+    /// the issuer: a fallback restores the bug above on every deployment that
+    /// does not set this, and does it silently.
+    #[config(name = "auth.platform_mint_url", default = String::new())]
+    pub auth_platform_mint_url: Operational<String>,
+
     /// Expected OAuth access-token audience for control bearer auth.
     #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
     pub oauth_audience: Operational<String>,

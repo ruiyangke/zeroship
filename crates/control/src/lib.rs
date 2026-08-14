@@ -524,6 +524,17 @@ pub struct AppState {
     /// Platform auth-provider token verifier for third-party OAuth bearer
     /// access tokens. Used only after local PAT verification fails.
     pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
+    /// Base URL the platform deploy-token mint is POSTed to, already validated
+    /// by `zeroship_core::device_grant::platform_mint_base_url` and carrying no
+    /// trailing slash. `None` means no platform OP is configured at all, which
+    /// is the only state in which the device flow is legitimately unavailable;
+    /// boot REFUSES the combination "issuer configured, mint URL empty".
+    ///
+    /// Separate from `auth_provider.platform_issuer()` on purpose: that string
+    /// is the trust anchor a token's `iss` must equal, this one is where
+    /// `control_key` is sent. See the declaration in `config.rs` for why they
+    /// cannot be one value.
+    pub platform_mint_url: Option<String>,
     /// Provider factories available in this process. Boot registers built-ins
     /// explicitly, then builds the role-addressed billing stack below.
     pub provider_registry: Arc<metering::provider::ProviderRegistry>,
