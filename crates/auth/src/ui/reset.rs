@@ -89,7 +89,7 @@ pub async fn post(
 
     // 2. NIST 800-63B Rev 4: 15-character minimum (same rule as /signup).
     //    Count chars, not bytes — multibyte passphrases aren't penalised.
-    if form.password.chars().count() < 15 {
+    if form.password.chars().count() < crate::identity::password::MIN_PASSWORD_CHARS {
         return render_form(
             &cfg,
             &form.token,
