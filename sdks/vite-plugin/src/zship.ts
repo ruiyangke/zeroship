@@ -28,7 +28,6 @@ import { create as tarCreate } from "tar";
 import mime from "mime";
 
 import {
-  GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
 } from "./gen-types/index.js";
 
@@ -216,21 +215,28 @@ export interface ZshipOptions {
   /**
    * Migration/typegen settings. The packer never carries migration documents in
    * the `.zship`; it only reads the generated `schema.runtime.json` descriptor
-   * and stages that descriptor as `manifest.runtime_descriptor`. Set
-   * `migrations: false` to disable descriptor packing.
+   * and stages that descriptor as `manifest.runtime_descriptor`.
+   *
+   * `false` OR ABSENT disables descriptor packing. There is no default pair of
+   * paths here: they come from the caller's `zeroship.jsonc`.
    */
   migrations?:
     | false
     | {
-        /** Migrations dir relative to root (default `migrations`). */
-        dir?: string;
         /**
-         * The `gen-types` output dir relative to `root` (default
-         * `GEN_TYPES_OUT_DEFAULT`). The packer reads
+         * Migrations dir relative to root. REQUIRED, no fallback: it comes from
+         * `migrations.dir` in the caller's zeroship.jsonc (or that schema's
+         * default), and a second copy here would be a second holder of the same
+         * value - which is the whole shape this file's config work removed.
+         */
+        dir: string;
+        /**
+         * The `gen-types` output dir relative to `root`. REQUIRED for the same
+         * reason as `dir`. The packer reads
          * `<genTypesOut>/schema.runtime.json` (when present) and carries it as
          * the manifest's content-addressed `runtime_descriptor` blob (P4a).
          */
-        genTypesOut?: string;
+        genTypesOut: string;
       };
 }
 
@@ -475,14 +481,23 @@ export async function emitZship(
   //     applied through the migration service and are NOT transported in the
   //     `.zship`. The packer only stages `schema.runtime.json` so runtime boot can
   //     install the typed `env.db` surface for the deployed code.
-  if (options.migrations !== false) {
-    const genTypesOut = options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT;
-    const descriptorPath = resolve(root, genTypesOut, RUNTIME_DESCRIPTOR_FILE);
+  // ABSENT is treated exactly like `false`, and there is deliberately no third
+  // arm that guesses a directory. A caller that has not said where the fold was
+  // written has not asked for a descriptor; a caller that has, said it. The
+  // guess this replaces was a SECOND holder of `migrations.out`'s default,
+  // living in TypeScript beside the schema's - which is the four-derivations
+  // shape one layer down.
+  if (options.migrations != null && options.migrations !== false) {
+    const descriptorPath = resolve(
+      root,
+      options.migrations.genTypesOut,
+      RUNTIME_DESCRIPTOR_FILE,
+    );
     let descriptorBytes: Buffer | undefined;
     try {
       descriptorBytes = await fs.readFile(descriptorPath);
     } catch {
-      if (await hasMigrationSources(root, options.migrations?.dir)) {
+      if (await hasMigrationSources(root, options.migrations.dir)) {
         throw new Error(
           `zship: found migration source files but missing runtime schema descriptor at ` +
             `${descriptorPath}; run gen-types before packing and apply migrations through the migration service`
@@ -650,8 +665,8 @@ async function collectFiles(
   return out;
 }
 
-async function hasMigrationSources(root: string, migrationsDir?: string): Promise<boolean> {
-  const dir = resolve(root, migrationsDir ?? "migrations");
+async function hasMigrationSources(root: string, migrationsDir: string): Promise<boolean> {
+  const dir = resolve(root, migrationsDir);
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
