@@ -196,6 +196,49 @@ fn platform_config(
     .map_err(|err| format!("platform auth provider config: {err}"))
 }
 
+/// Operator-facing spelling of the mint destination, for diagnostics that have
+/// to name something settable.
+const PLATFORM_MINT_URL_INPUT: &str = "--auth-platform-mint-url / ZEROSHIP_AUTH_PLATFORM_MINT_URL";
+
+/// Resolve the validated platform mint destination, or refuse to boot.
+///
+/// Kept beside [`platform_config`] because the two settings are read together
+/// and mean different things: that one builds the VERIFIER (which issuer a
+/// token's `iss` must equal), this one is the ROUTE `control_key` travels. The
+/// asymmetry in the two arms is deliberate:
+///
+///   * issuer set, mint URL empty -> REFUSE. There is no fall back to the
+///     issuer. Deriving the route from the name is the defect this setting
+///     exists to remove, and a fallback would reinstate it on exactly the
+///     deployments that did not know to set it - silently, and only visible
+///     once a human had already approved a device grant.
+///   * mint URL set, issuer empty -> REFUSE. This names a destination for
+///     `control_key` that nothing will ever use, so it is far more likely to be
+///     a half-finished configuration than an intent. Same shape as the existing
+///     "issuer is required when the JWKS URL is set" rule.
+///
+/// # Errors
+///
+/// The operator-facing message, already naming the input to fix.
+fn platform_mint_url(issuer: &str, mint_url: &str) -> Result<Option<String>, String> {
+    let issuer_configured = !issuer.trim().is_empty();
+    let mint_configured = !mint_url.trim().is_empty();
+    match (issuer_configured, mint_configured) {
+        (false, false) => Ok(None),
+        (false, true) => Err(format!(
+            "{PLATFORM_ISSUER_INPUT} is required when {PLATFORM_MINT_URL_INPUT} is set"
+        )),
+        (true, false) => Err(format!(
+            "{PLATFORM_MINT_URL_INPUT} is required when {PLATFORM_ISSUER_INPUT} is set; \
+             it is the address control POSTs the deploy-token mint to and is NOT derived \
+             from the issuer, which names the OP publicly (e.g. http://auth:9092)"
+        )),
+        (true, true) => zeroship_core::device_grant::platform_mint_base_url(mint_url)
+            .map(|base| Some(base.to_owned()))
+            .map_err(|err| format!("{PLATFORM_MINT_URL_INPUT}: {err}")),
+    }
+}
+
 fn platform_config_required(
     platform: ControlPlatformAuthConfig<'_>,
 ) -> Result<PlatformConfig, String> {
@@ -269,6 +312,7 @@ fn main() -> std::io::Result<()> {
     // precedence and `resolve_overlay_string` has nothing left to add.
     let auth_platform_issuer = settings.auth_platform_issuer.get().clone();
     let auth_platform_jwks_url = settings.auth_platform_jwks_url.get().clone();
+    let auth_platform_mint_url = settings.auth_platform_mint_url.get().clone();
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
@@ -433,6 +477,22 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // The outbound half of the platform-OP configuration, resolved BEFORE the
+    // `--check-config` early return so a dry run refuses what a real boot would
+    // refuse. Nothing here reaches the network: it is a parse and two presence
+    // rules.
+    let platform_mint_url = match platform_mint_url(&auth_platform_issuer, &auth_platform_mint_url) {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            eprintln!("control: {message}");
+            tracing::error!(
+                error = %message,
+                "control: refusing to start; the platform deploy-token mint destination is unusable"
+            );
+            std::process::exit(1);
+        }
+    };
+
     if check_config {
         // M1: read-only. No filesystem mutation, no signing-key load.
         let workers_count = workers_str
@@ -494,6 +554,14 @@ fn main() -> std::io::Result<()> {
         report.field(
             "auth_platform_jwks_url",
             CheckValue::Plain(platform_jwks_report),
+        );
+        // The destination `control_key` travels to, printed in full. It is
+        // deployment topology, not key material, and an operator diagnosing a
+        // failed `zeroship login` needs to see it next to the issuer to tell
+        // the trust anchor from the route.
+        report.field(
+            "auth_platform_mint_url",
+            CheckValue::Plain(platform_mint_url.clone().unwrap_or_default()),
         );
         report.field(
             "trusted_oauth_clients_count",
@@ -923,6 +991,7 @@ fn main() -> std::io::Result<()> {
             .expect("control: bundled authz policies parse"),
         pat_issuer,
         auth_provider,
+        platform_mint_url,
         provider_registry,
         billing_stack,
         billing_stream,
@@ -1464,6 +1533,16 @@ mod tests {
             .map(|_| ())
             .expect_err("a JWKS URL without an issuer must fail closed"),
             PLATFORM_ISSUER_INPUT.to_owned(),
+            platform_mint_url("https://auth.zeroship.test/oauth2", "")
+                .map(|_| ())
+                .expect_err("a configured issuer with no mint URL must fail closed"),
+            platform_mint_url("", "http://auth:9092")
+                .map(|_| ())
+                .expect_err("a mint URL with no issuer must fail closed"),
+            platform_mint_url("https://auth.zeroship.test/oauth2", "auth:9092")
+                .map(|_| ())
+                .expect_err("a scheme-less mint URL must fail closed"),
+            PLATFORM_MINT_URL_INPUT.to_owned(),
         ]
     }
 
@@ -1585,6 +1664,57 @@ mod tests {
             !readable.contains("ZEROSHIP_CONTROL_AUTH_PROVIDER"),
             "the retired control-scoped name must no longer be read"
         );
+    }
+
+    #[test]
+    fn a_configured_issuer_with_no_mint_url_refuses_to_boot() {
+        // THE REGRESSION. Before the split, control derived the mint target
+        // from the issuer, so this configuration booted happily and posted
+        // `control_key` at the OP's PUBLIC name - which on the shipped
+        // single-host topology is a CDN with no route back in. The failure
+        // surfaced as `zeroship login` printing `internal error` AFTER the
+        // human had approved in the browser.
+        //
+        // The refusal must be a refusal and not a fallback: an empty mint URL
+        // resolving to the issuer's origin is exactly the old behaviour.
+        let err = platform_mint_url("https://auth.zeroship.co/oauth2", "")
+            .expect_err("an issuer with no mint URL must refuse");
+        assert!(
+            err.contains("ZEROSHIP_AUTH_PLATFORM_MINT_URL"),
+            "the refusal must name the setting to fix: {err}"
+        );
+
+        // One variable changed: the mint URL is supplied. Without this the
+        // assertion above would also pass on a function that refused
+        // everything.
+        assert_eq!(
+            platform_mint_url("https://auth.zeroship.co/oauth2", "http://auth:9092")
+                .expect("a configured pair resolves"),
+            Some("http://auth:9092".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_mint_url_is_never_derived_from_the_issuer() {
+        // The property, stated directly: for every issuer, the resolved mint
+        // destination is the CONFIGURED string and owes nothing to the issuer.
+        // A future "simplification" that reinstates
+        // `op_public_url(platform_issuer)` as a fallback fails here.
+        for issuer in [
+            "https://auth.zeroship.co/oauth2",
+            "http://auth.zeroship.localhost/oauth2",
+            "http://localhost:9092/oauth2",
+        ] {
+            assert_eq!(
+                platform_mint_url(issuer, "http://auth:9092").expect("resolves"),
+                Some("http://auth:9092".to_owned()),
+                "the mint destination moved with the issuer"
+            );
+        }
+
+        // And with no platform OP at all there is nothing to mint through, so
+        // the absence is representable rather than an error.
+        assert_eq!(platform_mint_url("", "").expect("no platform OP"), None);
     }
 
     #[test]

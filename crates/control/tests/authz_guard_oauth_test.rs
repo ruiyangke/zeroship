@@ -164,6 +164,9 @@ async fn fixture_with_auth_provider(
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
         auth_provider,
+        // No platform deploy-token mint here: that is control's OUTBOUND
+        // destination for the device flow, and no fixture below drives one.
+        platform_mint_url: None,
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,
