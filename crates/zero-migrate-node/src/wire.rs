@@ -59,6 +59,55 @@ use napi_derive::napi;
 #[cfg(feature = "napi")]
 pub type JsonValue = serde_json::Value;
 
+/// Restore exact integers that napi's JS-number conversion widened to `f64`.
+///
+/// A JS number crossing as a real value is `f64` once it no longer fits a `u32`, so
+/// `4294967296` arrives as `4294967296.0` and re-serializes with the decimal point.
+/// The IR deserializer then takes its "fractional or exponential" branch and
+/// refuses a value that is nowhere near the `|v| < 2^53` limit it actually enforces.
+///
+/// The effect was a lint/apply split, because the two host boundaries differ:
+/// `validate` hands the addon `JSON.stringify(envelope)`, where the integer
+/// survives as text, while `apply` crosses the envelope as a JS value. A migration
+/// inserting a millisecond timestamp (~1.78e12, far above `u32::MAX`) therefore
+/// linted clean and died at deploy.
+///
+/// Whole integers below 2^53 are converted back; anything at or beyond it is left
+/// alone so the engine's own refusal — which names the `{"int64":"…"}` carrier —
+/// still fires. `f as i64` is exact in that range, and a value like
+/// `9007199254740993` is not representable as `f64` at all, so it never reaches the
+/// conversion.
+#[cfg(feature = "napi")]
+pub(crate) fn restore_exact_integers(value: &mut JsonValue) {
+    /// `2^53`. Matches `zero_migrate_ir`'s `MAX_EXACT_INT`, the point past which an
+    /// integer must use the exact carrier rather than a JS number.
+    const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
+    match value {
+        JsonValue::Number(number) => {
+            // Already an exact integer to serde_json: nothing to restore.
+            if number.as_i64().is_some() || number.as_u64().is_some() {
+                return;
+            }
+            if let Some(float) = number.as_f64() {
+                if float.fract() == 0.0 && float.abs() < MAX_EXACT {
+                    *number = serde_json::Number::from(float as i64);
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                restore_exact_integers(item);
+            }
+        }
+        JsonValue::Object(entries) => {
+            for (_, entry) in entries.iter_mut() {
+                restore_exact_integers(entry);
+            }
+        }
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::String(_) => {}
+    }
+}
+
 // ===========================================================================
 // 1. Driver cell transport DTOs (napi-neutral — the mock test builds them).
 // ===========================================================================

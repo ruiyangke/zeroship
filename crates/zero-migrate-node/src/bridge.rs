@@ -632,15 +632,22 @@ pub fn apply_ir(
 ) -> Result<Object<'static>> {
     // Lower the envelope to an ordered plan in Rust (checksum folded here). The
     // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
-    let envelope_json = serde_json::to_string(&req.envelope)
+    //
+    // Restore exact integers FIRST: a JS number above `u32::MAX` arrives as an f64,
+    // and re-serializing it here would write `4294967296.0`, which the IR
+    // deserializer refuses as fractional. `validate` never saw this because it hands
+    // the addon a `JSON.stringify` of the same envelope.
+    let mut envelope = req.envelope;
+    crate::wire::restore_exact_integers(&mut envelope);
+    let envelope_json = serde_json::to_string(&envelope)
         .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
     let prior_envelope_json = req
         .prior_envelopes
-        .as_deref()
         .unwrap_or_default()
-        .iter()
-        .map(|envelope| {
-            serde_json::to_string(envelope)
+        .into_iter()
+        .map(|mut envelope| {
+            crate::wire::restore_exact_integers(&mut envelope);
+            serde_json::to_string(&envelope)
                 .map_err(|e| Error::from_reason(format!("prior envelope is not serializable: {e}")))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -748,7 +755,12 @@ pub fn apply_ir_sqlite(
     let envelopes = envelopes
         .into_iter()
         .enumerate()
-        .map(|(index, envelope)| {
+        .map(|(index, mut envelope)| {
+            // Deserialized straight from the napi-converted value rather than via a
+            // JSON string, so this is the site where a widened integer reaches the
+            // IR first. Without the restore, a literal above `u32::MAX` arrives as
+            // an f64 and is refused as fractional.
+            crate::wire::restore_exact_integers(&mut envelope);
             serde_json::from_value::<MigrationIr>(envelope).map_err(|error| {
                 Error::from_reason(format!(
                     "envelope at index {index} is not a MigrationIr document: {error}"
@@ -827,7 +839,13 @@ fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
         .iter()
         .enumerate()
         .map(|(index, envelope)| {
-            serde_json::to_string(envelope).map_err(|error| {
+            // Cloned because this decoder borrows the request and reads more of it
+            // below; the normalization has to happen before re-serializing either
+            // way, or a large integer literal in a rolled-back migration hits the
+            // same fractional-number refusal `apply` used to.
+            let mut envelope = envelope.clone();
+            crate::wire::restore_exact_integers(&mut envelope);
+            serde_json::to_string(&envelope).map_err(|error| {
                 Error::from_reason(format!(
                     "envelope at index {index} is not serializable: {error}"
                 ))
@@ -1107,7 +1125,8 @@ pub fn status_ir(
 
     let envelope_json = envelopes
         .into_iter()
-        .map(|envelope| {
+        .map(|mut envelope| {
+            crate::wire::restore_exact_integers(&mut envelope);
             serde_json::to_string(&envelope)
                 .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))
         })
@@ -1190,7 +1209,8 @@ pub fn status_ir_sqlite(
         .map_err(|error| Error::from_reason(format!("registry is not serializable: {error}")))?;
     let envelope_json = envelopes
         .into_iter()
-        .map(|envelope| {
+        .map(|mut envelope| {
+            crate::wire::restore_exact_integers(&mut envelope);
             serde_json::to_string(&envelope).map_err(|error| {
                 Error::from_reason(format!("envelope is not serializable: {error}"))
             })
