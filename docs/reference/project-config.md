@@ -23,7 +23,7 @@ and it decides every question about what belongs here:
 
 | | `zeroship.jsonc` | the `.zship` manifest |
 | --- | --- | --- |
-| Written by | you, plus one CLI writeback (`app`) | the build |
+| Written by | you | the build |
 | Read by | the `zeroship` CLI and the build | control plane, gateway, worker |
 | Travels | never leaves your machine | uploaded on every deploy |
 | Describes | how the tooling operates | how the app behaves |
@@ -298,22 +298,15 @@ parses that path segment as a uuid. Those three still error naming `app` until
 the id is in the file. It is also off under `--no-create`, which is the flag
 that says "do not invent an app".
 
-`zeroship deploy` writes exactly one field back, in exactly one situation:
-**the root `app` member, on the auto-create path**. When a deploy creates the
-app, the new id is spliced into the existing `"app"` value - one scalar span
-replaced, every comment, key order and byte outside that span identical - and
-the file is re-parsed before it is written, so a splice that would not parse is
-never saved.
+`zeroship deploy` considers recording an auto-created id in exactly one
+situation: the resolved file had no `app`, so deploy used its `name` fallback.
+An existing config `app` or an explicit `--app` is never a writeback target,
+even if that named target is auto-created. The file is not opened for writing.
 
-```
-created app my-app (11111111-1111-4111-8111-111111111111)
-  wrote app id into /home/me/app/zeroship.jsonc
-```
-
-If the file has no `app` member at all, the CLI **refuses to insert one** and
-prints the line to paste instead. Inserting a member into arbitrary JSONC means
-guessing which comment it belongs under and at what indentation; a splice is
-provably byte-safe and a printed line is honest about the rest.
+Because the eligible file has no `app` member, the CLI **refuses to insert
+one** and prints the line to paste instead. Inserting a member into arbitrary
+JSONC means guessing which comment it belongs under and at what indentation;
+a printed line is honest about the edit the creator needs to make.
 
 ```
 created app my-app (11111111-1111-4111-8111-111111111111)
@@ -321,15 +314,16 @@ created app my-app (11111111-1111-4111-8111-111111111111)
     "app": "11111111-1111-4111-8111-111111111111",
 ```
 
-Nothing else is ever written. Not `control` - a `--control=` typo becoming
-permanent is worse than typing the flag twice - and not on a normal deploy: if
-`app` already resolved, the file is not opened for writing.
+Nothing else is ever written. In particular, `control` is never a writeback
+target: a `--control=` typo becoming permanent is worse than typing the flag
+twice.
 
-**A deploy run with `--env=` never writes either.** The splice can only touch a
-top-level member, and an id created for staging written at the root is where
-every un-flagged command would then read production's - the cross-targeting the
-non-inheritable rule exists to prevent, arriving through the writeback door. So
-the command prints the line and says which block it belongs in:
+**A deploy run with `--env=` never writes either.** The writeback helper only
+targets the top-level member, and an id created for staging written at the root
+is where every un-flagged command would then read production's - the
+cross-targeting the non-inheritable rule exists to prevent, arriving through
+the writeback door. So the command prints the line and says which block it
+belongs in:
 
 ```
 created app my-app-staging (2222...)
@@ -379,8 +373,7 @@ lines the mutating commands print.
 
   "name": "my-app",
 
-  // An app id, or a name the first `zeroship deploy` creates and rewrites
-  // to the new id.
+  // An app id or name. An explicit value is never rewritten by deploy.
   "app": "my-app",
   "control": "https://control.zeroship.ai",
 
