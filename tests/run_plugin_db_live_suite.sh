@@ -60,6 +60,11 @@ cd "$ROOT"
 
 : "${PG_TEST_URL:?PG_TEST_URL must point at a logical-WAL Postgres with pgvector}"
 
+# `distributed_live` predates this gate and reads `LIVE_DB_TEST_URL`; keep it
+# on the same provisioned server as every target unless the caller explicitly
+# supplies a separate URL.
+export LIVE_DB_TEST_URL="${LIVE_DB_TEST_URL:-$PG_TEST_URL}"
+
 SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 
 # MEASURED on a fresh database provisioned per the requirements above:
