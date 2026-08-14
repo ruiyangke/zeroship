@@ -69,9 +69,11 @@ scope = "all"
 `;
 }
 
-function authored(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
+function authored(name: string, schema: () => void): NamedMigration {
+  return { name, default: { schema } } as NamedMigration;
 }
+
+const TARGETS = ["plain_rows", "myisam_rows", "triggered_rows"] as const;
 
 test("MySQL refuses a data migration whose target is non-InnoDB or carries a user trigger", async (ctx) => {
   if (!MYSQL_URL) {
@@ -83,17 +85,32 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
   const database = uniqueNamespace("dmltarget_my");
   const driver: DriverConfig = { kind: "mysql", url: MYSQL_URL };
 
-  // One migration creates all three targets, so every arm below differs ONLY in
-  // what was done to its table out of band.
+  // One migration creates all three targets and a second stocks them, so every
+  // arm below differs ONLY in what was done to its table out of band.
   const created = authored("create_targets", () => {
-    for (const name of ["plain_rows", "myisam_rows", "triggered_rows"]) {
+    for (const name of TARGETS) {
       table(name).create({
         columns: { id: t.int().notNull(), stage: t.string({ length: 16 }) },
         primaryKey: ["id"],
       });
-      table(name).insert({ rows: { id: 1, stage: "pending" } });
     }
   });
+
+  const seeded = {
+    name: "seed_targets",
+    default: {
+      data() {
+        for (const name of TARGETS) {
+          table(name).insert({ rows: { id: 1, stage: "pending" } });
+        }
+      },
+      inverse() {
+        for (const name of TARGETS) {
+          table(name).delete({ where: (column) => column("id").eq(1) });
+        }
+      },
+    },
+  } as NamedMigration;
 
   const registry = {
     plain_rows: OWNER_APP,
@@ -152,6 +169,7 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
   try {
     await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
     await applyOne(created, [], {});
+    await applyOne(seeded, [created], registry);
 
     // The engine created these, so they start transactional and trigger-free.
     const [engines] = await admin.query(
@@ -182,7 +200,7 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
     // THE CONTROL, first. An untouched InnoDB target must still apply, and the
     // row must actually move - otherwise the two refusals below prove nothing.
     const promotedPlain = promote("plain_rows");
-    await applyOne(promotedPlain, [created], registry);
+    await applyOne(promotedPlain, [created, seeded], registry);
     assert.equal(
       await stageOf("plain_rows"),
       "ready",
@@ -191,7 +209,7 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
 
     // Both refusals run against the SAME prefix. Neither is journaled, since a
     // refused migration never completes, so they do not shadow each other.
-    const prefix = [created, promotedPlain];
+    const prefix = [created, seeded, promotedPlain];
 
     // 1. Non-transactional engine. Refused before the statement runs, so the
     //    row is untouched rather than half-migrated.
