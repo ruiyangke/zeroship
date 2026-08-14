@@ -49,23 +49,34 @@ function pgIdent(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-function authoredMixed(name: string, up: () => void): NamedMigration {
-  return { name, default: { up } } as NamedMigration;
-}
-
 function authoredSchema(name: string, schema: () => void): NamedMigration {
   return { name, default: { schema } } as NamedMigration;
 }
 
-/** Seeds a table carrying one row, so every arm has data to lose. */
-function seedWithARow(): NamedMigration {
-  return authoredMixed("seed", () => {
+/** The table, and then the row that gives every arm data to lose.
+ *
+ *  These are two migrations because one module may carry DDL or DML, never both.
+ *  Each arm therefore unwinds against a THREE-migration history, and `steps: 1`
+ *  still reaches only the migration under test. */
+function tableAndRow(): readonly [NamedMigration, NamedMigration] {
+  const create = authoredSchema("seed", () => {
     table("acct").create({
       columns: { id: t.int().notNull(), secret: t.string({ length: 20 }) },
       primaryKey: ["id"],
     });
-    table("acct").insert({ rows: [{ id: 1, secret: "hunter2" }] });
   });
+  const stock = {
+    name: "stock",
+    default: {
+      data() {
+        table("acct").insert({ rows: [{ id: 1, secret: "hunter2" }] });
+      },
+      inverse() {
+        table("acct").delete({ where: (column) => column("id").eq(1) });
+      },
+    },
+  } as NamedMigration;
+  return [create, stock];
 }
 
 test("a rollback removes what a migration added and keeps the rows it did not touch", async (ctx) => {
@@ -75,7 +86,7 @@ test("a rollback removes what a migration added and keeps the rows it did not to
   const projectSchema = uniqueNamespace("rbdata_add");
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
-  const seed = seedWithARow();
+  const [seed, stock] = tableAndRow();
   const added = authoredSchema("add_extra", () => {
     table("acct").column("extra").add({ type: t.string({ length: 10 }) });
   });
@@ -102,19 +113,20 @@ test("a rollback removes what a migration added and keeps the rows it did not to
       appliedBy: "rollback-data-semantics",
     };
     await apply({ ...base, migration: seed, priorMigrations: [], priorNameFallbacks: [], registry: {}, nameFallback: seed.name });
+    await apply({ ...base, migration: stock, priorMigrations: [seed], priorNameFallbacks: [seed.name], registry: { acct: OWNER_APP }, nameFallback: stock.name });
     await apply({
       ...base,
       migration: added,
-      priorMigrations: [seed],
-      priorNameFallbacks: [seed.name],
+      priorMigrations: [seed, stock],
+      priorNameFallbacks: [seed.name, stock.name],
       registry: { acct: OWNER_APP },
       nameFallback: added.name,
     });
     assert.deepEqual(await columns(), ["id", "secret", "extra"], "the add landed");
 
     const outcome = await rollback({
-      migrations: [seed, added],
-      nameFallbacks: [seed.name, added.name],
+      migrations: [seed, stock, added],
+      nameFallbacks: [seed.name, stock.name, added.name],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -151,7 +163,7 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
   const projectSchema = uniqueNamespace("rbdata_drop");
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
-  const seed = seedWithARow();
+  const [seed, stock] = tableAndRow();
   const dropped = authoredSchema("drop_secret", () => {
     table("acct").column("secret").drop();
   });
@@ -176,11 +188,12 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
       appliedBy: "rollback-data-semantics",
     };
     await apply({ ...base, migration: seed, priorMigrations: [], priorNameFallbacks: [], registry: {}, nameFallback: seed.name });
+    await apply({ ...base, migration: stock, priorMigrations: [seed], priorNameFallbacks: [seed.name], registry: { acct: OWNER_APP }, nameFallback: stock.name });
     await apply({
       ...base,
       migration: dropped,
-      priorMigrations: [seed],
-      priorNameFallbacks: [seed.name],
+      priorMigrations: [seed, stock],
+      priorNameFallbacks: [seed.name, stock.name],
       registry: { acct: OWNER_APP },
       nameFallback: dropped.name,
     });
@@ -188,8 +201,8 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
 
     const unwind = (force: boolean) =>
       rollback({
-        migrations: [seed, dropped],
-        nameFallbacks: [seed.name, dropped.name],
+        migrations: [seed, stock, dropped],
+        nameFallbacks: [seed.name, stock.name, dropped.name],
         ownerApp: OWNER_APP,
         projectSchema,
         driver,
