@@ -847,7 +847,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* The second and last signal: read fades back. */
 .notification-title.is-read { color: var(--ink-faint); }
 .notification-title.is-read a { color: var(--ink-2); }
-.notification-list [data-slot="list-view-content"] { min-inline-size: 0; }
 .notification-body {
   margin: 0;
   font-size: 0.82rem;
@@ -1189,7 +1188,6 @@ fieldset.issue-detail-extras { display: grid; }
    and lose their chrome: a bordered box per property turned a column of
    facts into a column of form controls, which is what made the rail read as
    heavier than the bug. */
-.fields-panel .zs-field,
 .fields-panel .field-block,
 .fields-panel .field-row-compact {
   margin-block: 0;
