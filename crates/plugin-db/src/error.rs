@@ -223,7 +223,10 @@ pub const MISSING_ROLE_HINT: &str =
 /// AUTHORIZATION` / connecting as the role report those instead.
 ///
 /// The message check is deliberately anchored at both ends: PostgreSQL writes
-/// exactly `role "<name>" does not exist`.
+/// exactly `role "<name>" does not exist`. Only names following
+/// [`crate::auth::bootstrap::per_app_role_name`]'s `app_<id>_role` convention
+/// qualify, so a missing operator login role cannot be mistaken for an app
+/// that needs `zeroship migrate`.
 fn is_missing_role(code: &compio_postgres::error::SqlState, primary_message: &str) -> bool {
     use compio_postgres::error::SqlState;
 
@@ -232,8 +235,8 @@ fn is_missing_role(code: &compio_postgres::error::SqlState, primary_message: &st
         || code == &SqlState::INVALID_AUTHORIZATION_SPECIFICATION;
 
     sqlstate_fits
-        && primary_message.starts_with("role \"")
-        && primary_message.ends_with("\" does not exist")
+        && primary_message.starts_with("role \"app_")
+        && primary_message.ends_with("_role\" does not exist")
 }
 
 impl DbError {
@@ -897,18 +900,31 @@ mod tests {
     }
 
     #[test]
-    fn role_missing_neighbours_are_classified() {
+    fn role_missing_neighbours_require_per_app_role_shape() {
         use compio_postgres::error::SqlState;
 
         // `SET SESSION AUTHORIZATION` / GRANT report 42704; connecting AS
-        // the role reports 28000. Same condition, same one-command fix.
+        // the role reports 28000. Same condition, same one-command fix when
+        // the missing role is a per-app role.
         assert!(is_missing_role(
             &SqlState::UNDEFINED_OBJECT,
             r#"role "app_x_role" does not exist"#
         ));
-        assert!(is_missing_role(
-            &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
-            r#"role "app_x_role" does not exist"#
+
+        // ONE-VARIABLE PAIR: the SQLSTATE and server message shape are
+        // identical; only the missing role name changes. A bad operator DSN
+        // cannot be fixed by `zeroship migrate`, while a missing per-app role
+        // can.
+        let classified = |role: &str| {
+            is_missing_role(
+                &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+                &format!(r#"role "{role}" does not exist"#),
+            )
+        };
+
+        assert!(!classified("zeroship_worker"));
+        assert!(classified(
+            "app_0198d9d8-2ad4-7c35-b4cf-8d40e471fadb_role"
         ));
     }
 
