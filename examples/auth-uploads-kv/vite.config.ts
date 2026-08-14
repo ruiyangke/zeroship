@@ -27,13 +27,11 @@ export default defineConfig({
             id: "pws_alice000000000000000",
             email: "alice@localhost",
             name: "Alice",
-            password: "alice",
           },
           {
             id: "pws_bob00000000000000000",
             email: "bob@localhost",
             name: "Bob",
-            password: "bob",
           },
         ],
         defaultUserId: "pws_alice000000000000000",

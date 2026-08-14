@@ -129,21 +129,32 @@ HOST="$APP_SLUG.$ZEROSHIP_CONTROL_APP_BASE_DOMAIN"
 # SAME EMAIL, SAME PERSON, and DELIBERATELY DIFFERENT PASSWORDS -- because the
 # two tiers do not accept the same one, which is itself a measured finding:
 #
-#   dev      `examples/auth-probe/vite.config.ts` declares `password: "probe-pw"`
-#            (8 chars) and the dev provider compares it verbatim
-#            (sdks/bootstrap/src/dev-auth.ts). There is no policy at all.
+#   dev      the password is not configured at all. `devPasswordFor`
+#            (sdks/bootstrap/src/dev-auth.ts -- the authority) DERIVES it from
+#            the user id declared in `examples/auth-probe/vite.config.ts`:
+#            "dev-" + the first 8 characters of the id after "pws_", so
+#            pws_probealpha0000000000 -> "dev-probealp" (12 chars). The dev
+#            provider then compares it verbatim; there is no policy at all.
 #   deployed `crates/auth/src/ui/signup.rs:110-116` REFUSES any password under
 #            15 characters, so the dev user's password cannot be registered on
 #            the platform OP.
 #
-# So `probe-pw` is a credential that works locally and cannot exist in
-# production. The `policy.short_password` measurement below records that
-# explicitly rather than papering over it; the login rows then use each tier's
-# own valid password, which keeps "log in as this person, correctly" the same
-# operation on both sides.
+# The derivation is bounded under 15 characters ON PURPOSE (see the doc comment
+# on `devPasswordFor`, which cites this script): the dev credential must stay
+# one that works locally and CANNOT EXIST in production. If it ever grew to >=
+# 15 characters the `policy.short_password` measurement below would invert into
+# a vacuous pass -- the signup would succeed and the row would stop meaning
+# anything -- so that assertion also checks the length directly.
+#
+# The `policy.short_password` measurement records the asymmetry explicitly
+# rather than papering over it; the login rows then use each tier's own valid
+# password, which keeps "log in as this person, correctly" the same operation on
+# both sides.
 LOGIN_EMAIL="alpha@probe.zeroship.test"
 LOGIN_NAME="Probe Alpha"
-DEV_PASSWORD="probe-pw"
+LOGIN_ID="pws_probealpha0000000000"
+# Derived exactly the way `devPasswordFor` derives it, from the id above.
+DEV_PASSWORD="$(printf 'dev-%.8s' "${LOGIN_ID#pws_}")"
 DEPLOYED_PASSWORD="probe-pw-platform-2026"
 WRONG_PASSWORD="definitely-not-the-password"
 # The scope an app that wants a profile asks for. The gateway force-appends
@@ -299,11 +310,18 @@ WORK="$WORK_EARLY"
   || { fail "build produced no app.zship"; tail -30 "$WORK/build.log"; exit 1; }
 
 # The dev user this harness logs in as must exist in the vite config with the
-# password used here, or the dev half measures a typo.
-for v in "$LOGIN_EMAIL" "$DEV_PASSWORD"; do
+# EMAIL and ID used here, or the dev half measures a typo. The password is no
+# longer a literal in the config -- it is derived from the id above the same way
+# `devPasswordFor` derives it -- so the id is what has to match, and a stray
+# `password:` field would mean somebody re-added a knob the dev tier ignores.
+for v in "$LOGIN_EMAIL" "$LOGIN_ID"; do
   grep -qF -- "$v" "$APP/vite.config.ts" || { fail "credential drift: '$v' is not in $APP/vite.config.ts"; exit 1; }
 done
-pass "dev credential ($LOGIN_EMAIL) is declared in vite.config.ts"
+if grep -qE '^[[:space:]]*password:' "$APP/vite.config.ts"; then
+  fail "credential drift: $APP/vite.config.ts declares a 'password:' field the dev tier ignores (it derives the password from the id -- sdks/bootstrap/src/dev-auth.ts devPasswordFor)"
+  exit 1
+fi
+pass "dev credential ($LOGIN_EMAIL / $DEV_PASSWORD, derived from $LOGIN_ID) is declared in vite.config.ts"
 
 # ---------------------------------------------------------------------------
 # 2. DEV SIDE
@@ -715,6 +733,16 @@ op_signup() {  # op_signup <password> <jar> <out-body> -> echoes the status
 # MEASUREMENT, not a compared row (dev has no signup at all -- the spine records
 # that asymmetry). Submit the DEV user's actual password to the platform and see
 # whether the account a creator has locally could exist in production.
+#
+# The measurement only MEANS anything while the dev password is under the 15-char
+# floor: at >= 15 the signup would succeed and "no account created" would become
+# a claim about something else entirely. Assert the precondition first, so a
+# widened derivation shows up as a red row here rather than a silent inversion.
+if [ "${#DEV_PASSWORD}" -lt 15 ]; then
+  pass "policy.short_password precondition: the derived dev password is ${#DEV_PASSWORD} chars, under the platform's 15-char floor"
+else
+  fail "policy.short_password precondition: the derived dev password is ${#DEV_PASSWORD} chars (>= 15) -- devPasswordFor widened and the measurement below no longer discriminates"
+fi
 short_status="$(op_signup "$DEV_PASSWORD" "$WORK/op-jar-short.txt" "$WORK/op-signup-short.body")"
 short_msg="$(grep -oE 'password must be at least [0-9]+ characters' "$WORK/op-signup-short.body" | head -1)"
 created_short="$(docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc \
@@ -1100,6 +1128,11 @@ fi
 # not the same as stability on a contended CI box, and storage/workflows/db are
 # three standing examples of exactly that difference. Wire it once it has run
 # green here across enough runs to mean something.
+# One unconditional `pass()` was added after this floor was measured (the
+# `policy.short_password precondition` row), so a green run should now score one
+# higher. The floor is a `-lt` guard and the extra row keeps satisfying it;
+# NOT bumped, because a floor nobody re-measured is worse than a floor one row
+# behind. Re-measure and bump together.
 LOGIN_MIN_PASSED="${LOGIN_MIN_PASSED:-30}"
 LOGIN_REQUIRED_DIVERGENT="${LOGIN_REQUIRED_DIVERGENT:-authorize.entry identity.get_session identity.rpc_shape identity.rpc_values identity.values session.exchange session.foreign_origin session.no_xzsauth signout signout.replay_rpc signout.replay_session}"
 LOGIN_EXPECTED_DIVERGENT="${LOGIN_EXPECTED_DIVERGENT:-11}"
