@@ -67,6 +67,87 @@ pub fn op_public_url(issuer: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
+/// Where control POSTs the platform deploy-token mint, validated.
+///
+/// This is the OUTBOUND half of what [`op_public_url`] used to do on its own,
+/// and it is deliberately not derived from the issuer. See the doc comment on
+/// `ControlSettings::auth_platform_mint_url` for why the trust anchor and the
+/// route cannot be one string.
+///
+/// The rules exist because the request this URL addresses carries `control_key`
+/// in an `Authorization` header, so whatever this names receives that
+/// credential. What the rules bound:
+///
+///   * ABSOLUTE http/https only. A relative or scheme-less value cannot be
+///     resolved against anything here, and `auth:9092` - which reads as a
+///     host:port - parses as the scheme `auth`, so it is refused by name rather
+///     than silently treated as a path.
+///   * NO userinfo. `https://auth.internal@evil.example` names `evil.example`
+///     while reading as the internal host; a value carrying `@` is refused.
+///   * NO path, query or fragment. Control appends a fixed endpoint path, and
+///     a configured suffix could otherwise move or re-parse the effective
+///     target.
+///
+/// What it does NOT bound: the host itself. Nothing here can tell an internal
+/// address from a hostile one, and a check that pretended to would be claiming
+/// a protection it does not have. The real bound is on the SUPPLY: this value
+/// comes only from a flag, an environment variable, or the operator-owned
+/// config overlay, never from a request, a token, a database row, or the
+/// issuer string.
+///
+/// # Errors
+///
+/// Returns the specific rule the value broke, so the boot diagnostic can name
+/// it rather than saying "invalid".
+pub fn platform_mint_base_url(raw: &str) -> Result<&str, MintUrlError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(MintUrlError::Missing);
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|_| MintUrlError::NotAbsolute)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(MintUrlError::UnsupportedScheme);
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(MintUrlError::NoHost);
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(MintUrlError::Userinfo);
+    }
+    if parsed.path() != "/" {
+        return Err(MintUrlError::HasPath);
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(MintUrlError::QueryOrFragment);
+    }
+    Ok(trimmed.trim_end_matches('/'))
+}
+
+/// Why a configured platform mint URL was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MintUrlError {
+    #[error("no value is set")]
+    Missing,
+
+    #[error("must be an absolute URL, e.g. http://auth:9092")]
+    NotAbsolute,
+
+    #[error("must use http or https")]
+    UnsupportedScheme,
+
+    #[error("must name a host")]
+    NoHost,
+
+    #[error("must not carry userinfo (a `user:pass@` prefix)")]
+    Userinfo,
+
+    #[error("must be a bare origin with no path")]
+    HasPath,
+
+    #[error("must not carry a query string or fragment")]
+    QueryOrFragment,
+}
+
 /// Format `chars` as `XXXX-XXXX-XXXX`.
 fn group(chars: &str) -> String {
     let mut formatted = String::with_capacity(USER_CODE_FORMATTED_LEN);
@@ -199,5 +280,83 @@ mod tests {
         // verification URI it cannot serve.
         assert_eq!(op_public_url("https://project.supabase.co/auth/v1"), None);
         assert_eq!(op_public_url("/oauth2"), None);
+    }
+
+    #[test]
+    fn a_mint_url_is_a_bare_reachable_origin() {
+        assert_eq!(
+            platform_mint_base_url("http://auth:9092"),
+            Ok("http://auth:9092")
+        );
+        // A trailing slash is the same origin, and the caller appends a path
+        // beginning with `/`, so it is trimmed rather than refused.
+        assert_eq!(
+            platform_mint_base_url("https://auth.internal/  "),
+            Ok("https://auth.internal")
+        );
+        assert_eq!(
+            platform_mint_base_url("http://127.0.0.1:9481"),
+            Ok("http://127.0.0.1:9481")
+        );
+    }
+
+    #[test]
+    fn a_mint_url_that_could_redirect_the_control_key_is_refused() {
+        // Each case is a way the resolved destination could differ from the
+        // host an operator reading the value would name.
+        assert_eq!(platform_mint_base_url(""), Err(MintUrlError::Missing));
+        assert_eq!(platform_mint_base_url("   "), Err(MintUrlError::Missing));
+        // Reads as host:port, parses as the scheme `auth`.
+        assert_eq!(
+            platform_mint_base_url("auth:9092"),
+            Err(MintUrlError::UnsupportedScheme)
+        );
+        assert_eq!(
+            platform_mint_base_url("//auth:9092"),
+            Err(MintUrlError::NotAbsolute)
+        );
+        assert_eq!(
+            platform_mint_base_url("file:///etc/passwd"),
+            Err(MintUrlError::UnsupportedScheme)
+        );
+        // Reads as the internal host, resolves to evil.example.
+        assert_eq!(
+            platform_mint_base_url("https://auth.internal@evil.example"),
+            Err(MintUrlError::Userinfo)
+        );
+        assert_eq!(
+            platform_mint_base_url("http://auth:9092/oauth2"),
+            Err(MintUrlError::HasPath)
+        );
+        assert_eq!(
+            platform_mint_base_url("http://auth:9092/?next=x"),
+            Err(MintUrlError::QueryOrFragment)
+        );
+        assert_eq!(
+            platform_mint_base_url("http://auth:9092/#frag"),
+            Err(MintUrlError::QueryOrFragment)
+        );
+    }
+
+    #[test]
+    fn the_issuer_and_the_mint_url_are_not_interchangeable() {
+        // The one-variable pair that names the whole bug. `op_public_url` maps
+        // an issuer to the PUBLIC origin that advertises it - correct for the
+        // browser page it feeds, and the wrong answer for an outbound POST on a
+        // host with no egress-and-back route. The mint URL is that outbound
+        // answer, and it is not derivable from the issuer: nothing in the
+        // issuer string mentions `auth:9092`.
+        let issuer = "https://auth.zeroship.co/oauth2";
+        assert_eq!(op_public_url(issuer), Some("https://auth.zeroship.co"));
+        assert_eq!(
+            platform_mint_base_url("http://auth:9092"),
+            Ok("http://auth:9092")
+        );
+        // And the issuer is not itself a legal mint URL, so a deployment
+        // cannot quietly paste one into the other and keep today's behaviour.
+        assert_eq!(
+            platform_mint_base_url(issuer),
+            Err(MintUrlError::HasPath)
+        );
     }
 }

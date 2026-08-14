@@ -102,6 +102,9 @@ impl Fixture {
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
+        // No platform deploy-token mint here: that is control's OUTBOUND
+        // destination for the device flow, and no fixture below drives one.
+        platform_mint_url: None,
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,

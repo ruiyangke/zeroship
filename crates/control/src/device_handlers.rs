@@ -512,10 +512,16 @@ pub async fn device_token(
 /// This flow needs the PLATFORM OP, and nothing else.
 ///
 /// Everything downstream is platform-shaped: the grant row is written with
-/// `provider = 'platform'`, `mint_platform_deploy_token` posts to the OP's
-/// `/internal/platform-token` under `control_key`, and the minted token is
-/// verified back through `platform_issuer`. Those two values are the whole
-/// precondition.
+/// `provider = 'platform'`, `mint_platform_deploy_token` posts to
+/// `{platform_mint_url}/internal/platform-token` under `control_key`, and the
+/// minted token is verified back through `platform_issuer`. Those three values
+/// are the whole precondition.
+///
+/// The mint URL is checked HERE, not only at the mint, because the alternative
+/// is that a human reads a code out of the CLI, opens the page, approves, and
+/// only then discovers the deployment cannot mint. Boot refuses the same
+/// combination, so in a real process this arm is unreachable; it is the
+/// handler-level statement of the precondition rather than a second policy.
 ///
 /// The one Supabase-shaped arm downstream is the `GoTrueRole` branch of
 /// [`device_approval_principal`], and it is not reachable from here. That is a
@@ -539,7 +545,10 @@ pub async fn device_token(
 /// `ensure_supabase_provider`, which this function replaced when the flow
 /// stopped being GoTrue-bound.
 fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResponse> {
-    if state.auth_provider.platform_issuer().is_some() && !state.control_key.is_empty() {
+    if state.auth_provider.platform_issuer().is_some()
+        && !state.control_key.is_empty()
+        && state.platform_mint_url.is_some()
+    {
         Ok(())
     } else {
         Err(unsupported_provider())
@@ -604,22 +613,27 @@ async fn mint_platform_deploy_token(
     principal_id: uuid::Uuid,
     scopes: &[String],
 ) -> Result<PlatformMintResponse, web::HttpResponse> {
-    let Some(platform_issuer) = state.auth_provider.platform_issuer() else {
+    if state.auth_provider.platform_issuer().is_none() {
         return Err(unsupported_provider());
-    };
+    }
+    // The CONFIGURED destination, never one derived from the issuer. The issuer
+    // names the OP's public identity; this names an address control can reach.
+    // A fall back to the issuer here is what would silently restore the
+    // egress-and-back POST that made every device approval fail, so there is
+    // none: an unconfigured mint URL is refused, loudly, and boot refuses it
+    // earlier still.
+    //
     // The mint route is mounted on the auth service's ROOT config
     // (`crates/auth/src/server.rs` calls `oidc::device_token::configure(cfg)`
-    // outside the `/oauth2` scope), while the issuer this is derived from
-    // carries that scope. Appending the path to the issuer addressed
-    // `{public}/oauth2/internal/platform-token`, which 404s.
-    let Some(op_public_url) = device_grant::op_public_url(platform_issuer) else {
+    // outside the `/oauth2` scope), so the endpoint hangs off the bare origin.
+    let Some(mint_base_url) = state.platform_mint_url.as_deref() else {
         tracing::error!(
-            platform_issuer = %platform_issuer,
-            "control: platform issuer is not an OP issuer, so its mint endpoint cannot be derived"
+            "control: no platform mint URL is configured, so the deploy token cannot be minted; \
+             set --auth-platform-mint-url / ZEROSHIP_AUTH_PLATFORM_MINT_URL"
         );
         return Err(internal_error());
     };
-    let url = format!("{op_public_url}{PLATFORM_TOKEN_ENDPOINT}");
+    let url = format!("{mint_base_url}{PLATFORM_TOKEN_ENDPOINT}");
     let principal_id_string = principal_id.to_string();
     let body = PlatformMintRequest {
         principal_id: &principal_id_string,
