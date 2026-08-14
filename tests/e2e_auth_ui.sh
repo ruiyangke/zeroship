@@ -312,6 +312,7 @@ for (const requiredTitle of [
   "failed login fields identify and describe their errors",
   "public auth pages name controls and use a sane heading order",
   "public auth pages show a focus indicator on every interactive element",
+  "creator journey covers signup, verification, login, profile, logout, and defenses",
 ]) {
   if (!discoveredTitles.has(requiredTitle)) {
     throw new Error(`required browser test was not discovered: ${requiredTitle}`);
