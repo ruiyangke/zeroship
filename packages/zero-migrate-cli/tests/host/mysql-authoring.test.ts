@@ -449,10 +449,10 @@ test("Live MySQL onConflict updates only the authored target and journals only c
   });
   const database = uniqueDatabase("mysql_conflict");
   const meta = `${database}_migrations`;
-  const migration = {
-    name: "mysql_conflict_target",
+  const schemaMigration = {
+    name: "mysql_conflict_schema",
     default: {
-      up() {
+      schema() {
         const items = table("conflict_items");
         items.create({
           columns: {
@@ -464,6 +464,14 @@ test("Live MySQL onConflict updates only the authored target and journals only c
             payload: t.bytes().notNull(),
           },
         });
+      },
+    },
+  };
+  const dataMigration = {
+    name: "mysql_conflict_target",
+    default: {
+      data() {
+        const items = table("conflict_items");
         items.insert({
           rows: {
             id: 1,
@@ -506,24 +514,32 @@ test("Live MySQL onConflict updates only the authored target and journals only c
           },
         });
       },
+      inverse() {
+        table("conflict_items").delete({ where: (col) => col("id").in([1, 2]) });
+      },
     },
   };
 
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
 
-    await assert.rejects(
+    const deploy = (migration: typeof schemaMigration | typeof dataMigration) =>
       apply({
         migration: migration as never,
         ownerApp: "app_mysql_conflict",
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
-        registry: {},
+        registry: { conflict_items: "app_mysql_conflict" },
         policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-test",
         nameFallback: migration.name,
-      }),
+      });
+
+    await deploy(schemaMigration);
+
+    await assert.rejects(
+      deploy(dataMigration),
       /Invalid JSON|JSON_EXTRACT|3141/i,
       "NULL values on a nullable UNIQUE target must not match a different-key collision",
     );
@@ -594,10 +610,10 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
   });
   const database = uniqueDatabase("mysql_conflict_nonunique");
   const meta = `${database}_migrations`;
-  const migration = {
-    name: "mysql_conflict_nonunique_target",
+  const schemaMigration = {
+    name: "mysql_conflict_nonunique_schema",
     default: {
-      up() {
+      schema() {
         const items = table("nonunique_items");
         items.create({
           columns: {
@@ -606,6 +622,14 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
             label: t.text().notNull(),
           },
         });
+      },
+    },
+  };
+  const dataMigration = {
+    name: "mysql_conflict_nonunique_target",
+    default: {
+      data() {
+        const items = table("nonunique_items");
         items.insert({ rows: { id: 1, group_id: 7, label: "seed" } });
         items.insert({
           rows: { id: 1, group_id: 7, label: "incoming" },
@@ -615,24 +639,32 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
           },
         });
       },
+      inverse() {
+        table("nonunique_items").delete({ where: (col) => col("id").eq(1) });
+      },
     },
   };
 
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
 
-    await assert.rejects(
+    const deploy = (migration: typeof schemaMigration | typeof dataMigration) =>
       apply({
         migration: migration as never,
         ownerApp: "app_mysql_conflict_nonunique",
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
-        registry: {},
+        registry: { nonunique_items: "app_mysql_conflict_nonunique" },
         policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-target-proof",
         nameFallback: migration.name,
-      }),
+      });
+
+    await deploy(schemaMigration);
+
+    await assert.rejects(
+      deploy(dataMigration),
       /does not exactly match the full columns of one UNIQUE or PRIMARY index/,
     );
 
@@ -646,6 +678,7 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
         label: String(row.label ?? row.LABEL),
       })),
       [{ id: 1, group_id: 7, label: "seed" }],
+      "the committed seed remains when the later non-unique target is rejected",
     );
 
     const [journal] = await admin.query(

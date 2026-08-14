@@ -62,12 +62,12 @@ value = true
 scope = { include = ["main"] }
 `;
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const SCHEMA_MIGRATION = `import { table, t } from "zero-migrate";
 
 export const name = "create_notes";
 
 export default {
-  up() {
+  schema() {
     table("notes").create({
       columns: {
         id: t.int().notNull(),
@@ -75,10 +75,28 @@ export default {
       },
       primaryKey: ["id"],
     });
-    table("notes").insert({ rows: { id: 1, body: "written by the CLI" } });
   },
 };
 `;
+
+const DATA_MIGRATION = `import { table } from "zero-migrate";
+
+export const name = "seed_notes";
+
+export default {
+  data() {
+    table("notes").insert({ rows: { id: 1, body: "written by the CLI" } });
+  },
+  inverse() {
+    table("notes").delete({ where: (col) => col("id").eq(1) });
+  },
+};
+`;
+
+function writeMigrations(migrations: string): void {
+  writeFileSync(join(migrations, "20260101000000_create_notes.ts"), SCHEMA_MIGRATION);
+  writeFileSync(join(migrations, "20260101000001_seed_notes.ts"), DATA_MIGRATION);
+}
 
 test("the CLI applies to a SQLite file and the rows are really there", () => {
   // Inside the test directory, not the system temp dir: the migration imports
@@ -89,8 +107,9 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
   try {
     const migrations = join(work, "migrations");
     writeFileSync(join(work, "policy.toml"), CHARTER);
+    writeFileSync(join(work, "registry.json"), JSON.stringify({ notes: OWNER_APP }));
     mkdirSync(migrations);
-    writeFileSync(join(migrations, "20260101000000_create_notes.ts"), MIGRATION);
+    writeMigrations(migrations);
 
     const applied = spawnCli(
       [
@@ -101,6 +120,8 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
         `sqlite:${dbPath}`,
         "--policy",
         join(work, "policy.toml"),
+        "--registry",
+        join(work, "registry.json"),
         "--schema",
         "main",
         "--owner-app",
@@ -194,8 +215,9 @@ test("a WAL application database is left in DELETE journal mode, persistently", 
 
     const migrations = join(work, "migrations");
     writeFileSync(join(work, "policy.toml"), CHARTER);
+    writeFileSync(join(work, "registry.json"), JSON.stringify({ notes: OWNER_APP }));
     mkdirSync(migrations);
-    writeFileSync(join(migrations, "20260101000000_create_notes.ts"), MIGRATION);
+    writeMigrations(migrations);
 
     const applied = spawnCli(
       [
@@ -206,6 +228,8 @@ test("a WAL application database is left in DELETE journal mode, persistently", 
         `sqlite:${dbPath}`,
         "--policy",
         join(work, "policy.toml"),
+        "--registry",
+        join(work, "registry.json"),
         "--schema",
         "main",
         "--owner-app",
@@ -285,8 +309,9 @@ test("plan, a dry run, converts a WAL application database too - the documented 
 
     const migrations = join(work, "migrations");
     writeFileSync(join(work, "policy.toml"), CHARTER);
+    writeFileSync(join(work, "registry.json"), JSON.stringify({ notes: OWNER_APP }));
     mkdirSync(migrations);
-    writeFileSync(join(migrations, "20260101000000_create_notes.ts"), MIGRATION);
+    writeMigrations(migrations);
 
     const planned = spawnCli(
       [
@@ -297,6 +322,8 @@ test("plan, a dry run, converts a WAL application database too - the documented 
         `sqlite:${dbPath}`,
         "--policy",
         join(work, "policy.toml"),
+        "--registry",
+        join(work, "registry.json"),
         "--schema",
         "main",
         "--owner-app",
@@ -313,8 +340,8 @@ test("plan, a dry run, converts a WAL application database too - the documented 
     // the journal-mode change below is not the artefact of a command that bailed.
     assert.match(
       planned.stdout,
-      /would apply 1 migration/,
-      "plan must have previewed the pending migration",
+      /would apply 2 migrations/,
+      "plan must have previewed both pending migrations",
     );
 
     const after = new DatabaseSync(dbPath);

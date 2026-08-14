@@ -78,7 +78,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: {
         id: t.int().notNull(),
@@ -92,7 +92,20 @@ export default {
         { name: "${TABLE}_status_ix", on: ["status"] },
       ],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({ rows: [{ id: 1, email: "a@x", status: "new", doomed: 9 }] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,
@@ -243,7 +256,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     table("fk_parent").create({ columns: { id: t.int().notNull(), spare: t.int() }, primaryKey: ["id"] });
     table("fk_child").create({
       columns: {
@@ -253,8 +266,22 @@ export default {
       },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("fk_parent").insert({ rows: [{ id: 1, spare: 1 }] });
     table("fk_child").insert({ rows: [{ id: 1, parent_id: 1, spare: 1 }] });
+  },
+  inverse() {
+    table("fk_child").delete({ where: (col) => col("id").eq(1) });
+    table("fk_parent").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,
@@ -367,7 +394,7 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     table("partial_rows").create({
       columns: {
         id: t.int().notNull(),
@@ -379,7 +406,20 @@ export default {
         { name: "partial_rows_active_ix", on: ["status"], where: (col) => col("status").eq("active") },
       ],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("partial_rows").insert({ rows: [{ id: 1, status: "active", spare: 1 }] });
+  },
+  inverse() {
+    table("partial_rows").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,

@@ -124,12 +124,25 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), ts: t.timestamp(), note: t.text() },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({ rows: [{ id: 1 }] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,
