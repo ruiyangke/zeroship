@@ -16,7 +16,7 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 
 /// Secrets this deployment issues to ITSELF, and therefore can generate.
 ///
-/// `STRIPE_WEBHOOK_SECRET` is deliberately absent: the value is issued by
+/// `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is deliberately absent: the value is issued by
 /// Stripe (`whsec_...` from the dashboard endpoint or `stripe listen
 /// --print-secret`), so a locally generated one can never verify a real
 /// Stripe-Signature. Generating it produced an inert placeholder that made an
@@ -490,11 +490,11 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
         "ZEROSHIP_CONTROL_MASTER_KEY" | "ZEROSHIP_AUTH_TOTP_ENC_KEY" => {
             zeroship_core::config::validate_master_key_material(name, value)
         }
-        "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(value),
+        "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(name, value),
         "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY" | "ZEROSHIP_AUTH_STASH_SIGNING_KEY" => {
-            zeroship_core::config::validate_stash_key(value)
+            zeroship_core::config::validate_stash_key(name, value)
         }
-        "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(value),
+        "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(name, value),
         "ZEROSHIP_CONTROL_KEY" | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }

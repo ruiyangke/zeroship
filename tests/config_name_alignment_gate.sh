@@ -15,8 +15,10 @@
 #                        fresh render of the compiled contract
 #   5 raw environment    no undeclared std::env read outside the planted fixtures,
 #                        AND the planted fixtures are still detected
-#   6 Compose            every ZEROSHIP_* variable a platform service sets is a
+#   6 Compose           every ZEROSHIP_* variable a platform service sets is a
 #                        name that exact binary declares
+#   6b alias equality    a container value that is EXACTLY one interpolation
+#                        must satisfy LEFT == RIGHT (proposal Section 4.3)
 #   7 ops TOML           every leaf in deploy/ops/*.toml is a generated overlay
 #                        path with a real consumer
 #
@@ -28,14 +30,16 @@
 # non-zeroship ambient inputs in AMBIENT_COMPOSE_KEYS, which no registry can
 # produce and which are listed with a reason each.
 #
-# WHAT IT DOES NOT CHECK. The Compose alias-equality rule of the proposal's
-# Section 4.3 - that a container value which is exactly one interpolation must
-# satisfy LEFT == RIGHT - is NOT enforced. Measured 2026-08-13: eight pairs in
-# deploy/compose/docker-compose.yml violate it (CONTROL_DATABASE_URL ->
-# ZEROSHIP_CONTROL_DATABASE_URL and seven siblings), so arming it would fail the
-# first run. See the "Gates that are NOT armed" section of
-# docs/reference/env-vars.md. It also cannot see a variable that exists only in
-# an operator's host shell.
+# WHAT IT DOES NOT CHECK. Check 6b cannot see a variable that exists only in an
+# operator's host shell or `.env` - that file is gitignored and generated, so
+# the guarantee covers the checked-in compose surface only. The pairing of a
+# stale host name with the canonical one it was renamed to is a DEPLOY-time
+# concern and lives in `deploy/scripts/deploy-remote.sh` (`rename_suspects`),
+# gated by `tests/deploy_scripts_gate.sh`.
+#
+# Check 6b was armed on 2026-08-13, after the eight violating pairs
+# (CONTROL_DATABASE_URL -> ZEROSHIP_CONTROL_DATABASE_URL and seven siblings)
+# were renamed so both sides spell the canonical name.
 #
 # Run `tests/config_name_alignment_gate.sh --self-test` to prove checks 6 and 7
 # still FAIL on a planted violation. A gate that accepts everything and a gate
@@ -108,13 +112,33 @@ compose_service_env() {
             gsub(/[ -]/, "", key)
             n = ++count[svc]
             keys[svc, n] = key
+            # The scalar after the key, for the alias-equality rule. Only a
+            # value whose WHOLE text is one interpolation is an alias; a
+            # composite (a URL assembled from scheme + domain) is excluded by
+            # the rule itself, so it is recorded as empty and skipped.
+            val = $0
+            sub(/^[^:]*:[[:space:]]*/, "", val)
+            sub(/[[:space:]]+$/, "", val)
+            # Accept every Compose modifier, not just `:-`: the file uses
+            # `${VAR:?msg}` for the fifteen values `zeroship dev init` must
+            # supply, and a pattern that saw only `:-` would silently check a
+            # third of the surface and call it clean.
+            alias = ""
+            if (match(val, /^\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-?+][^}]*)?\}$/)) {
+                alias = val
+                sub(/^\$\{/, "", alias)
+                sub(/[:}].*$/, "", alias)
+                sub(/[-?+].*$/, "", alias)
+            }
+            aliases[svc, n] = alias
             next
         }
         END {
             for (s in img) {
                 if (img[s] != image) continue
                 b = (s in bin) ? bin[s] : "-"
-                for (i = 1; i <= count[s]; i++) print s "\t" b "\t" keys[s, i]
+                for (i = 1; i <= count[s]; i++)
+                    print s "\t" b "\t" keys[s, i] "\t" aliases[s, i]
             }
         }
     ' "$1"
@@ -151,7 +175,7 @@ check_compose() {
         echo "      the extraction stopped matching, so a clean result would mean nothing."
         return 1
     fi
-    while IFS=$'\t' read -r svc bin key; do
+    while IFS=$'\t' read -r svc bin key _alias; do
         [ -n "$key" ] || continue
         case "$key" in
             ZEROSHIP_*) ;;
@@ -184,6 +208,48 @@ check_compose() {
         return 1
     fi
     pass "$label: $checked zeroship variables on $services platform services are all declared by the binary that reads them"
+    return 0
+}
+
+# Section 4.3 alias equality: when a container value is EXACTLY one
+# interpolation, the container key and the interpolated `.env` name must be the
+# same string. Composite values (a public URL assembled from scheme + domain)
+# are excluded by the rule itself and are not aliases, so `compose_service_env`
+# records an empty alias for them and they are skipped here.
+#
+# Why the rule is worth enforcing: `LEFT: ${RIGHT}` with LEFT != RIGHT is the
+# deployment spelling a name twice, and the two spellings drift. It also makes
+# a host rename undetectable in the direction that matters - every one of these
+# carries a `:-default`, so a host that still sets only the old name renders
+# green and silently takes the built-in default.
+check_compose_alias_equality() {
+    local compose="$1" label="$2"
+    local rows bad=0 checked=0
+    rows="$(compose_service_env "$compose")"
+    if [ -z "$rows" ]; then
+        fail "$label: extracted zero environment variables from $compose"
+        return 1
+    fi
+    while IFS=$'\t' read -r svc _bin key alias; do
+        [ -n "$key" ] || continue
+        [ -n "$alias" ] || continue
+        checked=$((checked + 1))
+        if [ "$key" != "$alias" ]; then
+            echo "  $svc: $key is fed by \${$alias}; a one-to-one alias must use the same name"
+            bad=$((bad + 1))
+        fi
+    done <<<"$rows"
+    # Anti-hollow: the rule is vacuous if the value half of the extractor stops
+    # matching, and that failure looks exactly like compliance.
+    if [ "$checked" -lt 20 ]; then
+        fail "$label: only $checked one-to-one aliases found; the value extraction stopped matching"
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad container variable(s) are fed by a differently-named .env variable"
+        return 1
+    fi
+    pass "$label: all $checked one-to-one compose aliases satisfy LEFT == RIGHT"
     return 0
 }
 
@@ -259,6 +325,23 @@ if [ "${1:-}" = "--self-test" ]; then
         fail "self-test: the compose check PASSED a variable no binary declares"
     fi
 
+    # Alias equality: repoint ONE container variable at a differently-named
+    # .env variable. This is the exact shape the eight renamed DSNs had.
+    sed "s|\${ZEROSHIP_CONTROL_DATABASE_URL:-|\${CONTROL_DATABASE_URL:-|" \
+        "$COMPOSE" >"$TMP/self/alias.yml"
+    if ! grep -q 'ZEROSHIP_CONTROL_DATABASE_URL: ${CONTROL_DATABASE_URL:-' "$TMP/self/alias.yml"; then
+        fail "self-test: the alias mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose_alias_equality "$TMP/self/alias.yml" "alias self-test" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: a container variable fed by a differently-named .env variable is rejected"
+    else
+        fail "self-test: the alias check PASSED a LEFT != RIGHT pair"
+    fi
+
     printf '[control]\nnot_a_real_setting = 1\n' >"$TMP/self/ops.toml"
     before=$FAIL
     check_ops_toml "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
@@ -272,6 +355,7 @@ if [ "${1:-}" = "--self-test" ]; then
     # And the one-variable partner: the SAME checks on the real inputs must pass,
     # or the mutations above proved only that the checks reject everything.
     check_compose "$COMPOSE" "compose control" "$TMP/contract.tsv"
+    check_compose_alias_equality "$COMPOSE" "alias control"
     check_ops_toml "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
 
     echo ""
@@ -321,6 +405,10 @@ echo "=== 6. Compose sets only variables the receiving binary declares ==="
 check_compose "$COMPOSE" "compose" "$TMP/contract.tsv"
 
 echo ""
+echo "=== 6b. Compose one-to-one aliases satisfy LEFT == RIGHT ==="
+check_compose_alias_equality "$COMPOSE" "compose alias equality"
+
+echo ""
 echo "=== 7. Every ops-TOML leaf is a generated overlay path ==="
 for file in deploy/ops/zeroship.toml deploy/ops/zeroship.example.toml; do
     [ -f "$file" ] || { fail "expected $file to exist"; continue; }
@@ -336,8 +424,8 @@ echo "============================================"
 
 # ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
 # matching, and this catches the case where several do at once. MEASURED on a
-# clean tree 2026-08-13: 9.
-CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-9}"
+# clean tree 2026-08-13: 9, then 10 once check 6b was armed.
+CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-10}"
 if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2

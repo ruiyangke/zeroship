@@ -19,7 +19,7 @@ const SECRET_FILES: [&str; 7] = [
     "refresh-idem-key",
 ];
 
-// STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
+// ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
 // verifies, so `dev init` no longer manufactures one. See
 // `dev_init_never_generates_a_stripe_webhook_secret`.
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
@@ -118,13 +118,19 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
 
     validate_master_key_material("ZEROSHIP_CONTROL_MASTER_KEY", &overlay["ZEROSHIP_CONTROL_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
-    validate_worker_key(&overlay["ZEROSHIP_WORKER_KEY"])
+    validate_worker_key("ZEROSHIP_WORKER_KEY", &overlay["ZEROSHIP_WORKER_KEY"])
         .expect("generated worker key must pass the production boot guard");
-    validate_stash_key(&overlay["ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"])
-        .expect("generated gateway stash key must pass the production boot guard");
-    validate_stash_key(&overlay["ZEROSHIP_AUTH_STASH_SIGNING_KEY"])
-        .expect("generated auth stash key must pass the production boot guard");
-    validate_pairwise_salt(&overlay["ZEROSHIP_PAIRWISE_SALT"])
+    validate_stash_key(
+        "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
+        &overlay["ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"],
+    )
+    .expect("generated gateway stash key must pass the production boot guard");
+    validate_stash_key(
+        "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+        &overlay["ZEROSHIP_AUTH_STASH_SIGNING_KEY"],
+    )
+    .expect("generated auth stash key must pass the production boot guard");
+    validate_pairwise_salt("ZEROSHIP_PAIRWISE_SALT", &overlay["ZEROSHIP_PAIRWISE_SALT"])
         .expect("generated pairwise salt must pass the production boot guard");
     validate_master_key_material("ZEROSHIP_AUTH_TOTP_ENC_KEY", &overlay["ZEROSHIP_AUTH_TOTP_ENC_KEY"])
         .expect("generated TOTP key must pass the production boot guard");
@@ -345,11 +351,11 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     // relaxation - control rejects every delivery with 500 when the secret is
     // empty (crates/control/tests/stripe_webhook_test.rs).
     assert!(
-        control.contains("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}"),
-        "STRIPE_WEBHOOK_SECRET must be optional with an empty default"
+        control.contains("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET:-}"),
+        "ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET must be optional with an empty default"
     );
     assert!(
-        !compose.contains("${STRIPE_WEBHOOK_SECRET:?"),
+        !compose.contains("${ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET:?"),
         "no service may REQUIRE a Stripe webhook secret to render compose"
     );
     assert!(migrated.contains(
@@ -410,13 +416,13 @@ fn dev_init_never_generates_a_stripe_webhook_secret() {
 
     let overlay = parse_generated_env(&env_file);
     assert!(
-        !overlay.contains_key("STRIPE_WEBHOOK_SECRET"),
+        !overlay.contains_key("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET"),
         "dev init generated a Stripe webhook secret it cannot possibly issue: {:?}",
         overlay.keys().collect::<Vec<_>>()
     );
     let raw = std::fs::read_to_string(&env_file).expect("read generated env file");
     assert!(
-        !raw.contains("STRIPE_WEBHOOK_SECRET"),
+        !raw.contains("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET"),
         "the generated env file still mentions STRIPE_WEBHOOK_SECRET"
     );
 }

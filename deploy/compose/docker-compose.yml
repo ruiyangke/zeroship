@@ -247,7 +247,7 @@ services:
       # migrated's are DIFFERENT settings with different roles, so they have
       # different canonical names; there is no shared `ZEROSHIP_DATABASE_URL`
       # middle name for all four to inherit and disagree about.
-      ZEROSHIP_CONTROL_DATABASE_URL: ${CONTROL_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
+      ZEROSHIP_CONTROL_DATABASE_URL: ${ZEROSHIP_CONTROL_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
       # Public-edge topology, independent of the origin's plain HTTP transport
       # and of the service's security posture.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
@@ -278,7 +278,7 @@ services:
       # rejects with 500 before any JSON parse or database work, and control
       # warns at boot that every delivery will be rejected. Pinned by
       # `webhook_empty_secret_*` in crates/control/tests/stripe_webhook_test.rs.
-      ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET:-}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk sec. 6.2). MUST be
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
@@ -369,11 +369,11 @@ services:
       - "127.0.0.1:9091:9091"
     environment:
       # Least-priv role for reading control-plane authz data (who owns the app).
-      ZEROSHIP_MIGRATED_DATABASE_URL: ${MIGRATED_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
+      ZEROSHIP_MIGRATED_DATABASE_URL: ${ZEROSHIP_MIGRATED_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
       # SUPERUSER DSN, and the reason this service exists: applying an app's
       # migrations means CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv role above cannot do.
-      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
       # MUST be the same file control signs with, or a control-issued creator PAT
       # will not verify here and every apply is 401.
       ZEROSHIP_MIGRATED_SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
@@ -448,7 +448,7 @@ services:
     environment:
       # The gateway's OWN least-priv DSN: it only reads sessions, so it is a
       # different role - and therefore a different setting - from control's.
-      ZEROSHIP_GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
+      ZEROSHIP_GATEWAY_DATABASE_URL: ${ZEROSHIP_GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
       # One key, one name, several consumers. MUST match the worker's.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
@@ -549,10 +549,10 @@ services:
       # Worker DSN = privileged provisioning superuser (see NOTE above); a
       # DIFFERENT role from control's and the gateway's, and therefore its own
       # canonical name rather than a shared one they could disagree about.
-      ZEROSHIP_WORKER_DATABASE_URL: ${WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
       # env.kv backend. Secret-classed: a Redis URL admits userinfo, so it has
       # no value flag and arrives here instead of on the command line.
-      ZEROSHIP_WORKER_KV_URL: ${WORKER_KV_URL:-redis://redis:6379}
+      ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
     volumes:
@@ -671,7 +671,7 @@ services:
       start_period: 30s
     environment:
       # Auth's OWN least-priv DSN, a distinct role from the other three.
-      ZEROSHIP_AUTH_DATABASE_URL: ${AUTH_DB_URL:-postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship}
+      ZEROSHIP_AUTH_DATABASE_URL: ${ZEROSHIP_AUTH_DATABASE_URL:-postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship}
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
       ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
