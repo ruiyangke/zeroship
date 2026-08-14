@@ -1287,10 +1287,15 @@ export interface IndexAddArgs {
   nullsNotDistinct?: boolean;
 }
 
+/** No `concurrently`: the engine renders a plain `DROP INDEX`, and
+ *  `dialects.md` / `writing-migrations.md` both state that concurrent index drop
+ *  is unsupported. The option used to be accepted here and then DISCARDED at
+ *  lower time, so an author who asked for a non-blocking drop silently got the
+ *  ACCESS EXCLUSIVE one. Refusing the key is the fail-closed behaviour the
+ *  sibling `index(n).add(...)` already has. */
 export interface IndexDropArgs {
   ifExists?: boolean;
   schema?: string;
-  concurrently?: boolean;
 }
 
 export interface IndexRef {

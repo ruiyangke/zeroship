@@ -2548,7 +2548,7 @@ var CREATE_VIEW_KEYS = ["as", "columns", "replace", "materialized", "schema"];
 var DROP_SEQUENCE_KEYS = ["schema", "ifExists"];
 var DROP_ENUM_KEYS = ["schema", "ifExists"];
 var DROP_DOMAIN_KEYS = ["schema", "ifExists"];
-var INDEX_DROP_KEYS = ["ifExists", "schema", "concurrently"];
+var INDEX_DROP_KEYS = ["ifExists", "schema"];
 var INSERT_KEYS = ["rows", "onConflict", "schema"];
 var UPDATE_KEYS = ["set", "where", "schema"];
 var DELETE_KEYS = ["where", "limit", "schema"];
@@ -3102,7 +3102,6 @@ function recordDropIndex(table2, name, args) {
   emitDropIndex({
     name,
     table: table2,
-    concurrently: args.concurrently,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists)
   });
@@ -3906,7 +3905,6 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
           terminateSelector(id);
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
-            concurrently: args.concurrently,
             schema: pickSchema(args, dflt)
           });
           return handle;

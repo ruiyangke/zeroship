@@ -3306,7 +3306,7 @@ const CREATE_VIEW_KEYS = ["as", "columns", "replace", "materialized", "schema"] 
 const DROP_SEQUENCE_KEYS = ["schema", "ifExists"] as const;
 const DROP_ENUM_KEYS = ["schema", "ifExists"] as const;
 const DROP_DOMAIN_KEYS = ["schema", "ifExists"] as const;
-const INDEX_DROP_KEYS = ["ifExists", "schema", "concurrently"] as const;
+const INDEX_DROP_KEYS = ["ifExists", "schema"] as const;
 const INSERT_KEYS = ["rows", "onConflict", "schema"] as const;
 const UPDATE_KEYS = ["set", "where", "schema"] as const;
 const DELETE_KEYS = ["where", "limit", "schema"] as const;
@@ -4036,7 +4036,6 @@ function recordDropIndex(
   emitDropIndex({
     name,
     table,
-    concurrently: args.concurrently,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists),
   });
@@ -4940,7 +4939,6 @@ export function __makeTableHandle(
           terminateSelector(id);
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
-            concurrently: args.concurrently,
             schema: pickSchema(args, dflt),
           });
           return handle;
