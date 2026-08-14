@@ -228,3 +228,69 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+/** Narrowing the bare-word rule must not stop redacting the username where the
+ *  text DOES mark it as a credential.
+ *
+ *  A failed authentication is among the likeliest errors an operator sees, and
+ *  PostgreSQL spells it `password authentication failed for user "name"` -- the
+ *  username in quotes after the word `user`, which is neither `user@` nor `user=`.
+ *  The first version of this fix covered only the URL-authority and libpq-keyword
+ *  forms, so it silently STOPPED redacting the username in exactly that message.
+ *  Nothing caught it: the sibling suite asserts the password never leaks, and the
+ *  password does not appear there. */
+test("the username is still redacted where the text marks it as one", async (ctx) => {
+  if (!PG_URL) {
+    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
+    return;
+  }
+  // Deliberately a user that does not exist: the server rejects the credentials
+  // and names the user back, without needing any role to be provisioned.
+  const GHOST = "zm_ghost_user";
+  const GHOST_PASSWORD = "WrongPass123";
+  const target = new URL(pgUrl());
+  target.username = GHOST;
+  target.password = GHOST_PASSWORD;
+
+  const work = project();
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import", "tsx", CLI_BIN, "status",
+        "--dir", join(work, "migrations"),
+        "--database-url", target.toString(),
+        "--policy", join(work, "policy.toml"),
+      ],
+      {
+        cwd: work,
+        encoding: "utf8",
+        env: { ...process.env, ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, DATABASE_URL: "" },
+      },
+    );
+    const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+      .replace(/^WARNING.*$/gm, "")
+      .trim();
+
+    assert.match(
+      text,
+      /authentication failed/i,
+      `the arm must reach a real authentication rejection; got: ${text}`,
+    );
+    assert.equal(
+      text.includes(GHOST),
+      false,
+      `\`for user "…"\` is a credential-shaped position, so the username must ` +
+        `still be redacted there; got: ${text}`,
+    );
+    assert.equal(
+      text.includes(GHOST_PASSWORD),
+      false,
+      `and the password must never appear; got: ${text}`,
+    );
+  } finally {
+    // No role and no schema here: the connection never authenticates, so this arm
+    // provisions nothing to clean up.
+    rmSync(work, { recursive: true, force: true });
+  }
+});
