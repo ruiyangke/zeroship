@@ -192,6 +192,77 @@ test("non-2xx responses throw ControlError with parsed body", async () => {
   );
 });
 
+// ---------------------------------------------------------------------
+// trace_id -- the correlation id on an otherwise contentless body.
+//
+// `infrastructure_error_response` (crates/control/src/api.rs) logs the
+// real cause and returns `{"error":"internal error","trace_id":<uuid>}`.
+// The cause is deliberately absent, so the id is the ONLY thing that
+// makes the response reportable. The client used to drop it: it survived
+// on `err.body` but had no field, so nothing surfaced it.
+//
+// WHAT THESE DO NOT CATCH:
+//   - That the server sends it. That is `api.rs`'s own tests.
+//   - That the id matches the one in the server's log line.
+//   - Anything about the app-dispatch path. A creator app's 5xx comes
+//     from the runtime rail, which emits a per-isolate counter and never
+//     reaches this client.
+// ---------------------------------------------------------------------
+
+test("ControlError lifts trace_id off an infrastructure error body", async () => {
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () =>
+      // Verbatim shape of `infrastructure_error_response`.
+      json(
+        {
+          error: "internal error",
+          trace_id: "3f2a1c88-9d4e-4f1b-8a02-6c5b7e9d0a11",
+        },
+        500,
+      ),
+  });
+
+  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+    assert.ok(error instanceof ControlError);
+    assert.equal(error.status, 500);
+    assert.equal(error.trace_id, "3f2a1c88-9d4e-4f1b-8a02-6c5b7e9d0a11");
+    // Emitting the id is not permission to emit the cause.
+    assert.equal(error.message, "internal error");
+    assert.equal(error.code, undefined);
+    return true;
+  });
+});
+
+test("ControlError leaves trace_id undefined when the body omits it", async () => {
+  // ONE-VARIABLE CONTROL for the test above: the SAME status and the SAME
+  // body shape, minus the field. Without it, that test would also pass if
+  // `trace_id` were defaulted to a constant.
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => json({ error: "internal error" }, 500),
+  });
+
+  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+    assert.ok(error instanceof ControlError);
+    assert.equal(error.trace_id, undefined);
+    return true;
+  });
+});
+
+test("ControlError ignores a non-string trace_id", async () => {
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => json({ error: "internal error", trace_id: 7 }, 500),
+  });
+
+  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+    assert.ok(error instanceof ControlError);
+    assert.equal(error.trace_id, undefined);
+    return true;
+  });
+});
+
 function json(
   body: unknown,
   status = 200,
