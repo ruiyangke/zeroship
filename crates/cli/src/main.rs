@@ -390,7 +390,7 @@ fn cmd_deploy(args: &[String]) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id);
-                record_created_app(config.as_ref(), &created.id);
+                record_created_app(config.as_ref(), flag_str(args, "--env=").as_deref(), &created.id);
             }
             eprintln!("Deployed successfully!");
             if let Some(hash) = outcome.deploy_hash {
@@ -437,7 +437,29 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
         (None, None) => None,
     };
 
-    let app = project_config::resolve_value(args, "--app", None, None, resolved.as_ref(), "app", None)?;
+    // `app` FALLS BACK TO `name` HERE AND NOWHERE ELSE, and only when the file
+    // is present (proposal 4.2). A brand-new project has no app id: `app` is
+    // deliberately not a required key, `deploy` already resolves-or-creates by
+    // name, and the id it mints is reported for the file. Doing this in
+    // `migrate` would let a typo'd name migrate a fresh empty app while the
+    // real one stayed broken, and in `secret`/`var` it would not work at all -
+    // the control plane parses that path segment as a uuid.
+    let app = project_config::resolve_value(
+        args,
+        "--app",
+        None,
+        None,
+        resolved.as_ref(),
+        "app",
+        None,
+    )
+    .or_else(|e| match resolved.as_ref().and_then(|r| r.str("name")) {
+        Some(name) if deploy_auto_create(args) => Ok(project_config::Sourced {
+            value: name.to_string(),
+            source: project_config::Source::FileMember("name"),
+        }),
+        _ => Err(e),
+    })?;
     let control_url = project_config::resolve_value(
         args,
         "--control",
@@ -478,12 +500,28 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 /// new member belongs under and at what indentation, which is where
 /// round-trip libraries get ugly; a splice is provably byte-safe and a printed
 /// line is honest about the rest.
-fn record_created_app(config: Option<&project_config::ProjectConfig>, id: &str) {
+fn record_created_app(
+    config: Option<&project_config::ProjectConfig>,
+    environment: Option<&str>,
+    id: &str,
+) {
     let Some(config) = config else {
         eprintln!("  record it with --app={id} on the next command, or in a {} (see docs/reference/project-config.md)",
             project_config::CONFIG_FILENAME);
         return;
     };
+    // An `--env=` deploy's app id belongs to THAT environment, and the splice
+    // only ever touches the top-level member. Writing it at the root would put
+    // staging's id where every un-flagged command reads production's - which is
+    // the cross-targeting the non-inheritable rule exists to prevent, arriving
+    // through the writeback door.
+    if let Some(env) = environment {
+        eprintln!(
+            "  add this under environments.{env} in {}:\n    \"app\": \"{id}\",",
+            config.path.display()
+        );
+        return;
+    }
     match config.write_app(id) {
         Ok(project_config::WriteOutcome::Spliced) => {
             eprintln!("  wrote app id into {}", config.path.display());

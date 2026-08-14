@@ -40,6 +40,11 @@ pub enum Source {
     File,
     /// The named environment block of the config file.
     FileEnvironment(String),
+    /// A DIFFERENT member of the file standing in for the one asked for.
+    /// Today the only case is `deploy` using `name` when `app` is absent, on
+    /// a first push. Named separately so the provenance line says so rather
+    /// than claiming the file set `app`.
+    FileMember(&'static str),
     /// The command's compiled fallback, reached only when there is no file.
     Fallback,
 }
@@ -53,6 +58,7 @@ impl Source {
             Source::FileEnvironment(name) => {
                 format!("{CONFIG_FILENAME} environments.{name}")
             }
+            Source::FileMember(member) => format!("{CONFIG_FILENAME} {member}"),
             Source::Fallback => "built-in default".to_string(),
         }
     }
