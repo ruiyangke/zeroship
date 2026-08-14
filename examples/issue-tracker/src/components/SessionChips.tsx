@@ -12,6 +12,7 @@ import { Button, Menu } from "@zeroship/ui";
 import { unreadNotificationCount } from "../api";
 import { errorMessage, isUnauthenticated, toPromise, type AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
+import type { Session } from "./session";
 
 
 /**
@@ -44,21 +45,24 @@ function SignInAction() {
   );
 }
 
-export function UserChip({ userState }: { userState: AsyncState<CurrentUser> }) {
-  if (userState.status === "loading") {
+export function UserChip({ session }: { session: Session }) {
+  if (session.status === "loading") {
     return <span className="user-chip dim">checking session...</span>;
   }
-  if (userState.status === "error") {
-    if (isUnauthenticated(userState.error)) {
-      return <SignInAction />;
-    }
+  if (session.status === "out") {
+    return <SignInAction />;
+  }
+  if (session.status === "unknown") {
+    // NOT a Sign in button. The server failed to answer rather than answering
+    // "nobody", and offering sign-in here would explain an empty page with a
+    // reason that is not the reason.
     return (
-      <span className="user-chip warn" title={errorMessage(userState.error)}>
+      <span className="user-chip warn" title={errorMessage(session.error)}>
         session unavailable
       </span>
     );
   }
-  const { data } = userState;
+  const data = session.user;
   return <AccountMenu name={data.name} email={data.email ?? null} provisioned={data.isProvisioned} />;
 }
 

@@ -5,6 +5,7 @@ import { AppShell, Button, Cluster } from "@zeroship/ui";
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { AsyncState } from "./rpc";
 import type { CurrentUser } from "./types";
+import type { Session } from "./session";
 
 /**
  * The application frame: one header band over the page, and no rail.
@@ -56,13 +57,13 @@ const LINKS: { label: string; href: string; identity?: boolean }[] = [
 ];
 
 export function Shell({
-  userState,
+  session,
   children,
 }: {
-  userState: AsyncState<CurrentUser>;
+  session: Session;
   children: ReactNode;
 }) {
-  const signedIn = userState.status === "ready";
+  const signedIn = session.status === "in";
 
   return (
     <AppShell>
@@ -108,7 +109,7 @@ export function Shell({
                 <Link to="/issues/new">New issue</Link>
               </Button>
             ) : null}
-            <UserChip userState={userState} />
+            <UserChip session={session} />
           </Cluster>
         </Cluster>
       </AppShell.Header>

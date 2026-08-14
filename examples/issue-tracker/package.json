@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tanstack/react-query": "catalog:",
     "@tiptap/extensions": "3.30.0",
     "@tiptap/markdown": "3.30.0",
     "@tiptap/pm": "^3.30.0",

@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { AuthProvider } from "@zeroship/auth/react";
 import { BrowserRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@zeroship/ui";
 // The design system ships its stylesheet as a separate export. Importing only
 // the module gets you the components with no chrome at all -- the AppShell
@@ -11,11 +12,45 @@ import { App } from "./App";
 // After the design system, so the app sheet can override tokens rather than
 // be overridden by them.
 import "./styles.css";
+import { isUnauthenticated } from "./components/rpc";
+
+/**
+ * The query cache, and the one policy decision worth making here.
+ *
+ * The app used a bespoke `useAsync` with, in its own words, "no cache, no
+ * refetch-on-focus, no request de-duplication". The absent de-duplication was
+ * the expensive part: six components asked `users.me` independently, so one
+ * visit to the issue list fired it FOUR times, and `listProducts` had five
+ * callers. Keying a query fixes that structurally instead of asking every page
+ * to remember.
+ *
+ * RETRY IS THE INTERESTING SETTING. Most of this app's procedures are
+ * `auth: "user"`, so a signed-out visitor gets a 401 from a large fraction of
+ * them -- and a 401 is an ANSWER, not a failure to reach the server. Retrying
+ * it doubles the requests on every anonymous page load and, worse, delays the
+ * moment the UI learns there is nobody, which is exactly the window where a
+ * control it should not offer is still on screen. So: retry transport
+ * failures once, never retry an authentication answer.
+ *
+ * `refetchOnWindowFocus` stays off to match the sibling examples
+ * (`examples/db-todos`). This app shows tables of a hundred rows; refetching
+ * them because someone alt-tabbed is a cost with no reader benefit.
+ */
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5_000,
+      refetchOnWindowFocus: false,
+      retry: (failureCount, error) => !isUnauthenticated(error) && failureCount < 1,
+    },
+  },
+});
 
 const el = document.getElementById("root");
 if (!el) throw new Error("missing #root");
 createRoot(el).render(
   <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
     <ThemeProvider>
       {/* The app had no way in. Every signed-out state said "sign in through
           the platform and reload" and nothing anywhere performed a sign-in --
@@ -28,5 +63,6 @@ createRoot(el).render(
         </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
+    </QueryClientProvider>
   </React.StrictMode>,
 );

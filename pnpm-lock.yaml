@@ -662,6 +662,9 @@ importers:
 
   examples/issue-tracker:
     dependencies:
+      '@tanstack/react-query':
+        specifier: 'catalog:'
+        version: 5.100.8(react@19.2.5)
       '@tiptap/extensions':
         specifier: 3.30.0
         version: 3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)
@@ -11446,6 +11449,11 @@ snapshots:
     dependencies:
       '@tanstack/query-core': 5.100.8
       react: 18.3.1
+
+  '@tanstack/react-query@5.100.8(react@19.2.5)':
+    dependencies:
+      '@tanstack/query-core': 5.100.8
+      react: 19.2.5
 
   '@tanstack/react-table@8.21.3(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
     dependencies:

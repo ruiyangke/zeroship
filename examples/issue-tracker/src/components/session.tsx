@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
 
-import { isUnauthenticated, type AsyncState } from "./rpc";
+import { isUnauthenticated } from "./rpc";
 import type { CurrentUser } from "./types";
 
 /**
@@ -58,15 +58,30 @@ export type Session =
 
 const SessionContext = createContext<Session | null>(null);
 
-/** Narrow an `AsyncState<CurrentUser>` to the four states that actually exist. */
-export function toSession(state: AsyncState<CurrentUser>): Session {
-  if (state.status === "loading") return { status: "loading" };
-  if (state.status === "error") {
-    return isUnauthenticated(state.error)
+/**
+ * Narrow a TanStack Query result to the four states that actually exist.
+ *
+ * The mapping is the app's knowledge, not the library's: `useQuery` reports
+ * "error" for a 401 and for a 500 alike, and those are different facts. A 401
+ * is the server ANSWERING that there is nobody; a 500 is the server failing to
+ * answer. Collapsing them is what made a failed request look like a signed-out
+ * visitor and offer a Sign in button as the explanation for an empty page.
+ */
+export function toSession(result: {
+  isPending: boolean;
+  isError: boolean;
+  error: unknown;
+  data: CurrentUser | undefined;
+}): Session {
+  if (result.isPending) return { status: "loading" };
+  if (result.isError) {
+    return isUnauthenticated(result.error)
       ? { status: "out" }
-      : { status: "unknown", error: state.error };
+      : { status: "unknown", error: result.error };
   }
-  return { status: "in", user: state.data };
+  return result.data
+    ? { status: "in", user: result.data }
+    : { status: "unknown", error: new Error("users.me resolved with no user") };
 }
 
 export function SessionProvider({

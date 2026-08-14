@@ -4,6 +4,8 @@ import { Link, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { currentUser } from "./api";
 import { Shell } from "./components/Shell";
 import { SessionProvider, toSession } from "./components/session";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "./lib/query-keys";
 import { useAsync } from "./components/rpc";
 import { EmptyState } from "./components/StateViews";
 import { IssueDetailPage } from "./pages/IssueDetail";
@@ -68,7 +70,14 @@ function NotFoundPage() {
 }
 
 export function App() {
-  const { state: userState, reload: reloadUser } = useAsync(() => currentUser({}), []);
+  // ONE keyed entry. Every consumer reads this same cache entry, so the
+  // question "who am I" is asked once per staleness window no matter how many
+  // components care -- it used to be asked once per component that cared.
+  const userQuery = useQuery({
+    queryKey: queryKeys.users.me(),
+    queryFn: () => currentUser({}),
+  });
+  const queryClient = useQueryClient();
 
   // Ask the SERVER again when the browser's session changes.
   //
@@ -89,8 +98,13 @@ export function App() {
     }
     if (lastUserId.current === id) return;
     lastUserId.current = id;
-    reloadUser();
-  }, [user?.id, reloadUser]);
+    // Invalidate rather than refetch one query: signing in or out changes the
+    // answer to nearly everything on screen, not just to users.me. This is the
+    // first half of retiring the `sessionKey` remount below -- once the pages
+    // read from this cache too, dropping it is what refreshes them, and the
+    // remount can go.
+    void queryClient.invalidateQueries();
+  }, [user?.id, queryClient]);
 
   // ...and remount the PAGE, because refetching identity alone is not enough.
   //
@@ -107,11 +121,11 @@ export function App() {
 
   // ONE ask, shared. Six components used to call currentUser() independently
   // and a single visit to the issue list fired users.me four times.
-  const session = toSession(userState);
+  const session = toSession(userQuery);
 
   return (
     <SessionProvider session={session}>
-    <Shell userState={userState}>
+    <Shell session={session}>
       <Fragment key={sessionKey}>
         <Routes>
           <Route path="/" element={<IssueListPage />} />
