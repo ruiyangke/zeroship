@@ -101,22 +101,11 @@ console.log(hash);
 NODE
 }
 
-write_apply_request(){
-  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$APP_EXAMPLE/migrations" > "$WORK/apply-migrations.json" <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const migration of migrations) {
-  documents.push({
-    filename: migration.stem + ".ir.json",
-    body: await recordMigration(migration.path),
-  });
-}
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
-}
+# The inline migration recorder that used to live here is GONE. It re-derived
+# the apply body from `migrations/*.ts` with a copy of the build's own recorder
+# call, which meant this harness could pass with a build that emitted nothing a
+# creator could use. Stage 3 now posts the artifact the build committed, through
+# `zeroship migrate`, which is the path a creator has.
 
 cleanup(){
   echo ""
@@ -258,6 +247,7 @@ e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
+  --migrated-url "$MIGRATED_URL" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
@@ -308,19 +298,69 @@ SQL
 "$BIN/zeroship" deploy "$ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1 | tee "$WORK/deploy.log" | grep -q deploy_hash \
   && pass "deployed db-hitcounter .zship" || { fail "deploy"; cat "$WORK/deploy.log"; exit 1; }
 
-write_apply_request || { fail "record migration IR request"; exit 1; }
-APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST "$MIGRATED_URL/v1/apps/$APP/migrations/apply" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" --data-binary @"$WORK/apply-migrations.json")"
-APPLIED="$(cat "$WORK/apply-response.json" | jget '.applied.length')"
-SKIPPED="$(cat "$WORK/apply-response.json" | jget '.skipped.length')"
-if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
-  pass "zeroship-migrated applied app IR migrations (applied=$APPLIED skipped=${SKIPPED:-0})"
+# --- THE PRE-MIGRATE CONTROL ------------------------------------------------
+#
+# The app is deployed and serving, and its schema does not exist yet. This is
+# the state a creator reaches by following the documented chain up to `zeroship
+# deploy`, and the arm below is the failure it produces: `env.db` opens a
+# transaction, issues `SET LOCAL ROLE "app_<id>_role"`
+# (crates/plugin-db/src/auth/bootstrap.rs), and Postgres answers that the role
+# does not exist. The worker turns that into an opaque `internal error` at the
+# edge, which is why the cause has to be read out of the worker log rather than
+# the response.
+#
+# It is a CONTROL, not a spec: it pins that the next stage's green is caused by
+# the migrate step and not by an app that would have worked anyway. Without it,
+# a `zeroship migrate` that silently did nothing would still leave every later
+# assertion passing.
+PRE_BODY="$(gw "http://localhost:$ZEROSHIP_GATEWAY_PORT/hit/ready")"
+PRE_WROTE="$(printf '%s' "$PRE_BODY" | jget '.wrote')"
+if [ "$PRE_WROTE" = "true" ]; then
+  fail "env.db worked BEFORE migrations were applied - the control proves nothing; \
+the app's schema already existed (leftover Postgres volume?)"
 else
-  fail "migrated apply failed (http=$APPLY_CODE)"
-  cat "$WORK/apply-response.json"
+  pass "env.db fails on the deployed, unmigrated app (the failure this command fixes)"
+  grep -qi 'does not exist' "$WORK/worker.log" \
+    && pass "the worker log names the missing per-app role" \
+    || echo "    note: worker log did not name the role; body=$(printf '%s' "$PRE_BODY" | head -c 120)"
+fi
+
+# --- APPLY THROUGH THE CLI, THROUGH CONTROL ---------------------------------
+#
+# `zeroship migrate` posts to the CONTROL plane, which authorizes the caller for
+# this app and forwards to migrated. It is driven here exactly as a creator
+# drives it: the committed build artifact, the app id, the control URL, and the
+# same PAT the deploy above used - no extra scope, no operator credential, and
+# no direct reach to migrated (which binds loopback in every real deployment).
+#
+# The body is the file the BUILD wrote (`generated/zeroship/migrations.ir.json`),
+# not one this harness records inline. That is deliberate: it makes the
+# committed artifact load-bearing, so a build that stops emitting it fails here
+# rather than in a creator's terminal.
+IR_FILE="$APP_EXAMPLE/generated/zeroship/migrations.ir.json"
+[ -f "$IR_FILE" ] \
+  && pass "the build emitted $(basename "$IR_FILE")" \
+  || { fail "missing $IR_FILE - run pnpm gen-types"; exit 1; }
+
+MIGRATE_OUT="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
+MIGRATE_RC=$?
+echo "$MIGRATE_OUT" > "$WORK/migrate.log"
+if [ "$MIGRATE_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIGRATE_OUT"; then
+  pass "zeroship migrate applied the app's migrations through control ($(head -c 80 <<<"$MIGRATE_OUT"))"
+else
+  fail "zeroship migrate failed (rc=$MIGRATE_RC): $MIGRATE_OUT"
   tail -50 "$WORK/migrated.log"
+  tail -20 "$WORK/control.log"
   exit 1
 fi
+
+# Re-running must be a no-op, not a second apply. A creator runs `deploy` then
+# `migrate` on every push; if the second run re-applied, every push after the
+# first would fail on an already-existing table.
+MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
+grep -qE 'Applied 0 migration op' <<<"$MIGRATE_AGAIN" \
+  && pass "a second zeroship migrate is a no-op (idempotent)" \
+  || fail "re-running zeroship migrate was not a no-op: $MIGRATE_AGAIN"
 sleep 5
 
 echo ""
@@ -345,7 +385,14 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-APP_REQUESTS=$((READY_TRIES + N_REQ))
+# PRE_MIGRATE_REQUESTS is the single gateway call the pre-migrate control made
+# in stage 3. It FAILED inside the app (no per-app role), and the worker meters
+# the platform counters per DISPATCH, not per success, so it is billed like any
+# other request and has to be counted here. Leaving it out is how the exact
+# `requests` equality below turns into an off-by-one that reads as a metering
+# bug.
+PRE_MIGRATE_REQUESTS=1
+APP_REQUESTS=$((PRE_MIGRATE_REQUESTS + READY_TRIES + N_REQ))
 echo "    env.db response on readiness attempt $READY_TRIES of 30: $READY_RESP"
 [ "$READY" = "1" ] && pass "probe response has wrote=true and readBack=$READBACK" || { fail "env.db probe did not succeed"; tail -50 "$WORK/worker.log"; exit 1; }
 
@@ -497,7 +544,7 @@ done
 # The one counter the harness knows exactly, because it made every request.
 [ "$REQ" = "$APP_REQUESTS" ] 2>/dev/null \
   && pass "requests=$REQ EQUALS the $APP_REQUESTS requests this harness sent" \
-  || { fail "requests=$REQ but this harness sent $APP_REQUESTS ($READY_TRIES readiness + $N_REQ)"; tail -50 "$WORK/control.log"; exit 1; }
+  || { fail "requests=$REQ but this harness sent $APP_REQUESTS ($PRE_MIGRATE_REQUESTS pre-migrate control + $READY_TRIES readiness + $N_REQ)"; tail -50 "$WORK/control.log"; exit 1; }
 
 # NOT AN AMOUNT CHECK, and the pass line says so. EXPECTED_CHARGE is computed
 # from the very rows this queries, so it can only establish that db_reads and

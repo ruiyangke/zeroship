@@ -76,6 +76,8 @@ export PG_CONTAINER="${PG_CONTAINER:-zs-devlogin-pg}"
 # A RECORDING PROXY in front of the OP, on its own port, so the harness can see
 # WHERE control sent the mint rather than only that a token came back.
 MINT_PROXY_PORT="${MINT_PROXY_PORT:-9483}"
+MIGRATED_PORT="${MIGRATED_PORT:-9484}"
+MIGRATED_URL="http://localhost:$MIGRATED_PORT"
 
 AUTH_URL="http://localhost:$AUTH_PORT"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
@@ -157,6 +159,7 @@ psql_q() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1"
 step "Preflight"
 stack_preflight || exit 2
 [ -x "$BIN/zeroship-auth" ] || { fail "missing $BIN/zeroship-auth"; exit 2; }
+[ -x "$BIN/zeroship-migrated" ] || { fail "missing $BIN/zeroship-migrated"; exit 2; }
 if [ ! -f "$ZSHIP" ]; then
   e2e_skipped "no $ZSHIP; run: pnpm --filter ./examples/auth-probe build"
   e2e_verdict || exit 1
@@ -261,11 +264,26 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --app-base-domain "localhost" \
+  --migrated-url "$MIGRATED_URL" \
   > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control ready" || { fail "control not ready"; tail -30 "$WORK/control.log"; exit 1; }
+
+# The migration service, so this harness can drive `zeroship migrate` on the
+# SAME credential the login flow just produced. Every other harness that
+# migrates uses an offline-minted PAT; this one uses a real OAuth bearer from
+# the device flow, and the two take different verification paths in
+# `BearerVerifier` (a PAT resolves a stored policy by token id, an OAuth bearer
+# carries a scope-derived policy). Only this leg covers the second one.
+"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
+  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+  > "$WORK/migrated.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 \
+  && pass "migrated ready" || { fail "migrated not ready"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
   --control-url "$CONTROL_URL" \
@@ -602,6 +620,55 @@ if [ -n "$SERVED" ]; then
   pass "the gateway serves the app deployed with the login token"
 else
   fail "the gateway never served $APP_HOST (last HTTP ${CODE:-none}): $(head -c 300 "$WORK/served.json" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------
+step "Migrate the same app with the same login credential"
+#
+# WHAT THIS LEG COVERS AND WHAT IT DOES NOT. It covers AUTHORIZATION: that the
+# credential `zeroship login` produced -- an OAuth device-flow bearer carrying
+# `apps:deploy apps:read apps:write`, asserted above -- is accepted all the way
+# through control's authz, control's forward, and migrated's independent
+# re-verification plus its `app_members` owner-row check (the row was created by
+# `POST /api/apps` above, not seeded here). Nothing else in the suite drives
+# that token type into the migration service.
+#
+# It does NOT cover this app's own schema: `examples/auth-probe` has no
+# `migrations/`, so there is nothing of its own to apply. The IR posted below is
+# BORROWED from `examples/db-todos`. The tables it creates are incidental; only
+# the 200 is the claim. If you are looking for "a deployed app's env.db works
+# after migrating", that is `tests/e2e_db_app_end_to_end.sh`, which drives the
+# app's own migrations and then reads a row back.
+BORROWED_IR="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
+if [ ! -f "$BORROWED_IR" ]; then
+  fail "missing $BORROWED_IR - run: pnpm gen-types"
+else
+  MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$CONTROL_URL" 2>&1)"
+  MIG_RC=$?
+  echo "  zeroship migrate (no --token; it used the saved login):"
+  echo "$MIG_OUT" | sed 's/^/    /'
+  if [ "$MIG_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG_OUT"; then
+    pass "zeroship migrate succeeded on the saved login credential"
+  else
+    fail "zeroship migrate failed on the login credential (rc=$MIG_RC): $MIG_OUT"
+    tail -20 "$WORK/migrated.log"
+  fi
+
+  # The negative half: a creator must not be able to migrate an app they do not
+  # own.
+  #
+  # WHAT THIS DOES NOT SHOW. The refusal below almost certainly comes from
+  # CONTROL, which authorizes before it forwards, so this arm says nothing about
+  # migrated's own gate. That gate exists and is independent (migrated
+  # re-verifies the bearer and additionally requires an `app_members` owner row,
+  # crates/migrated/src/auth.rs), but proving it would mean reaching migrated
+  # directly, which is exactly the topology this design removes. Read this as
+  # "the creator-facing surface refuses", not "defence in depth was measured".
+  FOREIGN_APP="$(node -e 'console.log(require("crypto").randomUUID())')"
+  FOREIGN_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$FOREIGN_APP" --control="$CONTROL_URL" 2>&1)"
+  grep -qE 'HTTP (403|404)' <<<"$FOREIGN_OUT" \
+    && pass "migrating an app this creator does not own is refused ($(grep -oE 'HTTP [0-9]+' <<<"$FOREIGN_OUT" | head -1))" \
+    || fail "an unowned app was not refused: $FOREIGN_OUT"
 fi
 
 e2e_verdict
