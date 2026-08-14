@@ -80,7 +80,7 @@ Four layers, because each one catches what the layer below cannot:
 ```bash
 pnpm typecheck
 pnpm test        # 86 unit tests, no database
-pnpm smoke       # 58 checks against a running `pnpm dev`
+pnpm smoke       # 88 checks against a running `pnpm dev`
 pnpm test:e2e    # 58 Chromium specs via Playwright
 ```
 
