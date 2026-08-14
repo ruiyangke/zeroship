@@ -12,6 +12,17 @@ import type { Activity, Comment } from "../types";
  *
  * The History tab stays. This is the story; that is the log, and a log that
  * shows every field of the creation event is worth keeping separately.
+ *
+ * The ordering claim above is checked by `e2e/timeline-order.spec.ts`, which
+ * was written after this comment had gone untested for some time -- it is the
+ * argument for the two-tab split, so it should not rest on assertion.
+ *
+ * ONE CAVEAT, and it will waste your afternoon otherwise: `at` is a
+ * millisecond stamp, so a comment and a field change issued back to back over
+ * RPC can share it, and the tiebreak below then decides on KIND rather than on
+ * time. Drive a page that way and the events appear to bunch at the end of the
+ * thread, which looks exactly like a broken sort and is not one. A person
+ * cannot type two things in the same millisecond; a script can.
  */
 
 export type TimelineEvent = {
