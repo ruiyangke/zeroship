@@ -101,7 +101,7 @@ scope = "all"
     `import { byteValue, table, t } from "zero-migrate";
 export const name = "base";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: {
         id: t.int().notNull(),
@@ -110,9 +110,22 @@ export default {
       },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260102000000_seed.ts"),
+    `import { byteValue, table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({
       rows: [{ id: 1, payload: byteValue(new Uint8Array([${PAYLOAD.join(", ")}])) }],
     });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,

@@ -100,22 +100,35 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: {
         id: t.int().notNull(), p: t.text(), q: t.text(), r: t.text(), out: t.text(),
       },
       primaryKey: ["id"],
     });
-    table("${TABLE}").insert({ rows: [${ROWS.join(", ")}] });
   },
 };
 `,
   );
   writeFileSync(
     join(work, "migrations", "20260102000000_b.ts"),
-    `import { table, concatWs } from "zero-migrate";
+    `import { table } from "zero-migrate";
 export const name = "b";
+export default {
+  data() {
+    table("${TABLE}").insert({ rows: [${ROWS.join(", ")}] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").in([1, 2, 3, 4, 5, 6]) });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260103000000_c.ts"),
+    `import { table, concatWs } from "zero-migrate";
+export const name = "c";
 export default {
   data() {
     table("${TABLE}").update({
