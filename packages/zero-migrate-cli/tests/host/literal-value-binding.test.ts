@@ -87,15 +87,27 @@ scope = ${scope}
 `;
 }
 
-function insertingMigration(value: string): MigrationModule {
+function schemaMigration(): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("items").create({
           columns: { id: t.int().notNull(), body: t.text() },
           primaryKey: ["id"],
         });
+      },
+    },
+  } as MigrationModule;
+}
+
+function insertingMigration(value: string): MigrationModule {
+  return {
+    default: {
+      data() {
         table("items").insert({ rows: { id: 1, body: value } });
+      },
+      inverse() {
+        table("items").delete({ where: (col) => col("id").eq(1) });
       },
     },
   } as MigrationModule;
@@ -122,18 +134,23 @@ test("PostgreSQL binds literal values, and refuses a NUL byte rather than trunca
     }
   };
 
-  const applyValue = (value: string, schema: string) =>
-    apply({
-      migration: insertingMigration(value),
-      ownerApp: OWNER_APP,
-      projectSchema: schema,
-      driver,
-      registry: {},
-      policy: [charter(schema)],
-      approved: true,
-      appliedBy: "literal-value-binding",
-      nameFallback: "insert_it",
-    });
+  const applyValue = async (value: string, schema: string) => {
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: schema,
+        driver,
+        registry: { items: OWNER_APP },
+        policy: [charter(schema)],
+        approved: true,
+        appliedBy: "literal-value-binding",
+        nameFallback,
+      });
+
+    await applyOne(schemaMigration(), "create_items");
+    await applyOne(insertingMigration(value), "insert_it");
+  };
 
   try {
     for (const [label, value] of PORTABLE) {
@@ -180,17 +197,20 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
     try {
       await admin.query(`CREATE DATABASE \`${database}\``);
       await admin.query(`CREATE TABLE \`${database}\`.bystander (id int) ENGINE=InnoDB`);
-      await apply({
-        migration: insertingMigration(value),
-        ownerApp: OWNER_APP,
-        projectSchema: database,
-        driver: { kind: "mysql", url: MYSQL_URL },
-        registry: {},
-        policy: [charter(database)],
-        approved: true,
-        appliedBy: "literal-value-binding",
-        nameFallback: "insert_it",
-      });
+      const applyOne = (migration: MigrationModule, nameFallback: string) =>
+        apply({
+          migration,
+          ownerApp: OWNER_APP,
+          projectSchema: database,
+          driver: { kind: "mysql", url: MYSQL_URL },
+          registry: { items: OWNER_APP },
+          policy: [charter(database)],
+          approved: true,
+          appliedBy: "literal-value-binding",
+          nameFallback,
+        });
+      await applyOne(schemaMigration(), "create_items");
+      await applyOne(insertingMigration(value), "insert_it");
 
       const [rows] = await admin.query(`SELECT body FROM \`${database}\`.items WHERE id = 1`);
       assert.equal(
@@ -247,17 +267,20 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
       seed.exec("CREATE TABLE bystander (id INTEGER)");
       seed.close();
 
-      await apply({
-        migration: insertingMigration(value),
-        ownerApp: OWNER_APP,
-        projectSchema: "main",
-        driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
-        registry: {},
-        policy: [charter("main")],
-        approved: true,
-        appliedBy: "literal-value-binding",
-        nameFallback: "insert_it",
-      });
+      const applyOne = (migration: MigrationModule, nameFallback: string) =>
+        apply({
+          migration,
+          ownerApp: OWNER_APP,
+          projectSchema: "main",
+          driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+          registry: { items: OWNER_APP },
+          policy: [charter("main")],
+          approved: true,
+          appliedBy: "literal-value-binding",
+          nameFallback,
+        });
+      await applyOne(schemaMigration(), "create_items");
+      await applyOne(insertingMigration(value), "insert_it");
 
       const db = new DatabaseSync(dbPath);
       try {

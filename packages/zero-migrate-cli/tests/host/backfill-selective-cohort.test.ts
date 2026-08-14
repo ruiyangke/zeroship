@@ -77,6 +77,34 @@ scope = "all"
 `;
 }
 
+const CREATE_ITEMS = {
+  name: "create_items",
+  default: {
+    schema() {
+      table("items").create({
+        columns: {
+          id: t.int().notNull(),
+          grp: t.text().notNull(),
+          val: t.int().notNull(),
+        },
+        primaryKey: ["id"],
+      });
+    },
+  },
+} as MigrationModule & { name: string };
+
+const SEED_ITEMS = {
+  name: "seed",
+  default: {
+    data() {
+      table("items").insert({ rows: ROWS });
+    },
+    inverse() {
+      table("items").delete({ where: (col) => col("id").in(ROWS.map((row) => row.id)) });
+    },
+  },
+} as MigrationModule & { name: string };
+
 test("a backfill transforms every selected row and leaves every other row alone", async (ctx) => {
   const client = await connectLivePg(ctx);
   if (!client) return;
@@ -84,23 +112,6 @@ test("a backfill transforms every selected row and leaves every other row alone"
   const schema = uniqueNamespace("bfsel");
   const meta = `${schema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
-
-  const seed = {
-    name: "seed",
-    default: {
-      up() {
-        table("items").create({
-          columns: {
-            id: t.int().notNull(),
-            grp: t.text().notNull(),
-            val: t.int().notNull(),
-          },
-          primaryKey: ["id"],
-        });
-        table("items").insert({ rows: ROWS });
-      },
-    },
-  } as MigrationModule & { name: string };
 
   const fill = {
     name: "fill",
@@ -142,7 +153,7 @@ test("a backfill transforms every selected row and leaves every other row alone"
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
-      registry: priors.length ? { items: OWNER_APP } : {},
+      registry: { items: OWNER_APP },
       policy: [charter(schema)],
       approved: true,
       appliedBy: "backfill-selective-cohort",
@@ -151,8 +162,9 @@ test("a backfill transforms every selected row and leaves every other row alone"
 
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
-    await applyOne(seed, []);
-    await applyOne(fill, [seed]);
+    await applyOne(CREATE_ITEMS, []);
+    await applyOne(SEED_ITEMS, [CREATE_ITEMS]);
+    await applyOne(fill, [CREATE_ITEMS, SEED_ITEMS]);
 
     const { rows } = await client.query(
       `SELECT id, grp, val FROM "${schema}".items ORDER BY id`,
@@ -217,23 +229,6 @@ test("a backfill whose predicate matches nothing completes and records nothing",
   const meta = `${schema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const seed = {
-    name: "seed",
-    default: {
-      up() {
-        table("items").create({
-          columns: {
-            id: t.int().notNull(),
-            grp: t.text().notNull(),
-            val: t.int().notNull(),
-          },
-          primaryKey: ["id"],
-        });
-        table("items").insert({ rows: ROWS });
-      },
-    },
-  } as MigrationModule & { name: string };
-
   const fill = {
     name: "fill",
     default: {
@@ -263,8 +258,9 @@ test("a backfill whose predicate matches nothing completes and records nothing",
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
     for (const [migration, priors] of [
-      [seed, []],
-      [fill, [seed]],
+      [CREATE_ITEMS, []],
+      [SEED_ITEMS, [CREATE_ITEMS]],
+      [fill, [CREATE_ITEMS, SEED_ITEMS]],
     ] as Array<[MigrationModule & { name: string }, (MigrationModule & { name: string })[]]>) {
       await apply({
         migration,
@@ -273,7 +269,7 @@ test("a backfill whose predicate matches nothing completes and records nothing",
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
-        registry: priors.length ? { items: OWNER_APP } : {},
+        registry: { items: OWNER_APP },
         policy: [charter(schema)],
         approved: true,
         appliedBy: "backfill-selective-cohort",
@@ -324,23 +320,6 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
   const meta = `${database}_migrations`;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
 
-  const seed = {
-    name: "seed",
-    default: {
-      up() {
-        table("items").create({
-          columns: {
-            id: t.int().notNull(),
-            grp: t.text().notNull(),
-            val: t.int().notNull(),
-          },
-          primaryKey: ["id"],
-        });
-        table("items").insert({ rows: ROWS });
-      },
-    },
-  } as MigrationModule & { name: string };
-
   const fill = {
     name: "fill",
     default: {
@@ -370,8 +349,9 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
     for (const [migration, priors] of [
-      [seed, []],
-      [fill, [seed]],
+      [CREATE_ITEMS, []],
+      [SEED_ITEMS, [CREATE_ITEMS]],
+      [fill, [CREATE_ITEMS, SEED_ITEMS]],
     ] as Array<[MigrationModule & { name: string }, (MigrationModule & { name: string })[]]>) {
       await apply({
         migration,
@@ -380,7 +360,7 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
-        registry: priors.length ? { items: OWNER_APP } : {},
+        registry: { items: OWNER_APP },
         policy: [charter(database)],
         approved: true,
         appliedBy: "backfill-selective-cohort",

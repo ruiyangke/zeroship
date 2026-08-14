@@ -5,12 +5,13 @@
 // mean anything - and the two dialects discover that at different LAYERS:
 //
 //   MySQL       refused during lowering, before any database change
-//   PostgreSQL  refused by the SERVER, partway through the migration
+//   PostgreSQL  refused by the SERVER while applying the data migration
 //
-// The layer is the whole finding. On PostgreSQL the migration's earlier schema
-// step has already committed by then, so the deploy fails with the table created
-// and the upsert not applied. That is the F443 shape: a migration that clears
-// validation, is refused mid-deploy, and leaves the schema half-changed.
+// The layer is the whole finding. Schema and data are separate migrations, so
+// the table is already committed on both dialects before the upsert is attempted.
+// PostgreSQL commits the seed operation, then reaches the server and refuses the
+// upsert, leaving a partially applied data migration. MySQL refuses during
+// lowering, before either DML operation reaches the database.
 //
 // The engine already owns the check - `ensure_exact_unique_conflict_target`
 // proves the target against a live unique index, rejecting supersets, prefix
@@ -20,11 +21,11 @@
 //
 // WHY THIS IS PINNED AND NOT FIXED. Moving the refusal earlier on PostgreSQL runs
 // into the boundary F415 and F429 both hit: validation is offline, and the table
-// an upsert targets is often created by the SAME migration, so there is no live
-// catalog to prove the index against yet. A preflight inside the DML transaction
-// would catch it sooner but still after the schema step committed, which does not
-// remove the half-applied outcome. Closing it properly means deciding where that
-// gate lives, which is the same open question those findings left.
+// an upsert targets may not exist in the validation environment, so there is no
+// live catalog to prove the index against yet. A preflight inside the DML
+// transaction would catch it sooner, but the schema migration is intentionally
+// already committed. Closing it properly means deciding where that gate lives,
+// which is the same open question those findings left.
 //
 // The arms below record today's answer on both dialects so the asymmetry is
 // visible, and so the day PostgreSQL learns to refuse earlier, the arm that
@@ -68,43 +69,59 @@ scope = ${scope}
 `;
 }
 
-/** `codes(code PK, label)` seeded with one row, then an upsert whose conflict
- *  target is `target`. Only `code` is covered by a unique index. */
-function upsertMigration(target: readonly string[]): MigrationModule {
+/** `codes(code PK, label)`. Only `code` is covered by a unique index. */
+function schemaMigration(): MigrationModule {
   return {
     default: {
-      up() {
+      schema() {
         table("codes").create({
           columns: { code: t.int().notNull(), label: t.string({ length: 32 }).notNull() },
           primaryKey: ["code"],
-        });
-        table("codes").insert({ rows: [{ code: 200, label: "ok" }] });
-        table("codes").insert({
-          rows: [{ code: 200, label: "dup" }],
-          onConflict: { columns: [...target], doUpdate: { label: "updated" } },
         });
       },
     },
   } as MigrationModule;
 }
 
-test("PostgreSQL: a matched target upserts; an unmatched one fails mid-migration", async (ctx) => {
+/** Seed one row, then upsert against `target`. */
+function upsertMigration(target: readonly string[]): MigrationModule {
+  return {
+    default: {
+      data() {
+        table("codes").insert({ rows: [{ code: 200, label: "ok" }] });
+        table("codes").insert({
+          rows: [{ code: 200, label: "dup" }],
+          onConflict: { columns: [...target], doUpdate: { label: "updated" } },
+        });
+      },
+      inverse() {
+        table("codes").delete({ where: (col) => col("code").eq(200) });
+      },
+    },
+  } as MigrationModule;
+}
+
+test("PostgreSQL: a matched target upserts; an unmatched one fails in the data migration", async (ctx) => {
   const client = await connectLivePg(ctx);
   if (!client) return;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
-  const run = (target: readonly string[], schema: string) =>
-    apply({
-      migration: upsertMigration(target),
-      ownerApp: OWNER_APP,
-      projectSchema: schema,
-      driver,
-      registry: {},
-      policy: [charter(schema)],
-      approved: true,
-      appliedBy: "on-conflict-target-boundary",
-      nameFallback: "upsert",
-    });
+  const run = async (target: readonly string[], schema: string) => {
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: schema,
+        driver,
+        registry: { codes: OWNER_APP },
+        policy: [charter(schema)],
+        approved: true,
+        appliedBy: "on-conflict-target-boundary",
+        nameFallback,
+      });
+    await applyOne(schemaMigration(), "create_codes");
+    await applyOne(upsertMigration(target), "upsert");
+  };
 
   const withSchema = async <T>(run: (schema: string) => Promise<T>): Promise<T> => {
     const schema = uniqueNamespace("on_conflict_pg");
@@ -142,8 +159,9 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails mid-migration
         "PostgreSQL refuses an uninferable target - from the server, not the engine",
       );
 
-      // The cost, and the reason this file exists. The migration's schema step
-      // committed before the upsert ran, so the deploy leaves the table behind.
+      // The schema migration committed before the data migration ran. PostgreSQL
+      // also committed the first DML operation before the server refused the
+      // upsert, so both the table and its seed row remain.
       const { rows } = await client.query(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`,
         [schema],
@@ -151,8 +169,13 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails mid-migration
       assert.deepEqual(
         rows.map((row) => row.table_name),
         ["codes"],
-        "TODAY the failed migration leaves its created table behind; if this is ever " +
-          "empty, PostgreSQL began refusing before the schema step and this file should say so",
+        "the separately applied schema migration must remain after the data migration fails",
+      );
+      const contents = await client.query(`SELECT code, label FROM "${schema}".codes`);
+      assert.deepEqual(
+        contents.rows,
+        [{ code: 200, label: "ok" }],
+        "PostgreSQL reaches the server only after committing the preceding seed operation",
       );
     });
   } finally {
@@ -160,7 +183,7 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails mid-migration
   }
 });
 
-test("MySQL: the same unmatched target is refused before any database change", async (ctx) => {
+test("MySQL: the same unmatched target is refused before any data change", async (ctx) => {
   if (!MYSQL_URL) {
     ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL onConflict boundary skipped");
     return;
@@ -171,33 +194,38 @@ test("MySQL: the same unmatched target is refused before any database change", a
 
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
-    await assert.rejects(
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration: upsertMigration(["label"]),
+        migration,
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
-        registry: {},
+        registry: { codes: OWNER_APP },
         policy: [charter(database)],
         approved: true,
         appliedBy: "on-conflict-target-boundary",
-        nameFallback: "upsert",
-      }),
+        nameFallback,
+      });
+    await applyOne(schemaMigration(), "create_codes");
+    await assert.rejects(
+      applyOne(upsertMigration(["label"]), "upsert"),
       /onConflict/,
       "MySQL must refuse the unmatched target",
     );
 
-    // The contrast that makes the PostgreSQL arm a finding rather than a quirk:
-    // nothing was created, so the deploy left no half-applied schema behind.
+    // The schema migration is already applied, but lowering must refuse before
+    // either insert in the data migration reaches the database.
     const [tables] = await admin.query(
       "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?",
       [database],
     );
     assert.deepEqual(
       (tables as Array<{ TABLE_NAME: string }>).map((row) => row.TABLE_NAME),
-      [],
-      "MySQL refuses during lowering, so no schema step ever ran",
+      ["codes"],
+      "the separately applied schema migration must remain",
     );
+    const [contents] = await admin.query(`SELECT code, label FROM \`${database}\`.codes`);
+    assert.deepEqual(contents, [], "lowering refusal must happen before the seed insert");
   } finally {
     await admin
       .query(

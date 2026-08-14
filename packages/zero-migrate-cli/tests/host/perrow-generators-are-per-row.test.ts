@@ -87,12 +87,13 @@ scope = "all"
   );
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [TABLE]: OWNER_APP }));
   const seed = Array.from({ length: ROWS }, (_, i) => `{ id: ${i + 1} }`).join(", ");
+  const seededIds = Array.from({ length: ROWS }, (_, i) => i + 1).join(", ");
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
     `import { table, t, ids } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: {
         id: t.int().notNull(),
@@ -104,7 +105,20 @@ export default {
       },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({ rows: [${seed}] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").in([${seededIds}]) });
   },
 };
 `,

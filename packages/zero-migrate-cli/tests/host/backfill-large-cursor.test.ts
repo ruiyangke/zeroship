@@ -88,17 +88,31 @@ scope = "all"
   );
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [TABLE]: OWNER_APP }));
   const rows = IDS.map((id) => `{ id: int64("${id}"), n: 0 }`).join(", ");
+  const ids = IDS.map((id) => JSON.stringify(id)).join(", ");
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t, int64 } from "zero-migrate";
+    `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: { id: t.bigInt().notNull(), n: t.int().notNull() },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table, int64 } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({ rows: [${rows}] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").in([${ids}]) });
   },
 };
 `,

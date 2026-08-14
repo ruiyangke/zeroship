@@ -98,15 +98,26 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
       const meta = `${projectSchema}_migrations`;
 
       // `val` counts visits: seeded 0, incremented by 1 per application.
-      const seed = {
-        name: "seed",
+      const createNums = {
+        name: "create_nums",
         default: {
-          up() {
+          schema() {
             table("nums").create({
               columns: { id: t.int().notNull(), val: t.int().notNull() },
               primaryKey: ["id"],
             });
+          },
+        },
+      } as MigrationModule & { name: string };
+
+      const seed = {
+        name: "seed",
+        default: {
+          data() {
             table("nums").insert({ rows: ids.map((id) => ({ id, val: 0 })) });
+          },
+          inverse() {
+            table("nums").delete({ where: (col) => col("id").in([...ids]) });
           },
         },
       } as MigrationModule & { name: string };
@@ -149,7 +160,7 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
           ownerApp: OWNER_APP,
           projectSchema,
           driver,
-          registry: priors.length ? { nums: OWNER_APP } : {},
+          registry: { nums: OWNER_APP },
           policy: [charter(projectSchema)],
           approved: true,
           appliedBy: "backfill-cursor-ordering",
@@ -158,8 +169,9 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
 
       try {
         await admin.query(`CREATE SCHEMA "${projectSchema}"`);
-        await applyOne(seed, []);
-        await applyOne(bump, [seed]);
+        await applyOne(createNums, []);
+        await applyOne(seed, [createNums]);
+        await applyOne(bump, [createNums, seed]);
 
         const { rows } = await admin.query(
           `SELECT id, val FROM "${projectSchema}".nums ORDER BY id`,
@@ -234,10 +246,10 @@ test("a composite cursor visits every row exactly once under the same inversions
       const projectSchema = uniqueNamespace("bf_order_composite");
       const meta = `${projectSchema}_migrations`;
 
-      const seed = {
-        name: "seed",
+      const createNums = {
+        name: "create_nums",
         default: {
-          up() {
+          schema() {
             table("nums").create({
               columns: {
                 tenant: t.int().notNull(),
@@ -246,9 +258,24 @@ test("a composite cursor visits every row exactly once under the same inversions
               },
               primaryKey: ["tenant", "id"],
             });
+          },
+        },
+      } as MigrationModule & { name: string };
+
+      const seed = {
+        name: "seed",
+        default: {
+          data() {
             table("nums").insert({
               rows: pairs.map(([tenant, id]) => ({ tenant, id, val: 0 })),
             });
+          },
+          inverse() {
+            for (const [tenant, id] of pairs) {
+              table("nums").delete({
+                where: (col) => col("tenant").eq(tenant).and(col("id").eq(id)),
+              });
+            }
           },
         },
       } as MigrationModule & { name: string };
@@ -290,7 +317,7 @@ test("a composite cursor visits every row exactly once under the same inversions
           ownerApp: OWNER_APP,
           projectSchema,
           driver,
-          registry: priors.length ? { nums: OWNER_APP } : {},
+          registry: { nums: OWNER_APP },
           policy: [charter(projectSchema)],
           approved: true,
           appliedBy: "backfill-cursor-ordering",
@@ -299,8 +326,9 @@ test("a composite cursor visits every row exactly once under the same inversions
 
       try {
         await admin.query(`CREATE SCHEMA "${projectSchema}"`);
-        await applyOne(seed, []);
-        await applyOne(bump, [seed]);
+        await applyOne(createNums, []);
+        await applyOne(seed, [createNums]);
+        await applyOne(bump, [createNums, seed]);
 
         const { rows } = await admin.query(
           `SELECT tenant, id, val FROM "${projectSchema}".nums ORDER BY tenant, id`,

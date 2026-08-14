@@ -52,17 +52,28 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_partial";
 
-// File A seeds two rows sharing a `tag`. The duplicate is the whole point: it is
-// invisible to the offline fold and fatal to a unique index.
-const FILE_A = `import { table, t } from "zero-migrate";
-export const name = "seed_dupes";
+// The base pair creates `dupes`, then seeds two rows sharing a `tag`. The
+// duplicate is invisible to the offline fold and fatal to a unique index.
+const FILE_A_SCHEMA = `import { table, t } from "zero-migrate";
+export const name = "create_dupes";
 export default {
-  up() {
+  schema() {
     table("dupes").create({
       columns: { id: t.int().notNull(), tag: t.string({ length: 32 }) },
       primaryKey: ["id"],
     });
+  },
+};
+`;
+
+const FILE_A_DATA = `import { table } from "zero-migrate";
+export const name = "seed_dupes";
+export default {
+  data() {
     table("dupes").insert({ rows: [{ id: 1, tag: "same" }, { id: 2, tag: "same" }] });
+  },
+  inverse() {
+    table("dupes").delete({ where: (col) => col("id").in([1, 2]) });
   },
 };
 `;
@@ -113,7 +124,8 @@ scope = "all"
     join(work, "registry.json"),
     JSON.stringify({ dupes: OWNER_APP, survivor: OWNER_APP }),
   );
-  writeFileSync(join(work, "migrations", "20260101000000_seed_dupes.ts"), FILE_A);
+  writeFileSync(join(work, "migrations", "20260101000000_create_dupes.ts"), FILE_A_SCHEMA);
+  writeFileSync(join(work, "migrations", "20260101000001_seed_dupes.ts"), FILE_A_DATA);
   return work;
 }
 
@@ -171,7 +183,7 @@ test("a file that fails partway leaves its earlier work applied, and the retry r
     await client.query(`CREATE SCHEMA "${schema}"`);
 
     const seeded = await run(work, schema, ["apply", "--approve"]);
-    assert.equal(seeded.code, 0, `file A must apply; ${seeded.err}`);
+    assert.equal(seeded.code, 0, `the base schema and seed migrations must apply; ${seeded.err}`);
 
     // Non-vacuity: the duplicate the whole test rests on must actually be there.
     const { rows: seededRows } = await client.query(
@@ -197,7 +209,7 @@ test("a file that fails partway leaves its earlier work applied, and the retry r
       `the fold pre-empted the failure, so nothing partial was exercised: ${failed.err}`,
     );
 
-    // CLAIM 1, inter-file: file A's table is still here, still journalled.
+    // CLAIM 1, inter-file: the earlier base pair's table is still here, still journalled.
     // CLAIM 2, intra-file: so is `survivor`, op 0 of the file that FAILED.
     const afterFailure = await names();
     assert.ok(afterFailure.includes("dupes"), "the earlier file must remain applied");

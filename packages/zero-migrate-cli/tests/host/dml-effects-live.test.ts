@@ -77,9 +77,9 @@ scope = "all"
  * are the bystanders: an update or delete that ignored its predicate would take
  * them with it, and the row-set assertion below is what notices.
  */
-const MIGRATION: MigrationModule = {
+const SCHEMA_MIGRATION: MigrationModule = {
   default: {
-    up() {
+    schema() {
       table("items").create({
         columns: {
           id: t.int().notNull(),
@@ -88,6 +88,13 @@ const MIGRATION: MigrationModule = {
         },
         primaryKey: ["id"],
       });
+    },
+  },
+} as MigrationModule;
+
+const DML_MIGRATION: MigrationModule = {
+  default: {
+    data() {
       table("items").insert({
         rows: [
           { id: 1, grp: "keep", n: 1 },
@@ -103,6 +110,9 @@ const MIGRATION: MigrationModule = {
       table("items").delete({
         where: (col) => col("id").eq(4),
       });
+    },
+    inverse() {
+      table("items").delete({ where: (col) => col("id").in([1, 2, 3]) });
     },
   },
 } as MigrationModule;
@@ -122,17 +132,20 @@ test("PostgreSQL: an authored update and delete change only the rows their predi
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
-    await apply({
-      migration: MIGRATION,
-      ownerApp: OWNER_APP,
-      projectSchema: schema,
-      driver,
-      registry: {},
-      policy: [charter(schema)],
-      approved: true,
-      appliedBy: "dml-effects-live",
-      nameFallback: "dml_effects",
-    });
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: schema,
+        driver,
+        registry: { items: OWNER_APP },
+        policy: [charter(schema)],
+        approved: true,
+        appliedBy: "dml-effects-live",
+        nameFallback,
+      });
+    await applyOne(SCHEMA_MIGRATION, "create_items");
+    await applyOne(DML_MIGRATION, "dml_effects");
 
     const { rows } = await client.query(
       `SELECT id, grp, n FROM "${schema}".items ORDER BY id`,
@@ -161,17 +174,20 @@ test("SQLite: the same authored migration leaves the same rows", async () => {
   const work = mkdtempSync(join(HERE, "dmleff-sq-"));
   const dbPath = join(work, "app.db");
   try {
-    await apply({
-      migration: MIGRATION,
-      ownerApp: OWNER_APP,
-      projectSchema: "main",
-      driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
-      registry: {},
-      policy: [charter("main")],
-      approved: true,
-      appliedBy: "dml-effects-live",
-      nameFallback: "dml_effects",
-    });
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: "main",
+        driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+        registry: { items: OWNER_APP },
+        policy: [charter("main")],
+        approved: true,
+        appliedBy: "dml-effects-live",
+        nameFallback,
+      });
+    await applyOne(SCHEMA_MIGRATION, "create_items");
+    await applyOne(DML_MIGRATION, "dml_effects");
 
     const db = new DatabaseSync(dbPath);
     try {
@@ -202,14 +218,23 @@ test("PostgreSQL: a predicate matching nothing changes nothing", async (ctx) => 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
-    await apply({
-      migration: {
+    const applyOne = (migration: MigrationModule, nameFallback: string) =>
+      apply({
+        migration,
+        ownerApp: OWNER_APP,
+        projectSchema: schema,
+        driver,
+        registry: { items: OWNER_APP },
+        policy: [charter(schema)],
+        approved: true,
+        appliedBy: "dml-effects-live",
+        nameFallback,
+      });
+    await applyOne(SCHEMA_MIGRATION, "create_items");
+    await applyOne(
+      {
         default: {
-          up() {
-            table("items").create({
-              columns: { id: t.int().notNull(), grp: t.text(), n: t.int() },
-              primaryKey: ["id"],
-            });
+          data() {
             table("items").insert({
               rows: [
                 { id: 1, grp: "keep", n: 1 },
@@ -224,17 +249,13 @@ test("PostgreSQL: a predicate matching nothing changes nothing", async (ctx) => 
               where: (col) => col("id").eq(404),
             });
           },
+          inverse() {
+            table("items").delete({ where: (col) => col("id").in([1, 2]) });
+          },
         },
       } as MigrationModule,
-      ownerApp: OWNER_APP,
-      projectSchema: schema,
-      driver,
-      registry: {},
-      policy: [charter(schema)],
-      approved: true,
-      appliedBy: "dml-effects-live",
-      nameFallback: "dml_no_match",
-    });
+      "dml_no_match",
+    );
 
     const { rows } = await client.query(
       `SELECT id, grp, n FROM "${schema}".items ORDER BY id`,

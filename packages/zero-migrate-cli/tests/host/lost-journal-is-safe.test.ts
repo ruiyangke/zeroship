@@ -23,7 +23,7 @@
 // anything specific to journals, and either could be changed without anyone
 // thinking about this scenario.
 //
-// THE SECOND MIGRATION'S UPDATE IS DELIBERATELY NON-IDEMPOTENT (`n = n + 10`).
+// THE FINAL MIGRATION'S UPDATE IS DELIBERATELY NON-IDEMPOTENT (`n = n + 10`).
 // An INSERT of fixed primary keys would have been useless here: a re-run would be
 // refused by the primary key, so "the data is unchanged" would hold whether or not
 // apply had stopped, and the test would prove nothing. With an increment, a re-run
@@ -90,12 +90,25 @@ scope = "all"
     `import { table, t } from "zero-migrate";
 export const name = "a";
 export default {
-  up() {
+  schema() {
     table("${TABLE}").create({
       columns: { id: t.int().notNull(), n: t.int().notNull() },
       primaryKey: ["id"],
     });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(work, "migrations", "20260101000001_seed.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed";
+export default {
+  data() {
     table("${TABLE}").insert({ rows: [{ id: 1, n: 10 }] });
+  },
+  inverse() {
+    table("${TABLE}").delete({ where: (col) => col("id").eq(1) });
   },
 };
 `,
@@ -182,7 +195,7 @@ test("an app database restored without its journal refuses, and re-runs nothing"
 
     const first = apply(work, appPath);
     assert.equal(first.code, 0, `the first apply must succeed; ${first.text}`);
-    assert.equal(valueOfN(appPath), 20, "10 inserted, then 10 added by the second migration");
+    assert.equal(valueOfN(appPath), 20, "10 inserted, then 10 added by the update migration");
     assert.ok(existsSync(journalPath), "the journal sidecar must exist to be removed");
 
     proveAnIncrementIsVisible(appPath);
