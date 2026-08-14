@@ -1327,6 +1327,15 @@ mod tests {
 
     #[test]
     fn auth_provider_selector_defaults_to_native_and_accepts_supabase() {
+        // Same environment hazard as the retired-spelling test below: clap
+        // reads `ZEROSHIP_AUTH_PROVIDER` into the same carrier the flag uses,
+        // so an ambient value - a sibling test's, or the caller's shell -
+        // makes "defaults to native" assert about the environment rather than
+        // about the compiled default.
+        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
+        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
+        std::env::remove_var("ZEROSHIP_AUTH_PROVIDER");
+
         let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse defaults");
         let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
         assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Native);
@@ -1335,6 +1344,8 @@ mod tests {
             .expect("parse supabase");
         let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
         assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
+
+        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
     }
 
     #[test]
@@ -1342,6 +1353,19 @@ mod tests {
         // `platform` was control's own word for the state now spelled `native`.
         // Both tiers must refuse it, or the two vocabularies survive the merge
         // in the one place an operator would not look.
+        //
+        // THE OVERLAY HALF READS THE PROCESS ENVIRONMENT, so it needs the same
+        // lock the env-mutating tests take AND it needs the variable absent.
+        // The environment tier outranks the overlay, so a sibling test holding
+        // `ZEROSHIP_AUTH_PROVIDER=supabase` makes the retired overlay value
+        // never get parsed and the refusal below never fire. Measured at 1
+        // failure in 12 runs of this binary before the lock was taken; the
+        // variable is unset here as well as locked, so an ambient value in the
+        // caller's shell cannot reproduce it either.
+        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
+        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
+        std::env::remove_var("ZEROSHIP_AUTH_PROVIDER");
+
         let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",
             "--auth-provider",
@@ -1361,6 +1385,8 @@ mod tests {
             format!("{err}").contains("auth.provider"),
             "the overlay rejection must name the key: {err}"
         );
+
+        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
     }
 
     #[test]
