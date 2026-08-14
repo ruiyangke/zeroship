@@ -1,0 +1,442 @@
+//! `zeroship migrate` - apply an app's committed migrations to its DEPLOYED
+//! database.
+//!
+//! Shape:
+//!   zeroship migrate [path-to-migrations.ir.json] --app=<name|uuid>
+//!                    [--control=URL] [--token=PAT]
+//!
+//! The path defaults to [`DEFAULT_IR_PATH`], which is where the build writes
+//! the recorded migration set. The file is the request body verbatim - the CLI
+//! does not build, parse or rewrite it, because recording a `.ts` migration
+//! means EVALUATING it, which needs Node, esbuild and the installed
+//! `zero-migrate` engine (`sdks/vite-plugin/src/gen-types/recorder.ts`). That
+//! work belongs to the build; shipping the result belongs here. Same division
+//! as `zeroship deploy`, which uploads a `.zship` it did not build.
+//!
+//! WHY THIS COMMAND EXISTS. Applying migrations is what creates the app's
+//! schema, its migrator role, and the `app_<id>_role` the runtime does
+//! `SET LOCAL ROLE` to on every `env.db` call
+//! (`crates/plugin-db/src/auth/bootstrap.rs`). Nothing else in the platform
+//! creates that role - `migrated`'s apply path is its only producer
+//! (`crates/migrated/src/apply.rs`). Deploy an app that uses `env.db` without
+//! applying its migrations and the FIRST database call fails with
+//! `role "app_..._role" does not exist`, which reaches the end user as
+//! `{"message":"internal error"}`. Before this command there was no supported
+//! way for a creator to run the step at all.
+//!
+//! The request goes to the CONTROL PLANE, not to `migrated` directly:
+//! `migrated` holds the superuser provisioning DSN and binds loopback in every
+//! deployment we ship, so control is the only route a creator has to it. See
+//! `crates/control/src/migrations_api.rs` for why that hop adds no authority.
+
+use std::path::PathBuf;
+
+use crate::{
+    flag_str, is_uuid, parse_app_id, resolve_bearer_token, run_curl, ControlResponse,
+};
+
+/// Where the build writes the recorded migration set.
+///
+/// `generated/zeroship/` already holds the other two artifacts the migration
+/// fold produces (`env.db.ts`, `schema.runtime.json`), and all three are
+/// written by the same emit step, so they cannot drift apart.
+pub const DEFAULT_IR_PATH: &str = "generated/zeroship/migrations.ir.json";
+
+/// Known flags accepted by `zeroship migrate` (bare names, no `=`).
+///
+/// Read off the call sites, not off the usage string - same discipline as
+/// `DEPLOY_KNOWN_FLAGS`. A typo'd `--control` here is worse than a confusing
+/// error: it would silently target `http://localhost:9090` instead of the
+/// control plane named on the command line, and applying a migration set to
+/// the wrong database is not something an error message afterwards can undo.
+const MIGRATE_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token"];
+
+pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
+    check_unknown_migrate_flags(args)?;
+
+    let input = positional_path(args).unwrap_or_else(|| DEFAULT_IR_PATH.to_string());
+    let app = flag_str(args, "--app=").ok_or_else(|| {
+        "--app=<name|uuid> is required. \
+         Usage: zeroship migrate [path-to-migrations.ir.json] --app=<name|uuid> \
+         [--control=<url>] [--token=<PAT>]"
+            .to_string()
+    })?;
+    let control_url = flag_str(args, "--control=")
+        .or_else(|| {
+            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
+        })
+        .unwrap_or_else(|| "http://localhost:9090".into());
+    let token = resolve_bearer_token(args)?;
+
+    let path = PathBuf::from(&input);
+    let body = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "failed to read {}: {e}\n\
+             This file is written by the build (`pnpm build` / `vite build` with \
+             @zeroship/vite-plugin) from the app's `migrations/*.ts`. An app with no \
+             migrations has none to apply.",
+            path.display()
+        )
+    })?;
+
+    let mut client = CurlMigrateClient;
+    let outcome = apply_migrations(&mut client, &control_url, &app, &token, &body)?;
+
+    eprintln!(
+        "Applied {} migration op(s) to app {} ({} skipped).",
+        outcome.applied, app, outcome.skipped
+    );
+    if let Some(id) = outcome.migration_id {
+        eprintln!("  migration_id: {id}");
+    }
+    Ok(())
+}
+
+/// The first non-flag argument after the subcommand, if any.
+///
+/// `zeroship migrate --app=x` must NOT read `--app=x` as the path; the default
+/// applies instead.
+fn positional_path(args: &[String]) -> Option<String> {
+    args.get(2)
+        .filter(|arg| !arg.starts_with("--"))
+        .cloned()
+}
+
+pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String> {
+    // args[0] = binary, args[1] = "migrate", args[2] = optional path.
+    for arg in args.iter().skip(2) {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        let flag_name = match arg.find('=') {
+            Some(idx) => &arg[..idx],
+            None => arg.as_str(),
+        };
+        if !MIGRATE_KNOWN_FLAGS.contains(&flag_name) {
+            return Err(format!(
+                "unknown flag `{flag_name}`; a typo here is silent - `--control` \
+                 falling back to its default would apply migrations to \
+                 http://localhost:9090 instead of the control plane you named. \
+                 Usage: zeroship migrate [path-to-migrations.ir.json] \
+                 --app=<name|uuid> [--control=<url>] [--token=<PAT>]"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The migration-service reply, reduced to what the command prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MigrateOutcome {
+    pub applied: usize,
+    pub skipped: usize,
+    pub migration_id: Option<String>,
+}
+
+pub(crate) trait MigrateClient {
+    fn apply(
+        &mut self,
+        control_url: &str,
+        app_id: &str,
+        token: &str,
+        body: &str,
+    ) -> Result<ControlResponse, String>;
+
+    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
+}
+
+struct CurlMigrateClient;
+
+impl MigrateClient for CurlMigrateClient {
+    fn apply(
+        &mut self,
+        control_url: &str,
+        app_id: &str,
+        token: &str,
+        body: &str,
+    ) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps/{app_id}/migrations/apply");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            // An apply runs DDL on the deployed database. curl's default has no
+            // total timeout, which is right here: cutting the client off
+            // mid-apply would leave the creator guessing whether the schema
+            // changed. The connect timeout still fails fast on a wrong --control.
+            "--connect-timeout",
+            "10",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            &auth,
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            "@-",
+        ]);
+        run_curl(&mut command, Some(body.as_bytes()))
+    }
+
+    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
+        run_curl(&mut command, None)
+    }
+}
+
+/// Resolve `--app` to an id and POST the body.
+///
+/// Deliberately NOT auto-creating a missing app, unlike `deploy`: creating an
+/// app is the right answer to "push this code somewhere new", and the wrong
+/// answer to "apply my schema" - a typo'd name would mint an empty app and
+/// migrate it while the real app stayed unmigrated, which is the exact silent
+/// failure this command exists to end.
+pub(crate) fn apply_migrations<C: MigrateClient>(
+    client: &mut C,
+    control_url: &str,
+    app: &str,
+    token: &str,
+    body: &str,
+) -> Result<MigrateOutcome, String> {
+    let app_id = if is_uuid(app) {
+        app.to_string()
+    } else {
+        resolve_app_id_by_name(client, control_url, token, app)?
+    };
+
+    let response = client.apply(control_url, &app_id, token, body)?;
+    if response.status != 200 {
+        return Err(format!(
+            "Migration apply failed (HTTP {}): {}",
+            response.status, response.body
+        ));
+    }
+    parse_outcome(&response.body)
+}
+
+fn resolve_app_id_by_name<C: MigrateClient>(
+    client: &mut C,
+    control_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<String, String> {
+    let list = client.list_apps(control_url, token)?;
+    if list.status != 200 {
+        return Err(format!(
+            "app lookup failed (HTTP {}): {}",
+            list.status, list.body
+        ));
+    }
+    let json = serde_json::from_str::<serde_json::Value>(&list.body)
+        .map_err(|e| format!("parse app list response: {e}"))?;
+    let apps = json
+        .as_array()
+        .ok_or_else(|| "parse app list response: expected array".to_string())?;
+    for app in apps {
+        if app.get("name").and_then(|n| n.as_str()) == Some(name) {
+            return parse_app_id(&app.to_string(), "app list response");
+        }
+    }
+    Err(format!(
+        "app `{name}` not found; `zeroship migrate` never creates an app - \
+         deploy it first, or pass its uuid with --app="
+    ))
+}
+
+fn parse_outcome(body: &str) -> Result<MigrateOutcome, String> {
+    let json = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|e| format!("parse migration apply response: {e}"))?;
+    let count = |key: &str| {
+        json.get(key)
+            .and_then(|v| v.as_array())
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+    Ok(MigrateOutcome {
+        applied: count("applied"),
+        skipped: count("skipped"),
+        migration_id: json
+            .get("migration_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FakeCall {
+        Apply(String),
+        List,
+    }
+
+    #[derive(Default)]
+    struct FakeMigrateClient {
+        calls: Vec<FakeCall>,
+        applies: VecDeque<ControlResponse>,
+        lists: VecDeque<ControlResponse>,
+    }
+
+    impl FakeMigrateClient {
+        fn with_apply(mut self, status: u16, body: &str) -> Self {
+            self.applies.push_back(ControlResponse {
+                status,
+                body: body.to_string(),
+            });
+            self
+        }
+
+        fn with_list(mut self, status: u16, body: &str) -> Self {
+            self.lists.push_back(ControlResponse {
+                status,
+                body: body.to_string(),
+            });
+            self
+        }
+    }
+
+    impl MigrateClient for FakeMigrateClient {
+        fn apply(
+            &mut self,
+            _control_url: &str,
+            app_id: &str,
+            _token: &str,
+            _body: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::Apply(app_id.to_string()));
+            self.applies
+                .pop_front()
+                .ok_or_else(|| "unexpected apply call".to_string())
+        }
+
+        fn list_apps(
+            &mut self,
+            _control_url: &str,
+            _token: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::List);
+            self.lists
+                .pop_front()
+                .ok_or_else(|| "unexpected list call".to_string())
+        }
+    }
+
+    /// An id goes straight to the apply endpoint - no lookup, so a creator
+    /// whose token cannot list apps can still migrate the one they own.
+    #[test]
+    fn uuid_app_applies_without_a_lookup() {
+        let app = "11111111-1111-4111-8111-111111111111";
+        let mut client = FakeMigrateClient::default().with_apply(
+            200,
+            r#"{"migration_id":"0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f","applied":["20260101000000_create_todos"],"skipped":[],"pending_contract":[]}"#,
+        );
+
+        let outcome = apply_migrations(&mut client, "http://control.test", app, "tok", "{}")
+            .expect("apply by id");
+
+        assert_eq!(outcome.applied, 1);
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(client.calls, vec![FakeCall::Apply(app.to_string())]);
+    }
+
+    /// A name is resolved through the app list before the apply.
+    #[test]
+    fn name_app_resolves_then_applies_by_id() {
+        let mut client = FakeMigrateClient::default()
+            .with_list(
+                200,
+                r#"[{"id":"22222222-2222-4222-8222-222222222222","name":"todos"}]"#,
+            )
+            .with_apply(200, r#"{"applied":[],"skipped":["a","b"]}"#);
+
+        let outcome = apply_migrations(&mut client, "http://control.test", "todos", "tok", "{}")
+            .expect("apply by name");
+
+        assert_eq!(outcome.applied, 0);
+        assert_eq!(outcome.skipped, 2);
+        assert_eq!(
+            client.calls,
+            vec![
+                FakeCall::List,
+                FakeCall::Apply("22222222-2222-4222-8222-222222222222".to_string()),
+            ]
+        );
+    }
+
+    /// A name that matches nothing must NOT create an app, and must say so.
+    /// `deploy` creates on first push; migrate must not, or a typo silently
+    /// migrates a brand-new empty app while the real one stays broken.
+    #[test]
+    fn unknown_name_fails_without_creating_anything() {
+        let mut client = FakeMigrateClient::default().with_list(200, "[]");
+
+        let err = apply_migrations(&mut client, "http://control.test", "typo", "tok", "{}")
+            .expect_err("unknown app must fail");
+
+        assert!(err.contains("never creates an app"), "{err}");
+        assert_eq!(client.calls, vec![FakeCall::List]);
+    }
+
+    /// The migration service's own status and body must survive to the user.
+    /// A 422 naming the bad document is the whole diagnostic; replacing it with
+    /// a generic message reproduces the failure this command exists to end.
+    #[test]
+    fn service_error_body_reaches_the_user() {
+        let app = "11111111-1111-4111-8111-111111111111";
+        let mut client = FakeMigrateClient::default().with_apply(
+            422,
+            r#"{"error":"migration_malformed","detail":"malformed IR document (20260101000000_create_todos.ir.json): unknown op"}"#,
+        );
+
+        let err = apply_migrations(&mut client, "http://control.test", app, "tok", "{}")
+            .expect_err("422 must fail");
+
+        assert!(err.contains("HTTP 422"), "{err}");
+        assert!(err.contains("20260101000000_create_todos.ir.json"), "{err}");
+    }
+
+    /// A typo'd flag is rejected before any request is built.
+    #[test]
+    fn unknown_migrate_flag_is_rejected() {
+        let args = s(&["zeroship", "migrate", "--app=todos", "--contrl=http://x"]);
+        let err = check_unknown_migrate_flags(&args).expect_err("typo must be rejected");
+        assert!(err.contains("--contrl"), "{err}");
+
+        let args = s(&[
+            "zeroship",
+            "migrate",
+            "generated/zeroship/migrations.ir.json",
+            "--app=todos",
+            "--control=http://localhost:9090",
+            "--token=pat",
+        ]);
+        assert!(check_unknown_migrate_flags(&args).is_ok());
+    }
+
+    /// The optional path must not swallow a flag, and must default when absent.
+    #[test]
+    fn positional_path_defaults_and_ignores_flags() {
+        assert_eq!(
+            positional_path(&s(&["zeroship", "migrate", "--app=todos"])),
+            None
+        );
+        assert_eq!(
+            positional_path(&s(&["zeroship", "migrate", "custom.ir.json", "--app=todos"])),
+            Some("custom.ir.json".to_string())
+        );
+        assert_eq!(positional_path(&s(&["zeroship", "migrate"])), None);
+    }
+}

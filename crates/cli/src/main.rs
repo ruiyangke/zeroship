@@ -18,6 +18,7 @@ use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
 mod dev;
+mod migrate;
 mod parent_death;
 mod secrets;
 
@@ -51,6 +52,7 @@ fn main() {
     match command {
         "serve" => cmd_serve(&args),
         "deploy" => cmd_deploy(&args),
+        "migrate" => exit_on_error("migrate", migrate::cmd_migrate(&args)),
         "login" => exit_on_error("login", auth::cmd_login(&args)),
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
@@ -401,9 +403,9 @@ fn cmd_deploy(args: &[String]) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ControlResponse {
-    status: u16,
-    body: String,
+pub(crate) struct ControlResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 trait ControlClient {
@@ -492,7 +494,7 @@ impl ControlClient for CurlControlClient {
     }
 }
 
-fn run_curl(
+pub(crate) fn run_curl(
     command: &mut std::process::Command,
     stdin_body: Option<&[u8]>,
 ) -> Result<ControlResponse, String> {
@@ -679,7 +681,7 @@ fn deploy_auto_create(args: &[String]) -> bool {
 /// through to resolve-or-create and, under the default auto-create, produced
 /// a brand-new app named after the id - with the deploy landing on it instead
 /// of on the app the caller meant.
-fn is_uuid(value: &str) -> bool {
+pub(crate) fn is_uuid(value: &str) -> bool {
     value.parse::<uuid::Uuid>().is_ok()
 }
 
@@ -697,7 +699,7 @@ fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<String>, String>
     Ok(None)
 }
 
-fn parse_app_id(body: &str, context: &str) -> Result<String, String> {
+pub(crate) fn parse_app_id(body: &str, context: &str) -> Result<String, String> {
     let json = serde_json::from_str::<serde_json::Value>(body)
         .map_err(|e| format!("parse {context}: {e}"))?;
     parse_app_id_value(&json, context)
@@ -723,6 +725,11 @@ fn print_usage() {
     eprintln!("  zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
+    eprintln!("  zeroship migrate  [path-to-migrations.ir.json] --app=<name|uuid> [--control=URL] [--token=PAT]");
+    eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
+    eprintln!("                   Path defaults to generated/zeroship/migrations.ir.json (written");
+    eprintln!("                   by the build). An app that uses env.db needs this after deploy,");
+    eprintln!("                   or its first database call fails with a missing-role error.");
     eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase]");
     eprintln!("                   Sign in with the platform device flow.");
     eprintln!("  zeroship whoami");
