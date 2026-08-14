@@ -223,6 +223,21 @@ SNAPSHOT_FILES="compose/.env compose/docker-compose.yml ops/Caddyfile ops/zerosh
 # `zeroship-platform-migrate` has no --check-config and mounts no overlay.
 CHECK_SERVICES="control:zeroship-control migrated:zeroship-migrated gateway:zeroship-gate worker:zeroship-worker auth:zeroship-auth"
 
+# A remote-shell fragment that sets $SEC to the host's secrets directory, run
+# from $REMOTE_DIR. Three separate ssh bodies need it -- the snapshot, the
+# provisioner and the file check -- and three copies of a path derivation is
+# three chances for two of them to point somewhere the third does not.
+#
+# Where the secrets live is the compose file's business: it bind-mounts
+# ${ZEROSHIP_SECRETS_DIR:-./secrets} relative to the compose directory, and a
+# relative value resolves from there, not from $REMOTE_DIR. Reading the .env
+# rather than assuming the default matters: on a host that sets it (the runbook
+# tells operators to) the assumption would archive an empty directory while the
+# real key material sat somewhere else, and report success.
+SEC_RESOLVE='SEC=$(sed -n "s/^ZEROSHIP_SECRETS_DIR=//p" compose/.env | tail -1)
+  [ -n "$SEC" ] || SEC=./secrets
+  case "$SEC" in /*) : ;; *) SEC="$(cd compose && pwd)/$SEC" ;; esac'
+
 main() {
   HOST=""
   REGISTRY=""
@@ -534,13 +549,7 @@ main() {
   STAMP="$(date +%Y%m%d%H%M%S)"
   rsh "set -e
   cd '$REMOTE_DIR'
-  # Where the secrets live is the compose file's business: it bind-mounts
-  # \${ZEROSHIP_SECRETS_DIR:-./secrets} relative to the compose directory. Read
-  # the .env rather than assuming, or the snapshot silently archives an empty
-  # default directory while the real key material sits somewhere else.
-  SEC=\$(sed -n 's/^ZEROSHIP_SECRETS_DIR=//p' compose/.env | tail -1)
-  [ -n \"\$SEC\" ] || SEC=./secrets
-  case \"\$SEC\" in /*) : ;; *) SEC=\"\$(cd compose && pwd)/\$SEC\" ;; esac
+  $SEC_RESOLVE
   mkdir -p \"\$SEC\" && chmod 700 \"\$SEC\"
   for f in $SNAPSHOT_FILES; do cp -a \"\$f\" \"\$f.bak.$STAMP\"; done
   # -P keeps the absolute path in the archive, so the restore lands where this
@@ -580,9 +589,7 @@ main() {
   say "provisioning secrets with the image's own zeroship dev init (additive)"
   rsh "set -e
   cd '$REMOTE_DIR'
-  SEC=\$(sed -n 's/^ZEROSHIP_SECRETS_DIR=//p' compose/.env | tail -1)
-  [ -n \"\$SEC\" ] || SEC=./secrets
-  case \"\$SEC\" in /*) : ;; *) SEC=\"\$(cd compose && pwd)/\$SEC\" ;; esac
+  $SEC_RESOLVE
   docker run --rm \
     -v '$REMOTE_DIR/compose':'$REMOTE_DIR/compose' \
     -v \"\$SEC\":\"\$SEC\" \
@@ -611,9 +618,7 @@ main() {
   Refusing to continue: an empty list would make this check vacuous, which is
   the shape of the gap it exists to close."
   ABSENT="$(rsh "cd '$REMOTE_DIR'
-  SEC=\$(sed -n 's/^ZEROSHIP_SECRETS_DIR=//p' compose/.env | tail -1)
-  [ -n \"\$SEC\" ] || SEC=./secrets
-  case \"\$SEC\" in /*) : ;; *) SEC=\"\$(cd compose && pwd)/\$SEC\" ;; esac
+  $SEC_RESOLVE
   for f in $WANT_FILES; do [ -s \"\$SEC/\$f\" ] || printf ' %s' \"\$f\"; done" || true)"
   [ -z "$ABSENT" ] || fail "secret files the new compose requires are missing or empty:$ABSENT
   Nothing was restarted. The provisioner did not create them, so the two lists
