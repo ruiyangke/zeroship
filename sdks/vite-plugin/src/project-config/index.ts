@@ -471,8 +471,9 @@ export function readProjectConfig(
   const path = locateProjectConfig(root, opts.configPath);
   const base =
     path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
-  if (path != null) assertWritablePathsAreSafe(root, path, base);
-  return { config: applyProjectConfigOverride(base, opts.override), path };
+  const config = applyProjectConfigOverride(base, opts.override);
+  assertWritablePathsAreSafe(root, path ?? resolve(root, CONFIG_FILENAME), config);
+  return { config, path };
 }
 
 /**
