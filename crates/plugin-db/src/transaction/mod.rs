@@ -26,7 +26,8 @@
 //!    connection. On success it hands back a
 //!    [`zeroship_runtime::state::ResolveValue::Continuation`] (see step
 //!    4); on failure it rejects the outer promise (`begin_failed` for a
-//!    top-level BEGIN; the underlying coded error for a savepoint).
+//!    top-level BEGIN, except that a missing per-app role keeps its
+//!    provisioning diagnosis; the underlying coded error for a savepoint).
 //! 4. The continuation runs inside the pump's V8 scope:
 //!    [`mint_tx_view`](crate::v8_classes::transaction::mint_tx_view)
 //!    builds the tx-view object (collections-as-props, no
@@ -360,15 +361,23 @@ pub fn transaction_dispatch<'s>(
             }
             Err(e) => {
                 // BEGIN / SAVEPOINT itself failed — nothing to roll back.
-                // Top-level BEGIN failures carry `begin_failed`; savepoint
-                // failures keep their underlying coded error.
-                let coded = if nested {
-                    e
-                } else {
+                // Top-level BEGIN failures normally carry `begin_failed`.
+                // Keep the provisioning diagnosis on the shared public-error
+                // rail used by autocommit; savepoints keep every coded error.
+                let preserve_provisioning_error = matches!(
+                    &e,
+                    DbError::Configuration { code, .. }
+                        if *code == crate::error::SCHEMA_NOT_PROVISIONED
+                );
+                if !nested {
                     // Nothing was opened, so nothing will settle — release
                     // the claim here or every later transaction for this
                     // app parks forever.
                     crate::context::with_mut(|c| c.release_tx_claim(&app_id));
+                }
+                let coded = if nested || preserve_provisioning_error {
+                    e
+                } else {
                     DbError::Coded {
                         code: "begin_failed".to_string(),
                         message: format!("db.transaction: BEGIN failed: {}", e.message_str()),
