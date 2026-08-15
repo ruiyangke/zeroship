@@ -85,9 +85,9 @@ column therefore says what the *build* assumes when the key is missing.
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` emits `manifest.worker`; `"static"` is an SSG-only deploy with no worker. |
 | `build.serverEntry` | string | auto-detected | build (dev server and production build). Omit for auto-detection. |
 | `build.dist` | string | `"dist"` | build. The directory the client build writes and the only directory the packer walks. |
-| `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). |
+| `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). The resolved path cannot be the project root, an ancestor, a symlink, or an existing non-`.zship` path. |
 | `migrations.dir` | string | `"migrations"` | build: the Vite build, the dev server, `gen-types-all`, `zeroship-dev-migrate`. |
-| `migrations.out` | string | `"generated/zeroship"` | build (writes `env.db.ts`, `schema.runtime.json`, `migrations.ir.json` there) and CLI `migrate` (posts `<out>/migrations.ir.json`). |
+| `migrations.out` | string | `"generated/zeroship"` | build (writes `env.db.ts`, `schema.runtime.json`, `migrations.ir.json` there) and CLI `migrate` (posts `<out>/migrations.ir.json`). Its resolved directory cannot contain the project root; gen-types refuses unknown existing target files and symlinks. |
 | `secrets` | string[], each `^[A-Z][A-Z0-9_]{0,63}$` | `[]` | CLI `deploy` checks the declared names before upload. See [Secrets](#secrets). |
 | `environments.<name>` | object | - | see [Environments](#environments). |
 
