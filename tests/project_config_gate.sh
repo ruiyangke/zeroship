@@ -30,8 +30,8 @@
 #                           of the archive -- WITH the one-variable control
 #                           that plants it in dist/ and requires a FIND
 #   5. no runtime parser    no runtime-side crate names the file or the module
-#   6. parser confined      the JSONC reader exists in crates/cli and nowhere
-#                           else, and no other crate declares a JSONC dep
+#   6. runtime parser deps  no runtime-side crate declares or invokes a JSONC
+#                           parser that could bypass the direct-name check
 #
 # CHECK 4 IS THE ONE THAT MATTERS. 5 and 6 are cheap defence in depth against
 # defeating 4 by indirection.
@@ -400,27 +400,27 @@ else
 fi
 
 echo
-echo "== 6. the JSONC parser is confined to crates/cli =="
-PARSERS="$(grep -rl 'fn strip' crates --include='jsonc.rs' 2>/dev/null || true)"
-N_PARSERS=$(printf '%s\n' "$PARSERS" | grep -c . || true)
-if [ "$N_PARSERS" != "1" ]; then
-  fail "expected exactly one JSONC parser under crates/, found $N_PARSERS - the extractor or the confinement is wrong"
-  printf '%s\n' "$PARSERS" | sed 's/^/       /'
-elif [ "$PARSERS" = "crates/cli/src/project_config/jsonc.rs" ]; then
-  pass "the only JSONC parser under crates/ is $PARSERS"
+echo "== 6. no runtime-side JSONC parser dependency or API use =="
+RUNTIME_JSONC_DEPS=""
+RUNTIME_JSONC_APIS=""
+for d in "${RUNTIME_DIRS[@]}"; do
+  [ -d "$d" ] || continue
+  h="$(grep -nE 'jsonc[-_]parser|json5|json[_-]spanned' "$d/Cargo.toml" 2>/dev/null || true)"
+  [ -n "$h" ] && RUNTIME_JSONC_DEPS="$RUNTIME_JSONC_DEPS$d/Cargo.toml:$h"$'\n'
+  h="$(grep -rnE 'jsonc_parser|json5::|json_spanned' "$d" --include='*.rs' 2>/dev/null || true)"
+  [ -n "$h" ] && RUNTIME_JSONC_APIS="$RUNTIME_JSONC_APIS$h"$'\n'
+done
+if [ -z "$RUNTIME_JSONC_DEPS" ]; then
+  pass "no runtime-side crate declares a JSONC parsing dependency"
 else
-  fail "the JSONC parser moved to $PARSERS"
+  fail "a runtime-side crate declares a JSONC parsing dependency:"
+  printf '%s' "$RUNTIME_JSONC_DEPS" | sed 's/^/       /' | head -10
 fi
-
-# And no crate has taken a JSONC dependency, which is how (5) would be defeated
-# by indirection. There is no such dependency ANYWHERE today: the parser is a
-# module, which is a stronger form of "confined" than one Cargo.toml.
-DEPS="$(grep -rn 'jsonc\|json5\|json_spanned' --include='Cargo.toml' crates libs 2>/dev/null || true)"
-if [ -z "$DEPS" ]; then
-  pass "no crate declares a JSONC parsing dependency"
+if [ -z "$RUNTIME_JSONC_APIS" ]; then
+  pass "no runtime-side Rust source imports or invokes a JSONC parser API"
 else
-  fail "a crate declares a JSONC parsing dependency:"
-  printf '%s\n' "$DEPS" | sed 's/^/       /'
+  fail "runtime-side Rust source imports or invokes a JSONC parser API:"
+  printf '%s' "$RUNTIME_JSONC_APIS" | sed 's/^/       /' | head -10
 fi
 
 echo

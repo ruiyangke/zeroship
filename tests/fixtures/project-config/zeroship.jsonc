@@ -5,7 +5,8 @@
 // the two dumps must be byte-equal.
 //
 // It is deliberately awkward. A fixture that only exercises the happy shape
-// would pass with two strippers that disagree about every interesting case, so
+// would pass with two parsers whose options disagree about every interesting
+// case, so
 // every line below that looks like noise is a case where a naive JSONC reader
 // diverges:
 //
@@ -58,7 +59,7 @@
       // It carries, in order: an escaped quote followed by a comment opener
       // that must NOT start a comment; a comma directly before a closing brace
       // that must NOT be treated as trailing; and multi-byte content that must
-      // survive byte-wise scanning.
+      // survive parsing and canonical resolution.
       "build": { "serverEntry": "src/a\"/*b*/,}-café-😀.ts" }
     }
   }
