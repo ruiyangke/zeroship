@@ -38,6 +38,7 @@ import type {
   HistoryReply,
   LoadVerifyReply,
   PreviewSqlSource,
+  AdvisoryDto,
   BuildInfo,
 } from "zero-migrate-node";
 
@@ -56,6 +57,7 @@ export type {
   HistoryReply,
   LoadVerifyReply,
   PreviewSqlSource,
+  AdvisoryDto,
 };
 
 /** The neutral driver cell DTOs — the single source of truth from the generated
@@ -97,6 +99,11 @@ export interface MigrateAddon {
 
   /** Sync, DB-free rendering of authored IR envelope JSON for operator review. */
   previewSql(source: PreviewSqlSource): string[];
+
+  /** The operational advisories the analyzer finds in the lowered DDL, each
+   *  carrying the statement that raised it. Never gates - an advisory is
+   *  information an operator reads before choosing to deploy. */
+  advisoriesFor(source: PreviewSqlSource): AdvisoryDto[];
 
   /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the IR envelope
    *  as a JS value), LOWER it in Rust (stamp `owner_app` + fold

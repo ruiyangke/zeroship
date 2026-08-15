@@ -916,3 +916,27 @@ pub struct BuildInfo {
     /// identity here. A hole, not a handoff.
     pub source_digest: String,
 }
+
+/// One operational advisory the analyzer raised, with the statement that raised
+/// it.
+///
+/// The statement travels with the advisory on purpose. The analyzer's message
+/// names the CONSTRAINT (`lk_t_e_key`) but not the TABLE, and an operator
+/// deciding whether to take a lock needs to know which table is going to be
+/// locked. Advisories never gate; this is information, not a verdict.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AdvisoryDto {
+    /// The migration whose lowered DDL raised it.
+    pub migration: String,
+    /// The stable analyzer rule id.
+    pub rule: String,
+    /// `"notice" | "warning" | ...` — the analyzer's severity, lowercased.
+    pub severity: String,
+    /// What the operational risk is.
+    pub message: String,
+    /// The safer alternative, when the analyzer knows one.
+    pub suggestion: Option<String>,
+    /// The exact statement the advisory describes.
+    pub statement: String,
+}

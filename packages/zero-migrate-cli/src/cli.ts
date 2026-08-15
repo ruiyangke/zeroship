@@ -36,7 +36,12 @@ import {
   type NetworkSecurityOptions,
   type RollbackOutcome,
 } from "./index.js";
-import { loadAddon, type RollbackTargetDto, type StatusReply } from "./addon.js";
+import {
+  loadAddon,
+  type AdvisoryDto,
+  type RollbackTargetDto,
+  type StatusReply,
+} from "./addon.js";
 import { resolveCliConfig, type CliConfigValues } from "./config.js";
 import {
   buildEnvelope,
@@ -1024,6 +1029,19 @@ async function runLint(args: Args): Promise<number> {
         if (args.explain) process.stdout.write(`${result.sql ?? ""}\n`);
       }
     }
+    if (args.explain) {
+      // Under --explain the operator is asking what this deploy will actually
+      // do, which is exactly when a table-wide lock is worth knowing about.
+      writeAdvisories(
+        addon.advisoriesFor({
+          envelopes: envelopeJson,
+          dialect: selectedDialects[0],
+          defaultSchema: args.projectSchema,
+          ownerApp: args.ownerApp,
+          charterLayers,
+        }),
+      );
+    }
   }
   return reports.every((report) => report.ok) ? 0 : 1;
 }
@@ -1126,8 +1144,42 @@ async function runLivePlan(args: Args): Promise<number> {
     const noun = pending.length === 1 ? "migration" : "migrations";
     process.stdout.write(`would apply ${pending.length} ${noun}\n`);
     for (const sql of rendered) process.stdout.write(`${sql}\n`);
+    writeAdvisories(
+      loadAddon().advisoriesFor({
+        envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
+        dialect: driver.kind,
+        defaultSchema: args.projectSchema,
+        ownerApp: args.ownerApp,
+        charterLayers,
+      }),
+    );
   }
   return 0;
+}
+
+/** Print the analyzer's operational advisories for an about-to-run plan.
+ *
+ * F650. The engine computed these all along -- an ACCESS EXCLUSIVE warning for
+ * `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE` among them -- and no verb ever
+ * read one, so an operator adding a unique column to a populated table took a
+ * table-wide lock with nothing telling them it was coming.
+ *
+ * The STATEMENT is printed with the message because the analyzer names the
+ * constraint and not the table, and "which table locks" is the question being
+ * answered. These never gate: the exit code is untouched, or an advisory would
+ * be a denial wearing a softer word. */
+function writeAdvisories(advisories: readonly AdvisoryDto[]): void {
+  for (const advisory of advisories) {
+    // Statement and message on ONE line. The analyzer names the CONSTRAINT
+    // ("lk_t_e_key") and the statement names the TABLE, and an operator scanning
+    // for which table is about to lock needs both in the same place -- splitting
+    // them across lines is how a warning becomes something you grep past.
+    const statement = advisory.statement.replace(/\s+/g, " ").trim();
+    process.stdout.write(
+      `advisory [${advisory.severity}] ${advisory.rule}: ${statement} -- ${advisory.message}\n` +
+        (advisory.suggestion ? `  suggestion: ${advisory.suggestion}\n` : ""),
+    );
+  }
 }
 
 /** `apply [dir]` — apply every migration over the `--database-url` driver in order. */

@@ -83,7 +83,7 @@ use crate::wire::{
     ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, CollectionDescriptorDto,
     FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
     HistoryRequest, LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest,
-    RuntimeOptionsDto, StatusIrRequest, StatusRequest,
+    AdvisoryDto, RuntimeOptionsDto, StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -1339,4 +1339,64 @@ pub fn history(
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())
     })
+}
+
+/// The operational advisories the analyzer finds in an envelope set's lowered
+/// DDL, attributed to the statement that raised each one.
+///
+/// F650. The engine already computed these and threw them away: `analyze`
+/// produces an ACCESS EXCLUSIVE warning for `ALTER TABLE … ADD CONSTRAINT …
+/// UNIQUE`, the declarative differ exposes them, and no CLI verb ever read one.
+/// An operator adding a unique column to a populated table took a table-wide
+/// lock with nothing anywhere telling them it was coming.
+///
+/// Advisories NEVER gate. They are information an operator reads before choosing
+/// to deploy, which is why the statement travels with them: a warning that does
+/// not say WHICH table it is about cannot be acted on at 2am.
+#[napi(js_name = "advisoriesFor", catch_unwind)]
+pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
+    let PreviewSqlSource {
+        envelopes,
+        dialect,
+        default_schema,
+        owner_app,
+        charter_layers,
+    } = source;
+
+    let dialect = preview_dialect(&dialect).map_err(Error::from_reason)?;
+    let effective_policy = effective_policy_from_wire_layers(&charter_layers).map_err(|e| {
+        Error::from_reason(format!("advisoriesFor: policy charter failed to load: {e}"))
+    })?;
+    let opts = zero_migrate::PreviewOpts {
+        default_schema,
+        owner_app,
+        effective_policy,
+    };
+
+    let mut out = Vec::new();
+    for envelope in &envelopes {
+        // Statement-at-a-time so each advisory keeps the statement that raised
+        // it. `analyze` over a whole multi-statement `up` would return a flat
+        // list with no way back to the ALTER TABLE it describes.
+        let Ok((migration, statements)) =
+            zero_migrate::render_ir_envelope_sql_statements(envelope, dialect, &opts)
+        else {
+            // An envelope that will not render offline yields no advisories
+            // rather than failing the verb: this is enrichment, never a gate.
+            continue;
+        };
+        for statement in statements {
+            for advisory in zero_migrate::analysis::analyze::analyze(&statement) {
+                out.push(AdvisoryDto {
+                    migration: migration.clone(),
+                    rule: advisory.rule.to_string(),
+                    severity: format!("{:?}", advisory.severity).to_lowercase(),
+                    message: advisory.message,
+                    suggestion: advisory.suggestion,
+                    statement: statement.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
