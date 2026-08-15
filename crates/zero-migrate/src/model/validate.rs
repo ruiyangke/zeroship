@@ -4709,6 +4709,29 @@ pub fn validate_op_authorized(
         // remaining VENDOR ops carry no embedded Expr — their privileged payload is
         // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the capability-gated
         // raw `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
+        // A rename whose target IS its source is a no-op the servers reject, and
+        // they reject it with a message about the wrong thing: PostgreSQL says
+        // `relation "a" already exists`, which reads as a collision with some
+        // OTHER table. Left to lower it renders `ALTER TABLE a RENAME TO a`,
+        // survives the fragment guard, and fails during apply while the deploy
+        // holds locks. Compared EXACTLY: quoted identifiers are case-sensitive on
+        // PostgreSQL, so `a` -> `A` is a genuine rename.
+        Op::RenameTable { table, to, .. } if table == to => Err(AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "renameTable names {table:?} as both its source and its target, so it \
+                 renames the table to itself"
+            ),
+            suggested_fix: Some(
+                "drop the operation if the name is already correct, or name the new \
+                 table in `to`"
+                    .to_string(),
+            ),
+        }),
         Op::RenameColumn { ty, .. } => validate_col_type_position(
             ty,
             "renameColumn.type",
