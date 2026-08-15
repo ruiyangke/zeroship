@@ -162,7 +162,7 @@ it resolved and where it came from, on stderr, before it acts:
 $ zeroship migrate --env=prod
 zeroship migrate: app = prod-app (from zeroship.jsonc environments.prod)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
-zeroship migrate: migrations = generated/zeroship/migrations.ir.json
+zeroship migrate: migrations = /home/me/app/generated/zeroship/migrations.ir.json
 ```
 
 The source is one of `<flag> flag`, `$ZEROSHIP_CONTROL_URL`, `zeroship.jsonc`,
