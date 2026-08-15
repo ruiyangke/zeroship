@@ -64,7 +64,12 @@ export default { schema() { ${body} } };
   return work;
 }
 
-function cli(work: string, schema: string, args: readonly string[]): CliResult {
+function cli(
+  work: string,
+  schema: string,
+  args: readonly string[],
+  databaseUrl: string = pgUrl(),
+): CliResult {
   return spawnSync(
     process.execPath,
     [
@@ -75,7 +80,7 @@ function cli(work: string, schema: string, args: readonly string[]): CliResult {
       "--dir",
       join(work, "migrations"),
       "--database-url",
-      pgUrl(),
+      databaseUrl,
       "--schema",
       schema,
       "--policy",
@@ -296,4 +301,46 @@ test("F654 d CONTROL: ordinary DDL rollback appends an event and remains re-appl
       rmSync(work, { recursive: true, force: true });
     }
   });
+});
+
+test("F658: MySQL stores the reverse too, read back from the journal itself", async (t) => {
+  // The MySQL write was landed on the strength of the suite and the bind-shape
+  // assertions rather than a row read, which is a weaker claim than the one made
+  // for PostgreSQL and SQLite. This arm closes that: it reads the column MySQL
+  // actually wrote.
+  //
+  // MySQL journals through CompletedRecord, a different path from the PostgreSQL
+  // insert, so "PostgreSQL stores it" was never evidence for MySQL.
+  const url = process.env.ZERO_MIGRATE_MYSQL_URL;
+  if (!url) {
+    t.skip("ZERO_MIGRATE_MYSQL_URL unset");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({ uri: url, multipleStatements: true });
+  const database = `f658_${Date.now().toString(36)}`;
+  const work = scaffold(database, "create_f658_mysql", createTableBody());
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    assertCliOk(cli(work, database, ["apply", "--approve"], url), "mysql apply");
+
+    const [rows] = await admin.query(
+      `SELECT down FROM \`${database}_migrations\`.schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq DESC LIMIT 1`,
+    );
+    const stored = (rows as Array<{ down: string | null }>)[0]?.down ?? null;
+    assert.equal(
+      typeof stored,
+      "string",
+      "MySQL must journal the reverse it applied; a NULL here means every MySQL " +
+        "rollback still re-derives its inverse with whatever engine is installed " +
+        "at rollback time, which is the hole F654 exists to close",
+    );
+    assert.match(String(stored), /DROP TABLE/i, "and it is the reverse of what ran");
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+    await admin.query(`DROP DATABASE IF EXISTS \`${database}_migrations\``).catch(() => {});
+    await admin.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
 });
