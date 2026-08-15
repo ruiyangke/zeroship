@@ -817,8 +817,8 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
-                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
-                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6)",
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind, down)
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6, $7)",
                 applied = journal::EventKind::Applied.as_str()
             ),
             &[
@@ -828,6 +828,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
                 applied_by.into(),
                 exec_ms.into(),
                 kind.into(),
+                (&m.down).into(),
             ],
         )
         .await

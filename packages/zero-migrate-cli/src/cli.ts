@@ -1309,6 +1309,10 @@ async function runRollback(args: Args): Promise<number> {
 /** The operator lines for a completed rollback. */
 export function formatRollbackHuman(outcome: RollbackOutcome): string {
   const lines = [`rollback: ${outcome.rolledBack.length} rolled back`];
+  // `advisories` arrives from a newer addon than some callers construct. An
+  // outcome without the field is a rollback that raised none, not a crash in the
+  // formatter that reports the rollback.
+  for (const advisory of outcome.advisories ?? []) lines.push(`  advisory: ${advisory}`);
   for (const version of outcome.rolledBack) lines.push(`  reversed ${version}`);
   for (const version of outcome.skippedIrreversible) {
     lines.push(`  skipped ${version} (declares no down; crossed under --force)`);

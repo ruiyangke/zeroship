@@ -494,6 +494,9 @@ struct RollbackSet {
     /// rollback can act on it, so for everything reachable here plan and step
     /// stand 1:1.
     plan_to_step: std::collections::BTreeMap<String, String>,
+    /// Applied pre-upgrade rows whose NULL stored reverse made this request use
+    /// the checksummed source-derived compatibility path.
+    reconstructed_reverses: std::collections::BTreeSet<String>,
 }
 
 enum RollbackRefusal {
@@ -517,12 +520,14 @@ enum RollbackRefusal {
 /// instead of hiding inside it.
 fn rollback_migration_set(
     artifacts: &[zero_migrate::LoweredArtifact],
+    journal_entries: &[zero_migrate::apply::journal::AppliedEntry],
 ) -> std::result::Result<RollbackSet, String> {
     let mut set = RollbackSet {
         migrations: Vec::with_capacity(artifacts.len()),
         inverse_plans: std::collections::BTreeMap::new(),
         unrepresentable: std::collections::BTreeMap::new(),
         plan_to_step: std::collections::BTreeMap::new(),
+        reconstructed_reverses: std::collections::BTreeSet::new(),
     };
     for artifact in artifacts {
         // The manifest is the one walker that already enumerates every step
@@ -595,7 +600,22 @@ fn rollback_migration_set(
         }
 
         if let Ok(migration) = artifact.plan.single_step_migration() {
-            set.migrations.push(migration.clone());
+            let mut migration = migration.clone();
+            if let Some(entry) = journal_entries
+                .iter()
+                .find(|entry| entry.version == forward.version.as_str())
+            {
+                if let Some(stored_down) = &entry.down {
+                    // Replace only the executable reverse. The migration's
+                    // freshly-lowered checksum stays intact so the existing
+                    // source-vs-journal drift refusal remains authoritative.
+                    migration.down = Some(stored_down.clone());
+                } else if migration.down.is_some() {
+                    set.reconstructed_reverses
+                        .insert(forward.version.as_str().to_string());
+                }
+            }
+            set.migrations.push(migration);
             continue;
         }
 
@@ -696,7 +716,7 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
             &journal_entries,
             &resolved_contracts,
         )?;
-        let set = rollback_migration_set(&artifacts)?;
+        let set = rollback_migration_set(&artifacts, &journal_entries)?;
         // `--to` accepts EITHER spelling of a migration's version. The engine
         // anchors on the journaled step identity, so a logical plan version is
         // rewritten to the step it lowered to; anything already a step version, or
@@ -735,9 +755,20 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
         )
         .await
         .map_err(|error| describe_rollback_error(&error, &set))?;
+        let advisories = outcome
+            .rolled_back
+            .iter()
+            .filter(|version| set.reconstructed_reverses.contains(*version))
+            .map(|version| {
+                format!(
+                    "reconstructed legacy reverse for {version} from the checksummed migration source because its applied journal row has NULL down"
+                )
+            })
+            .collect();
         Ok::<RollbackReply, String>(RollbackReply {
             rolled_back: outcome.rolled_back,
             skipped_irreversible: outcome.skipped_irreversible,
+            advisories,
         })
     }
     .await;

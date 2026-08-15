@@ -753,6 +753,11 @@ export interface RollbackReply {
    * Empty on every request that did not force.
    */
   skippedIrreversible: Array<string>
+  /**
+   * Operator-facing compatibility notices, including when a legacy applied
+   * row has NULL `down` and rollback reconstructed its reverse from source.
+   */
+  advisories: Array<string>
 }
 
 /**

@@ -449,6 +449,9 @@ pub struct RollbackReply {
     /// the request carried both the force flag and the backup acknowledgement.
     /// Empty on every request that did not force.
     pub skipped_irreversible: Vec<String>,
+    /// Operator-facing compatibility notices, including when a legacy applied
+    /// row has NULL `down` and rollback reconstructed its reverse from source.
+    pub advisories: Vec<String>,
 }
 
 /// One outstanding online-rename contract returned after apply.
