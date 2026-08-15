@@ -4230,7 +4230,12 @@ impl IrAuthor {
                 );
                 pending_foreign_keys.extend(lowered.deferred_foreign_keys);
                 flush_pending_foreign_keys_for_target(&table, pending_foreign_keys, |pending| {
-                    out.push(PlanStep::Ddl(pending.unit.0));
+                    // A tracking-only entry carries no unit: the SQLite foreign
+                    // key is already inline. Discharging it here is the whole
+                    // point — it proves the target got created (F673).
+                    if let Some(unit) = pending.unit {
+                        out.push(PlanStep::Ddl(unit.0));
+                    }
                     Ok::<(), IrLowerError>(())
                 })?;
             }
@@ -4630,10 +4635,12 @@ impl IrAuthor {
                         .immediate_units
                         .iter()
                         .chain(
+                            // A tracking-only entry emits no statement, so there
+                            // is nothing for a guard probe to attach to (F673).
                             lowered
                                 .deferred_foreign_keys
                                 .iter()
-                                .map(|deferred| &deferred.unit),
+                                .filter_map(|deferred| deferred.unit.as_ref()),
                         )
                         .any(|(migration, _)| migration.existence_guard.is_none())
                 {
@@ -6723,21 +6730,27 @@ impl IrAuthor {
                 while pending_index < pending_foreign_keys.len() {
                     if pending_foreign_keys[pending_index].deferred.target_table == table {
                         let pending = pending_foreign_keys.remove(pending_index);
-                        let deferred_start = steps.len();
-                        Self::guard_lowered_unit(
-                            &pending.op,
-                            pending.op_index,
-                            pending.op_kind,
-                            pending.deferred.unit,
-                            steps,
-                            fragments,
-                            guard,
-                            raw_island_guard,
-                            skips_static_guard,
-                        )?;
-                        op_spans[pending.op_span_index]
-                            .additional_step_ranges
-                            .push(deferred_start..steps.len());
+                        // A tracking-only entry carries no unit: the SQLite
+                        // foreign key is already inline, so there is nothing to
+                        // guard and no step range to attribute. Removing it from
+                        // the pending list IS the discharge (F673).
+                        if let Some(unit) = pending.deferred.unit {
+                            let deferred_start = steps.len();
+                            Self::guard_lowered_unit(
+                                &pending.op,
+                                pending.op_index,
+                                pending.op_kind,
+                                unit,
+                                steps,
+                                fragments,
+                                guard,
+                                raw_island_guard,
+                                skips_static_guard,
+                            )?;
+                            op_spans[pending.op_span_index]
+                                .additional_step_ranges
+                                .push(deferred_start..steps.len());
+                        }
                     } else {
                         pending_index += 1;
                     }

@@ -1692,7 +1692,15 @@ pub(crate) struct DeferredForeignKeyUnit {
     pub(crate) target_table: String,
     pub(crate) source_table: String,
     pub(crate) constraint_name: String,
-    pub(crate) unit: LoweredUnit,
+    /// The follow-on `ALTER TABLE ADD CONSTRAINT`, or `None` when the entry is
+    /// TRACKING-ONLY.
+    ///
+    /// SQLite has no `ALTER TABLE ADD CONSTRAINT`, so its create-time foreign
+    /// keys are inlined into `CREATE TABLE` and there is no unit to emit. Such an
+    /// entry rides this list purely so that the end-of-lowering drain proves the
+    /// target is created somewhere in the envelope — the check PostgreSQL and
+    /// MySQL get for free and SQLite previously had no equivalent of (F673).
+    pub(crate) unit: Option<LoweredUnit>,
 }
 
 /// Structured result of lowering one `createTable` operation.
@@ -8033,6 +8041,10 @@ impl DeclarativeAuthor {
         let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
         let mut deferred: Vec<(&ConstraintSnapshot, String)> = Vec::new();
+        // Tracking-only entries: SQLite inline foreign keys whose target is not
+        // yet settled. They emit nothing; they only have to be discharged by the
+        // target's CREATE before lowering ends (F673).
+        let mut deferred_tracking: Vec<DeferredForeignKeyUnit> = Vec::new();
         for c in &snapshot.constraints {
             if c.kind != "FOREIGN KEY" {
                 continue;
@@ -8041,12 +8053,28 @@ impl DeclarativeAuthor {
             // A self-FK or live target inlines on every dialect. SQLite also
             // accepts a forward target in an inline CREATE TABLE constraint; the
             // target need not physically exist until rows exercise the FK.
-            let inlinable = target
+            let target_is_settled = target
                 .as_deref()
-                .is_some_and(|tt| tt == table || live_tables.contains(tt))
-                || is_sqlite;
+                .is_some_and(|tt| tt == table || live_tables.contains(tt));
+            let inlinable = target_is_settled || is_sqlite;
             if inlinable {
                 inline_fks.push(c);
+                // SQLite inlined a target that is NOT this table and NOT already
+                // live, so nothing here has proven the target is ever created.
+                // Track it — with no unit to emit, the FK is already inline — so
+                // the end-of-lowering drain refuses a target no operation creates.
+                // Without this, a dangling reference reached a real database and
+                // produced a table that could not accept a row (F673).
+                if is_sqlite && !target_is_settled {
+                    if let Some(target) = target {
+                        deferred_tracking.push(DeferredForeignKeyUnit {
+                            target_table: target,
+                            source_table: table.to_string(),
+                            constraint_name: c.name.clone(),
+                            unit: None,
+                        });
+                    }
+                }
             } else if !self.dialect.supports(Capability::AlterTableAddConstraint) {
                 return Err(DeclarativeError::SqliteDeferredFkUnsupported {
                     table: table.to_string(),
@@ -8235,9 +8263,10 @@ impl DeclarativeAuthor {
                 target_table,
                 source_table: table.to_string(),
                 constraint_name: fk.name.clone(),
-                unit: single_stmt(fk_mig),
+                unit: Some(single_stmt(fk_mig)),
             });
         }
+        deferred_foreign_keys.extend(deferred_tracking);
         Ok(LoweredCreateTable {
             immediate_units: out,
             deferred_foreign_keys,
