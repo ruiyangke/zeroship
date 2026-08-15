@@ -25,7 +25,8 @@
 #                           Rust applies only optional non-CLI defaults
 #   3. round trip           both readers dump the same fixture byte-for-byte,
 #                           at the root AND under --env=staging; plus a
-#                           MUTATION showing the asymmetry is real
+#                           MUTATION showing the asymmetry is real, and a real
+#                           first deploy whose appended file both accept
 #   4. not packed           a sentinel in a root zeroship.jsonc reaches no byte
 #                           of the archive -- WITH the one-variable control
 #                           that plants it in dist/ and requires a FIND
@@ -343,6 +344,88 @@ if [ "$empty_rs_rc" != 0 ] && grep -qF "$(basename "$FIXTURE")" "$WORK/empty-rs.
   pass "MUTATION B: with NO file, the Rust reader refuses and names the file it wanted"
 else
   fail "with no file the Rust reader produced a config (rc=$empty_rs_rc) - it has defaults"
+fi
+
+echo
+echo "== 3b. first deploy appends an app both readers accept =="
+WRITEBACK_PROJECT="$WORK/writeback-project"
+WRITEBACK_BIN="$WORK/writeback-bin"
+WRITEBACK_ID="88888888-8888-4888-8888-888888888888"
+mkdir -p "$WRITEBACK_PROJECT/dist" "$WRITEBACK_BIN"
+cp "$MINIMAL_FIXTURE" "$WRITEBACK_PROJECT/zeroship.jsonc"
+printf 'focused writeback probe\n' > "$WRITEBACK_PROJECT/dist/app.zship"
+cat > "$WRITEBACK_BIN/curl" <<'SH'
+#!/bin/sh
+method="GET"
+url=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "-X" ]; then method="$argument"; fi
+  case "$argument" in http*) url="$argument";; esac
+  previous="$argument"
+done
+if [ "$method" = "POST" ]; then cat >/dev/null; fi
+printf '%s %s\n' "$method" "$url" >> "$ZEROSHIP_CURL_LOG"
+case "$method $url" in
+  "GET https://control.zeroship.ai/api/apps")
+    printf '%s\n200\n' '[]'
+    ;;
+  "POST https://control.zeroship.ai/api/apps")
+    printf '%s\n201\n' '{"id":"88888888-8888-4888-8888-888888888888","name":"minimal-config-fixture"}'
+    ;;
+  "POST https://control.zeroship.ai/api/apps/88888888-8888-4888-8888-888888888888/deploy")
+    printf '%s\n200\n' '{"deploy_hash":"sha256:writeback-probe"}'
+    ;;
+  *)
+    printf '%s\n599\n' '{"error":"unexpected request"}'
+    ;;
+esac
+SH
+chmod +x "$WRITEBACK_BIN/curl"
+
+(
+  cd "$WRITEBACK_PROJECT" || exit 1
+  env -u ZEROSHIP_CONFIG -u ZEROSHIP_CONTROL_URL \
+    PATH="$WRITEBACK_BIN:$PATH" \
+    ZEROSHIP_CURL_LOG="$WORK/writeback-curl.log" \
+    ZEROSHIP_TOKEN="test-token" \
+    "$BIN" deploy
+) > "$WORK/writeback.out" 2> "$WORK/writeback.err"
+writeback_rc=$?
+expected_writeback_line="  wrote app id into $WRITEBACK_PROJECT/zeroship.jsonc"
+expected_requests="GET https://control.zeroship.ai/api/apps
+POST https://control.zeroship.ai/api/apps
+POST https://control.zeroship.ai/api/apps/$WRITEBACK_ID/deploy"
+actual_requests="$(cat "$WORK/writeback-curl.log" 2>/dev/null)"
+if [ "$writeback_rc" = 0 ] \
+    && grep -Fxq "$expected_writeback_line" "$WORK/writeback.err" \
+    && [ "$actual_requests" = "$expected_requests" ]; then
+  pass "a real first deploy ran create, deploy, and the documented writeback transcript"
+else
+  fail "first-deploy writeback transcript or request sequence differed (rc=$writeback_rc)"
+  sed 's/^/       /' "$WORK/writeback.err" | tail -12
+fi
+
+(
+  cd "$ROOT/sdks/vite-plugin" || exit 1
+  "${NODE_RUN[@]}" "$TS_DUMP" "$WRITEBACK_PROJECT/zeroship.jsonc"
+) > "$WORK/writeback-ts.json" 2> "$WORK/writeback-ts.err"
+writeback_ts_rc=$?
+(
+  cd "$WRITEBACK_PROJECT" || exit 1
+  "$BIN" config show
+) > "$WORK/writeback-rs.json" 2> "$WORK/writeback-rs.err"
+writeback_rs_rc=$?
+if [ "$writeback_ts_rc" = 0 ] && [ "$writeback_rs_rc" = 0 ] \
+    && diff -q "$WORK/writeback-ts.json" "$WORK/writeback-rs.json" >/dev/null; then
+  pass "TypeScript and Rust both accept and identically resolve the appended file"
+else
+  fail "a reader refused or disagreed on the appended file (ts=$writeback_ts_rc rs=$writeback_rs_rc)"
+fi
+if grep -Fq "\"app\":\"$WRITEBACK_ID\"" "$WORK/writeback-rs.json"; then
+  pass "the appended file resolves the control-plane app id"
+else
+  fail "the written file did not resolve app=$WRITEBACK_ID"
 fi
 
 echo
