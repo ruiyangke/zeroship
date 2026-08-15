@@ -177,7 +177,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
             .await
             .expect("seed the table the payload tries to drop");
 
-        let Ok(artifact) = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::confined_charter())
+        let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::confined_charter())
             .load_and_lower_guarded(
                 &format!(
                     r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
@@ -187,9 +187,18 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
                 &LiveSchema::default(),
                 &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
             )
-        else {
-            continue; // refused before rendering
-        };
+        .unwrap_or_else(|e| {
+            // NOT a `continue`. SQLite is the dialect that ESCAPES these, so a
+            // refusal here means the escaper broke and rendered something the
+            // guard rejected. Skipping on refusal would absorb exactly the
+            // regression this test exists to catch — the same way the sibling
+            // test above once did.
+            panic!(
+                "{label}: SQLite must escape a quote-bearing identifier and lower it. \
+                 A refusal here is a broken escaper producing malformed SQL, not a \
+                 deliberate rejection: {e:?}"
+            )
+        });
 
         MigrationEngine::new()
             .apply_plan(
