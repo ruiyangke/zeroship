@@ -853,6 +853,29 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     Ok(())
 }
 
+fn postgres_dml_params(
+    binds: &[crate::render::step::BindValue],
+) -> Result<Vec<Option<String>>, String> {
+    binds
+        .iter()
+        .map(|bind| match bind {
+            crate::render::step::BindValue::Null => Ok(None),
+            crate::render::step::BindValue::Bool(value) => Ok(Some(if *value {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            })),
+            crate::render::step::BindValue::Int(value) => Ok(Some(value.to_string())),
+            crate::render::step::BindValue::Decimal(value)
+            | crate::render::step::BindValue::Text(value) => Ok(Some(value.clone())),
+            crate::render::step::BindValue::Bytes(_) => Err(
+                "postgres DML: raw binary bind reached the backend without a decode wrapper"
+                    .to_string(),
+            ),
+        })
+        .collect()
+}
+
 /// Transactional apply of a single **parameterized DML** step (`op.*` DSL)
 /// — the PG executor behind
 /// [`MigrationBackend::run_dml_step`](crate::apply::backend::MigrationBackend::run_dml_step).
@@ -892,24 +915,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // ("cannot bind text → timestamptz"). The value is STILL a native bind — never
     // interpolated into the SQL — so the bind-safety property holds (a metacharacter
     // value cannot alter the statement shape). `Null` → SQL NULL (no bytes).
-    let params: Vec<Option<String>> = binds
-        .iter()
-        .map(|b| match b {
-            crate::render::step::BindValue::Null => Ok(None),
-            crate::render::step::BindValue::Bool(v) => Ok(Some(if *v {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            })),
-            crate::render::step::BindValue::Int(v) => Ok(Some(v.to_string())),
-            crate::render::step::BindValue::Decimal(s) => Ok(Some(s.clone())),
-            crate::render::step::BindValue::Text(s) => Ok(Some(s.clone())),
-            crate::render::step::BindValue::Bytes(_) => Err(ApplyError::Backend(
-                "postgres DML: raw binary bind reached the backend without a decode wrapper"
-                    .to_string(),
-            )),
-        })
-        .collect::<Result<_, _>>()?;
+    let params = postgres_dml_params(binds).map_err(ApplyError::Backend)?;
 
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
@@ -1497,31 +1503,112 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Append the immutable `rolled_back` event in the SAME transaction, as admin.
-    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
-    if let Err(e) = conn
-        .exec(
-            &format!(
-                "INSERT INTO {meta}.schema_migrations
-                     (event_kind, version, name, checksum, \"by\", exec_ms)
-                 VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
-                rolled_back = journal::EventKind::RolledBack.as_str()
-            ),
-            &[
-                m.version.as_str().into(),
-                (&m.name).into(),
-                m.checksum.as_str().into(),
-                applied_by.into(),
-                exec_ms.into(),
-            ],
-        )
-        .await
-    {
+    if let Err(error) = append_rolled_back(conn, cfg, m, applied_by, exec_ms).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a rolled_back-insert error");
         }
-        return Err(RollbackError::Journal(JournalError::Db(e.into())));
+        return Err(error);
     }
 
+    conn.batch("COMMIT").await?;
+    Ok(())
+}
+
+async fn append_rolled_back<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    forward: &Migration,
+    applied_by: &str,
+    exec_ms: i64,
+) -> Result<(), RollbackError> {
+    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    conn.exec(
+        &format!(
+            "INSERT INTO {meta}.schema_migrations
+                 (event_kind, version, name, checksum, \"by\", exec_ms)
+             VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
+            rolled_back = journal::EventKind::RolledBack.as_str()
+        ),
+        &[
+            forward.version.as_str().into(),
+            (&forward.name).into(),
+            forward.checksum.as_str().into(),
+            applied_by.into(),
+            exec_ms.into(),
+        ],
+    )
+    .await
+    .map_err(|error| RollbackError::Journal(JournalError::Db(error.into())))?;
+    Ok(())
+}
+
+/// Run a lowered recorded inverse through PostgreSQL's native text-bind DML seam,
+/// then journal the FORWARD identity as rolled back in the same transaction.
+#[cfg(pg_seam)]
+pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    forward: &Migration,
+    inverse_steps: &[crate::render::step::PlanStep],
+    applied_by: &str,
+) -> Result<(), RollbackError> {
+    let version = forward.version.as_str();
+    let session_sql = dml_set_local_session_sql(cfg, version)
+        .map_err(|error| RollbackError::Backend(error.to_string()))?;
+    let role_sql =
+        set_local_role_sql(cfg).map_err(|error| RollbackError::Backend(error.to_string()))?;
+    let params: Vec<Vec<Option<String>>> = inverse_steps
+        .iter()
+        .map(|step| {
+            let crate::render::step::PlanStep::Dml { binds, .. } = step else {
+                return Err(RollbackError::RecordedInverseUnsupported {
+                    version: version.to_string(),
+                    reason: "non-DML step reached PostgreSQL recorded-inverse executor".to_string(),
+                });
+            };
+            postgres_dml_params(binds).map_err(|reason| RollbackError::Backend(reason))
+        })
+        .collect::<Result<_, _>>()?;
+    let started = Instant::now();
+
+    conn.batch("BEGIN").await?;
+    if let Err(error) = conn.batch(&session_sql).await {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(RollbackError::Db(error.into()));
+    }
+    if let Some(set_role) = &role_sql {
+        if let Err(error) = conn.batch(set_role).await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(RollbackError::Db(error.into()));
+        }
+    }
+
+    for (step, params) in inverse_steps.iter().zip(&params) {
+        let crate::render::step::PlanStep::Dml { template, .. } = step else {
+            unreachable!("inverse shape was validated before BEGIN")
+        };
+        if let Err(error) = conn.exec_text(template, params).await {
+            if let Err(rollback) = conn.batch("ROLLBACK").await {
+                tracing::warn!(error = %rollback, version, "zero-migrate: ROLLBACK failed after inverse DML error");
+            }
+            return Err(RollbackError::DownFailed {
+                version: version.to_string(),
+                source: error.into(),
+            });
+        }
+    }
+
+    if cfg.pg.migrator_role.is_some() {
+        if let Err(error) = conn.batch("RESET ROLE").await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(RollbackError::Db(error.into()));
+        }
+    }
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    if let Err(error) = append_rolled_back(conn, cfg, forward, applied_by, exec_ms).await {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(error);
+    }
     conn.batch("COMMIT").await?;
     Ok(())
 }

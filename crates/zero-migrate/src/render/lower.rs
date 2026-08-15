@@ -2254,6 +2254,20 @@ pub struct LoweredArtifact {
     /// touches a different table than the pending one (the case `touched_tables`
     /// does not cover).
     pub depends_on: Vec<String>,
+    /// The author's reason this artifact cannot be reversed, when its envelope
+    /// declared one.
+    ///
+    /// Carried so a rollback refusal can quote the author instead of explaining
+    /// the engine's step accounting. An operator reading "this migration lowers
+    /// to more than one journaled step" learns nothing about their own data; the
+    /// sentence the author wrote is the one that tells them whether to look for a
+    /// backup or roll forward.
+    pub irreversible: Option<String>,
+    /// The author's recorded inverse, lowered by this same [`IrAuthor`] into the
+    /// same parameterized plan-step representation as the forward operation list.
+    /// Rollback executes these steps through the ordinary apply machinery while
+    /// retaining the forward plan's journal identity.
+    pub inverse_plan: Option<AppliedPlan>,
 }
 
 impl LoweredArtifact {
@@ -3015,6 +3029,26 @@ impl IrAuthor {
         // contract is still pending, even when this artifact touches a different
         // table than the pending one.
         let depends_on = ir.depends_on.clone();
+        let irreversible = ir.irreversible.clone();
+        let inverse_plan = if let Some(inverse_ops) = &ir.inverse_ops {
+            let inverse_ir = MigrationIr {
+                ops: inverse_ops.clone(),
+                inverse_ops: None,
+                irreversible: None,
+                checksum: None,
+                ..ir.clone()
+            };
+            let (inverse_steps, _, _) = self
+                .lower_guarded_with_op_spans(&inverse_ir, guard_cfg, live)
+                .map_err(LoadAndLowerGuardedError::Lower)?;
+            Some(
+                self.assemble_plan(&inverse_ir, inverse_steps)
+                    .map_err(IrGuardedLowerError::Lower)
+                    .map_err(LoadAndLowerGuardedError::Lower)?,
+            )
+        } else {
+            None
+        };
         let plan = self
             .assemble_plan(&ir, steps)
             .map_err(IrGuardedLowerError::Lower)?;
@@ -3025,6 +3059,8 @@ impl IrAuthor {
             created_tables,
             touched_tables,
             depends_on,
+            irreversible,
+            inverse_plan,
         })
     }
 

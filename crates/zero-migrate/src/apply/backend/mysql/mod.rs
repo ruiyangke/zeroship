@@ -753,6 +753,17 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         session::rollback_one(self.conn, cfg, m, applied_by).await
     }
 
+    async fn rollback_plan_transactional(
+        &self,
+        cfg: &ExecutorConfig,
+        forward: &Migration,
+        inverse_steps: &[crate::render::step::PlanStep],
+        applied_by: &str,
+    ) -> Result<(), RollbackError> {
+        session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
+            .await
+    }
+
     /// MySQL has no statement that is refused inside a transaction the way
     /// PostgreSQL refuses the CONCURRENTLY family. Its DDL commits implicitly
     /// instead, which is a different problem and not this one.

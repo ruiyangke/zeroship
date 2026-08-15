@@ -658,6 +658,22 @@ impl MigrationBackend for SqliteBackend {
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
 
+    async fn rollback_plan_transactional(
+        &self,
+        _cfg: &ExecutorConfig,
+        forward: &Migration,
+        inverse_steps: &[crate::render::step::PlanStep],
+        applied_by: &str,
+    ) -> Result<(), RollbackError> {
+        rollback_sql::rollback_dml_plan_transactional(
+            &self.actor,
+            forward,
+            inverse_steps,
+            applied_by,
+        )
+        .await
+    }
+
     // -- parse-time validation ----------------------------------------------
 
     /// SQLite has no non-transactional DDL at all, so no `down` can object.

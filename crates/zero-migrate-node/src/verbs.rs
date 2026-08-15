@@ -469,13 +469,17 @@ pub fn parse_rollback_target(
 /// The authored set a rollback reverses, plus the journaled identities it could
 /// not represent.
 struct RollbackSet {
-    /// One `Migration` per artifact that lowered to exactly ONE DDL step.
+    /// One rollback-selection identity per artifact that lowered to exactly ONE
+    /// journaled step. Rich data steps use a metadata-only `Migration` here; their
+    /// executable reverse remains structured in `inverse_plans`.
     migrations: Vec<Migration>,
+    /// FORWARD journal version to the author's lowered inverse plan.
+    inverse_plans: std::collections::BTreeMap<String, zero_migrate::AppliedPlan>,
     /// Journaled step identity to the authored migration that owns it, for every
     /// step of a plan that lowered to more than one. These are the identities the
     /// engine refuses as `MissingFromSet`, and the map is what turns that refusal
     /// from an opaque derived version into a name the operator authored.
-    unrepresentable: std::collections::BTreeMap<String, String>,
+    unrepresentable: std::collections::BTreeMap<String, RollbackRefusal>,
     /// Logical PLAN version to the journaled STEP version it lowered to, for the
     /// single-step plans above.
     ///
@@ -490,6 +494,12 @@ struct RollbackSet {
     /// rollback can act on it, so for everything reachable here plan and step
     /// stand 1:1.
     plan_to_step: std::collections::BTreeMap<String, String>,
+}
+
+enum RollbackRefusal {
+    MultiStep { name: String },
+    DeclaredIrreversible { name: String, reason: String },
+    MissingInverse { name: String, kind: String },
 }
 
 /// Project the lowered artifacts into the authored migration set `rollback` takes.
@@ -510,21 +520,11 @@ fn rollback_migration_set(
 ) -> std::result::Result<RollbackSet, String> {
     let mut set = RollbackSet {
         migrations: Vec::with_capacity(artifacts.len()),
+        inverse_plans: std::collections::BTreeMap::new(),
         unrepresentable: std::collections::BTreeMap::new(),
         plan_to_step: std::collections::BTreeMap::new(),
     };
     for artifact in artifacts {
-        if let Ok(migration) = artifact.plan.single_step_migration() {
-            // Recorded only for the single-step case, on purpose: this is exactly
-            // the set where one plan means one journal identity, so resolving a
-            // plan version to a step version cannot be ambiguous.
-            set.plan_to_step.insert(
-                artifact.plan.version.as_str().to_string(),
-                migration.version.as_str().to_string(),
-            );
-            set.migrations.push(migration.clone());
-            continue;
-        }
         // The manifest is the one walker that already enumerates every step
         // variant's journal identity, so the refusal can name the step kind
         // without teaching this module the shape of each variant.
@@ -553,12 +553,64 @@ fn rollback_migration_set(
         // green while the property between them disappears.
         let manifest = PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
             .map_err(|error| error.to_string())?;
-        for step in &manifest.steps {
-            set.unrepresentable.insert(
-                step.version.as_str().to_string(),
-                format!("{} ({} step)", manifest.name, step.kind.as_str()),
-            );
+        let [forward] = manifest.steps.as_slice() else {
+            for step in &manifest.steps {
+                set.unrepresentable.insert(
+                    step.version.as_str().to_string(),
+                    RollbackRefusal::MultiStep {
+                        name: manifest.name.clone(),
+                    },
+                );
+            }
+            continue;
+        };
+
+        // Recorded only for the exactly-one-journal-identity case, on purpose:
+        // resolving a logical plan id to its step id cannot be ambiguous here.
+        set.plan_to_step.insert(
+            artifact.plan.version.as_str().to_string(),
+            forward.version.as_str().to_string(),
+        );
+
+        if let Some(inverse_plan) = &artifact.inverse_plan {
+            // Selection/checksum/dependency gates still operate on a Migration
+            // identity. No textual reverse is fabricated: execution looks this
+            // forward id up in `inverse_plans` and keeps template + binds native.
+            set.migrations.push(Migration {
+                version: forward.version.clone(),
+                name: forward.name.clone(),
+                up: String::new(),
+                down: None,
+                checksum: forward.checksum.clone(),
+                flags: artifact.plan.flags,
+                owner_app: artifact.plan.owner_app.clone(),
+                depends_on: artifact.plan.depends_on.clone(),
+                supersedes: artifact.plan.supersedes.clone(),
+                preconditions: artifact.plan.preconditions.clone(),
+                existence_guard: None,
+            });
+            set.inverse_plans
+                .insert(forward.version.as_str().to_string(), inverse_plan.clone());
+            continue;
         }
+
+        if let Ok(migration) = artifact.plan.single_step_migration() {
+            set.migrations.push(migration.clone());
+            continue;
+        }
+
+        let refusal = match &artifact.irreversible {
+            Some(reason) => RollbackRefusal::DeclaredIrreversible {
+                name: manifest.name.clone(),
+                reason: reason.clone(),
+            },
+            None => RollbackRefusal::MissingInverse {
+                name: manifest.name.clone(),
+                kind: forward.kind.as_str().to_string(),
+            },
+        };
+        set.unrepresentable
+            .insert(forward.version.as_str().to_string(), refusal);
     }
     Ok(set)
 }
@@ -670,11 +722,12 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
         let guard = zero_migrate::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
-        let outcome = zero_migrate::rollback_with_lock(
+        let outcome = zero_migrate::rollback_with_lock_and_inverse_plans(
             backend,
             cfg,
             &request,
             &set.migrations,
+            &set.inverse_plans,
             approval,
             applied_by,
             guard.as_ref(),
@@ -721,15 +774,22 @@ fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSe
     };
     set.unrepresentable.get(version.as_str()).map_or_else(
         || error.to_string(),
-        |owner| {
-            format!(
-                "migration {owner} cannot be rolled back: it lowers to more than one \
-                 journaled step, and a plan with several steps has no reverse - its data \
-                 steps carry no reverse SQL, so the engine reduced it to the per-step \
-                 identity {version} that no authored envelope can supply a `down` for. \
-                 Only a migration that lowers to exactly ONE step is reversible. Roll \
-                 forward with a compensating migration instead"
-            )
+        |refusal| match refusal {
+            RollbackRefusal::MultiStep { name } => format!(
+                "migration {name} cannot be rolled back: it lowers to more than one \
+                 journaled step. Only a migration that lowers to exactly ONE journaled \
+                 step is reversible; otherwise an interrupted MySQL unwind could leave \
+                 a half-reverted shape still journaled as applied. Roll forward with a \
+                 compensating migration instead"
+            ),
+            RollbackRefusal::DeclaredIrreversible { name, reason } => format!(
+                "migration {name} cannot be rolled back: the author declared it \
+                 irreversible: {reason}"
+            ),
+            RollbackRefusal::MissingInverse { name, kind } => format!(
+                "migration {name} cannot be rolled back: its single {kind} step carries \
+                 no recorded inverse"
+            ),
         },
     )
 }

@@ -645,6 +645,55 @@ fn mysql_binds(values: &[BindValue]) -> Result<Vec<Bind>, ApplyError> {
         .collect()
 }
 
+/// Execute one already-lowered DML step inside the caller-owned transaction.
+/// Apply and recorded-inverse rollback share this exact native-bind, metadata-lock
+/// and conflict-target proof path; callers own journal event selection and commit.
+#[allow(clippy::too_many_arguments)]
+async fn execute_dml_in_open_transaction<D: SqlSession>(
+    conn: &D,
+    version: &str,
+    template: &str,
+    binds: &[BindValue],
+    target_schema: &str,
+    target_table: &str,
+    mutates_data: bool,
+    conflict_target: Option<&[String]>,
+) -> Result<(), ApplyError> {
+    let target_lock_sql = mutates_data
+        .then(|| {
+            Ok::<_, crate::apply::journal::JournalError>(format!(
+                "SELECT 1 AS zero_migrate_metadata_lock FROM {}.{} LIMIT 0",
+                journal_sql::quote_ident_mysql(target_schema)?,
+                journal_sql::quote_ident_mysql(target_table)?,
+            ))
+        })
+        .transpose()?;
+    let params = mysql_binds(binds)?;
+
+    if let Some(lock_sql) = target_lock_sql.as_deref() {
+        // Open the target table inside this transaction before reading its index
+        // metadata. The shared metadata lock survives through COMMIT/ROLLBACK.
+        conn.query(lock_sql, &[]).await?;
+        super::ensure_transactional_dml_target(conn, target_schema, target_table).await?;
+        if let Some(target_columns) = conflict_target {
+            super::ensure_exact_unique_conflict_target(
+                conn,
+                target_schema,
+                target_table,
+                target_columns,
+            )
+            .await?;
+        }
+    }
+    conn.exec(template, &params)
+        .await
+        .map_err(|error| ApplyError::MigrationFailed {
+            version: version.to_string(),
+            source: error.into(),
+        })?;
+    Ok(())
+}
+
 /// Apply one structured DML statement and its completed journal event in the
 /// same InnoDB transaction. Unlike MySQL DDL, ordinary DML is transactional, so
 /// a crash cannot leave the row mutation committed without its idempotency
@@ -667,51 +716,21 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     configure_data_session(conn, cfg, version).await?;
 
     let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
-    let target_lock_sql = mutates_data
-        .then(|| {
-            Ok::<_, crate::apply::journal::JournalError>(format!(
-                "SELECT 1 AS zero_migrate_metadata_lock FROM {}.{} LIMIT 0",
-                journal_sql::quote_ident_mysql(target_schema)?,
-                journal_sql::quote_ident_mysql(target_table)?,
-            ))
-        })
-        .transpose()?;
-    let params = mysql_binds(binds)?;
     let started = Instant::now();
 
     conn.batch("START TRANSACTION").await?;
-    if let Some(lock_sql) = target_lock_sql.as_deref() {
-        let preflight: Result<(), ApplyError> = async {
-            // Open the target table inside this transaction before reading its
-            // index metadata. MySQL retains the resulting shared metadata lock
-            // through COMMIT/ROLLBACK, so a concurrent DDL cannot invalidate the
-            // catalog proof between this check and the duplicate-key statement.
-            conn.query(lock_sql, &[]).await?;
-            super::ensure_transactional_dml_target(conn, target_schema, target_table).await?;
-            if let Some(target_columns) = conflict_target {
-                super::ensure_exact_unique_conflict_target(
-                    conn,
-                    target_schema,
-                    target_table,
-                    target_columns,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = preflight {
-            if let Err(rollback) = conn.batch("ROLLBACK").await {
-                tracing::warn!(
-                    error = %rollback,
-                    version = %version,
-                    "zero-migrate: MySQL ROLLBACK failed after target-table preflight"
-                );
-            }
-            return Err(error);
-        }
-    }
-    if let Err(error) = conn.exec(template, &params).await {
+    if let Err(error) = execute_dml_in_open_transaction(
+        conn,
+        version,
+        template,
+        binds,
+        target_schema,
+        target_table,
+        mutates_data,
+        conflict_target,
+    )
+    .await
+    {
         if let Err(rollback) = conn.batch("ROLLBACK").await {
             tracing::warn!(
                 error = %rollback,
@@ -719,10 +738,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
                 "zero-migrate: MySQL ROLLBACK failed after a DML error"
             );
         }
-        return Err(ApplyError::MigrationFailed {
-            version: version.to_string(),
-            source: error.into(),
-        });
+        return Err(error);
     }
 
     if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL) {
@@ -1063,6 +1079,138 @@ pub(super) async fn insert_supersedes_edges<D: SqlSession>(
         .map_err(|e| ApplyError::Journal(journal::JournalError::Db(e.into())))?;
     }
     Ok(())
+}
+
+fn dml_apply_error_to_rollback(error: ApplyError, version: &str) -> RollbackError {
+    match error {
+        ApplyError::Db(source) => RollbackError::Db(source),
+        ApplyError::Journal(source) => RollbackError::Journal(source),
+        ApplyError::MigrationFailed { source, .. } => RollbackError::DownFailed {
+            version: version.to_string(),
+            source,
+        },
+        other => RollbackError::Backend(other.to_string()),
+    }
+}
+
+/// Execute a lowered recorded inverse as one InnoDB transaction, using the same
+/// DML bind/preflight helper as apply, then append one `rolled_back` event for the
+/// FORWARD identity before commit.
+pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    forward: &Migration,
+    inverse_steps: &[crate::render::step::PlanStep],
+    applied_by: &str,
+) -> Result<(), RollbackError> {
+    let version = forward.version.as_str();
+    let snapshot = read_session_snapshot(conn)
+        .await
+        .map_err(|error| dml_apply_error_to_rollback(error, version))?;
+    let result: Result<(), RollbackError> = async {
+        if journal_sql::has_rollback_inflight(conn, cfg, version)
+            .await
+            .map_err(RollbackError::Journal)?
+        {
+            return Err(RollbackError::Backend(format!(
+                "mysql migration {version} has a rollback marker from an interrupted unwind; zero-migrate will not run its recorded inverse over an unverified partially-reverted shape"
+            )));
+        }
+
+        configure_data_session(conn, cfg, version)
+            .await
+            .map_err(|error| dml_apply_error_to_rollback(error, version))?;
+        conn.batch("START TRANSACTION")
+            .await
+            .map_err(|error| RollbackError::Db(error.into()))?;
+        let started = Instant::now();
+
+        for step in inverse_steps {
+            let crate::render::step::PlanStep::Dml {
+                template,
+                binds,
+                target_schema,
+                target_table,
+                conflict_target,
+                mutates_data,
+                ..
+            } = step
+            else {
+                let _ = conn.batch("ROLLBACK").await;
+                return Err(RollbackError::RecordedInverseUnsupported {
+                    version: version.to_string(),
+                    reason: "non-DML step reached MySQL recorded-inverse executor".to_string(),
+                });
+            };
+            if let Err(error) = execute_dml_in_open_transaction(
+                conn,
+                version,
+                template,
+                binds,
+                target_schema,
+                target_table,
+                *mutates_data,
+                conflict_target.as_deref(),
+            )
+            .await
+            {
+                if let Err(rollback) = conn.batch("ROLLBACK").await {
+                    tracing::warn!(error = %rollback, version, "zero-migrate: MySQL ROLLBACK failed after inverse DML error");
+                }
+                return Err(dml_apply_error_to_rollback(error, version));
+            }
+        }
+
+        if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL)
+        {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(dml_apply_error_to_rollback(error, version));
+        }
+
+        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        if let Err(error) = journal_sql::record_rolled_back(
+            conn,
+            cfg,
+            version,
+            &forward.name,
+            forward.checksum.as_str(),
+            applied_by,
+            exec_ms,
+        )
+        .await
+        {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(RollbackError::Journal(error));
+        }
+
+        if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT)
+        {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(dml_apply_error_to_rollback(error, version));
+        }
+
+        match conn.batch("COMMIT").await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Err(rollback) = conn.batch("ROLLBACK").await {
+                    tracing::warn!(error = %rollback, version, "zero-migrate: MySQL ROLLBACK failed after ambiguous inverse COMMIT failure");
+                }
+                Err(RollbackError::Db(error.into()))
+            }
+        }
+    }
+    .await;
+
+    let restored = restore_session_snapshot(conn, &snapshot).await;
+    match (result, restored) {
+        (Err(error), Err(restore)) => {
+            tracing::warn!(error = %restore, version, "zero-migrate: failed to restore MySQL session after inverse rollback error");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(RollbackError::Db(error.into())),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// Roll back ONE migration: run the `down`, then append the `rolled_back` event

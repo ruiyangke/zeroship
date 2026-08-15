@@ -448,6 +448,22 @@ pub trait MigrationBackend {
         applied_by: &str,
     ) -> Result<(), RollbackError>;
 
+    /// Execute an author's lowered inverse plan as one rollback unit, then append
+    /// exactly one `rolled_back` event using the FORWARD migration identity.
+    ///
+    /// The generic rollback planner admits only transactional parameterized DML
+    /// steps here. Backends must bind their values through the same native-bind
+    /// seam used by [`Self::run_dml_step`]; the inverse is never rendered or
+    /// interpolated into SQL text. The mutation(s) and the forward identity's
+    /// journal event must commit atomically.
+    async fn rollback_plan_transactional(
+        &self,
+        cfg: &ExecutorConfig,
+        forward: &Migration,
+        inverse_steps: &[crate::render::step::PlanStep],
+        applied_by: &str,
+    ) -> Result<(), RollbackError>;
+
     // -- parse-time validation ----------------------------------------------
 
     /// Validate the recovery contract for a **non-transactional** migration's

@@ -40,6 +40,7 @@ use std::time::Instant;
 
 use crate::apply::executor::RollbackError;
 use crate::model::migration::Migration;
+use crate::render::step::PlanStep;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -95,6 +96,46 @@ pub(crate) async fn rollback_one_transactional(
     run_rollback_txn(actor, m, down, applied_by).await
 }
 
+/// Execute a lowered inverse's parameterized DML steps in one SQLite transaction
+/// and append one `rolled_back` event for the forward journal identity.
+pub(crate) async fn rollback_dml_plan_transactional(
+    actor: &MigrationActor,
+    forward: &Migration,
+    inverse_steps: &[PlanStep],
+    applied_by: &str,
+) -> Result<(), RollbackError> {
+    journal_sql::ensure_journal(actor).await.map_err(rb_err)?;
+    let started = Instant::now();
+
+    actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
+    actor.exec("BEGIN IMMEDIATE").await.map_err(rb_err)?;
+
+    let result = async {
+        actor.set_mode(Mode::CreatorUp).await?;
+        for step in inverse_steps {
+            let PlanStep::Dml {
+                template, binds, ..
+            } = step
+            else {
+                return Err(SqliteActorError::Exec(
+                    "non-DML step reached SQLite recorded-inverse executor".to_string(),
+                ));
+            };
+            let sqlite_binds: Vec<super::actor::SqliteBind> = binds
+                .iter()
+                .map(super::actor::SqliteBind::from_bind)
+                .collect();
+            actor.exec_params(template, &sqlite_binds).await?;
+        }
+
+        actor.set_mode(Mode::EngineJournal).await?;
+        append_rolled_back(actor, forward, applied_by, started).await
+    }
+    .await;
+
+    finish_rollback_transaction(actor, forward, result).await
+}
+
 /// The transactional body, factored so a failure path can ROLLBACK + report a wedge
 /// (the same autocommit-probe discipline the apply path uses).
 async fn run_rollback_txn(
@@ -121,23 +162,39 @@ async fn run_rollback_txn(
         // prepares from the creator `down`, mode flip strictly between. A
         // rolled_back row leaves kind/phase/outcome NULL (the event-shape CHECK).
         actor.set_mode(Mode::EngineJournal).await?;
-        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        let version = journal_sql::sql_lit(m.version.as_str());
-        let name = journal_sql::sql_lit(&m.name);
-        let checksum = journal_sql::sql_lit(m.checksum.as_str());
-        let by = journal_sql::sql_lit(applied_by);
-        actor
-            .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations \
-                 (event_kind, version, name, checksum, \"by\", exec_ms) \
-                 VALUES ('{rolled_back}', {version}, {name}, {checksum}, {by}, {exec_ms})",
-                rolled_back = crate::apply::journal::EventKind::RolledBack.as_str()
-            ))
-            .await?;
-        Ok::<(), SqliteActorError>(())
+        append_rolled_back(actor, m, applied_by, started).await
     }
     .await;
 
+    finish_rollback_transaction(actor, m, result).await
+}
+
+async fn append_rolled_back(
+    actor: &MigrationActor,
+    m: &Migration,
+    applied_by: &str,
+    started: Instant,
+) -> Result<(), SqliteActorError> {
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let version = journal_sql::sql_lit(m.version.as_str());
+    let name = journal_sql::sql_lit(&m.name);
+    let checksum = journal_sql::sql_lit(m.checksum.as_str());
+    let by = journal_sql::sql_lit(applied_by);
+    actor
+        .exec(&format!(
+            "INSERT INTO \"_mig\".schema_migrations \
+             (event_kind, version, name, checksum, \"by\", exec_ms) \
+             VALUES ('{rolled_back}', {version}, {name}, {checksum}, {by}, {exec_ms})",
+            rolled_back = crate::apply::journal::EventKind::RolledBack.as_str()
+        ))
+        .await
+}
+
+async fn finish_rollback_transaction(
+    actor: &MigrationActor,
+    m: &Migration,
+    result: Result<(), SqliteActorError>,
+) -> Result<(), RollbackError> {
     match result {
         Ok(()) => {
             actor

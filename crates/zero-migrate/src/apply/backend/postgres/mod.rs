@@ -190,6 +190,17 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         session::rollback_one_transactional(self.conn, cfg, m, applied_by).await
     }
 
+    async fn rollback_plan_transactional(
+        &self,
+        cfg: &ExecutorConfig,
+        forward: &Migration,
+        inverse_steps: &[crate::render::step::PlanStep],
+        applied_by: &str,
+    ) -> Result<(), RollbackError> {
+        session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
+            .await
+    }
+
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
         session::validate_non_txn_idempotent(m)
     }

@@ -58,6 +58,8 @@ use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::guard::GuardError;
 use crate::model::migration::{Migration, MigrationId};
+use crate::render::plan::AppliedPlan;
+use crate::render::step::PlanStep;
 
 /// Whether an apply sub-batch must acquire/release the project advisory lock
 /// itself, or whether an OUTER caller already holds it for the whole operation.
@@ -2106,6 +2108,19 @@ pub enum RollbackError {
         /// Its human-readable name.
         name: String,
     },
+    /// A recorded inverse reached rollback in a shape the atomic inverse executor
+    /// cannot safely run. The current contract is deliberately narrow:
+    /// transactional parameterized DML only. Refused during the all-up-front
+    /// planning pass, before an earlier `down` can commit.
+    #[error(
+        "migration {version} has a recorded inverse that rollback cannot execute safely: {reason}"
+    )]
+    RecordedInverseUnsupported {
+        /// The forward journal identity being unwound.
+        version: String,
+        /// The unsupported step/transactionality detail.
+        reason: String,
+    },
     /// The rollback would `force`-SKIP an irreversible SQUASH. Skipping any other
     /// irreversible migration only forgoes its own undo; skipping a squash leaves
     /// its supersession standing over versions this same rollback then unwinds, so
@@ -2581,6 +2596,38 @@ pub fn plan_rollback<'a>(
     approval: Approval,
     guard: &dyn crate::guard::MigrationGuard,
 ) -> Result<RollbackPlan<'a>, RollbackError> {
+    plan_rollback_with_inverse_plans(
+        request,
+        migrations,
+        &std::collections::BTreeMap::new(),
+        applied,
+        outstanding,
+        non_txn_downs,
+        approval,
+        guard,
+    )
+}
+
+/// The structured-inverse peer of [`plan_rollback`].
+///
+/// `inverse_plans` is keyed by the FORWARD journal version. Its values retain
+/// parameterized DML templates and native bind values; they never become textual
+/// `Migration.down` strings. Selection, checksum, dependency, approval and
+/// ordering gates remain identical to ordinary rollback.
+///
+/// # Errors
+/// As [`plan_rollback`], plus [`RollbackError::RecordedInverseUnsupported`] when
+/// a recorded inverse contains anything other than transactional DML.
+pub fn plan_rollback_with_inverse_plans<'a>(
+    request: &RollbackRequest,
+    migrations: &'a [Migration],
+    inverse_plans: &std::collections::BTreeMap<String, AppliedPlan>,
+    applied: &[AppliedRecord],
+    outstanding: &[crate::apply::journal::PendingContract],
+    non_txn_downs: &std::collections::BTreeMap<String, String>,
+    approval: Approval,
+    guard: &dyn crate::guard::MigrationGuard,
+) -> Result<RollbackPlan<'a>, RollbackError> {
     // (1) Approval. A `down` is destructive by construction, so this is not a
     //     per-migration flag question: rollback always requires it.
     if !matches!(approval, Approval::Approved) {
@@ -2632,11 +2679,13 @@ pub fn plan_rollback<'a>(
     let mut steps: Vec<&Migration> = Vec::with_capacity(chosen.len());
     for m in &chosen {
         let version = m.version.as_str();
+        let inverse = inverse_plans.get(version);
 
         // (5a) Reversible? `force` alone is not enough - forcing past an
         //      irreversible step discards data, so it also takes an explicit backup
         //      acknowledgement.
-        let Some(down) = m.down.as_deref() else {
+        let down = m.down.as_deref();
+        if down.is_none() && inverse.is_none() {
             // A SQUASH is never skippable. For any other migration a skip only
             // forgoes that migration's own undo; for a squash it leaves the
             // supersession standing over versions this same rollback unwinds, and
@@ -2661,7 +2710,40 @@ pub fn plan_rollback<'a>(
                 version: version.to_string(),
                 name: m.name.clone(),
             });
-        };
+        }
+
+        if let Some(inverse) = inverse {
+            for (index, step) in inverse.steps.iter().enumerate() {
+                match step {
+                    PlanStep::Dml {
+                        transactional: true,
+                        ..
+                    } => {}
+                    PlanStep::Dml {
+                        transactional: false,
+                        ..
+                    } => {
+                        return Err(RollbackError::RecordedInverseUnsupported {
+                            version: version.to_string(),
+                            reason: format!(
+                                "inverse step {} declares transaction:false; rollback must commit the complete inverse and rolled_back journal event atomically",
+                                index + 1
+                            ),
+                        });
+                    }
+                    other => {
+                        return Err(RollbackError::RecordedInverseUnsupported {
+                            version: version.to_string(),
+                            reason: format!(
+                                "inverse step {} lowers to {}; recorded inverse rollback currently supports transactional DML only",
+                                index + 1,
+                                rollback_inverse_step_kind(other)
+                            ),
+                        });
+                    }
+                }
+            }
+        }
 
         // (5b) Transactional? The executor runs each `down` inside a transaction, so
         //      a migration marked non-transactional would fail at execution. Refuse
@@ -2676,20 +2758,24 @@ pub fn plan_rollback<'a>(
         //      found in the reverse SQL itself, which catches the migration that
         //      declares `transaction: true` and then reverses itself with a statement
         //      the server will not run inside a transaction block.
-        if let Some(reason) = non_txn_downs.get(version) {
-            return Err(RollbackError::NonTransactionalDown {
-                version: version.to_string(),
-                reason: reason.clone(),
-            });
+        if inverse.is_none() {
+            if let Some(reason) = non_txn_downs.get(version) {
+                return Err(RollbackError::NonTransactionalDown {
+                    version: version.to_string(),
+                    reason: reason.clone(),
+                });
+            }
         }
 
-        // (5c) The `down` is author-supplied SQL that reaches the database, so it
-        //      gets the same line-1 guard the `up` does. Skipping this would make
-        //      `down` a way to run exactly what `up` is refused.
-        guard.check(down).map_err(|source| RollbackError::Guard {
-            version: version.to_string(),
-            source,
-        })?;
+        // (5c) A textual `down` is author-supplied SQL and gets the line-1 guard.
+        // A structured inverse was already validated and guard-lowered by the same
+        // IrAuthor as its forward plan; its DML values remain native binds.
+        if let (None, Some(down)) = (inverse, down) {
+            guard.check(down).map_err(|source| RollbackError::Guard {
+                version: version.to_string(),
+                source,
+            })?;
+        }
 
         steps.push(m);
     }
@@ -2785,6 +2871,17 @@ pub fn plan_rollback<'a>(
     })
 }
 
+fn rollback_inverse_step_kind(step: &PlanStep) -> &'static str {
+    match step {
+        PlanStep::Ddl(_) => "DDL",
+        PlanStep::Dml { .. } => "DML",
+        PlanStep::Backfill { .. } => "backfill",
+        PlanStep::AlterPrimaryKey(_) => "alterPrimaryKey",
+        PlanStep::SynchronizeIdentity(_) => "synchronizeIdentity",
+        PlanStep::OnlineRename(_) => "onlineRename",
+    }
+}
+
 /// Roll back migrations: plan every refusal, then run each `down` in order.
 ///
 /// The counterpart to [`apply`], and the driver [`plan_rollback`] was written for.
@@ -2860,6 +2957,35 @@ pub async fn rollback_with_lock<B: MigrationBackend>(
     guard: &dyn crate::guard::MigrationGuard,
     lock_mode: LockMode,
 ) -> Result<RollbackOutcome, RollbackError> {
+    rollback_with_lock_and_inverse_plans(
+        backend,
+        cfg,
+        request,
+        migrations,
+        &std::collections::BTreeMap::new(),
+        approval,
+        applied_by,
+        guard,
+        lock_mode,
+    )
+    .await
+}
+
+/// Roll back with structured inverse plans keyed by their FORWARD journal id.
+/// Existing SQL-only callers use [`rollback_with_lock`]; host IR rollback uses
+/// this entry so parameterized inverse DML never crosses a text `down` seam.
+#[allow(clippy::too_many_arguments)]
+pub async fn rollback_with_lock_and_inverse_plans<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    request: &RollbackRequest,
+    migrations: &[Migration],
+    inverse_plans: &std::collections::BTreeMap<String, AppliedPlan>,
+    approval: Approval,
+    applied_by: &str,
+    guard: &dyn crate::guard::MigrationGuard,
+    lock_mode: LockMode,
+) -> Result<RollbackOutcome, RollbackError> {
     if lock_mode == LockMode::Acquire {
         backend
             .acquire_project_lock(cfg)
@@ -2867,7 +2993,14 @@ pub async fn rollback_with_lock<B: MigrationBackend>(
             .map_err(|e| RollbackError::Backend(e.to_string()))?;
     }
     let result = rollback_locked(
-        backend, cfg, request, migrations, approval, applied_by, guard,
+        backend,
+        cfg,
+        request,
+        migrations,
+        inverse_plans,
+        approval,
+        applied_by,
+        guard,
     )
     .await;
     if lock_mode == LockMode::AlreadyHeld {
@@ -2889,6 +3022,7 @@ async fn rollback_locked<B: MigrationBackend>(
     cfg: &ExecutorConfig,
     request: &RollbackRequest,
     migrations: &[Migration],
+    inverse_plans: &std::collections::BTreeMap<String, AppliedPlan>,
     approval: Approval,
     applied_by: &str,
     guard: &dyn crate::guard::MigrationGuard,
@@ -2934,9 +3068,10 @@ async fn rollback_locked<B: MigrationBackend>(
         })
         .collect();
 
-    let plan = plan_rollback(
+    let plan = plan_rollback_with_inverse_plans(
         request,
         migrations,
+        inverse_plans,
         &applied,
         &outstanding,
         &non_txn_downs,
@@ -2944,11 +3079,28 @@ async fn rollback_locked<B: MigrationBackend>(
         guard,
     )?;
 
+    // Feature probes and inverse-shape validation finish before the first down,
+    // preserving rollback's all-up-front refusal contract.
+    for m in &plan.steps {
+        if let Some(inverse) = inverse_plans.get(m.version.as_str()) {
+            backend
+                .verify_database_requirements(&inverse.database_requirements)
+                .await
+                .map_err(|error| RollbackError::Backend(error.to_string()))?;
+        }
+    }
+
     let mut rolled_back = Vec::with_capacity(plan.steps.len());
     for m in &plan.steps {
-        backend
-            .rollback_one_transactional(cfg, m, applied_by)
-            .await?;
+        if let Some(inverse) = inverse_plans.get(m.version.as_str()) {
+            backend
+                .rollback_plan_transactional(cfg, m, &inverse.steps, applied_by)
+                .await?;
+        } else {
+            backend
+                .rollback_one_transactional(cfg, m, applied_by)
+                .await?;
+        }
         rolled_back.push(m.version.as_str().to_string());
     }
 
@@ -3098,6 +3250,58 @@ mod rollback_selection_tests {
             mig(b, Some("DROP TABLE b"), vec![]),
             mig(c, Some("DROP TABLE c"), vec![]),
         ]
+    }
+
+    #[test]
+    fn a_transactional_parameterized_inverse_makes_a_data_identity_reversible() {
+        let version = MigrationId::generate();
+        let migration = mig(version.clone(), None, vec![]);
+        let inverse = AppliedPlan {
+            version: version.clone(),
+            name: migration.name.clone(),
+            steps: vec![PlanStep::Dml {
+                version: version.clone(),
+                checksum: migration.checksum.clone(),
+                name: "delete seeded row".to_string(),
+                template: "DELETE FROM acct WHERE id = $1".to_string(),
+                binds: vec![crate::render::step::BindValue::Int(1)],
+                target_schema: "app".to_string(),
+                target_table: "acct".to_string(),
+                conflict_target: None,
+                mutates_data: true,
+                transactional: true,
+                destructive: true,
+                requires_approval: true,
+                owner_app: migration.owner_app.clone(),
+            }],
+            database_requirements: crate::render::plan::DatabaseRequirements::default(),
+            checksum: migration.checksum.clone(),
+            flags: migration.flags,
+            dialect_scope: crate::render::step::DialectScope::Both,
+            rollbackable: false,
+            owner_app: migration.owner_app.clone(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+        };
+        let inverses = std::collections::BTreeMap::from([(version.as_str().to_string(), inverse)]);
+        let applied = versions(std::slice::from_ref(&migration));
+
+        let plan = super::plan_rollback_with_inverse_plans(
+            &req(RollbackTarget::All),
+            std::slice::from_ref(&migration),
+            &inverses,
+            &applied,
+            &[],
+            &std::collections::BTreeMap::new(),
+            Approval::Approved,
+            &PermissiveGuard,
+        )
+        .expect("a structured inverse supplies reversibility without text down SQL");
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].version, version);
+        assert!(plan.steps[0].down.is_none(), "no text down was fabricated");
     }
 
     #[test]
