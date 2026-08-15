@@ -2716,7 +2716,34 @@ fn validate_index_names_across_ops(
 
     for (op_index, op) in ir.ops.iter().enumerate() {
         match op {
-            Op::CreateTable { name, indexes, .. } => {
+            Op::CreateTable {
+                name,
+                columns,
+                indexes,
+                ..
+            } => {
+                // A column marked `unique` renders no inline UNIQUE; it renders a
+                // follow-on `CREATE UNIQUE INDEX` under a DERIVED name. That name
+                // never appears in the IR, so an explicit index declared under it
+                // collides invisibly unless the derivation is consulted here.
+                //
+                // Calls the renderer's own function rather than restating
+                // `{table}_{column}_key`: two encodings of one naming rule drift,
+                // and the drift would reopen exactly this hole.
+                for column in columns {
+                    if column.unique == Some(true) {
+                        let derived =
+                            crate::render::declarative::unique_index_name(name, &column.name);
+                        claim(
+                            &mut live,
+                            &derived,
+                            name,
+                            op_index,
+                            target_dialect,
+                            ts_locations,
+                        )?;
+                    }
+                }
                 for index in indexes {
                     if let Some(index_name) = index.name.as_deref() {
                         claim(

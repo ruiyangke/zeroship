@@ -132,3 +132,47 @@ fn an_index_op_colliding_with_an_inline_index_is_refused() {
     verdict_envelope(ops, Dialect::Postgres)
         .expect_err("an inline index and a later createIndex under one name collide the same way");
 }
+
+// ---------------------------------------------------------------------------
+// The DERIVED-name route: a column's `unique` produces an index name of its own.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_explicit_index_colliding_with_a_derived_unique_name_is_refused() {
+    // A column marked `unique` does not render UNIQUE inline; it renders a
+    // follow-on `CREATE UNIQUE INDEX "<table>_<column>_key"`. An explicit index
+    // declared under that same derived name collides with it, and both carry
+    // `IF NOT EXISTS`, so the second is skipped and the apply succeeds without it.
+    //
+    // Measured before the fix:
+    //     CREATE UNIQUE INDEX IF NOT EXISTS "a_v_key" ON "prj_ir"."a" ("v")
+    //     CREATE INDEX IF NOT EXISTS "a_v_key" ON "prj_ir"."a" ("w")
+    //
+    // This route was invisible to the first two fixes because one of the two
+    // names never appears in the IR — it is derived during lowering.
+    let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"a_v_key","columns":[{"kind":"column","name":"w"}]}]}"#;
+    let refusal = verdict_envelope(ops, Dialect::Postgres).expect_err(
+        "an explicit index named exactly what the unique column derives is silently \
+         skipped at apply, leaving the declared index absent",
+    );
+    assert!(
+        refusal.to_lowercase().contains("index"),
+        "the refusal must name the index as the problem: {refusal}"
+    );
+}
+
+#[test]
+fn a_unique_column_alongside_a_differently_named_index_is_still_allowed() {
+    // The control: the derived name and the explicit name do not collide, which
+    // is the ordinary case and must not be swept up.
+    let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"a_w_idx","columns":[{"kind":"column","name":"w"}]}]}"#;
+    verdict_envelope(ops, Dialect::Postgres)
+        .expect("a unique column and an unrelated index name must coexist");
+}
+
+#[test]
+fn two_unique_columns_are_still_allowed() {
+    // Each derives its own name, so they cannot collide with each other.
+    let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true,"unique":true}],"primaryKey":["c"]}"#;
+    verdict_envelope(ops, Dialect::Postgres).expect("two unique columns derive distinct names");
+}

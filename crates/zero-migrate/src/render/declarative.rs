@@ -3950,7 +3950,7 @@ pub fn is_system_managed_constraint(
 /// even though neither was truncated. Because `render_drop_index` classifies a
 /// unique index drop as destructive, that disagreement surfaces as a migration
 /// waiting on approval rather than as silent churn.
-fn unique_index_name(table: &str, field: &str) -> String {
+pub(crate) fn unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
 }
 
