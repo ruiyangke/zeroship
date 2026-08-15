@@ -124,15 +124,14 @@ fn dropping_a_table_and_recreating_it_is_still_allowed() {
     .expect("drop-then-recreate, then use, is a real migration pattern");
 }
 
-// MEASURED AND NOT FIXED, stated rather than left implied: the COLUMN-level
-// version of this has the same defect.
+// SINCE FIXED, in `op_references_a_dropped_column.rs`. Left here because the
+// reasoning below is what shaped that fix:
 //
 //     ALTER TABLE "prj_ir"."a" DROP COLUMN "v"
 //     CREATE INDEX IF NOT EXISTS "ix" ON "prj_ir"."a" ("v")
 //
-// lowers today and fails at the server with `column "v" does not exist`. It is
-// left out because catching it needs different machinery: this check compares one
-// name per op via `touched_table`, while a column case needs every column each op
-// REFERENCES — index elements, constraint column lists, backfill targets — which
-// is a wider surface than the table name and belongs in its own change with its
-// own controls.
+// lowered and failed at the server with `column "v" does not exist`. It needed
+// different machinery: this check compares one name per op via `touched_table`,
+// while the column case needs every column each op REFERENCES - index elements,
+// constraint column lists, backfill targets - a wider surface than the table
+// name, which is why it went in its own change with its own controls.

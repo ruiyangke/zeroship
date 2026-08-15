@@ -179,6 +179,7 @@ pub fn validate_ir_authorized(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_authorized(op, target_dialect, op_index, ts, schema_scope, authority)?;
     }
+    validate_no_name_is_claimed_twice(ir, target_dialect, ts_locations)?;
     validate_no_op_targets_a_renamed_away_table(ir, target_dialect, ts_locations)?;
     validate_no_op_references_a_dropped_column(ir, target_dialect, ts_locations)?;
     validate_no_column_uses_a_dropped_named_object(ir, target_dialect, ts_locations)?;
@@ -2798,6 +2799,184 @@ fn validate_no_column_uses_a_dropped_named_object(
 /// column's expression and a backfill `set` value all name columns too, but as
 /// expression trees rather than identifier lists; walking those is a separate job
 /// and they still fail loudly at the server.
+/// Refuse a migration that claims the same NEW name twice.
+///
+/// The mirror of [`validate_no_op_targets_a_renamed_away_table`]: that one
+/// refuses USING a name after it stops being valid, this refuses CREATING a name
+/// that is already taken earlier in the same envelope. Left alone these lower and
+/// fail at the server with `relation "a" already exists`, `column "n" of relation
+/// "a" already exists`, `column "d" specified more than once`.
+///
+/// The engine already refuses two members of this family - `createEnum` twice is
+/// a `duplicate definition` at lower, and a `renameColumn` onto an existing
+/// column is refused there too - so this closes an asymmetry rather than
+/// inventing a rule.
+///
+/// TRACKS ONLY WHAT THIS ENVELOPE CREATES. `validate_ir` has no live schema, so a
+/// `createTable` colliding with a table already in the database is a different
+/// question and is deliberately not answered here.
+///
+/// CONSTRAINT NAMES ARE OUT, on measured grounds: live PostgreSQL accepts the
+/// same CHECK name on two tables and rejects the same UNIQUE name, because UNIQUE
+/// creates a schema-level index and CHECK does not. That rule has to be kind- and
+/// dialect-aware, which is its own change.
+fn validate_no_name_is_claimed_twice(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    let refuse = |op_index: usize, what: &str, fix: &str| AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason: what.to_string(),
+        suggested_fix: Some(fix.to_string()),
+    };
+
+    // Only names this envelope brings into existence, and only while they last.
+    // KEYED ON THE SCHEMA QUALIFIER TOO. Two `createTable` ops may share a name in
+    // different schemas and be entirely distinct tables - an existing platform test
+    // pins exactly that shape, and a name-only key refused it.
+    //
+    // An unqualified op and a qualified one naming the SAME table compare unequal
+    // here, so this MISSES that pairing rather than refusing it. Missing is the
+    // right direction: resolving the default schema is the resolver's job, and
+    // guessing at it here would refuse legitimate migrations.
+    //
+    // COLUMNS ARE KEYED BY TABLE, not held in one flat set, and that is a cost
+    // decision rather than a style one. A flat set makes dropping or renaming a
+    // table a scan of every column in the migration, which is O(ops^2) over an
+    // envelope of drops - the `f664_scaling` guard caught exactly that in the
+    // first version of this check. Nested, every operation here is logarithmic.
+    type Key<'a> = (Option<&'a str>, &'a str);
+    let mut tables: BTreeSet<Key> = BTreeSet::new();
+    let mut columns: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        match op {
+            Op::CreateTable {
+                name,
+                columns: cols,
+                schema,
+                ..
+            } => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                if tables.contains(&key) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createTable claims the name {name:?}, but an earlier \
+                             operation in this migration already created a table with that \
+                             name and nothing dropped or renamed it in between"
+                        ),
+                        "drop or rename the first table before recreating the name",
+                    ));
+                }
+                // Decidable from this single op, and the server says `column "d"
+                // specified more than once`.
+                let mut seen: BTreeSet<&str> = BTreeSet::new();
+                for column in cols {
+                    if !seen.insert(column.name.as_str()) {
+                        return Err(refuse(
+                            op_index,
+                            &format!(
+                                "this createTable names column {:?} more than once",
+                                column.name
+                            ),
+                            "remove the duplicate column",
+                        ));
+                    }
+                }
+                tables.insert(key);
+                columns.insert(key, cols.iter().map(|c| c.name.as_str()).collect());
+            }
+            Op::DropTable { table, schema, .. } => {
+                let key: Key = (schema.as_deref(), table.as_str());
+                tables.remove(&key);
+                columns.remove(&key);
+            }
+            Op::RenameTable {
+                table, to, schema, ..
+            } => {
+                let from_key: Key = (schema.as_deref(), table.as_str());
+                let to_key: Key = (schema.as_deref(), to.as_str());
+                if tables.contains(&to_key) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this renameTable targets the name {to:?}, but an earlier \
+                             operation in this migration already created a table with that \
+                             name and nothing dropped it in between"
+                        ),
+                        "drop the table occupying the target name, or rename to a free name",
+                    ));
+                }
+                // The name moves, and so does everything scoped to it.
+                if tables.remove(&from_key) {
+                    tables.insert(to_key);
+                }
+                if let Some(moved) = columns.remove(&from_key) {
+                    columns.insert(to_key, moved);
+                }
+            }
+            Op::AddColumn {
+                table,
+                column,
+                schema,
+                ..
+            } => {
+                let key: Key = (schema.as_deref(), table.as_str());
+                if columns
+                    .get(&key)
+                    .is_some_and(|live| live.contains(column.as_str()))
+                {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this addColumn claims the name {column:?} on table {table:?}, \
+                             but an earlier operation in this migration already added or \
+                             defined it and nothing dropped it in between"
+                        ),
+                        "drop the existing column first, or alter it instead of adding it",
+                    ));
+                }
+                columns.entry(key).or_default().insert(column.as_str());
+            }
+            Op::DropColumn {
+                table,
+                column,
+                schema,
+                ..
+            } => {
+                if let Some(live) = columns.get_mut(&(schema.as_deref(), table.as_str())) {
+                    live.remove(column.as_str());
+                }
+            }
+            Op::RenameColumn {
+                table,
+                from,
+                to,
+                schema,
+                ..
+            } => {
+                // Unconditional: after the rename the new name is occupied whether or
+                // not this envelope is the thing that created the old one.
+                let key: Key = (schema.as_deref(), table.as_str());
+                let live = columns.entry(key).or_default();
+                live.remove(from.as_str());
+                live.insert(to.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Every column an op names inside an EXPRESSION, attributed to the op's target
 /// table.
 ///

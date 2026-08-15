@@ -19,8 +19,10 @@
 //!         ERROR: relation "objdrop.sq" does not exist
 //!
 //! COVERAGE IS BOUNDED, as in the column case: this reaches type and sequence
-//! names carried as plain identifiers on a column — a column's declared type and
-//! a `nextval` default. It does not reach names buried in expressions.
+//! names carried as plain identifiers on a column - a column's declared type and
+//! a `nextval` default. COLUMN names buried in expressions are reached by
+//! `expr_references_a_dropped_column.rs`; TYPE names inside an expression (a cast
+//! to a dropped domain, say) are not.
 
 mod support;
 

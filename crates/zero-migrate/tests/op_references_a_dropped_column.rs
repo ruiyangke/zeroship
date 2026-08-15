@@ -17,11 +17,14 @@
 //! COVERAGE IS BOUNDED AND SAID SO OUT LOUD. This checks the places a column name
 //! is a plain identifier in the IR: the `column` field of the alter-column family,
 //! `createIndex` elements, and the column lists of UNIQUE and foreign-key
-//! constraints. It does NOT reach columns named inside expressions — a CHECK body,
-//! a generated-column expression, a backfill `set` value — because those are
-//! expression trees rather than identifier lists, and walking them is a separate
-//! job with its own controls. Those cases still fail at the server, loudly, as
-//! they do today.
+//! constraints.
+//!
+//! EXPRESSIONS ARE COVERED TOO, in `expr_references_a_dropped_column.rs`. This
+//! fixture once recorded them as out of reach on the grounds that they are trees
+//! rather than identifier lists. That premise was right and the conclusion was
+//! wrong: `Expr` is a closed AST and the renderer already carries an exhaustive
+//! walk over it, so only the wiring was missing. A backfill `set` value is the
+//! one expression site still unreached.
 
 mod support;
 
