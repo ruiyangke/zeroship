@@ -507,7 +507,8 @@ fn write_app_splices_the_value_and_leaves_every_other_byte() {
     std::fs::write(&path, FULL).unwrap();
 
     let c = ProjectConfig::load(&path).unwrap();
-    assert_eq!(c.write_app("33333333-3333-4333-8333-333333333333").unwrap(), WriteOutcome::Spliced);
+    c.write_app("33333333-3333-4333-8333-333333333333")
+        .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
     let expected = FULL.replace(
@@ -519,21 +520,126 @@ fn write_app_splices_the_value_and_leaves_every_other_byte() {
     std::fs::remove_file(&path).ok();
 }
 
-/// With no `app` member the writeback REFUSES rather than inventing an
-/// insertion point. Inserting into arbitrary JSONC is where round-trip
-/// libraries get ugly; the creator gets the line to paste instead.
+/// Appending changes only the insertion site. This one exact comparison covers
+/// comments, member order, an interior blank line, trailing commas, CRLF, and
+/// multibyte text together so preserving five while losing one cannot pass.
 #[test]
-fn write_app_refuses_to_insert_a_missing_member() {
-    let text = FULL.replace("\"app\": \"11111111-1111-4111-8111-111111111111\",\n  ", "");
-    let dir = std::env::temp_dir().join(format!("zs-pc-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("noapp.jsonc");
+fn write_app_appends_a_missing_member_without_reformatting_the_file() {
+    let multibyte = "caf\u{e9}-\u{1f600}";
+    let text = format!(
+        "{{\r\n\
+         \x20\x20// {multibyte}\r\n\
+         \x20\x20\"$schema\": \"https://zeroship.ai/schema/project-v1.json\",\r\n\
+         \x20\x20\"name\": \"demo-app\",\r\n\
+         \x20\x20\"control\": \"https://control.zeroship.ai\",\r\n\
+         \x20\x20\"runtime_date\": \"2026-08-14\",\r\n\
+         \r\n\
+         \x20\x20// Keep this group and its blank line.\r\n\
+         \x20\x20\"build\": {{ \"mode\": \"full\", \"dist\": \"dist\", \"output\": \"dist/app.zship\" }},\r\n\
+         \x20\x20\"migrations\": {{ \"dir\": \"migrations\", \"out\": \"generated/zeroship\" }},\r\n\
+         \x20\x20\"secrets\": [],\r\n\
+         }}\r\n"
+    );
+    let expected = text.replacen(
+        "\r\n}\r\n",
+        "\r\n  \"app\": \"44444444-4444-4444-8444-444444444444\",\r\n}\r\n",
+        1,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("append.jsonc");
     std::fs::write(&path, &text).unwrap();
 
-    let c = ProjectConfig::load(&path).unwrap();
-    assert_eq!(c.write_app("44444444-4444-4444-8444-444444444444").unwrap(), WriteOutcome::PrintInstead);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the file must be untouched");
-    std::fs::remove_file(&path).ok();
+    let config = ProjectConfig::load(&path).unwrap();
+    config
+        .write_app("44444444-4444-4444-8444-444444444444")
+        .unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after, expected,
+        "the new final member must be the only formatting change"
+    );
+    assert_eq!(
+        ProjectConfig::load(&path)
+            .unwrap()
+            .resolve(None)
+            .unwrap()
+            .str("app"),
+        Some("44444444-4444-4444-8444-444444444444"),
+        "the Rust reader must accept the written file"
+    );
+}
+
+/// `CstObject::append` deliberately normalises extra blank lines touching the
+/// root braces. Pin its whole output so a library upgrade may change those two
+/// sites, but may not quietly start eating the nearby comments or other trivia.
+#[test]
+fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
+    let text = r#"{
+
+  // The leading comment must survive.
+  "name": "demo-app",
+  "control": "https://control.zeroship.ai",
+  "runtime_date": "2026-08-14",
+
+  // The interior group must survive.
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+
+}
+"#;
+    let expected = r#"{
+  // The leading comment must survive.
+  "name": "demo-app",
+  "control": "https://control.zeroship.ai",
+  "runtime_date": "2026-08-14",
+
+  // The interior group must survive.
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": [],
+  "app": "66666666-6666-4666-8666-666666666666"
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("root-blank-lines.jsonc");
+    std::fs::write(&path, text).unwrap();
+
+    ProjectConfig::load(&path)
+        .unwrap()
+        .write_app("66666666-6666-4666-8666-666666666666")
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+}
+
+/// The generated CST is validated as a complete project config before the
+/// original path is touched. Construct an intentionally inconsistent internal
+/// value to make that otherwise defensive failure arm observable.
+#[test]
+fn write_app_reparses_before_writing() {
+    let text = "{\n  \"name\": \"demo-app\"\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid-project.jsonc");
+    std::fs::write(&path, text).unwrap();
+    let config = ProjectConfig {
+        path: path.clone(),
+        text: text.to_string(),
+        root: Map::new(),
+    };
+
+    let error = config
+        .write_app("77777777-7777-4777-8777-777777777777")
+        .expect_err("the generated text is valid JSONC but not a valid project config");
+
+    assert!(error.contains("refusing to write a file that would not parse"), "{error}");
+    assert!(error.contains("control"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        text,
+        "validation must happen before the write"
+    );
 }
 
 #[test]
@@ -552,12 +658,9 @@ fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
     std::fs::write(&path, &text).unwrap();
 
     let config = ProjectConfig::load(&path).unwrap();
-    assert_eq!(
-        config
-            .write_app("55555555-5555-4555-8555-555555555555")
-            .unwrap(),
-        WriteOutcome::Spliced
-    );
+    config
+        .write_app("55555555-5555-4555-8555-555555555555")
+        .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
     let expected = text.replace(

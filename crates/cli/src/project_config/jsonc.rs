@@ -6,6 +6,7 @@
 
 use jsonc_parser::ast::Value as AstValue;
 use jsonc_parser::common::Ranged;
+use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use jsonc_parser::tokens::Token;
 use jsonc_parser::{
     parse_to_ast, parse_to_serde_value, CollectOptions, ParseOptions, Scanner,
@@ -44,6 +45,20 @@ pub fn top_level_value_span(text: &str, key: &str) -> Option<(usize, usize)> {
     };
     let range = root.get(key)?.value.range();
     Some((range.start, range.end))
+}
+
+/// Append a string member to the root object while retaining its CST trivia.
+pub fn append_top_level_string(text: &str, key: &str, value: &str) -> Result<String, String> {
+    validate_scanned_source(text)?;
+    let root = CstRootNode::parse(text, &PARSE_OPTIONS).map_err(|error| error.to_string())?;
+    let object = root
+        .object_value()
+        .ok_or_else(|| "the top level must be an object".to_string())?;
+    if object.get(key).is_some() {
+        return Err(format!("top-level member `{key}` already exists"));
+    }
+    object.append(key, CstInputValue::String(value.to_string()));
+    Ok(root.to_string())
 }
 
 /// Close two strict-JSON gaps in `jsonc-parser`: JavaScript whitespace beyond
