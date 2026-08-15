@@ -181,7 +181,30 @@ impl ProjectConfig {
         )
         .map_err(|e| self.err(e))?;
         check_members(&self.root, "").map_err(|e| self.err(e))?;
-        self.reject_dist_containing_config(&self.root, project_root, "build.dist")?;
+        self.reject_unsafe_write_path(
+            &self.root,
+            project_root,
+            "build",
+            "dist",
+            "build.dist",
+            None,
+        )?;
+        self.reject_unsafe_write_path(
+            &self.root,
+            project_root,
+            "build",
+            "output",
+            "build.output",
+            Some("zship"),
+        )?;
+        self.reject_unsafe_write_path(
+            &self.root,
+            project_root,
+            "migrations",
+            "out",
+            "migrations.out",
+            None,
+        )?;
 
         if let Some(envs) = self.root.get("environments") {
             let envs = envs.as_object().ok_or_else(|| {
@@ -207,26 +230,48 @@ impl ProjectConfig {
                 })?;
                 check_members(entry, &format!("environments.{name}"))
                     .map_err(|e| self.err(e))?;
-                self.reject_dist_containing_config(
+                self.reject_unsafe_write_path(
                     entry,
                     project_root,
+                    "build",
+                    "dist",
                     &format!("environments.{name}.build.dist"),
+                    None,
+                )?;
+                self.reject_unsafe_write_path(
+                    entry,
+                    project_root,
+                    "build",
+                    "output",
+                    &format!("environments.{name}.build.output"),
+                    Some("zship"),
+                )?;
+                self.reject_unsafe_write_path(
+                    entry,
+                    project_root,
+                    "migrations",
+                    "out",
+                    &format!("environments.{name}.migrations.out"),
+                    None,
                 )?;
             }
         }
         Ok(())
     }
 
-    fn reject_dist_containing_config(
+    fn reject_unsafe_write_path(
         &self,
         value: &Map<String, Value>,
         project_root: &Path,
+        section: &str,
+        member: &str,
         field: &str,
+        existing_artifact_extension: Option<&str>,
     ) -> Result<(), String> {
-        let Some(dist) = value
-            .get("build")
+        let Some(configured_path) = value
+            .get(section)
             .and_then(Value::as_object)
-            .and_then(|build| build.get("dist"))
+            .and_then(|block| block.get(member))
             .and_then(Value::as_str)
         else {
             return Ok(());
@@ -243,17 +288,32 @@ impl ProjectConfig {
         } else {
             cwd.join(&self.path)
         });
-        let candidate = Path::new(dist);
-        let dist_dir = lexical_normalize(&if candidate.is_absolute() {
+        let candidate = Path::new(configured_path);
+        let resolved = lexical_normalize(&if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             root.join(candidate)
         });
-        if root.starts_with(&dist_dir) || config.starts_with(&dist_dir) {
+        if root.starts_with(&resolved) || config.starts_with(&resolved) {
             return Err(self.err(format!(
-                "`{field}` ({dist}) cannot resolve to the project root or an ancestor containing \
+                "`{field}` ({configured_path}) cannot resolve to the project root or an ancestor containing \
                  {CONFIG_FILENAME}"
             )));
+        }
+        if let Some(extension) = existing_artifact_extension {
+            let metadata = std::fs::symlink_metadata(&resolved);
+            if let Ok(metadata) = metadata {
+                let is_artifact_file = metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && resolved.extension().and_then(|value| value.to_str()) == Some(extension);
+                if !is_artifact_file {
+                    return Err(self.err(format!(
+                        "`{field}` ({configured_path}) resolves to existing non-artifact file {}; \
+                         refusing to overwrite creator data",
+                        resolved.display()
+                    )));
+                }
+            }
         }
         Ok(())
     }

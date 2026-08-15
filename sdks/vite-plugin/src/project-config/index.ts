@@ -15,8 +15,8 @@
  * for the two readers to disagree.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   getNodeValue,
   parseTree,
@@ -227,19 +227,40 @@ function pathContains(parent: string, child: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-function assertDistDoesNotContainConfig(
+function assertWritablePathIsSafe(
+  root: string,
+  configPath: string,
+  field: string,
+  configuredPath: string,
+  existingArtifactExtension?: string,
+): void {
+  const candidate = resolve(root, configuredPath);
+  const absoluteConfig = resolve(configPath);
+  if (pathContains(candidate, resolve(root)) || pathContains(candidate, absoluteConfig)) {
+    throw new Error(
+      `${configPath}: \`${field}\` (${configuredPath}) cannot resolve to the project root or ` +
+        `an ancestor containing ${CONFIG_FILENAME}`,
+    );
+  }
+  if (existingArtifactExtension == null || !existsSync(candidate)) return;
+
+  const stat = lstatSync(candidate);
+  if (!stat.isFile() || stat.isSymbolicLink() || extname(candidate) !== existingArtifactExtension) {
+    throw new Error(
+      `${configPath}: \`${field}\` (${configuredPath}) resolves to existing non-artifact file ` +
+        `${candidate}; refusing to overwrite creator data`,
+    );
+  }
+}
+
+function assertWritablePathsAreSafe(
   root: string,
   configPath: string,
   config: ResolvedProjectConfig,
 ): void {
-  const distDir = resolve(root, config.build.dist);
-  const absoluteConfig = resolve(configPath);
-  if (pathContains(distDir, resolve(root)) || pathContains(distDir, absoluteConfig)) {
-    throw new Error(
-      `${configPath}: \`build.dist\` (${config.build.dist}) cannot resolve to the project root or ` +
-        `an ancestor containing ${CONFIG_FILENAME}`,
-    );
-  }
+  assertWritablePathIsSafe(root, configPath, "build.dist", config.build.dist);
+  assertWritablePathIsSafe(root, configPath, "build.output", config.build.output, ".zship");
+  assertWritablePathIsSafe(root, configPath, "migrations.out", config.migrations.out);
 }
 
 function checkMembers(path: string, map: Json, at: string, isRoot: boolean): void {
@@ -450,7 +471,7 @@ export function readProjectConfig(
   const path = locateProjectConfig(root, opts.configPath);
   const base =
     path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
-  if (path != null) assertDistDoesNotContainConfig(root, path, base);
+  if (path != null) assertWritablePathsAreSafe(root, path, base);
   return { config: applyProjectConfigOverride(base, opts.override), path };
 }
 

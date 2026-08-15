@@ -110,6 +110,26 @@ export const schema = {
 `;
 
 describe("manual schema source", () => {
+  test("refuses to overwrite a creator-owned gen-types target", async () => {
+    const creatorSource = "export const creatorData = true;\n";
+    const fx = await makeFixture({
+      "schema.ts": TWO_COLLECTION_SCHEMA,
+      "src/env.db.ts": creatorSource,
+    });
+    try {
+      await assert.rejects(
+        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), join(fx.root, "src"), {}),
+        /refusing to overwrite.*env\.db\.ts/,
+      );
+      assert.equal(
+        await fs.readFile(join(fx.root, "src/env.db.ts"), "utf8"),
+        creatorSource,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   test("writes a valid v1 schema.runtime.json + an augmentation env.db.ts", async () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");

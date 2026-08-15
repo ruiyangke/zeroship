@@ -215,6 +215,54 @@ fn build_dist_cannot_be_the_project_root_or_one_of_its_ancestors() {
 }
 
 #[test]
+fn build_output_cannot_target_the_project_root_an_ancestor_or_an_existing_source_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let source_path = dir.path().join("src/main.rs");
+    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    for output in [".", "..", CONFIG_FILENAME, "src/main.rs"] {
+        let text = FULL.replace(
+            "\"output\": \"dist/app.zship\"",
+            &format!("\"output\": {}", serde_json::to_string(output).unwrap()),
+        );
+        std::fs::write(&config_path, &text).unwrap();
+        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+            .expect_err("an output that can overwrite creator data must not parse");
+        assert!(err.contains("build.output"), "{err}");
+    }
+}
+
+#[test]
+fn build_output_may_replace_an_existing_generated_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let output_path = dir.path().join("dist/app.zship");
+    std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    std::fs::write(&output_path, "old artifact").unwrap();
+
+    ProjectConfig::parse_with_root(config_path, FULL.to_string(), dir.path())
+        .expect("an existing generated artifact remains a valid output");
+}
+
+#[test]
+fn migrations_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+
+    for out in [".", "..", "generated/zeroship/../..", "/tmp"] {
+        let text = FULL.replace(
+            "\"out\": \"generated/zeroship\"",
+            &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
+        );
+        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+            .expect_err("a gen-types directory containing creator files must not parse");
+        assert!(err.contains("migrations.out"), "{err}");
+    }
+}
+
+#[test]
 fn an_unknown_top_level_key_names_the_known_ones() {
     let text = FULL.replace("\"name\": \"demo-app\",", "\"name\": \"demo-app\", \"rpcEndpoint\": \"/_rpc\",");
     let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)

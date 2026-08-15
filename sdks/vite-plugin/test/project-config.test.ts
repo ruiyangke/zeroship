@@ -225,6 +225,59 @@ describe("validation", () => {
       }
     }
   });
+
+  test("build.output cannot target the project root, an ancestor, or an existing source file", () => {
+    const cases = [
+      { output: ".", files: {} },
+      { output: "..", files: {} },
+      { output: CONFIG_FILENAME, files: {} },
+      { output: "src/main.ts", files: { "src/main.ts": "export default {};\n" } },
+    ];
+    for (const { output, files } of cases) {
+      const body = FULL.replace('"output": "dist/app.zship"', `"output": ${JSON.stringify(output)}`);
+      const root = scratch({ [CONFIG_FILENAME]: body, ...files });
+      try {
+        assert.throws(
+          () => readProjectConfig(root),
+          /build\.output/,
+          `build.output=${JSON.stringify(output)} must be refused`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("build.output may replace an existing generated artifact", () => {
+    const root = scratch({
+      [CONFIG_FILENAME]: FULL,
+      "dist/app.zship": "old artifact",
+    });
+    try {
+      assert.equal(readProjectConfig(root).config.build.output, "dist/app.zship");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("migrations.out cannot target the project root or one of its ancestors", () => {
+    for (const out of [".", "..", "generated/zeroship/../..", "/tmp"]) {
+      const body = FULL.replace(
+        '"out": "generated/zeroship"',
+        `"out": ${JSON.stringify(out)}`,
+      );
+      const root = scratch({ [CONFIG_FILENAME]: body });
+      try {
+        assert.throws(
+          () => readProjectConfig(root),
+          /migrations\.out/,
+          `migrations.out=${JSON.stringify(out)} must be refused`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("resolution", () => {
