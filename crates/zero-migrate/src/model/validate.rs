@@ -180,6 +180,7 @@ pub fn validate_ir_authorized(
         validate_op_authorized(op, target_dialect, op_index, ts, schema_scope, authority)?;
     }
     validate_no_op_targets_a_renamed_away_table(ir, target_dialect, ts_locations)?;
+    validate_no_op_references_a_dropped_column(ir, target_dialect, ts_locations)?;
     validate_index_names_across_ops(ir, target_dialect, ts_locations)?;
     validate_column_references(ir, target_dialect, ts_locations)?;
     validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
@@ -2657,6 +2658,113 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Every column name this operation names as a plain identifier, paired with the
+/// table it belongs to.
+///
+/// Deliberately does NOT descend into expressions. A CHECK body, a generated
+/// column's expression and a backfill `set` value all name columns too, but as
+/// expression trees rather than identifier lists; walking those is a separate job
+/// and they still fail loudly at the server.
+fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'a str)> {
+    use crate::model::ir::{IndexElement, IrConstraintKind, Op};
+
+    let pair = |table: &'a str, column: &'a str| vec![(table, column)];
+    match op {
+        Op::DropColumn { table, column, .. }
+        | Op::SetColumnNotNull { table, column, .. }
+        | Op::DropColumnNotNull { table, column, .. }
+        | Op::SetColumnDefault { table, column, .. }
+        | Op::DropColumnDefault { table, column, .. }
+        | Op::SetColumnType { table, column, .. } => pair(table, column),
+        Op::RenameColumn { table, from, .. } => pair(table, from),
+        Op::CreateIndex { table, columns, .. } => columns
+            .iter()
+            .filter_map(|element| match element {
+                IndexElement::Column { name, .. } => Some((table.as_str(), name.as_str())),
+                IndexElement::Expr { .. } => None,
+            })
+            .collect(),
+        Op::AddConstraint {
+            table, constraint, ..
+        } => match &constraint.kind {
+            IrConstraintKind::Unique { columns } => columns
+                .iter()
+                .map(|column| (table.as_str(), column.as_str()))
+                .collect(),
+            IrConstraintKind::Fk { columns, .. } => columns
+                .iter()
+                .map(|column| (table.as_str(), column.as_str()))
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Refuse an operation that names a column an earlier `dropColumn` removed.
+///
+/// Left alone it lowers to SQL naming a column that is gone — `ALTER TABLE a DROP
+/// COLUMN v` followed by `CREATE INDEX ix ON a (v)` — and fails mid-migration
+/// with `column "v" does not exist`.
+///
+/// The table-level sibling of this lives in
+/// [`validate_no_op_targets_a_renamed_away_table`]. This one is separate because
+/// it needs every column an op REFERENCES rather than the single name
+/// `touched_table` reports.
+///
+/// TRACKS STATE PER TABLE. Dropping `b.v` says nothing about `a.v`, and dropping a
+/// column then re-adding it is how a column's type is changed, so an `addColumn`
+/// restores the name.
+fn validate_no_op_references_a_dropped_column(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    let mut dropped: BTreeSet<(&str, &str)> = BTreeSet::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        // An `addColumn` brings the name back, and a `createTable` redefines the
+        // whole table, so both are handled before the check.
+        match op {
+            Op::AddColumn { table, column, .. } => {
+                dropped.remove(&(table.as_str(), column.as_str()));
+            }
+            Op::CreateTable { name, .. } => {
+                dropped.retain(|(table, _)| *table != name.as_str());
+            }
+            _ => {}
+        }
+
+        for (table, column) in plain_column_references(op) {
+            if dropped.contains(&(table, column)) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this operation names column {column:?} of table {table:?}, but an \
+                         earlier dropColumn in this migration removed it, so it will not \
+                         exist when this runs"
+                    ),
+                    suggested_fix: Some(
+                        "move this operation before the drop, or re-add the column first"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+
+        if let Op::DropColumn { table, column, .. } = op {
+            dropped.insert((table.as_str(), column.as_str()));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse an operation that targets a table name an earlier `renameTable` in the
 /// same envelope has already moved away.
 ///
