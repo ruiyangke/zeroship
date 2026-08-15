@@ -137,19 +137,141 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
     }
 }
 
-fn infrastructure_error_response(
+/// Log the real cause, return a generic body -- plus the correlation id
+/// that joins the two.
+///
+/// The id was already minted and already logged here; it just never left
+/// this helper. That made failures routed through this helper undiagnosable
+/// from the outside: a creator could report "it returned internal error"
+/// and an operator had no key to search the logs by. The message stays
+/// generic on purpose. This is not a message redesign; it is the difference
+/// between undiagnosable and reportable.
+///
+/// ## Why `trace_id` and not `request_id`
+///
+/// The wire contract already chose. `sdks/rpc/src/error.ts` documents the
+/// envelope as `{ code, message, details?, retryable, trace_id? }` and lifts
+/// `trace_id`/`traceId`; `RpcCtx` (`crates/runtime/src/rpc/ctx_holder.rs`)
+/// carries a `trace_id` field. This tree already has more request-id
+/// concepts than it can join -- the gateway's `X-Request-Id`, the runtime's
+/// per-isolate `u64`, and `authz_guard::request_id` in this very crate --
+/// and adding a fourth spelling of "the id in the error body" would make
+/// that worse, not better. So the id goes out under the name the clients
+/// already read.
+///
+/// The log field is renamed to match: the body value and the log value are
+/// the same string under the same key, so an operator handed a `trace_id`
+/// greps for `trace_id` and finds the cause. A field that is emitted under
+/// one name and logged under another correlates nothing.
+///
+/// ## What this does NOT close
+///
+/// Only responses routed through `infrastructure_error_response` are
+/// correlated. `env_handlers::env_err_response`, used by
+/// `control.env.listVars`, remains id-less. Other direct control-plane 5xx
+/// bodies also remain outside this helper.
+///
+/// The app-dispatch path remains uncorrelated:
+///
+/// - generic sanitized 5xx bodies carry a per-isolate `request_id`;
+/// - public-code 5xx bodies carry no id; and
+/// - `@zeroship/rpc` can lift `trace_id`, but this path emits none.
+///
+/// The generic body's counter is logged by that isolate, but it is not a
+/// globally unique id and does not join to the gateway's `X-Request-Id`.
+/// Closing this gap needs an edge id propagated through the worker and into
+/// app and workflow dispatch, which is separate work.
+pub(crate) fn infrastructure_error_response(
     status: StatusCode,
     context: &'static str,
     detail: impl std::fmt::Display,
 ) -> web::HttpResponse {
-    let request_id = Uuid::new_v4();
+    let trace_id = Uuid::new_v4().to_string();
     tracing::error!(
-        request_id = %request_id,
+        trace_id = %trace_id,
         context,
         error = %detail,
         "control-plane infrastructure error"
     );
-    web::HttpResponse::build(status).json(&serde_json::json!({"error": "internal error"}))
+    web::HttpResponse::build(status).json(&serde_json::json!({
+        "error": "internal error",
+        "trace_id": trace_id,
+    }))
+}
+
+#[cfg(test)]
+pub(crate) mod infrastructure_error_test_support {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("trace event buffer mutex poisoned")
+                .push(visitor.fields);
+        }
+    }
+
+    pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<HashMap<String, String>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: Arc::clone(&events),
+        });
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let captured = events
+            .lock()
+            .expect("trace event buffer mutex poisoned")
+            .clone();
+        (result, captured)
+    }
+
+    pub(crate) fn assert_logged_trace_id(
+        events: &[HashMap<String, String>],
+        trace_id: &str,
+    ) {
+        assert_eq!(events.len(), 1, "expected one infrastructure error event");
+        assert_eq!(
+            events[0].get("trace_id").map(String::as_str),
+            Some(trace_id),
+            "log trace_id must match the response body"
+        );
+        assert!(
+            !events[0].contains_key("request_id"),
+            "infrastructure error event must use trace_id, not request_id"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2238,6 +2360,7 @@ where
 #[cfg(test)]
 mod error_response_tests {
     use super::*;
+    use super::infrastructure_error_test_support::{assert_logged_trace_id, capture};
     use ntex::http::StatusCode;
     use ntex::util::{stream_recv, BytesMut};
 
@@ -2250,14 +2373,59 @@ mod error_response_tests {
         serde_json::from_slice(&buf).expect("body is JSON")
     }
 
+    /// Assert the two properties every body produced by this helper must hold,
+    /// and return the correlation id.
+    ///
+    /// 1. The message is still generic. Emitting the id is NOT permission
+    ///    to emit the cause; `detail` goes to `tracing` and nowhere else.
+    /// 2. A `trace_id` is present and is a parseable UUID -- the key an
+    ///    operator greps the logs by. The field is named `trace_id`
+    ///    because that is the spelling the SDKs already read; see
+    ///    `infrastructure_error_response` for why a fourth id name was
+    ///    not introduced.
+    ///
+    fn assert_sanitized_with_id(body: &serde_json::Value) -> String {
+        assert_eq!(
+            body.get("error").and_then(serde_json::Value::as_str),
+            Some("internal error"),
+            "the cause must stay out of the body: {body}"
+        );
+        let id = body
+            .get("trace_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("body must carry trace_id: {body}"))
+            .to_string();
+        uuid::Uuid::parse_str(&id)
+            .unwrap_or_else(|e| panic!("trace_id must be a UUID ({id}): {e}"));
+        assert!(
+            body.get("request_id").is_none(),
+            "the id rides under `trace_id` only; a second spelling would be a \
+             fourth id concept: {body}"
+        );
+        // Exactly two keys: emitting the id must not have opened the body up.
+        assert_eq!(
+            body.as_object().map(serde_json::Map::len),
+            Some(2),
+            "body carries error + trace_id and nothing else: {body}"
+        );
+        id
+    }
+
     #[compio::test]
     async fn registry_database_error_response_is_sanitized() {
-        let resp = error_response(RegistryError::Database(
-            "db connect failed: postgres://internal/schema".into(),
-        ));
+        let (resp, events) = capture(|| {
+            error_response(RegistryError::Database(
+                "db connect failed: postgres://internal/schema".into(),
+            ))
+        });
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        let trace_id = assert_sanitized_with_id(&body);
+        assert_logged_trace_id(&events, &trace_id);
+        assert!(
+            !body.to_string().contains("postgres://"),
+            "the DSN must not ride out: {body}"
+        );
     }
 
     #[compio::test]
@@ -2267,14 +2435,14 @@ mod error_response_tests {
         ));
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        assert_sanitized_with_id(&body);
 
         let resp = ingest_error_to_response(IngestError::Internal(
             "put_manifest: postgres://internal".into(),
         ));
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        assert_sanitized_with_id(&body);
     }
 
     #[compio::test]
@@ -2286,7 +2454,26 @@ mod error_response_tests {
         );
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         let body = body_json(resp).await;
-        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+        let id = assert_sanitized_with_id(&body);
+        assert!(
+            !body.to_string().contains("worker.internal"),
+            "the upstream host must not ride out: {body}"
+        );
+        assert!(
+            !body.to_string().contains("secret body"),
+            "the upstream body must not ride out: {body}"
+        );
+
+        // ONE-VARIABLE CONTROL on the id itself: a second call with a
+        // different `detail` must get a DIFFERENT id. A constant would
+        // satisfy every assertion above and correlate nothing.
+        let other = infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            "a different failure",
+        );
+        let other_id = assert_sanitized_with_id(&body_json(other).await);
+        assert_ne!(id, other_id, "each response gets its own correlation id");
     }
 }
 
@@ -2390,5 +2577,119 @@ mod stream_tmp_tests {
         let contents = std::fs::read(&path).unwrap();
         assert_eq!(contents, b"pre-existing");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn infrastructure_comment_names_the_uncorrelated_app_dispatch_shapes() {
+        let source = include_str!("api.rs");
+        let (comment, _) = source
+            .split_once("pub(crate) fn infrastructure_error_response")
+            .expect("infrastructure helper must remain documented");
+        let comment = comment
+            .rsplit_once("/// Log the real cause")
+            .map(|(_, tail)| tail)
+            .expect("infrastructure helper documentation must keep its anchor");
+
+        for required in [
+            "app-dispatch path remains uncorrelated",
+            "generic sanitized 5xx bodies carry a per-isolate `request_id`",
+            "public-code 5xx bodies carry no id",
+            "`@zeroship/rpc` can lift `trace_id`, but this path emits none",
+        ] {
+            assert!(
+                comment.contains(required),
+                "infrastructure helper documentation must say {required:?}; got:\n{comment}"
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_keeps_app_dispatch_correlation_open() {
+        let proposal = include_str!(
+            "../../../docs/proposals/2026-08-14-error-message-quality.md"
+        );
+
+        for required in [
+            "The control helper loop is closed; the app-dispatch loop is not.",
+            "Generic sanitized app 5xx bodies carry a per-isolate `request_id`",
+            "Public-code app 5xx bodies carry no id.",
+            "`@zeroship/rpc` lifts `trace_id`, but app dispatch emits none.",
+            "Option 1c remains open for app dispatch.",
+            "`SET LOCAL ROLE` reports `invalid_parameter_value` / `22023`",
+            "A missing schema with a fully-qualified query reports `undefined_table` / `42P01`",
+            "A present role without required grants reports `insufficient_privilege` / `42501`",
+            "`42P01` and `42501` must not be added to the missing-role classifier.",
+        ] {
+            assert!(
+                proposal.contains(required),
+                "the proposal must state the partial Option 1c scope: {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn correlation_claims_are_scoped_to_the_infrastructure_helper_family() {
+        let compact = |text: &str| {
+            text.split_whitespace()
+                .filter(|token| !matches!(*token, "///" | "//" | "*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let api = include_str!("api.rs");
+        let (helper_comment, _) = api
+            .split_once("pub(crate) fn infrastructure_error_response")
+            .expect("infrastructure helper must remain documented");
+        let helper_comment = helper_comment
+            .rsplit_once("/// Log the real cause")
+            .map(|(_, tail)| compact(tail))
+            .expect("infrastructure helper documentation must keep its anchor");
+
+        for required in [
+            "Only responses routed through `infrastructure_error_response` are correlated.",
+            "`env_handlers::env_err_response`, used by `control.env.listVars`, remains id-less.",
+        ] {
+            assert!(
+                helper_comment.contains(required),
+                "infrastructure helper documentation must say {required:?}; got:\n{helper_comment}"
+            );
+        }
+        assert!(
+            !helper_comment.contains("every control-plane infrastructure failure"),
+            "the helper documentation must not claim coverage beyond its callers"
+        );
+
+        let (_, helper_tests) = api
+            .split_once("#[cfg(test)]\nmod error_response_tests")
+            .expect("helper response tests must remain present");
+        let (helper_tests, _) = helper_tests
+            .split_once("#[cfg(test)]\nmod stream_tmp_tests")
+            .expect("helper response test section must remain bounded");
+        assert!(
+            compact(helper_tests)
+                .contains("Assert the two properties every body produced by this helper must hold"),
+            "helper test documentation must scope its body claim to the helper"
+        );
+
+        let sdk = compact(include_str!("../../../sdks/control/src/index.ts"));
+        for required in [
+            "Only responses produced by `infrastructure_error_response` carry this id.",
+            "Failures such as `control.env.listVars` can remain id-less.",
+        ] {
+            assert!(
+                sdk.contains(required),
+                "the control SDK contract must say {required:?}"
+            );
+        }
+
+        let reference = compact(include_str!("../../../docs/reference/control.md"));
+        for required in [
+            "`trace_id` is present only on responses produced by `infrastructure_error_response`.",
+            "For example, `control.env.listVars` failures remain id-less.",
+        ] {
+            assert!(
+                reference.contains(required),
+                "the control reference must say {required:?}"
+            );
+        }
     }
 }

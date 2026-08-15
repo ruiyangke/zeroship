@@ -60,7 +60,7 @@
 //! | [`DbError::Serialization`] | Postgres 40001 | SSI conflict in REPEATABLE READ / SERIALIZABLE |
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
-//! | [`DbError::Configuration`] | Plugin mis-configured | `DB_URL` not set |
+//! | [`DbError::Configuration`] | Plugin mis-configured, OR the app's own DB was never provisioned | `DB_URL` not set; `schema_not_provisioned` (per-app role missing, fix: `zeroship migrate`) |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
 
@@ -180,7 +180,93 @@ pub enum DbError {
     },
 }
 
+/// Public error code for "this app's database was never provisioned".
+///
+/// On the 5xx allow-list in `crates/runtime/src/core/dispatch.rs` in BOTH
+/// spellings: `@zeroship/db` re-stamps every native code through
+/// `canonicalErrorCode` inside the isolate, so a creator using the SDK sees
+/// `SCHEMA_NOT_PROVISIONED` and a creator calling `env.db` directly sees this
+/// one. Both must be listed or the exemption is inert on the path creators
+/// actually take.
+pub const SCHEMA_NOT_PROVISIONED: &str = "schema_not_provisioned";
+
+/// The wire message for [`SCHEMA_NOT_PROVISIONED`]. Platform-authored and
+/// fixed: it names the condition and the exact command that fixes it, and it
+/// interpolates NOTHING. The server text and the role name (which embeds the
+/// app id) stay in the operator log.
+///
+/// The remediation lives in the MESSAGE, not the hint, because `hint` is
+/// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
+/// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
+/// creator reading the HTTP response only ever sees the message.
+pub const MISSING_ROLE_MESSAGE: &str =
+    "this app's database is not provisioned: its per-app Postgres role does not \
+     exist. Run `zeroship migrate` for this app, then retry.";
+
+/// Operator/`env.db`-caller hint for [`SCHEMA_NOT_PROVISIONED`]. Reaches app
+/// JS as `err.hint` on a direct native throw; does NOT reach the HTTP wire.
+pub const MISSING_ROLE_HINT: &str =
+    "`zeroship migrate` creates the app's schema and per-app role. A deploy \
+     alone does not: the first `env.db` call is what discovers the role is \
+     missing.";
+
+/// Does this server error match the role set by per-app session setup?
+///
+/// This discriminator is called only where the caller knows it just issued
+/// `SET LOCAL ROLE` for `app_id`. Provenance is the primary guard; SQLSTATE
+/// and the exact expected role name pin the measured server response.
+///
+/// The SQLSTATE alone is not enough. `SET LOCAL ROLE "missing"` reports **22023
+/// `invalid_parameter_value`** (measured against postgres:16 -- `LOCATION:
+/// call_string_check_hook, guc.c`), not 42704 `undefined_object`. 22023 is the
+/// generic "bad GUC value" code, shared with `SET statement_timeout = 'yes'`,
+/// so matching it alone would reclassify unrelated configuration failures as
+/// creator-facing.
+///
+/// Matching the exact role derived from `app_id` is stronger than sniffing the
+/// `app_<id>_role` shape. A pool DSN can use an app-shaped login name and return
+/// a FATAL 28000 during reconnect; that is an operator connection failure, not
+/// an app condition that `zeroship migrate` can repair.
+fn is_missing_per_app_session_role(
+    code: &compio_postgres::error::SqlState,
+    primary_message: &str,
+    app_id: &str,
+) -> bool {
+    use compio_postgres::error::SqlState;
+
+    code == &SqlState::INVALID_PARAMETER_VALUE
+        && primary_message
+            == format!(
+                "role \"{}\" does not exist",
+                crate::auth::bootstrap::per_app_role_name(app_id)
+            )
+}
+
 impl DbError {
+    /// Classify an error returned by the per-app `SET LOCAL ROLE` batch.
+    ///
+    /// Call this only at the two session-setup sites, after connection
+    /// acquisition and transaction start have succeeded. All other Postgres
+    /// errors, including pool connection failures, must use [`Self::from_pg`].
+    pub fn from_pg_per_app_session_setup(e: &compio_postgres::Error, app_id: &str) -> Self {
+        if e.as_db_error().is_some_and(|db| {
+            is_missing_per_app_session_role(db.code(), db.message(), app_id)
+        }) {
+            let msg = walk_pg_chain(e);
+            tracing::warn!(
+                error = %msg,
+                "per-app database role missing; app has not been migrated"
+            );
+            return DbError::config_hinted(
+                SCHEMA_NOT_PROVISIONED,
+                MISSING_ROLE_MESSAGE,
+                MISSING_ROLE_HINT,
+            );
+        }
+
+        Self::from_pg(e)
+    }
+
     /// Classify a `compio_postgres::Error` by SQLSTATE. Falls back to
     /// [`DbError::Internal`] when the error has no code (e.g.
     /// connection-layer errors that aren't class 08). Walks the source
@@ -745,6 +831,141 @@ mod tests {
         // A message without a DETAIL line is unchanged.
         let plain = "db: some other error".to_string();
         assert_eq!(scrub_constraint_detail(plain.clone()), plain);
+    }
+
+    // -----------------------------------------------------------------
+    // `schema_not_provisioned` -- the missing per-app role classification.
+    //
+    // These drive `is_missing_per_app_session_role` directly rather than the
+    // contextual converter because `compio_postgres::Error` has no public
+    // constructor (its `test-utils` feature exposes Row/Statement/Column
+    // only). The real converter path, against a live server that actually
+    // reports the SQLSTATE, is covered by `tests/missing_role.rs`; these pin
+    // the discriminator's edges, which a live test cannot enumerate cheaply.
+    //
+    // WHAT THESE DO NOT CATCH:
+    //   - That both production setup sites call the contextual converter.
+    //     `tests/missing_role.rs` drives the converter with a live error; the
+    //     call sites are kept adjacent to the setup SQL in exec/transaction.
+    //   - A non-English server. PostgreSQL translates the primary message
+    //     under a non-C `lc_messages`, and the shape check would then miss.
+    //     The failure mode is a false NEGATIVE (today's `internal`
+    //     behaviour), never a false positive.
+    //   - A future PostgreSQL SQLSTATE change. The live test pins 22023 so a
+    //     changed server fails visibly instead of silently widening this set.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn missing_role_is_classified_from_the_measured_sqlstate() {
+        use compio_postgres::error::SqlState;
+
+        // Measured against postgres:16: `BEGIN; SET LOCAL ROLE
+        // "app_nonexistent_role"` reports
+        //   ERROR: 22023: role "app_nonexistent_role" does not exist
+        // NOT 42704. The message is verbatim server text.
+        assert!(is_missing_per_app_session_role(
+            &SqlState::INVALID_PARAMETER_VALUE,
+            r#"role "app_nonexistent_role" does not exist"#,
+            "nonexistent",
+        ));
+    }
+
+    #[test]
+    fn same_sqlstate_different_message_stays_unclassified() {
+        use compio_postgres::error::SqlState;
+
+        // ONE-VARIABLE CONTROL for the test above: identical SQLSTATE,
+        // different primary message. 22023 is the generic "bad GUC value"
+        // code -- `SET LOCAL statement_timeout = 'yes'` reports it too. If
+        // the discriminator keyed on SQLSTATE alone, this would be
+        // reclassified as a creator-facing configuration error and its
+        // message would ride out at 5xx.
+        assert!(!is_missing_per_app_session_role(
+            &SqlState::INVALID_PARAMETER_VALUE,
+            r#"invalid value for parameter "statement_timeout": "yes""#,
+            "nonexistent",
+        ));
+    }
+
+    #[test]
+    fn same_message_shape_different_sqlstate_stays_unclassified() {
+        use compio_postgres::error::SqlState;
+
+        // ONE-VARIABLE CONTROL on the other axis: the exact message shape
+        // the arm matches, under a SQLSTATE that is not a role failure.
+        // Proves the message check is a NARROWING condition, not the whole
+        // test -- a server that said this under 42P01 must not be treated
+        // as "not provisioned".
+        assert!(!is_missing_per_app_session_role(
+            &SqlState::UNDEFINED_TABLE,
+            r#"role "app_nonexistent_role" does not exist"#,
+            "nonexistent",
+        ));
+    }
+
+    #[test]
+    fn other_role_sqlstates_are_not_session_setup_missing_role() {
+        use compio_postgres::error::SqlState;
+
+        // 42704 and 28000 may carry the same primary message, but neither is
+        // the measured SET LOCAL ROLE failure at this contextual call site.
+        assert!(!is_missing_per_app_session_role(
+            &SqlState::UNDEFINED_OBJECT,
+            r#"role "app_x_role" does not exist"#,
+            "x",
+        ));
+        assert!(!is_missing_per_app_session_role(
+            &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+            r#"role "app_x_role" does not exist"#,
+            "x",
+        ));
+    }
+
+    #[test]
+    fn missing_role_message_names_the_command_and_leaks_no_identity() {
+        // THE ACCEPTANCE BAR. A creator who skipped the migrate step must
+        // learn what to run from the RESPONSE, not from a worker log they
+        // cannot see. The remediation must be in `message`: `hint` is
+        // populated and then dropped -- `build_verbose_error_body` never
+        // emits it.
+        let err = DbError::config_hinted(
+            SCHEMA_NOT_PROVISIONED,
+            MISSING_ROLE_MESSAGE,
+            MISSING_ROLE_HINT,
+        );
+        let op = err.to_op_error();
+        match &op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, SCHEMA_NOT_PROVISIONED);
+                assert!(hint.is_some(), "hint is set for direct env.db callers");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert!(
+            op.message.contains("zeroship migrate"),
+            "the response must name the command that fixes it: {}",
+            op.message
+        );
+        // Platform-authored and fixed: no server text, no role name, no
+        // app id, and nothing interpolated at all.
+        assert!(!op.message.contains("_role"), "no role name: {}", op.message);
+        assert!(!op.message.contains("ERROR:"), "no server text: {}", op.message);
+        assert!(op.message.is_ascii(), "ASCII only: {}", op.message);
+    }
+
+    #[test]
+    fn prefix_message_leaves_the_provisioning_message_alone() {
+        // `exec.rs` adds "db: per-app session setup: " to ordinary setup
+        // failures. `prefix_message` skips `Configuration`, so the
+        // creator-facing string stays clean. If that skip is ever removed,
+        // operator-only setup context would leak through a public code.
+        let mut err = DbError::config_hinted(
+            SCHEMA_NOT_PROVISIONED,
+            MISSING_ROLE_MESSAGE,
+            MISSING_ROLE_HINT,
+        );
+        prefix_message(&mut err, "db: per-app session setup: ");
+        assert_eq!(err.message_str(), MISSING_ROLE_MESSAGE);
     }
 
     #[test]
