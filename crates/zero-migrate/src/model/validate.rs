@@ -2655,6 +2655,51 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Refuse a `UNIQUE` constraint that names the same column twice.
+///
+/// PostgreSQL rejects `UNIQUE (c, c)` with `column "c" appears twice in unique
+/// constraint`, so without this the operator meets the mistake during apply
+/// rather than at authoring time. The sibling constraint kinds already refuse the
+/// identical shape — a foreign key whose local columns repeat, and a `primaryKey`
+/// that repeats a column — so this restores one answer to one question.
+///
+/// Deliberately NOT extended to indexes: PostgreSQL ACCEPTS
+/// `CREATE INDEX ON a (c, c)`, so a duplicate there is wasteful rather than
+/// invalid, and refusing it would reject a migration the server is happy to run.
+fn validate_unique_constraint_columns(
+    table: &str,
+    constraint: &crate::model::ir::IrConstraint,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let crate::model::ir::IrConstraintKind::Unique { columns } = &constraint.kind else {
+        return Ok(());
+    };
+    let mut seen = BTreeSet::new();
+    let Some(duplicate) = columns.iter().find(|name| !seen.insert(name.as_str())) else {
+        return Ok(());
+    };
+    let name = constraint
+        .name
+        .clone()
+        .unwrap_or_else(|| "<derived>".to_string());
+    Err(AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason: format!(
+            "unique constraint {table}.{name} names column {duplicate:?} more than once"
+        ),
+        suggested_fix: Some(
+            "remove the duplicate column while preserving the intended positional order"
+                .to_string(),
+        ),
+    })
+}
+
 fn validate_table_foreign_key_constraint(
     local_schema: Option<&str>,
     local_table: &str,
@@ -2953,6 +2998,13 @@ fn validate_table_foreign_keys_op(
                 indexes,
             );
             for constraint in constraints {
+                validate_unique_constraint_columns(
+                    name,
+                    constraint,
+                    target_dialect,
+                    op_index,
+                    ts_locations,
+                )?;
                 validate_table_foreign_key_constraint(
                     schema.as_deref(),
                     name,
@@ -2981,6 +3033,13 @@ fn validate_table_foreign_keys_op(
                 table,
                 constraint,
             );
+            validate_unique_constraint_columns(
+                table,
+                constraint,
+                target_dialect,
+                op_index,
+                ts_locations,
+            )?;
             validate_table_foreign_key_constraint(
                 schema.as_deref(),
                 table,
