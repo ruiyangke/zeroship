@@ -331,3 +331,105 @@ test("MySQL: a backfill killed mid-flight resumes the same way", async (ctx) => 
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("SQLite: a backfill killed mid-flight resumes the same way", async () => {
+  // The third backend, and not covered by either arm above: SQLite runs
+  // in-process through rusqlite rather than over the host-driver seam, so a
+  // SIGKILL takes the database connection down with the process rather than
+  // leaving a server to clean up after it.
+  //
+  // Measured by hand first: 10,060 / 20,000 filled after the kill, the file
+  // readable immediately (SQLite released its lock with the process), and the
+  // retry finished all 20,000 correctly.
+  const sqlite = await import("node:sqlite");
+  const work = project();
+  const appPath = join(work, "app.sqlite");
+
+  const sqArgv = (): string[] => [
+    "--import", "tsx", CLI_BIN, "apply", "--approve",
+    "--dir", join(work, "migrations"),
+    "--database-url", `sqlite:${appPath}`,
+    "--policy", join(work, "policy.toml"),
+    "--registry", join(work, "registry.json"),
+    "--owner-app", OWNER_APP,
+  ];
+  const read = <T>(body: (db: InstanceType<typeof sqlite.DatabaseSync>) => T): T => {
+    const db = new sqlite.DatabaseSync(appPath);
+    try {
+      return body(db);
+    } finally {
+      db.close();
+    }
+  };
+
+  try {
+    assert.equal(
+      spawnSync(process.execPath, sqArgv(), {
+        cwd: work, encoding: "utf8", env: { ...process.env, ...ENV },
+      }).status,
+      0,
+      "the create must apply",
+    );
+    read((db) =>
+      db.exec(
+        `WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM g WHERE n < ${ROWS})
+         INSERT INTO ${TABLE} (id, val) SELECT n, n FROM g`,
+      ),
+    );
+    writeFileSync(join(work, "migrations", "20260101000001_fill.ts"), BACKFILL);
+
+    // `spawn` hands back the real child pid. Killing a SHELL wrapper instead
+    // leaves the worker running and holding the database, which reads back as
+    // "database is locked" and looks exactly like a SQLite-specific defect.
+    const child = spawn(process.execPath, sqArgv(), {
+      cwd: work, env: { ...process.env, ...ENV }, stdio: "ignore",
+    });
+    const deadline = Date.now() + 60_000;
+    let progressed = 0;
+    while (Date.now() < deadline) {
+      await new Promise((done) => setTimeout(done, 100));
+      // SQLite has ONE writer and no reader concurrency while it holds the
+      // write lock, so this poll legitimately fails mid-batch where the
+      // PostgreSQL and MySQL polls never would. A lock error means the backfill
+      // is running, which is the thing being waited for - keep waiting.
+      try {
+        progressed = read(
+          (db) =>
+            (db.prepare(`SELECT count(*) n FROM ${TABLE} WHERE filled IS NOT NULL`).get() as {
+              n: number;
+            }).n,
+        );
+      } catch {
+        continue;
+      }
+      if (progressed > 0) break;
+    }
+    child.kill("SIGKILL");
+    await new Promise((done) => child.on("exit", done));
+
+    assert.ok(progressed > 0, "the backfill must have committed a batch");
+    assert.ok(progressed < ROWS, `the kill must land MID-backfill (${progressed}/${ROWS})`);
+
+    assert.equal(
+      spawnSync(process.execPath, sqArgv(), {
+        cwd: work, encoding: "utf8", env: { ...process.env, ...ENV },
+      }).status,
+      0,
+      "re-running apply must finish the interrupted backfill",
+    );
+
+    const row = read(
+      (db) =>
+        db
+          .prepare(
+            `SELECT count(*) total, sum(CASE WHEN filled = val + 1 THEN 1 ELSE 0 END) ok
+               FROM ${TABLE}`,
+          )
+          .get() as { total: number; ok: number },
+    );
+    assert.equal(Number(row.total), ROWS, "every row is still present");
+    assert.equal(Number(row.ok), ROWS, "every row carries its own computed value");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
