@@ -109,11 +109,9 @@ fn an_absent_cross_tool_key_errors_naming_it_rather_than_defaulting() {
     assert!(err.contains("no default"), "{err}");
 }
 
-/// EVERY field the schema gives a default AND the CLI reads must produce an
-/// error here, not a value. This checks the rule against the generated tables
-/// rather than against a list somebody typed: add a `default` to a CLI-read
-/// property in the schema and this test starts failing until the Rust side is
-/// still fallback-free.
+/// Every CLI-read default not explicitly marked safe must produce an error
+/// here, not a value. This checks the rule against the generated tables rather
+/// than against a second hand-maintained field list.
 ///
 /// It is the intersection that matters. `build.mode` has a default and is NOT
 /// CLI-read, so a TypeScript-only default there is correct and this test says
@@ -124,6 +122,11 @@ fn no_cli_read_field_has_a_rust_side_default() {
         .iter()
         .copied()
         .filter(|f| generated::CLI_READ_FIELDS.contains(f))
+        .filter(|f| {
+            !generated::RESOLVED_OPTIONAL_DEFAULTS_JSON
+                .iter()
+                .any(|(path, _)| path == f)
+        })
         .collect();
     assert!(
         !stripped.is_empty(),
@@ -148,6 +151,13 @@ fn no_cli_read_field_has_a_rust_side_default() {
         let err = r.require(field).expect_err("must not default");
         assert!(err.contains(field), "{err}");
     }
+}
+
+#[test]
+fn absent_secrets_resolve_to_the_schema_safe_empty_default() {
+    let text = FULL.replace("  \"secrets\": [\"STRIPE_SECRET_KEY\"],\n", "");
+    let resolved = cfg(&text).resolve(None).unwrap();
+    assert_eq!(resolved.get("secrets"), Some(&Value::Array(Vec::new())));
 }
 
 /// A `$schema` naming a different contract is refused rather than validated

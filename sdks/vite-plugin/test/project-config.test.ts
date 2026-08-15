@@ -403,10 +403,20 @@ describe("the config escape hatch", () => {
     assert.equal(out.build.mode, "static", "the accepted in-place mutation must survive");
   });
 
-  test("the deny-list exactly matches schema markers, including protected", () => {
-    const schemaFields = schemaCliReadFields();
-    assert.ok(schemaFields.includes("protected"), "protected controls Rust migrate and must be x-cli-read");
-    assert.deepEqual([...CLI_READ_FIELDS].sort(), schemaFields);
+  test("the deny-list and schema markers match the explicit Rust-read contract", () => {
+    const expected = [
+      "app",
+      "build.output",
+      "control",
+      "migrations.dir",
+      "migrations.out",
+      "name",
+      "protected",
+      "runtime_date",
+      "secrets",
+    ];
+    assert.deepEqual(schemaCliReadFields(), expected);
+    assert.deepEqual([...CLI_READ_FIELDS].sort(), expected);
   });
 });
 

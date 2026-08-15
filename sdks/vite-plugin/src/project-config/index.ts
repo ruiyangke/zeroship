@@ -426,7 +426,7 @@ export function applyProjectConfigOverride(
           `run a JavaScript function. Overriding it here would make the two disagree - which is the ` +
           `drift ${CONFIG_FILENAME} exists to remove. Change it in ${CONFIG_FILENAME}, or use an ` +
           `\`environments\` entry and \`--env=\`.\n` +
-          `Fields the build alone reads (build.mode, build.serverEntry, build.dist, secrets) ` +
+          `Fields the build alone reads (build.mode, build.serverEntry, build.dist) ` +
           `are overridable here.`,
       );
     }
