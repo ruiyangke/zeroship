@@ -2523,11 +2523,11 @@ fi
 # from a registry is blocked by task #265: the published @zeroship/vite-plugin
 # requires zero-migrate@0.1.0, which exists on no registry, so `npm install`
 # dies E404. So `examples/scaffold-app` is the template's real source, produced
-# by running the SHIPPED `bin/create.js`, with ONE class of edit: the
-# `@zeroship/*` dependency specs are `workspace:*` instead of registry semver.
-# PRESERVED: every source byte, all six procedures, the ABSENT policy, the
-# migrations, the generated descriptor, and the real vite-plugin build. CHANGED:
-# dependency resolution only. 10a is what keeps that claim true over time.
+# by running the SHIPPED `bin/create.js`, with two bounded substitutions: the
+# `@zeroship/*` dependency specs are `workspace:*` instead of registry semver,
+# and the scaffolded runtime date may differ. PRESERVED: every other source
+# byte, all six procedures, the ABSENT policy, the migrations, the generated
+# descriptor, and the real vite-plugin build. 10a keeps that claim true.
 step 10 "Scaffold: the app \`npm create zeroship-app\` produces, on both tiers"
 SCAFFOLD="$ROOT/examples/scaffold-app"
 TEMPLATE="$ROOT/sdks/create-zeroship-app/template"
@@ -2542,9 +2542,9 @@ rm -rf "$SCAFFOLD/src/server"
 # Without this the whole step is worthless: `examples/scaffold-app` could drift
 # into a hand-tuned app that reproduces nothing, and every green below would be
 # about a file nobody ships. So the harness re-runs the REAL scaffolder into a
-# temp dir and requires byte equality on every file except package.json, plus a
-# structural check that package.json differs ONLY in `name` and in `@zeroship/*`
-# specs.
+# temp dir and requires byte equality on every file except package.json and the
+# single stamped `runtime_date` scalar in zeroship.jsonc. Structural checks
+# constrain both exceptions.
 #
 # THE EXCLUDE LIST IS NOT MINE. Build and run state has to be excluded from the
 # comparison, but choosing that list by hand is how a real added file gets
@@ -2558,7 +2558,7 @@ rm -rf "$SCAFFOLD/src/server"
 # creator's repo has only the template's.
 SC_FRESH="$(mktemp -d -t gp-scaffold-XXXXXX)"
 if ( cd "$SC_FRESH" && node "$ROOT/sdks/create-zeroship-app/bin/create.js" scaffold-app ) >/tmp/gp-scaffold-create.log 2>&1; then
-  SC_EXCL=(--exclude=package.json)
+  SC_EXCL=(--exclude=package.json --exclude=zeroship.jsonc)
   while IFS= read -r ig; do
     case "$ig" in ""|"#"*) continue ;; esac
     SC_EXCL+=("--exclude=${ig%/}")
@@ -2570,6 +2570,28 @@ if ( cd "$SC_FRESH" && node "$ROOT/sdks/create-zeroship-app/bin/create.js" scaff
     fail "the scaffold copy has DRIFTED from sdks/create-zeroship-app/template -- it no longer
     reproduces what a creator receives, so every verdict below is about a different app:
 $(printf '%s' "$SC_DIFF" | sed 's/^/      /')"
+  fi
+  if node -e '
+      const { readFileSync } = require("fs");
+      const normalize = (path) => {
+        const source = readFileSync(path, "utf8");
+        let matches = 0;
+        const normalized = source.replace(
+          /(\"runtime_date\"\s*:\s*\")\d{4}-\d{2}-\d{2}(\")/g,
+          (_match, prefix, suffix) => {
+            matches += 1;
+            return `${prefix}<runtime-date>${suffix}`;
+          },
+        );
+        if (matches !== 1) throw new Error(`${path}: expected one runtime_date, found ${matches}`);
+        return normalized;
+      };
+      const [fresh, checkedIn] = process.argv.slice(1);
+      if (normalize(fresh) !== normalize(checkedIn)) process.exit(1);
+    ' "$SC_FRESH/scaffold-app/zeroship.jsonc" "$SCAFFOLD/zeroship.jsonc" 2>/tmp/gp-scaffold-config.log; then
+    pass "the copy's zeroship.jsonc differs from the template only in runtime_date"
+  else
+    fail "the scaffold copy changes zeroship.jsonc beyond runtime_date: $(cat /tmp/gp-scaffold-config.log)"
   fi
   if node -e '
       const { readFileSync } = require("fs");

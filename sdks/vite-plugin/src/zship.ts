@@ -84,6 +84,8 @@ interface ManifestMetadata {
 interface Manifest {
   /** Manifest schema version. v1 is the initial published shape. */
   version: 1;
+  /** Creator project's inert runtime compatibility date. */
+  runtime_date?: string;
   worker?: WorkerCode | null;
   assets: Record<string, AssetEntry>;
   runtime_assets: Record<string, AssetEntry>;
@@ -160,6 +162,8 @@ export interface PrecompressOptions {
 export interface ZshipOptions {
   /** Project root (defaults to Vite's resolved root). */
   root: string;
+  /** Creator project's inert runtime compatibility date. */
+  runtimeDate?: string;
   /** `outDir` of the client/static build. Default: `dist`. */
   distDir?: string;
   /** Subdir under `distDir` containing the worker bundle. Default: `server`. */
@@ -472,6 +476,9 @@ export async function emitZship(
     sourcemaps,
     metadata: { compiler, built_at: builtAt },
   };
+  if (options.runtimeDate != null) {
+    manifest.runtime_date = options.runtimeDate;
+  }
   if (worker != null) {
     manifest.worker = worker;
   }

@@ -1,8 +1,8 @@
 // zeroship.jsonc - this project's tooling configuration. COMMITTED.
 //
-// It is read by the `zeroship` CLI and by the build. It is NEVER read by the
-// runtime and never packed into your deploy artifact, so nothing here reaches
-// the machines your app runs on.
+// It is read by the `zeroship` CLI and by the build. The file itself is NEVER
+// read by the runtime or packed. Its runtime_date is copied into the manifest
+// as inert metadata.
 //
 // NO SECRETS. This file is tracked, and a plaintext secret in a tracked file is
 // unrecoverable once committed. Declare NAMES under `secrets`; put the values
@@ -19,9 +19,8 @@
   // `secret` and `var` all read it and you never type `--app=` again.
   "control": "https://control.zeroship.ai",
 
-  // RESERVED. The runtime does not branch on this yet. It is required from day
-  // one so that when a dated behaviour gate does arrive, every project already
-  // says which semantics it was written against.
+  // Stamped with today's UTC date by the scaffolder and carried in the manifest.
+  // The runtime does not branch on it yet.
   "runtime_date": "2026-08-14",
 
   "build": {

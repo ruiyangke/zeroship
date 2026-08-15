@@ -17,9 +17,11 @@ Both readers are generated from one JSON Schema, `schema/project-v1.json`.
 
 ## What it is not
 
-**It is never read by the runtime and never packed into a `.zship`.** Nothing in
-this file reaches the machines your app runs on. That is the scope invariant,
-and it decides every question about what belongs here:
+**The config file itself is never read by the runtime and never packed into a
+`.zship`.** The build copies one reserved scalar, `runtime_date`, into the
+manifest, where it remains inert. No other config content reaches the machines
+your app runs on. That is the scope invariant, and it decides every question
+about what belongs here:
 
 | | `zeroship.jsonc` | the `.zship` manifest |
 | --- | --- | --- |
@@ -79,7 +81,7 @@ column therefore says what the *build* assumes when the key is missing.
 | `name` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | required | CLI `deploy`, and only as the app name on a first push (see below). The build validates it and otherwise ignores it. |
 | `app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. An app id (uuid) or an app name. |
 | `control` | string | required | CLI: the same four commands plus `login`. Control-plane base URL. |
-| `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | nobody. Reserved; validated only. See [`runtime_date`](#runtime_date-is-reserved). |
+| `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | build (transport only). The scaffold stamps the current UTC date; the build copies it into the manifest; the runtime ignores it. See [`runtime_date`](#runtime_date-is-transported-but-inert). |
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` emits `manifest.worker`; `"static"` is an SSG-only deploy with no worker. |
 | `build.serverEntry` | string | auto-detected | build (dev server and production build). Omit for auto-detection. |
 | `build.dist` | string | `"dist"` | build. The directory the client build writes and the only directory the packer walks. |
@@ -238,16 +240,18 @@ a secret value. If the advisory check cannot run or its response cannot be
 parsed, deploy prints that validation failure explicitly and continues with the
 upload.
 
-## `runtime_date` is reserved
+## `runtime_date` is transported but inert
 
-`runtime_date` is required, its format is validated, and **nothing reads it**.
-The runtime does not branch on it, there is no compatibility mechanism behind
-it, and none is scheduled. It is required from day one so that the habit of
-writing it exists before the first dated behaviour gate does; a field that is
-absent from every project is what makes the first such change expensive.
+`runtime_date` is required and both readers validate its `YYYY-MM-DD` format.
+The scaffolder writes the current UTC date, and the build copies that value
+verbatim into `manifest.json`. The runtime does not branch on it, there is no
+compatibility mechanism behind it, and none is scheduled. It is required from
+day one so that the habit of writing it exists before the first dated behavior
+gate does; a field absent from every project would make the first such change
+expensive.
 
-Write today's date when you create a project and leave it alone. It is not a
-version pin, and changing it changes nothing.
+Leave the scaffolded value alone. It is not a version pin. Changing it changes
+the artifact metadata but does not currently change runtime behavior.
 
 ## The `config` escape hatch
 
@@ -363,8 +367,9 @@ lines the mutating commands print.
 ```jsonc
 // zeroship.jsonc - this project's tooling configuration. COMMITTED.
 //
-// Read by the `zeroship` CLI and by the build. NEVER read by the runtime and
-// never packed into the deploy artifact.
+// Read by the `zeroship` CLI and by the build. The file itself is NEVER read
+// by the runtime or packed. Its runtime_date is copied into the manifest and
+// ignored.
 //
 // NO SECRETS. Declare NAMES under `secrets`; put the values in `.env` (local
 // dev, git-ignored) or `zeroship secret set` (deployed).
@@ -377,7 +382,7 @@ lines the mutating commands print.
   "app": "my-app",
   "control": "https://control.zeroship.ai",
 
-  // Reserved. The runtime does not branch on it.
+  // Scaffolded as the current UTC date. The runtime does not branch on it.
   "runtime_date": "2026-08-14",
 
   "build": {

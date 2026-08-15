@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -56,6 +56,42 @@ test("the longest legal scaffold emits a project config the schema reader accept
     );
     assert.equal(parsed.status, 0, parsed.stderr);
     assert.equal(JSON.parse(parsed.stdout).name, name);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stamps runtime_date from the day the project is scaffolded", () => {
+  const root = mkdtempSync(join(tmpdir(), "zs-create-date-"));
+  const clock = join(root, "fixed-clock.mjs");
+  writeFileSync(
+    clock,
+    `const RealDate = globalThis.Date;
+globalThis.Date = class FixedDate extends RealDate {
+  constructor(...args) {
+    super(...(args.length === 0 ? ["2042-03-04T12:00:00.000Z"] : args));
+  }
+  static now() { return new RealDate("2042-03-04T12:00:00.000Z").getTime(); }
+};
+`,
+  );
+
+  try {
+    const created = spawnSync(
+      process.execPath,
+      ["--import", clock, createBin, "dated-project"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(created.status, 0, created.stderr);
+
+    const configPath = join(root, "dated-project", "zeroship.jsonc");
+    const parsed = spawnSync(
+      process.execPath,
+      ["--import", "tsx", configDump, configPath],
+      { cwd: vitePluginRoot, encoding: "utf8" },
+    );
+    assert.equal(parsed.status, 0, parsed.stderr);
+    assert.equal(JSON.parse(parsed.stdout).runtime_date, "2042-03-04");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
