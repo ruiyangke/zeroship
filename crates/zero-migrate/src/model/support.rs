@@ -205,7 +205,6 @@ pub enum Feature {
     NonIdForeignKey,
     ConstraintNotValid,
     ExclusionConstraint,
-    NativeAlterColumn,
     AlterColumnUsing,
     SequenceDefault,
     RenameColumnGuard,

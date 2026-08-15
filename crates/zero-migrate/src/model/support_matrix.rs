@@ -28,7 +28,6 @@ fn feature_label(feature: Feature) -> &'static str {
         Feature::NonIdForeignKey => "Foreign key referencing a non-`id` column",
         Feature::ConstraintNotValid => "`NOT VALID` constraint",
         Feature::ExclusionConstraint => "Exclusion constraint",
-        Feature::NativeAlterColumn => "Native alter column",
         Feature::AlterColumnUsing => "Custom `USING` expression",
         Feature::SequenceDefault => "Sequence-backed default",
         Feature::RenameColumnGuard => "Rename-column existence guard",
@@ -162,5 +161,89 @@ fn committed_support_matrix_is_current() {
     assert_eq!(
         committed, rendered,
         "docs/support-matrix.md is stale; regenerate it with `{REGENERATE_COMMAND}`"
+    );
+}
+
+/// Every `Feature` variant, so the guard below can find the ones that never
+/// reach the published matrix.
+///
+/// This list is maintained by hand because `Feature` carries no reflection.
+/// Adding a variant without adding it here weakens the guard, so keep them
+/// together; `feature_label`'s exhaustive `match` is the compiler-enforced
+/// reminder that a new variant needs attention in this file.
+#[cfg(test)]
+const ALL_FEATURES: &[Feature] = &[
+    Feature::PartialIndex,
+    Feature::IndexInclude,
+    Feature::IndexStorageParams,
+    Feature::IndexOnly,
+    Feature::IndexNullsNotDistinct,
+    Feature::IndexOpclass,
+    Feature::IndexCollation,
+    Feature::ExpressionIndex,
+    Feature::NonBtreeIndexMethod,
+    Feature::TableLevelForeignKey,
+    Feature::TableLevelUnique,
+    Feature::TableLevelCheck,
+    Feature::CompositeForeignKey,
+    Feature::ForeignKeyNoLocalColumn,
+    Feature::NonIdForeignKey,
+    Feature::ConstraintNotValid,
+    Feature::ExclusionConstraint,
+    Feature::AlterColumnUsing,
+    Feature::SequenceDefault,
+    Feature::RenameColumnGuard,
+    Feature::ExistenceGuardProbe,
+    Feature::InsertOnConflict,
+    Feature::MaterializedView,
+    Feature::CreateOrReplaceMaterializedView,
+    Feature::TriggerMultipleEvents,
+    Feature::TriggerTruncateEvent,
+    Feature::TriggerInsteadOfTiming,
+    Feature::TriggerStatementForEach,
+    Feature::TriggerExecuteFunction,
+    Feature::TriggerBody,
+    Feature::TriggerWhen,
+    Feature::TriggerRaiseIgnore,
+    Feature::Comment,
+    Feature::Sequence,
+    Feature::RawViewBody,
+    Feature::RawSql,
+    Feature::PartitionDdl,
+];
+
+/// A `Feature` that carries a matrix label but appears in no support-decision
+/// group renders NOTHING, silently.
+///
+/// `Feature::NativeAlterColumn` was exactly that: declared in the enum, given
+/// the label "Native alter column", and listed in no `*_FEATURES` array, so the
+/// generated matrix simply had no such row. Nothing failed. The committed
+/// matrix was byte-current the whole time, because it faithfully rendered a
+/// registry the feature was never in.
+///
+/// The concept is live elsewhere -- `Capability::NativeAlterColumn` in the
+/// renderer decides it per dialect (PostgreSQL yes, SQLite NO, MySQL yes) -- so
+/// this was not a feature that had been dropped, it was a second route to one
+/// concept where only one route was published.
+#[cfg(test)]
+#[test]
+fn every_feature_reaches_the_support_matrix() {
+    let declared: Vec<Feature> = FEATURE_SUPPORT_REGISTRY
+        .iter()
+        .flat_map(|group| group.features().iter().map(|support| support.feature))
+        .collect();
+
+    let unreachable: Vec<&'static str> = ALL_FEATURES
+        .iter()
+        .filter(|feature| !declared.contains(feature))
+        .map(|feature| feature_label(*feature))
+        .collect();
+
+    assert!(
+        unreachable.is_empty(),
+        "these features carry a matrix label but appear in no support-decision \
+         group, so they render no row and no test notices: {unreachable:?}. \
+         Either declare the feature's per-dialect decision or drop the variant \
+         and its label"
     );
 }
