@@ -132,7 +132,11 @@ async fn round_trip(
             LockMode::Acquire,
         )
         .await
-        .expect("the data envelope applies once it has been accepted");
+        // A refusal can arrive from the load gate (the scalar domain) OR from the
+        // server (a value the column cannot hold). Both are "not stored", and a
+        // caller distinguishing them reads the error text; panicking here would
+        // make the second kind unobservable.
+        .map_err(|e| format!("{e:?}"))?;
 
     let rows = session
         .query(
@@ -256,4 +260,43 @@ async fn a_uuid_round_trips_byte_identical() {
         stored, "0191d4f4-9c1a-7f2b-8c3d-4e5f60718293",
         "the stored UUID must be the authored one, not a re-generated or re-cased value"
     );
+}
+
+#[compio::test]
+async fn a_text_value_carrying_a_nul_byte_is_not_silently_truncated() {
+    // PostgreSQL `text` cannot hold a NUL byte. The dangerous outcome is storing
+    // the prefix before it and reporting success, which drops everything after
+    // the NUL with nothing anywhere to notice. Failing is correct; arriving whole
+    // would be acceptable too. Only truncation is a defect.
+    //
+    // The JSON escape is ASSEMBLED here rather than written literally: char 92 is
+    // the backslash, so the fixture reaching the parser is the six-character
+    // escape and this source file contains no control byte of its own.
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+
+    let backslash = char::from(92);
+    let literal = format!("\"a{backslash}u0000b\"");
+    let outcome = round_trip(&session, "nul", "text", &literal).await;
+
+    match outcome {
+        // NOT `Err(_)`. Accepting any error would let a broken fixture — a schema
+        // that failed to create, a journal that failed to open — pass as though
+        // the NUL had been refused. The refusal has to be about the VALUE: either
+        // the scalar domain rejects it at load, or the server rejects the byte
+        // (SQLSTATE 22021, `invalid byte sequence for encoding "UTF8": 0x00`).
+        Err(refused) => assert!(
+            refused.contains("0x00") || refused.contains("Deserialize"),
+            "the write failed for a reason unrelated to the NUL, so this test did \
+             not measure truncation at all: {refused}"
+        ),
+        Ok(stored) => assert_eq!(
+            stored.chars().count(),
+            3,
+            "the NUL-bearing value was stored as {stored:?}, which is the truncated \
+             prefix. PostgreSQL text cannot hold a NUL, so the write must fail or \
+             the value must arrive whole - storing the prefix loses data while \
+             every layer reports success"
+        ),
+    }
 }
