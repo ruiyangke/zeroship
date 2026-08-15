@@ -181,6 +181,7 @@ pub fn validate_ir_authorized(
     }
     validate_no_op_targets_a_renamed_away_table(ir, target_dialect, ts_locations)?;
     validate_no_op_references_a_dropped_column(ir, target_dialect, ts_locations)?;
+    validate_no_column_uses_a_dropped_named_object(ir, target_dialect, ts_locations)?;
     validate_index_names_across_ops(ir, target_dialect, ts_locations)?;
     validate_column_references(ir, target_dialect, ts_locations)?;
     validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
@@ -2658,6 +2659,107 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The named PostgreSQL objects a single column definition depends on: its
+/// declared type when that type is a named enum or domain, and the sequence a
+/// `nextval` default draws from.
+fn column_named_object_dependencies(
+    column: &crate::model::ir::IrColumn,
+) -> Vec<(&'static str, &str)> {
+    use crate::model::ir::{ColType, IrDefault};
+
+    let mut out = Vec::new();
+    match &column.ty {
+        ColType::Enum { name, .. } => out.push(("enum", name.as_str())),
+        ColType::Domain { name, .. } => out.push(("domain", name.as_str())),
+        _ => {}
+    }
+    if let Some(IrDefault::Nextval { sequence }) = &column.default {
+        out.push(("sequence", sequence.name.as_str()));
+    }
+    out
+}
+
+/// Refuse a column that depends on an enum, domain or sequence an earlier op in
+/// the same migration dropped.
+///
+/// The third member of the family whose table and column cases live in
+/// [`validate_no_op_targets_a_renamed_away_table`] and
+/// [`validate_no_op_references_a_dropped_column`]. Confirmed against the server:
+/// `DROP TYPE e` then a column of type `e` gives `type "e" does not exist`, and
+/// `DROP SEQUENCE sq` then a `nextval('sq')` default gives `relation "sq" does
+/// not exist`.
+///
+/// Recreating a dropped object before using it stays allowed — dropping an enum
+/// and recreating it is how its value set is replaced.
+///
+/// Bounded like its siblings: this reaches names carried as plain identifiers on
+/// a column, not names buried inside expressions.
+fn validate_no_column_uses_a_dropped_named_object(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    let mut dropped: BTreeSet<(&'static str, &str)> = BTreeSet::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        // Recreating an object restores the name, so creates are handled first.
+        match op {
+            Op::CreateEnum { name, .. } => {
+                dropped.remove(&("enum", name.as_str()));
+            }
+            Op::CreateDomain { name, .. } => {
+                dropped.remove(&("domain", name.as_str()));
+            }
+            Op::CreateSequence { name, .. } => {
+                dropped.remove(&("sequence", name.as_str()));
+            }
+            _ => {}
+        }
+
+        let columns: Vec<&crate::model::ir::IrColumn> = match op {
+            Op::CreateTable { columns, .. } => columns.iter().collect(),
+            _ => Vec::new(),
+        };
+        for column in columns {
+            for (kind, name) in column_named_object_dependencies(column) {
+                if dropped.contains(&(kind, name)) {
+                    return Err(AuthoringError {
+                        code: CODE_OP_INVALID.to_string(),
+                        kind: Some(UnsupportedKind::Op),
+                        op_index,
+                        ts_location: ts_locations.get(op_index).cloned().flatten(),
+                        dialect: target_dialect,
+                        reason: format!(
+                            "column {:?} depends on {kind} {name:?}, but an earlier drop in \
+                             this migration removed it, so it will not exist when this runs",
+                            column.name
+                        ),
+                        suggested_fix: Some(format!(
+                            "move this operation before the drop, or recreate the {kind} first"
+                        )),
+                    });
+                }
+            }
+        }
+
+        match op {
+            Op::DropEnum { name, .. } => {
+                dropped.insert(("enum", name.as_str()));
+            }
+            Op::DropDomain { name, .. } => {
+                dropped.insert(("domain", name.as_str()));
+            }
+            Op::DropSequence { name, .. } => {
+                dropped.insert(("sequence", name.as_str()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Every column name this operation names as a plain identifier, paired with the
 /// table it belongs to.
 ///
