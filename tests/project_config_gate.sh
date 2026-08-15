@@ -224,6 +224,10 @@ probe() {
 }
 
 P_NONE="$(probe none)"; P_ROOT="$(probe root)"; P_DIST="$(probe dist)"
+P_UNSAFE="$(
+  cd "$ROOT/sdks/vite-plugin" &&
+    "${NODE_RUN[@]}" "$PROBE" "--sentinel=$SENTINEL" --plant=root --dist=.
+)" 2>"$WORK/probe-unsafe.err"
 ran=1
 for arm in none root dist; do
   case "$arm" in none) v="$P_NONE" ;; root) v="$P_ROOT" ;; dist) v="$P_DIST" ;; esac
@@ -234,6 +238,13 @@ for arm in none root dist; do
        sed 's/^/       /' "$WORK/probe-$arm.err" | head -8 ;;
   esac
 done
+
+case "$P_UNSAFE" in
+  REJECTED) ;;
+  *) ran=0
+     fail "probe --dist=. did not report a safe rejection (got '$P_UNSAFE')"
+     sed 's/^/       /' "$WORK/probe-unsafe.err" | head -8 ;;
+esac
 
 if [ "$ran" = "1" ]; then
   # The CONTROL first: a sentinel that IS inside dist/ must be found. A search
@@ -246,6 +257,10 @@ if [ "$ran" = "1" ]; then
   [ "$P_NONE" = "ABSENT" ] \
     && pass "with no sentinel anywhere, the search reports ABSENT (it is not stuck on FOUND)" \
     || fail "the search reported FOUND with no sentinel planted - it is not discriminating"
+
+  [ "$P_UNSAFE" = "REJECTED" ] \
+    && pass "build.dist=. is rejected before an archive can contain zeroship.jsonc" \
+    || fail "build.dist=. was packed instead of rejected"
 
   if [ "$P_DIST" = "FOUND" ] && [ "$P_NONE" = "ABSENT" ]; then
     [ "$P_ROOT" = "ABSENT" ] \

@@ -127,10 +127,17 @@ impl ProjectConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        Self::parse(path.to_path_buf(), text)
+        let project_root = std::env::current_dir()
+            .map_err(|e| format!("cannot read the working directory: {e}"))?;
+        Self::parse_with_root(path.to_path_buf(), text, &project_root)
     }
 
     pub fn parse(path: PathBuf, text: String) -> Result<Self, String> {
+        let project_root = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::parse_with_root(path.clone(), text, project_root)
+    }
+
+    fn parse_with_root(path: PathBuf, text: String, project_root: &Path) -> Result<Self, String> {
         let stripped = jsonc::strip(&text);
         let value: Value = serde_json::from_str(&stripped)
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -144,7 +151,7 @@ impl ProjectConfig {
             }
         };
         let cfg = ProjectConfig { path, text, root };
-        cfg.validate()?;
+        cfg.validate(project_root)?;
         Ok(cfg)
     }
 
@@ -152,7 +159,7 @@ impl ProjectConfig {
         format!("{}: {}", self.path.display(), msg.as_ref())
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, project_root: &Path) -> Result<(), String> {
         self.reject_forbidden_names(&Value::Object(self.root.clone()), "")?;
         // A `$schema` pointing somewhere else is a file written against a
         // different contract. Accepting it silently would mean validating v1
@@ -174,6 +181,7 @@ impl ProjectConfig {
         )
         .map_err(|e| self.err(e))?;
         check_members(&self.root, "").map_err(|e| self.err(e))?;
+        self.reject_dist_containing_config(&self.root, project_root, "build.dist")?;
 
         if let Some(envs) = self.root.get("environments") {
             let envs = envs.as_object().ok_or_else(|| {
@@ -199,7 +207,53 @@ impl ProjectConfig {
                 })?;
                 check_members(entry, &format!("environments.{name}"))
                     .map_err(|e| self.err(e))?;
+                self.reject_dist_containing_config(
+                    entry,
+                    project_root,
+                    &format!("environments.{name}.build.dist"),
+                )?;
             }
+        }
+        Ok(())
+    }
+
+    fn reject_dist_containing_config(
+        &self,
+        value: &Map<String, Value>,
+        project_root: &Path,
+        field: &str,
+    ) -> Result<(), String> {
+        let Some(dist) = value
+            .get("build")
+            .and_then(Value::as_object)
+            .and_then(|build| build.get("dist"))
+            .and_then(Value::as_str)
+        else {
+            return Ok(());
+        };
+        let cwd = std::env::current_dir()
+            .map_err(|e| self.err(format!("cannot read the working directory: {e}")))?;
+        let root = lexical_normalize(&if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            cwd.join(project_root)
+        });
+        let config = lexical_normalize(&if self.path.is_absolute() {
+            self.path.clone()
+        } else {
+            cwd.join(&self.path)
+        });
+        let candidate = Path::new(dist);
+        let dist_dir = lexical_normalize(&if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            root.join(candidate)
+        });
+        if root.starts_with(&dist_dir) || config.starts_with(&dist_dir) {
+            return Err(self.err(format!(
+                "`{field}` ({dist}) cannot resolve to the project root or an ancestor containing \
+                 {CONFIG_FILENAME}"
+            )));
         }
         Ok(())
     }
@@ -328,6 +382,24 @@ impl ProjectConfig {
             .map_err(|e| format!("failed to write {}: {e}", self.path.display()))?;
         Ok(WriteOutcome::Spliced)
     }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR_STR),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

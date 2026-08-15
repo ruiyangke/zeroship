@@ -32,7 +32,7 @@ export const ENVIRONMENT_REQUIRED_KEYS: readonly string[] = ["app","control"];
 export const FIELD_RULES: readonly {
   path: string; type: "string" | "boolean" | "string[]";
   enum?: readonly string[]; pattern?: string; itemPattern?: string;
-}[] = [{"path":"$schema","type":"string"},{"path":"name","type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,62}$"},{"path":"app","type":"string"},{"path":"control","type":"string"},{"path":"runtime_date","type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},{"path":"build.mode","type":"string","enum":["full","static"]},{"path":"build.serverEntry","type":"string"},{"path":"build.dist","type":"string"},{"path":"build.output","type":"string"},{"path":"migrations.dir","type":"string"},{"path":"migrations.out","type":"string"},{"path":"secrets","type":"string[]","itemPattern":"^[A-Z][A-Z0-9_]{0,63}$"}];
+}[] = [{"path":"$schema","type":"string"},{"path":"name","type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,62}$"},{"path":"app","type":"string"},{"path":"control","type":"string"},{"path":"runtime_date","type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},{"path":"build.mode","type":"string","enum":["full","static"]},{"path":"build.serverEntry","type":"string"},{"path":"build.dist","type":"string","pattern":"^(?!\\.{1,2}$).+$"},{"path":"build.output","type":"string"},{"path":"migrations.dir","type":"string"},{"path":"migrations.out","type":"string"},{"path":"secrets","type":"string[]","itemPattern":"^[A-Z][A-Z0-9_]{0,63}$"}];
 
 /** Every schema `default`, by dotted path. The ONLY copy in the TS tree. */
 export const DEFAULTS: Readonly<Record<string, unknown>> = {

@@ -168,6 +168,22 @@ describe("validation", () => {
       /runtime_date/,
     );
   });
+
+  test("build.dist cannot be the project root or one of its ancestors", () => {
+    for (const dist of [".", "..", "../..", "dist/..", "/tmp"]) {
+      const body = FULL.replace('"dist": "dist"', `"dist": ${JSON.stringify(dist)}`);
+      const root = scratch({ [CONFIG_FILENAME]: body });
+      try {
+        assert.throws(
+          () => readProjectConfig(root),
+          /build\.dist.*zeroship\.jsonc/,
+          `build.dist=${JSON.stringify(dist)} must be refused`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("resolution", () => {
