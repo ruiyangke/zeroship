@@ -24,7 +24,7 @@
  * reduced-motion. Nothing here to disable.
  */
 
-.zs-faq {
+[data-slot="faq"] {
   /* Local single-knob custom property (the house idiom): the readable measure
      the header + Q/A list are capped to. */
   --zs-faq-measure: 44rem;
@@ -37,7 +37,7 @@
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
-.zs-faq__header {
+[data-slot="faq-header"] {
   max-inline-size: var(--zs-faq-measure);
   margin-block-end: var(--zs-space-8);
   text-align: start;
@@ -46,7 +46,7 @@
 /* The eyebrow styling is the shared `.zs-section-eyebrow` (defined once in
    _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
-.zs-faq__title {
+[data-slot="faq-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zs-text-display-3-size);
@@ -57,7 +57,7 @@
   text-wrap: balance;
 }
 
-.zs-faq__description {
+[data-slot="faq-description"] {
   margin-block: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -67,7 +67,7 @@
 }
 
 /* ─── List — the composed Accordion, capped to the readable measure ──────── */
-.zs-faq__list {
+[data-slot="faq-list"] {
   max-inline-size: var(--zs-faq-measure);
   /* The Accordion owns its own internal chrome (rows, dividers, chevron,
      panel animation). This band only constrains its inline measure. */
@@ -79,10 +79,10 @@
  * the painted header text to system colors. The composed Accordion handles its
  * own forced-colors treatment for the trigger/panel/dividers. */
 @media (forced-colors: active) {
-  .zs-faq,
-  .zs-faq__eyebrow,
-  .zs-faq__title,
-  .zs-faq__description {
+  [data-slot="faq"],
+  [data-slot="faq-eyebrow"],
+  [data-slot="faq-title"],
+  [data-slot="faq-description"] {
     color: CanvasText;
   }
 }

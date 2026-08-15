@@ -48,7 +48,7 @@
  * in their own CSS), so there is nothing here to disable.
  */
 
-.zs-pricing {
+[data-slot="pricing-table"] {
   /* Local single-knob custom properties (the house idiom, cf.
      --zs-auth-form-width / --zs-hero-measure): named, tunable handles for
      the band's calibrated literals so the intent is legible and a consumer
@@ -76,7 +76,7 @@
 }
 
 /* ─── Lead-in — optional centered title + description ─────────────────────── */
-.zs-pricing__lead {
+[data-slot="pricing-table-lead"] {
   /* Cap the lead-in to a readable measure and center it above the grid. */
   max-inline-size: var(--zs-pricing-lead-measure);
   margin-inline: auto;
@@ -84,7 +84,7 @@
   text-align: center;
 }
 
-.zs-pricing__title {
+[data-slot="pricing-table-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zs-text-display-3-size);
@@ -95,7 +95,7 @@
   text-wrap: balance;
 }
 
-.zs-pricing__lead-description {
+[data-slot="pricing-lead-description"] {
   margin-block: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -112,7 +112,7 @@
    band adds no local collapse override. */
 
 /* ─── Tier card — a column flexbox so the CTA pins to the bottom ─────────── */
-.zs-pricing__tier {
+[data-slot="pricing-tier"] {
   /* The Card root is overridden to a column flexbox so the feature list can
      grow and the CTA sits at the block-end. `block-size: 100%` makes the
      card fill its stretched grid track (equal-height row). */
@@ -133,7 +133,7 @@
    - the accent ring (inset box-shadow) still outlines the card.
    "recommended" is never carried by this treatment alone — the visible
    "Most popular" badge is the AT + color-blind signal. */
-.zs-pricing__tier[data-featured] {
+[data-slot="pricing-tier"][data-featured] {
   position: relative;
   transform: translateY(calc(-1 * var(--zs-pricing-featured-raise)));
   box-shadow:
@@ -145,7 +145,7 @@
    block-start edge. The Card's own `overflow: hidden` + border-radius clip the
    strip to the rounded top corners, so it reads as a painted cap rather than a
    floating bar. Decorative; the badge carries the meaning. */
-.zs-pricing__tier[data-featured]::before {
+[data-slot="pricing-tier"][data-featured]::before {
   content: "";
   position: absolute;
   inset-block-start: 0;
@@ -155,20 +155,20 @@
 }
 
 /* ─── Header — badge + name + price + description ─────────────────────────── */
-.zs-pricing__header {
+[data-slot="pricing-tier-header"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-2);
 }
 
-.zs-pricing__badge {
+[data-slot="pricing-badge"] {
   /* The badge sits above the name; start-aligned so it reads as a flag on
      the tier rather than a centered ornament. */
   display: flex;
   margin-block-end: var(--zs-space-1);
 }
 
-.zs-pricing__name {
+[data-slot="pricing-name"] {
   margin-block: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -177,7 +177,7 @@
   color: var(--zs-label);
 }
 
-.zs-pricing__price {
+[data-slot="pricing-price"] {
   /* The price line: a prominent amount with a muted period suffix on the
      same baseline. */
   margin-block: 0;
@@ -187,7 +187,7 @@
   flex-wrap: wrap;
 }
 
-.zs-pricing__amount {
+[data-slot="pricing-amount"] {
   font-size: var(--zs-text-large-title-size);
   line-height: var(--zs-text-large-title-line);
   font-weight: var(--zs-text-large-title-weight);
@@ -195,14 +195,14 @@
   color: var(--zs-label);
 }
 
-.zs-pricing__period {
+[data-slot="pricing-period"] {
   font-size: var(--zs-text-callout-size);
   line-height: var(--zs-text-callout-line);
   font-weight: var(--zs-text-body-weight);
   color: var(--zs-label-secondary);
 }
 
-.zs-pricing__description {
+[data-slot="pricing-description"] {
   margin-block: 0;
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
@@ -215,7 +215,7 @@
    tier's own `gap` provides the rhythm above/below it. */
 
 /* ─── Features — the GROW region so the CTA pins to the bottom ───────────── */
-.zs-pricing__features {
+[data-slot="pricing-features"] {
   /* Reset the list chrome — the rows are styled rows, not bulleted. */
   margin-block: 0;
   padding-inline-start: 0;
@@ -228,7 +228,7 @@
   gap: var(--zs-space-3);
 }
 
-.zs-pricing__feature {
+[data-slot="pricing-feature"] {
   display: flex;
   /* Top-align the icon to the first line of a multi-line label. */
   align-items: flex-start;
@@ -244,11 +244,11 @@
    `--zs-label-secondary` (not tertiary) keeps the row body-text AA-clean
    against the Card surface while still reading visibly quieter than the
    full-weight included rows. */
-.zs-pricing__feature:not([data-included]) {
+[data-slot="pricing-feature"]:not([data-included]) {
   color: var(--zs-label-secondary);
 }
 
-.zs-pricing__feature-icon {
+[data-slot="pricing-feature-icon"] {
   /* Nudge the icon down to sit on the label's first-line baseline. The icon
      inherits the row color via currentColor; the included rows tint the
      check accent, the excluded rows stay muted with the row. */
@@ -256,16 +256,16 @@
   flex: 0 0 auto;
 }
 
-.zs-pricing__feature[data-included] .zs-pricing__feature-icon {
+[data-slot="pricing-feature"][data-included] [data-slot="pricing-feature-icon"] {
   color: var(--zs-accent);
 }
 
-.zs-pricing__feature-label {
+[data-slot="pricing-feature-label"] {
   /* The label takes the remaining inline space; the optional note follows. */
   flex: 1 1 auto;
 }
 
-.zs-pricing__feature-note {
+[data-slot="pricing-feature-note"] {
   flex: 0 0 auto;
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
@@ -274,7 +274,7 @@
 }
 
 /* ─── CTA — pinned to the card block-end ─────────────────────────────────── */
-.zs-pricing__cta {
+[data-slot="pricing-cta"] {
   /* The trailing row. `margin-block-start: auto` is the belt to the feature
      list's `flex: 1` braces — together they pin the CTA to the block-end so
      CTAs align across tiers of differing feature counts. */
@@ -284,7 +284,7 @@
 
 /* The default (ctaLabel) Button stretches full-width so the CTA reads as a
    tier-level action band. A consumer-supplied `cta` node is laid out as-is. */
-.zs-pricing__cta-button {
+[data-slot="pricing-cta-button"] {
   inline-size: 100%;
 }
 
@@ -296,36 +296,36 @@
  * CanvasText. The composed Icon paints with currentColor, so it follows the
  * row color automatically — no extra rule needed. */
 @media (forced-colors: active) {
-  .zs-pricing,
-  .zs-pricing__title,
-  .zs-pricing__name,
-  .zs-pricing__amount {
+  [data-slot="pricing-table"],
+  [data-slot="pricing-table-title"],
+  [data-slot="pricing-name"],
+  [data-slot="pricing-amount"] {
     color: CanvasText;
   }
-  .zs-pricing__lead-description,
-  .zs-pricing__period,
-  .zs-pricing__description,
-  .zs-pricing__feature,
-  .zs-pricing__feature:not([data-included]),
-  .zs-pricing__feature-note {
+  [data-slot="pricing-lead-description"],
+  [data-slot="pricing-period"],
+  [data-slot="pricing-description"],
+  [data-slot="pricing-feature"],
+  [data-slot="pricing-feature"]:not([data-included]),
+  [data-slot="pricing-feature-note"] {
     color: CanvasText;
   }
   /* Every tier card keeps a system border so the cards stay separable when
      the authored box-shadow hairline drops out. Uses the house hairline
      token (the same edge Radio / Toolbar / DataTable use). */
-  .zs-pricing__tier {
+  [data-slot="pricing-tier"] {
     border: var(--zs-selection-hairline) solid CanvasText;
   }
   /* The featured ring becomes a thicker Highlight border so "recommended"
      stays visually distinct (the visible badge already carries it for AT).
      1.5× the accent ring width keeps it tied to the single ring knob. */
-  .zs-pricing__tier[data-featured] {
+  [data-slot="pricing-tier"][data-featured] {
     border-color: Highlight;
     border-width: calc(var(--zs-pricing-ring-width) * 1.5);
   }
   /* The painted accent cap drops out under a forced palette — re-pin it to a
      thicker Highlight cap on the block-start edge so the flag survives. */
-  .zs-pricing__tier[data-featured]::before {
+  [data-slot="pricing-tier"][data-featured]::before {
     background: Highlight;
   }
 }

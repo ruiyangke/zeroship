@@ -32,7 +32,7 @@
  */
 
 /* ─── Backdrop ─────────────────────────────────────────────────────────── */
-.zs-drawer-backdrop {
+[data-slot="drawer-backdrop"] {
   position: fixed;
   inset: 0;
   z-index: var(--zs-z-modal);
@@ -45,13 +45,13 @@
   opacity: 1;
   transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
 }
-.zs-drawer-backdrop[data-starting-style],
-.zs-drawer-backdrop[data-ending-style] {
+[data-slot="drawer-backdrop"][data-starting-style],
+[data-slot="drawer-backdrop"][data-ending-style] {
   opacity: 0;
 }
 
 /* ─── Content (base) ───────────────────────────────────────────────────── */
-.zs-drawer-content {
+[data-slot="drawer-content"] {
   /* Anchored sheet — position pins to one edge of the viewport. The
    * default declarations cover side="end" (the most common drawer);
    * per-side rules below override insets and the closed-state transform.
@@ -88,92 +88,92 @@
 }
 
 /* ─── side="start" (left in LTR, right in RTL) ─────────────────────────── */
-.zs-drawer-content[data-side="start"] {
+[data-slot="drawer-content"][data-side="start"] {
   inset-block-start: 0;
   inset-block-end: 0;
   inset-inline-start: 0;
   block-size: 100dvh;
 }
-.zs-drawer-content[data-side="start"][data-starting-style],
-.zs-drawer-content[data-side="start"][data-ending-style] {
+[data-slot="drawer-content"][data-side="start"][data-starting-style],
+[data-slot="drawer-content"][data-side="start"][data-ending-style] {
   transform: translateX(-100%);
 }
 
 /* ─── side="end" (right in LTR, left in RTL) ───────────────────────────── */
-.zs-drawer-content[data-side="end"] {
+[data-slot="drawer-content"][data-side="end"] {
   inset-block-start: 0;
   inset-block-end: 0;
   inset-inline-end: 0;
   block-size: 100dvh;
 }
-.zs-drawer-content[data-side="end"][data-starting-style],
-.zs-drawer-content[data-side="end"][data-ending-style] {
+[data-slot="drawer-content"][data-side="end"][data-starting-style],
+[data-slot="drawer-content"][data-side="end"][data-ending-style] {
   transform: translateX(100%);
 }
 
 /* ─── side="top" ───────────────────────────────────────────────────────── */
-.zs-drawer-content[data-side="top"] {
+[data-slot="drawer-content"][data-side="top"] {
   inset-block-start: 0;
   inset-inline-start: 0;
   inset-inline-end: 0;
   inline-size: 100dvw;
 }
-.zs-drawer-content[data-side="top"][data-starting-style],
-.zs-drawer-content[data-side="top"][data-ending-style] {
+[data-slot="drawer-content"][data-side="top"][data-starting-style],
+[data-slot="drawer-content"][data-side="top"][data-ending-style] {
   transform: translateY(-100%);
 }
 
 /* ─── side="bottom" ────────────────────────────────────────────────────── */
-.zs-drawer-content[data-side="bottom"] {
+[data-slot="drawer-content"][data-side="bottom"] {
   inset-block-end: 0;
   inset-inline-start: 0;
   inset-inline-end: 0;
   inline-size: 100dvw;
 }
-.zs-drawer-content[data-side="bottom"][data-starting-style],
-.zs-drawer-content[data-side="bottom"][data-ending-style] {
+[data-slot="drawer-content"][data-side="bottom"][data-starting-style],
+[data-slot="drawer-content"][data-side="bottom"][data-ending-style] {
   transform: translateY(100%);
 }
 
 /* ─── sizes: horizontal drawers (start/end) → inline-size ──────────────── */
-.zs-drawer-content[data-side="start"][data-size="sm"],
-.zs-drawer-content[data-side="end"][data-size="sm"] {
+[data-slot="drawer-content"][data-side="start"][data-size="sm"],
+[data-slot="drawer-content"][data-side="end"][data-size="sm"] {
   inline-size: 16rem;
   max-inline-size: 100dvw;
 }
-.zs-drawer-content[data-side="start"][data-size="md"],
-.zs-drawer-content[data-side="end"][data-size="md"] {
+[data-slot="drawer-content"][data-side="start"][data-size="md"],
+[data-slot="drawer-content"][data-side="end"][data-size="md"] {
   inline-size: 24rem;
   max-inline-size: 100dvw;
 }
-.zs-drawer-content[data-side="start"][data-size="lg"],
-.zs-drawer-content[data-side="end"][data-size="lg"] {
+[data-slot="drawer-content"][data-side="start"][data-size="lg"],
+[data-slot="drawer-content"][data-side="end"][data-size="lg"] {
   inline-size: 32rem;
   max-inline-size: 100dvw;
 }
-.zs-drawer-content[data-side="start"][data-size="full"],
-.zs-drawer-content[data-side="end"][data-size="full"] {
+[data-slot="drawer-content"][data-side="start"][data-size="full"],
+[data-slot="drawer-content"][data-side="end"][data-size="full"] {
   inline-size: 100dvw;
 }
 
 /* ─── sizes: vertical drawers (top/bottom) → block-size ────────────────── */
-.zs-drawer-content[data-side="top"][data-size="sm"],
-.zs-drawer-content[data-side="bottom"][data-size="sm"] {
+[data-slot="drawer-content"][data-side="top"][data-size="sm"],
+[data-slot="drawer-content"][data-side="bottom"][data-size="sm"] {
   block-size: 16rem;
   max-block-size: 100dvh;
 }
-.zs-drawer-content[data-side="top"][data-size="md"],
-.zs-drawer-content[data-side="bottom"][data-size="md"] {
+[data-slot="drawer-content"][data-side="top"][data-size="md"],
+[data-slot="drawer-content"][data-side="bottom"][data-size="md"] {
   block-size: 24rem;
   max-block-size: 100dvh;
 }
-.zs-drawer-content[data-side="top"][data-size="lg"],
-.zs-drawer-content[data-side="bottom"][data-size="lg"] {
+[data-slot="drawer-content"][data-side="top"][data-size="lg"],
+[data-slot="drawer-content"][data-side="bottom"][data-size="lg"] {
   block-size: 32rem;
   max-block-size: 100dvh;
 }
-.zs-drawer-content[data-side="top"][data-size="full"],
-.zs-drawer-content[data-side="bottom"][data-size="full"] {
+[data-slot="drawer-content"][data-side="top"][data-size="full"],
+[data-slot="drawer-content"][data-side="bottom"][data-size="full"] {
   block-size: 100dvh;
 }
 
@@ -191,16 +191,16 @@
  * `dir="rtl"` directly on the Content (see Drawer.stories.tsx RTL),
  * and the SELF selector catches that path.
  */
-.zs-drawer-content[dir="rtl"][data-side="start"][data-starting-style],
-.zs-drawer-content[dir="rtl"][data-side="start"][data-ending-style],
-[dir="rtl"] .zs-drawer-content[data-side="start"][data-starting-style],
-[dir="rtl"] .zs-drawer-content[data-side="start"][data-ending-style] {
+[data-slot="drawer-content"][dir="rtl"][data-side="start"][data-starting-style],
+[data-slot="drawer-content"][dir="rtl"][data-side="start"][data-ending-style],
+[dir="rtl"] [data-slot="drawer-content"][data-side="start"][data-starting-style],
+[dir="rtl"] [data-slot="drawer-content"][data-side="start"][data-ending-style] {
   transform: translateX(100%);
 }
-.zs-drawer-content[dir="rtl"][data-side="end"][data-starting-style],
-.zs-drawer-content[dir="rtl"][data-side="end"][data-ending-style],
-[dir="rtl"] .zs-drawer-content[data-side="end"][data-starting-style],
-[dir="rtl"] .zs-drawer-content[data-side="end"][data-ending-style] {
+[data-slot="drawer-content"][dir="rtl"][data-side="end"][data-starting-style],
+[data-slot="drawer-content"][dir="rtl"][data-side="end"][data-ending-style],
+[dir="rtl"] [data-slot="drawer-content"][data-side="end"][data-starting-style],
+[dir="rtl"] [data-slot="drawer-content"][data-side="end"][data-ending-style] {
   transform: translateX(-100%);
 }
 
@@ -216,25 +216,25 @@
  * direction, and we fall back to opacity-only transition.
  */
 @media (prefers-reduced-motion: reduce) {
-  .zs-drawer-content {
+  [data-slot="drawer-content"] {
     transition: none;
   }
-  .zs-drawer-content[data-side="start"][data-starting-style],
-  .zs-drawer-content[data-side="start"][data-ending-style],
-  .zs-drawer-content[data-side="end"][data-starting-style],
-  .zs-drawer-content[data-side="end"][data-ending-style],
-  .zs-drawer-content[data-side="top"][data-starting-style],
-  .zs-drawer-content[data-side="top"][data-ending-style],
-  .zs-drawer-content[data-side="bottom"][data-starting-style],
-  .zs-drawer-content[data-side="bottom"][data-ending-style],
-  .zs-drawer-content[dir="rtl"][data-side="start"][data-starting-style],
-  .zs-drawer-content[dir="rtl"][data-side="start"][data-ending-style],
-  .zs-drawer-content[dir="rtl"][data-side="end"][data-starting-style],
-  .zs-drawer-content[dir="rtl"][data-side="end"][data-ending-style],
-  [dir="rtl"] .zs-drawer-content[data-side="start"][data-starting-style],
-  [dir="rtl"] .zs-drawer-content[data-side="start"][data-ending-style],
-  [dir="rtl"] .zs-drawer-content[data-side="end"][data-starting-style],
-  [dir="rtl"] .zs-drawer-content[data-side="end"][data-ending-style] {
+  [data-slot="drawer-content"][data-side="start"][data-starting-style],
+  [data-slot="drawer-content"][data-side="start"][data-ending-style],
+  [data-slot="drawer-content"][data-side="end"][data-starting-style],
+  [data-slot="drawer-content"][data-side="end"][data-ending-style],
+  [data-slot="drawer-content"][data-side="top"][data-starting-style],
+  [data-slot="drawer-content"][data-side="top"][data-ending-style],
+  [data-slot="drawer-content"][data-side="bottom"][data-starting-style],
+  [data-slot="drawer-content"][data-side="bottom"][data-ending-style],
+  [data-slot="drawer-content"][dir="rtl"][data-side="start"][data-starting-style],
+  [data-slot="drawer-content"][dir="rtl"][data-side="start"][data-ending-style],
+  [data-slot="drawer-content"][dir="rtl"][data-side="end"][data-starting-style],
+  [data-slot="drawer-content"][dir="rtl"][data-side="end"][data-ending-style],
+  [dir="rtl"] [data-slot="drawer-content"][data-side="start"][data-starting-style],
+  [dir="rtl"] [data-slot="drawer-content"][data-side="start"][data-ending-style],
+  [dir="rtl"] [data-slot="drawer-content"][data-side="end"][data-starting-style],
+  [dir="rtl"] [data-slot="drawer-content"][data-side="end"][data-ending-style] {
     /* Reduced motion: no slide AND no fade. We zero the transform so the
      * panel never flies across the viewport, and we DELIBERATELY leave
      * opacity at its steady-open value (1, inherited from the base
@@ -252,7 +252,7 @@
      * animated. */
     transform: none;
   }
-  .zs-drawer-backdrop {
+  [data-slot="drawer-backdrop"] {
     transition: none;
   }
   /* Mirror the backdrop: its non-reduced-motion starting/ending rule pins
@@ -260,14 +260,14 @@
    * fade can't complete (no transitionend), so the scrim would stay fully
    * transparent while the modal is open. Restore it to its steady opacity
    * so the backdrop paints immediately. */
-  .zs-drawer-backdrop[data-starting-style],
-  .zs-drawer-backdrop[data-ending-style] {
+  [data-slot="drawer-backdrop"][data-starting-style],
+  [data-slot="drawer-backdrop"][data-ending-style] {
     opacity: 1;
   }
 }
 
 /* ─── Header ───────────────────────────────────────────────────────────── */
-.zs-drawer__header {
+[data-slot="drawer-header"] {
   display: flex;
   align-items: flex-start;
   gap: var(--zs-space-3);
@@ -290,14 +290,14 @@
   padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
   padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
 }
-.zs-drawer__header-content {
+[data-slot="drawer-header-content"] {
   flex: 1;
   min-inline-size: 0;
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-1);
 }
-.zs-drawer__header-close {
+[data-slot="drawer-header-close"] {
   /* Auto-X close button INSIDE the header (flex child), never absolutely
    * positioned outside the visible chrome. */
   appearance: none;
@@ -320,17 +320,17 @@
     color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 @media (hover: hover) {
-  .zs-drawer__header-close:hover {
+  [data-slot="drawer-header-close"]:hover {
     background-color: var(--zs-fill-tertiary);
     color: var(--zs-label);
   }
 }
-.zs-drawer__header-close:focus-visible {
+[data-slot="drawer-header-close"]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 @media (pointer: coarse) {
-  .zs-drawer__header-close::before {
+  [data-slot="drawer-header-close"]::before {
     content: "";
     position: absolute;
     inset-block-start: 50%;
@@ -342,7 +342,7 @@
 }
 
 /* ─── Title / Description ──────────────────────────────────────────────── */
-.zs-drawer__title {
+[data-slot="drawer-title"] {
   margin: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -350,7 +350,7 @@
   letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
-.zs-drawer__description {
+[data-slot="drawer-description"] {
   margin: 0;
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
@@ -358,7 +358,7 @@
 }
 
 /* ─── Body / Footer ────────────────────────────────────────────────────── */
-.zs-drawer__body {
+[data-slot="drawer-body"] {
   padding-inline: var(--zs-space-6);
   padding-block: 0;
   flex: 1;
@@ -373,17 +373,17 @@
   padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
   padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
 }
-.zs-drawer__body > p:first-child,
-.zs-drawer__body > ul:first-child,
-.zs-drawer__body > ol:first-child {
+[data-slot="drawer-body"] > p:first-child,
+[data-slot="drawer-body"] > ul:first-child,
+[data-slot="drawer-body"] > ol:first-child {
   margin-block-start: 0;
 }
-.zs-drawer__body > p:last-child,
-.zs-drawer__body > ul:last-child,
-.zs-drawer__body > ol:last-child {
+[data-slot="drawer-body"] > p:last-child,
+[data-slot="drawer-body"] > ul:last-child,
+[data-slot="drawer-body"] > ol:last-child {
   margin-block-end: 0;
 }
-.zs-drawer__footer {
+[data-slot="drawer-footer"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--zs-space-3);
@@ -405,33 +405,33 @@
  * data-size) so the cascade doesn't silently demote our overrides.
  */
 @media (forced-colors: active) {
-  .zs-drawer-content,
-  .zs-drawer-content[data-side="start"],
-  .zs-drawer-content[data-side="end"],
-  .zs-drawer-content[data-side="top"],
-  .zs-drawer-content[data-side="bottom"] {
+  [data-slot="drawer-content"],
+  [data-slot="drawer-content"][data-side="start"],
+  [data-slot="drawer-content"][data-side="end"],
+  [data-slot="drawer-content"][data-side="top"],
+  [data-slot="drawer-content"][data-side="bottom"] {
     background: Canvas;
     color: CanvasText;
     box-shadow: 0 0 0 0.0625rem CanvasText inset;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
-  .zs-drawer-backdrop {
+  [data-slot="drawer-backdrop"] {
     background-color: color-mix(in oklch, CanvasText 40%, transparent);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
-  .zs-drawer__header-close {
+  [data-slot="drawer-header-close"] {
     color: CanvasText;
   }
   /* Hover state is painted at higher specificity than the base above
    * (`:hover` adds an (0,0,1,0) selector unit); mirror it here so the
    * authored hover colors don't survive the forced-colors pass. */
-  .zs-drawer__header-close:hover {
+  [data-slot="drawer-header-close"]:hover {
     background-color: Canvas;
     color: CanvasText;
   }
-  .zs-drawer__header-close:focus-visible {
+  [data-slot="drawer-header-close"]:focus-visible {
     outline-color: Highlight;
   }
   /* Child text selectors paint their own color tokens (`--zs-label`,
@@ -441,11 +441,11 @@
    * — the cascade picks the more specific child rule. Mirror each
    * painted-text child here so Title / Description / Body all resolve
    * to system colors in the high-contrast pass. */
-  .zs-drawer__title,
-  .zs-drawer__body {
+  [data-slot="drawer-title"],
+  [data-slot="drawer-body"] {
     color: CanvasText;
   }
-  .zs-drawer__description {
+  [data-slot="drawer-description"] {
     color: GrayText;
   }
 }

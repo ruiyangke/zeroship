@@ -35,7 +35,7 @@
  * Motion: none. Avatar carries no transitions.
  */
 
-.zs-avatar {
+[data-slot="avatar"] {
   /* Default token-driven sizing — overridden per `--<size>` modifier. */
   --zs-avatar-size: 2.5rem;
   --zs-avatar-text-size: var(--zs-text-headline-size);
@@ -66,31 +66,31 @@
 
 /* ─── Size scale ────────────────────────────────────────────────────── */
 
-.zs-avatar--xs {
+[data-slot="avatar"][data-size="xs"] {
   --zs-avatar-size: 1.5rem;
   --zs-avatar-text-size: var(--zs-text-caption-2-size);
   --zs-avatar-text-line: var(--zs-text-caption-2-line);
   --zs-avatar-text-weight: 600;
 }
-.zs-avatar--sm {
+[data-slot="avatar"][data-size="sm"] {
   --zs-avatar-size: 2rem;
   --zs-avatar-text-size: var(--zs-text-caption-1-size);
   --zs-avatar-text-line: var(--zs-text-caption-1-line);
   --zs-avatar-text-weight: 600;
 }
-.zs-avatar--md {
+[data-slot="avatar"][data-size="md"] {
   --zs-avatar-size: 2.5rem;
   --zs-avatar-text-size: var(--zs-text-footnote-size);
   --zs-avatar-text-line: var(--zs-text-footnote-line);
   --zs-avatar-text-weight: 600;
 }
-.zs-avatar--lg {
+[data-slot="avatar"][data-size="lg"] {
   --zs-avatar-size: 3rem;
   --zs-avatar-text-size: var(--zs-text-callout-size);
   --zs-avatar-text-line: var(--zs-text-callout-line);
   --zs-avatar-text-weight: 600;
 }
-.zs-avatar--xl {
+[data-slot="avatar"][data-size="xl"] {
   --zs-avatar-size: 4rem;
   --zs-avatar-text-size: var(--zs-text-headline-size);
   --zs-avatar-text-line: var(--zs-text-headline-line);
@@ -99,19 +99,19 @@
 
 /* ─── Shape scale ───────────────────────────────────────────────────── */
 
-.zs-avatar--circle {
+[data-slot="avatar"][data-shape="circle"] {
   --zs-avatar-radius: var(--zs-radius-full);
 }
-.zs-avatar--square {
+[data-slot="avatar"][data-shape="square"] {
   --zs-avatar-radius: 0;
 }
-.zs-avatar--rounded {
+[data-slot="avatar"][data-shape="rounded"] {
   --zs-avatar-radius: var(--zs-radius-2);
 }
 
 /* ─── Image ─────────────────────────────────────────────────────────── */
 
-.zs-avatar__image {
+[data-slot="avatar-image"] {
   display: block;
   inline-size: 100%;
   block-size: 100%;
@@ -124,7 +124,7 @@
 
 /* ─── Fallback ──────────────────────────────────────────────────────── */
 
-.zs-avatar__fallback {
+[data-slot="avatar-fallback"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -146,7 +146,7 @@
  * `box-shadow` ring around overlap-tagged Avatars separates them from
  * the lockup below — uses the canvas-mix so it inherits the parent
  * surface color (light theme on dark surface still reads). */
-.zs-avatar[data-position="overlap"] {
+[data-slot="avatar"][data-position="overlap"] {
   margin-inline-start: calc(-1 * var(--zs-avatar-size) / 3);
   box-shadow:
     inset 0 0 0 var(--zs-selection-hairline)
@@ -161,15 +161,15 @@
  * CanvasText. The image is left untouched (forced-color-adjust:
  * auto by default) so photographic content still renders. */
 @media (forced-colors: active) {
-  .zs-avatar {
+  [data-slot="avatar"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  .zs-avatar__fallback {
+  [data-slot="avatar-fallback"] {
     color: CanvasText;
   }
-  .zs-avatar[data-position="overlap"] {
+  [data-slot="avatar"][data-position="overlap"] {
     box-shadow:
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0.125rem Canvas;
@@ -182,9 +182,9 @@
  * parity with the rest of the surface so a future maintainer adding a
  * fade-in on Fallback mount has the gate already in place. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-avatar,
-  .zs-avatar__image,
-  .zs-avatar__fallback {
+  [data-slot="avatar"],
+  [data-slot="avatar-image"],
+  [data-slot="avatar-fallback"] {
     transition: none;
     animation: none;
   }

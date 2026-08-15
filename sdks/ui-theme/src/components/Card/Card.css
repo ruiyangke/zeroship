@@ -26,7 +26,7 @@
  */
 
 /* ─── base ─────────────────────────────────────────────────────────────── */
-.zs-card {
+[data-slot="card"] {
   /* `isolation: isolate` creates a stacking context so a fill-mode
    * Card.Media can sit at z-index: 0 underneath its siblings without
    * mutating each direct child's position (review-fix item 17). */
@@ -51,12 +51,12 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-.zs-card--sm {
+[data-slot="card"][data-size="sm"] {
   padding: var(--zs-card-padding-sm);
   gap: var(--zs-card-gap-sm);
   border-radius: var(--zs-card-radius-sm);
 }
-.zs-card--lg {
+[data-slot="card"][data-size="lg"] {
   padding: var(--zs-card-padding-lg);
   gap: var(--zs-card-gap-lg);
   border-radius: var(--zs-card-radius-lg);
@@ -67,29 +67,29 @@
  * visually when sat on a same-color parent surface. Token-driven so a
  * theme can opt out by setting --zs-card-surface-edge: none. Visual-
  * polish item 1. */
-.zs-card--surface {
+[data-slot="card"][data-variant="surface"] {
   box-shadow: var(--zs-card-surface-edge);
 }
-.zs-card--elevated {
+[data-slot="card"][data-variant="elevated"] {
   box-shadow:
     var(--zs-shadow-2),
     var(--zs-card-surface-edge);
 }
-.zs-card--outline {
+[data-slot="card"][data-variant="outline"] {
   box-shadow:
     var(
       --zs-card-outline-edge,
       0 0 0 0.0625rem var(--zs-separator) inset
     );
 }
-.zs-card--ghost {
+[data-slot="card"][data-variant="ghost"] {
   background-color: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
 
 /* ─── interactive states ───────────────────────────────────────────────── */
-.zs-card[data-interactive] {
+[data-slot="card"][data-interactive] {
   cursor: pointer;
   transition:
     transform var(--zs-motion-fast) var(--zs-motion-spring),
@@ -97,7 +97,7 @@
     box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
 }
 @media (hover: hover) {
-  .zs-card[data-interactive]:hover {
+  [data-slot="card"][data-interactive]:hover {
     /* Layer a translucent tint OVER the opaque base via an inset
      * box-shadow rather than a background-image gradient.
      *
@@ -121,7 +121,7 @@
   /* Surface variant carries its subtle inset hairline as a box-shadow;
    * combine with the hover tint so the edge survives hover.
    * Visual-polish item 1. */
-  .zs-card--surface[data-interactive]:hover {
+  [data-slot="card"][data-variant="surface"][data-interactive]:hover {
     box-shadow:
       inset 0 0 0 100rem var(--zs-card-hover-tint),
       var(--zs-card-surface-edge);
@@ -129,7 +129,7 @@
   /* Elevated has an existing box-shadow — combine the hover tint
    * inset with the deeper drop-shadow so neither overrides the
    * other. */
-  .zs-card--elevated[data-interactive]:hover {
+  [data-slot="card"][data-variant="elevated"][data-interactive]:hover {
     box-shadow:
       inset 0 0 0 100rem var(--zs-card-hover-tint),
       var(--zs-shadow-3),
@@ -137,7 +137,7 @@
   }
   /* Outline variant carries the inset hairline as a box-shadow; combine
    * with the hover tint so the outline survives hover. */
-  .zs-card--outline[data-interactive]:hover {
+  [data-slot="card"][data-variant="outline"][data-interactive]:hover {
     box-shadow:
       inset 0 0 0 100rem var(--zs-card-hover-tint),
       var(
@@ -146,16 +146,16 @@
       );
   }
 }
-.zs-card[data-interactive]:focus-visible {
+[data-slot="card"][data-interactive]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
-.zs-card[data-interactive]:active {
+[data-slot="card"][data-interactive]:active {
   transform: scale(0.99);
 }
 /* Disabled / aria-disabled — neutralise the interactive affordances. */
-.zs-card[data-interactive]:disabled,
-.zs-card[data-interactive][aria-disabled="true"] {
+[data-slot="card"][data-interactive]:disabled,
+[data-slot="card"][data-interactive][aria-disabled="true"] {
   cursor: not-allowed;
   pointer-events: none;
   opacity: 0.55;
@@ -169,10 +169,10 @@
  * but doesn't ANIMATE between them. The :active selector loses its
  * transform but keeps its cursor signal. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-card[data-interactive] {
+  [data-slot="card"][data-interactive] {
     transition: none;
   }
-  .zs-card[data-interactive]:active {
+  [data-slot="card"][data-interactive]:active {
     transform: none;
   }
 }
@@ -188,34 +188,34 @@
  * Card.Action is present so the second `auto` column doesn't reserve
  * blank space. `:has()` baseline: Chrome 105+ / Safari 15.4+ /
  * Firefox 121+ — all our targets. */
-.zs-card__header {
+[data-slot="card-header"] {
   display: grid;
   grid-template-columns: 1fr;
   column-gap: var(--zs-space-3);
   row-gap: var(--zs-space-half);
   align-items: start;
 }
-.zs-card__header:has(.zs-card__action) {
+[data-slot="card-header"]:has() {
   grid-template-columns: 1fr auto;
 }
-.zs-card__header > .zs-card__title {
+[data-slot="card-header"] > [data-slot="card-title"] {
   grid-column: 1;
   /* Allow the title column to shrink below its intrinsic size so very
    * long titles can wrap or truncate (review-fix item 12). */
   min-inline-size: 0;
 }
-.zs-card__header > .zs-card__description {
+[data-slot="card-header"] > [data-slot="card-description"] {
   grid-column: 1;
   min-inline-size: 0;
 }
-.zs-card__header > .zs-card__action {
+[data-slot="card-header"] > [data-slot="card-action"] {
   grid-column: 2;
   grid-row: 1 / -1;
   align-self: center;
 }
 
 /* Title — size scales with the Card size. */
-.zs-card__title {
+[data-slot="card-title"] {
   margin: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -223,20 +223,20 @@
   letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
-.zs-card--sm .zs-card__title {
+[data-slot="card"][data-size="sm"] [data-slot="card-title"] {
   font-size: var(--zs-text-headline-size);
   line-height: var(--zs-text-headline-line);
   font-weight: var(--zs-text-headline-weight);
   letter-spacing: var(--zs-text-headline-tracking);
 }
-.zs-card--lg .zs-card__title {
+[data-slot="card"][data-size="lg"] [data-slot="card-title"] {
   font-size: var(--zs-text-title-2-size);
   line-height: var(--zs-text-title-2-line);
   font-weight: var(--zs-text-title-2-weight);
   letter-spacing: var(--zs-text-title-2-tracking);
 }
 
-.zs-card__description {
+[data-slot="card-description"] {
   margin: 0;
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
@@ -251,10 +251,10 @@
    * Description is 400). A11y bar protected. */
   color: var(--zs-label-secondary);
 }
-.zs-card[data-disabled] .zs-card__description {
+[data-slot="card"][data-disabled] [data-slot="card-description"] {
   color: var(--zs-label-tertiary);
 }
-.zs-card--sm .zs-card__description {
+[data-slot="card"][data-size="sm"] [data-slot="card-description"] {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
 }
@@ -267,26 +267,26 @@
 /* Action: no default styling — consumer drops a Button or similar
  * interactive node inside. Grid column 2 + align-self: center pin it
  * to the trailing edge of Header. */
-.zs-card__action {
+[data-slot="card-action"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-2);
 }
 
 /* ─── Media ────────────────────────────────────────────────────────────── */
-.zs-card__media {
+[data-slot="card-media"] {
   display: block;
   background-color: var(--zs-fill-tertiary);
 }
 /* Normalise the common embedded media elements so consumers get a
  * sensible default without dropping into bespoke CSS. */
-.zs-card__media :is(img, picture, video) {
+[data-slot="card-media"] :is(img, picture, video) {
   display: block;
   inline-size: 100%;
   block-size: auto;
   object-fit: cover;
 }
-.zs-card__media[data-side="top"] {
+[data-slot="card-media"][data-side="top"] {
   margin-inline: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: calc(var(--zs-card-padding-md) * -1);
   margin-block-end: 0;
@@ -298,7 +298,7 @@
   border-start-start-radius: inherit;
   border-start-end-radius: inherit;
 }
-.zs-card__media[data-side="bottom"] {
+[data-slot="card-media"][data-side="bottom"] {
   margin-inline: calc(var(--zs-card-padding-md) * -1);
   margin-block-end: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: 0;
@@ -318,28 +318,28 @@
  * applies regardless of child margins, so adding extra positive
  * margin tops it up to the desired total.
  * Visual-polish item 2 (cause A). */
-.zs-card > .zs-card__media[data-side="top"] + * {
+[data-slot="card"] > [data-slot="card-media"][data-side="top"] + * {
   margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
 }
-.zs-card--sm > .zs-card__media[data-side="top"] + * {
+[data-slot="card"][data-size="sm"] > [data-slot="card-media"][data-side="top"] + * {
   margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
 }
-.zs-card--lg > .zs-card__media[data-side="top"] + * {
+[data-slot="card"][data-size="lg"] > [data-slot="card-media"][data-side="top"] + * {
   margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
 }
 /* Mirror the same correction on the bottom-bleed media so the
  * preceding Header/Body has a full padding worth of room above the
  * media instead of just the gap. */
-.zs-card > * + .zs-card__media[data-side="bottom"] {
+[data-slot="card"] > * + [data-slot="card-media"][data-side="bottom"] {
   margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
 }
-.zs-card--sm > * + .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="sm"] > * + [data-slot="card-media"][data-side="bottom"] {
   margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
 }
-.zs-card--lg > * + .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="lg"] > * + [data-slot="card-media"][data-side="bottom"] {
   margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
 }
-.zs-card__media[data-side="fill"] {
+[data-slot="card-media"][data-side="fill"] {
   position: absolute;
   inset: 0;
   /* z-index: 0 anchors the fill layer; siblings sit above implicitly
@@ -350,31 +350,31 @@
 }
 
 /* Edge-bleed margins scale with the card size token. */
-.zs-card--sm .zs-card__media[data-side="top"],
-.zs-card--sm .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="top"],
+[data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="bottom"] {
   margin-inline: calc(var(--zs-card-padding-sm) * -1);
 }
-.zs-card--sm .zs-card__media[data-side="top"] {
+[data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="top"] {
   margin-block-start: calc(var(--zs-card-padding-sm) * -1);
 }
-.zs-card--sm .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="bottom"] {
   margin-block-end: calc(var(--zs-card-padding-sm) * -1);
 }
-.zs-card--lg .zs-card__media[data-side="top"],
-.zs-card--lg .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="top"],
+[data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="bottom"] {
   margin-inline: calc(var(--zs-card-padding-lg) * -1);
 }
-.zs-card--lg .zs-card__media[data-side="top"] {
+[data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="top"] {
   margin-block-start: calc(var(--zs-card-padding-lg) * -1);
 }
-.zs-card--lg .zs-card__media[data-side="bottom"] {
+[data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="bottom"] {
   margin-block-end: calc(var(--zs-card-padding-lg) * -1);
 }
 
 /* ─── Content ──────────────────────────────────────────────────────────── */
 /* Renamed from `.zs-card__body` for shadcn/MUI/Chakra vocabulary parity
  * (visual-polish item 10). Pre-launch — no aliases. */
-.zs-card__content {
+[data-slot="card-content"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-3);
@@ -382,19 +382,19 @@
 }
 /* Normalise direct-child prose margins so a single `<p>` slotted into
  * Content doesn't double-up with the card padding (review-fix item 14). */
-.zs-card__content > p:first-child,
-.zs-card__content > ul:first-child,
-.zs-card__content > ol:first-child {
+[data-slot="card-content"] > p:first-child,
+[data-slot="card-content"] > ul:first-child,
+[data-slot="card-content"] > ol:first-child {
   margin-block-start: 0;
 }
-.zs-card__content > p:last-child,
-.zs-card__content > ul:last-child,
-.zs-card__content > ol:last-child {
+[data-slot="card-content"] > p:last-child,
+[data-slot="card-content"] > ul:last-child,
+[data-slot="card-content"] > ol:last-child {
   margin-block-end: 0;
 }
 
 /* ─── Footer ───────────────────────────────────────────────────────────── */
-.zs-card__footer {
+[data-slot="card-footer"] {
   display: flex;
   /* Allow wrapping so a footer with many buttons or a long label
    * cluster doesn't overflow its card (review-fix item 13). With
@@ -406,16 +406,16 @@
   align-items: center;
   justify-content: flex-end;
 }
-.zs-card__footer[data-align="start"] {
+[data-slot="card-footer"][data-align="start"] {
   justify-content: flex-start;
 }
-.zs-card__footer[data-align="between"] {
+[data-slot="card-footer"][data-align="between"] {
   justify-content: space-between;
 }
-.zs-card__footer[data-align="end"] {
+[data-slot="card-footer"][data-align="end"] {
   justify-content: flex-end;
 }
-.zs-card__footer[data-divider="top"] {
+[data-slot="card-footer"][data-divider="top"] {
   padding-block-start: var(--zs-space-4);
   border-block-start: 0.0625rem solid var(--zs-separator);
   margin-block-start: var(--zs-space-2);
@@ -432,25 +432,25 @@
  * the interactive affordance still reads without using a custom tint
  * value. */
 @media (forced-colors: active) {
-  .zs-card {
+  [data-slot="card"] {
     background: Canvas;
     color: CanvasText;
     box-shadow: 0 0 0 0.0625rem CanvasText inset;
   }
-  .zs-card--ghost {
+  [data-slot="card"][data-variant="ghost"] {
     background: transparent;
     box-shadow: none;
   }
-  .zs-card[data-interactive]:focus-visible {
+  [data-slot="card"][data-interactive]:focus-visible {
     outline-color: Highlight;
   }
   @media (hover: hover) {
-    .zs-card[data-interactive]:hover {
+    [data-slot="card"][data-interactive]:hover {
       box-shadow: 0 0 0 0.125rem Highlight inset;
     }
-    .zs-card--surface[data-interactive]:hover,
-    .zs-card--elevated[data-interactive]:hover,
-    .zs-card--outline[data-interactive]:hover {
+    [data-slot="card"][data-variant="surface"][data-interactive]:hover,
+    [data-slot="card"][data-variant="elevated"][data-interactive]:hover,
+    [data-slot="card"][data-variant="outline"][data-interactive]:hover {
       box-shadow: 0 0 0 0.125rem Highlight inset;
     }
   }

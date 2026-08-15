@@ -19,7 +19,7 @@
  * Motion: none.
  */
 
-.zs-cluster {
+[data-slot="cluster"] {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;

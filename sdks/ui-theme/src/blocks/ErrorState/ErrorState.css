@@ -20,7 +20,7 @@
  * Motion: none.
  */
 
-.zs-error-state {
+[data-slot="error-state"] {
   padding-block: var(--zs-space-8);
   padding-inline: var(--zs-space-6);
   font-family: var(--zs-font-system);
@@ -30,11 +30,11 @@
   --zs-error-state-icon-color: var(--zs-system-red);
 }
 
-.zs-error-state--warning {
+[data-slot="error-state"][data-intent="warning"] {
   --zs-error-state-icon-color: var(--zs-system-orange);
 }
 
-.zs-error-state__column {
+[data-slot="error-state-column"] {
   max-inline-size: 28rem;
   text-align: center;
   /* Center the capped column within the (block-level) region. The merged
@@ -44,7 +44,7 @@
   margin-inline: auto;
 }
 
-.zs-error-state__icon {
+[data-slot="error-state-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -60,7 +60,7 @@
    footprint (it wins on specificity over the .zs-icon--md size class).
    Lucide's mark is fully stroked in currentColor — the alert dot is a short
    stroked line, not a filled circle, so no per-shape fill override remains. */
-.zs-error-state__icon svg {
+[data-slot="error-state-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
   fill: none;
@@ -72,7 +72,7 @@
   stroke-linejoin: round;
 }
 
-.zs-error-state__title {
+[data-slot="error-state-title"] {
   margin: 0;
   color: var(--zs-label);
   font-size: var(--zs-text-title-3-size);
@@ -80,7 +80,7 @@
   font-weight: 600;
 }
 
-.zs-error-state__description {
+[data-slot="error-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
      --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
@@ -93,7 +93,7 @@
   margin-block-start: calc(-1 * var(--zs-space-1));
 }
 
-.zs-error-state__actions {
+[data-slot="error-state-actions"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -107,12 +107,12 @@
  * CanvasText so it stays visible (the glyph shape carries the alert
  * meaning under HCM, not the color). */
 @media (forced-colors: active) {
-  .zs-error-state__icon {
+  [data-slot="error-state-icon"] {
     color: CanvasText;
     forced-color-adjust: none;
   }
-  .zs-error-state__title,
-  .zs-error-state__description {
+  [data-slot="error-state-title"],
+  [data-slot="error-state-description"] {
     color: CanvasText;
   }
 }

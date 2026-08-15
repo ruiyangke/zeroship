@@ -46,7 +46,7 @@
  */
 
 /* ─── Root ─────────────────────────────────────────────────────────────── */
-.zs-scrollarea {
+[data-slot="scrollarea"] {
   position: relative;
   overflow: hidden;
   /* The Root inherits its sizing from the parent — ScrollArea is a
@@ -58,7 +58,7 @@
 }
 
 /* ─── Viewport (overflow container) ────────────────────────────────────── */
-.zs-scrollarea__viewport {
+[data-slot="scrollarea-viewport"] {
   position: relative;
   inline-size: 100%;
   block-size: 100%;
@@ -70,12 +70,12 @@
   border-radius: inherit;
 }
 
-.zs-scrollarea__viewport:focus-visible {
+[data-slot="scrollarea-viewport"]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
 }
 
 /* ─── Content wrapper (block flow) ─────────────────────────────────────── */
-.zs-scrollarea__content {
+[data-slot="scrollarea-content"] {
   display: block;
   /* The inner content is laid out by the consumer. We avoid forcing a
    * min-block-size so prose, lists, grids, and tables all behave
@@ -97,7 +97,7 @@
  * `pointer-events: auto` so the bar accepts thumb drags and track
  * clicks when (and only when) it is actually visible.
  */
-.zs-scrollarea__scrollbar {
+[data-slot="scrollarea-scrollbar"] {
   position: absolute;
   display: flex;
   /* Above the content but never above modal layers (Dialog/Drawer set
@@ -133,7 +133,7 @@
 }
 
 /* Vertical bar — pinned to the inline-end edge, full block height. */
-.zs-scrollarea__scrollbar--vertical {
+[data-slot="scrollarea-scrollbar"][data-orientation="vertical"] {
   inset-block-start: 0;
   inset-block-end: 0;
   inset-inline-end: 0;
@@ -144,7 +144,7 @@
 }
 
 /* Horizontal bar — pinned to the block-end edge, full inline width. */
-.zs-scrollarea__scrollbar--horizontal {
+[data-slot="scrollarea-scrollbar"][data-orientation="horizontal"] {
   inset-inline-start: 0;
   inset-inline-end: 0;
   inset-block-end: 0;
@@ -190,7 +190,7 @@
  * then flips to `none` exactly when the bar finishes fading. Without
  * this, the bar would be visibly present but refuse thumb drags and
  * track clicks during the hide-delay window. */
-.zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
   transition:
@@ -200,8 +200,8 @@
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
-.zs-scrollarea[data-visibility="auto"][data-scrolling]
-  .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="auto"][data-scrolling]
+  [data-slot="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
   /* While actively scrolling, drop the delay — keep the bar visible
@@ -212,8 +212,8 @@
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
-.zs-scrollarea[data-visibility="auto"]:not([data-scrolling])
-  .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="auto"]:not([data-scrolling])
+  [data-slot="scrollarea-scrollbar"] {
   /* Fade out when not scrolling. The delayed transition produces the
    * hide-delay behavior — bar stays at opacity 1 through the delay
    * window then fades over motion-base. `pointer-events` swaps to
@@ -233,32 +233,32 @@
 }
 
 /* type=always — bar is always visible. */
-.zs-scrollarea[data-visibility="always"] .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="always"] [data-slot="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
 
 /* type=scroll — visible only while actively scrolling. */
-.zs-scrollarea[data-visibility="scroll"] .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="scroll"] [data-slot="scrollarea-scrollbar"] {
   opacity: 0;
   pointer-events: none;
 }
-.zs-scrollarea[data-visibility="scroll"][data-scrolling]
-  .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="scroll"][data-scrolling]
+  [data-slot="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
 
 /* type=hover — visible while pointer hovers the Root or the bar
  * itself, or while actively scrolling. */
-.zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"] {
   opacity: 0;
   pointer-events: none;
 }
-.zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar[data-hovering],
-.zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar,
-.zs-scrollarea[data-visibility="hover"][data-scrolling]
-  .zs-scrollarea__scrollbar {
+[data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"][data-hovering],
+[data-slot="scrollarea"][data-visibility="hover"]:hover [data-slot="scrollarea-scrollbar"],
+[data-slot="scrollarea"][data-visibility="hover"][data-scrolling]
+  [data-slot="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
@@ -277,14 +277,14 @@
  * plus two attributes) so cascade order doesn't matter: when there is
  * no overflow on the axis, the bar is hidden no matter which
  * visibility selector tried to lift it. */
-.zs-scrollarea[data-visibility="always"]
-  .zs-scrollarea__scrollbar[data-orientation="vertical"]:not([data-has-overflow-y]),
-.zs-scrollarea[data-visibility="always"]
-  .zs-scrollarea__scrollbar[data-orientation="horizontal"]:not([data-has-overflow-x]),
-.zs-scrollarea[data-visibility="hover"]
-  .zs-scrollarea__scrollbar[data-orientation="vertical"]:not([data-has-overflow-y]),
-.zs-scrollarea[data-visibility="hover"]
-  .zs-scrollarea__scrollbar[data-orientation="horizontal"]:not([data-has-overflow-x]) {
+[data-slot="scrollarea"][data-visibility="always"]
+  [data-slot="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
+[data-slot="scrollarea"][data-visibility="always"]
+  [data-slot="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]),
+[data-slot="scrollarea"][data-visibility="hover"]
+  [data-slot="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
+[data-slot="scrollarea"][data-visibility="hover"]
+  [data-slot="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]) {
   opacity: 0;
   pointer-events: none;
 }
@@ -299,7 +299,7 @@
  * the relevant axis; we enforce a minimum so a thumb on a very long
  * list stays grabbable.
  */
-.zs-scrollarea__thumb {
+[data-slot="scrollarea-thumb"] {
   background-color: color-mix(in oklch, var(--zs-label) 32%, transparent);
   border-radius: var(--zs-radius-full);
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
@@ -308,27 +308,27 @@
   flex-shrink: 0;
 }
 
-.zs-scrollarea__scrollbar--vertical .zs-scrollarea__thumb {
+[data-slot="scrollarea-scrollbar"][data-orientation="vertical"] [data-slot="scrollarea-thumb"] {
   inline-size: 100%;
   min-block-size: var(--zs-space-6);
 }
-.zs-scrollarea__scrollbar--horizontal .zs-scrollarea__thumb {
+[data-slot="scrollarea-scrollbar"][data-orientation="horizontal"] [data-slot="scrollarea-thumb"] {
   block-size: 100%;
   min-inline-size: var(--zs-space-6);
 }
 
 @media (hover: hover) {
-  .zs-scrollarea__scrollbar:hover .zs-scrollarea__thumb {
+  [data-slot="scrollarea-scrollbar"]:hover [data-slot="scrollarea-thumb"] {
     background-color: color-mix(in oklch, var(--zs-label) 50%, transparent);
   }
 }
-.zs-scrollarea__thumb[data-dragging],
-.zs-scrollarea__thumb:active {
+[data-slot="scrollarea-thumb"][data-dragging],
+[data-slot="scrollarea-thumb"]:active {
   background-color: color-mix(in oklch, var(--zs-label) 64%, transparent);
 }
 
 /* ─── Corner ───────────────────────────────────────────────────────────── */
-.zs-scrollarea__corner {
+[data-slot="scrollarea-corner"] {
   position: absolute;
   inset-inline-end: 0;
   inset-block-end: 0;
@@ -361,15 +361,15 @@
  * overrides — same `data-visibility="auto"` selector weight.
  */
 @media (prefers-reduced-motion: reduce) {
-  .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="auto"][data-scrolling]
-    .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="scroll"] .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar {
+  [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="auto"][data-scrolling]
+    [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="scroll"] [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"] {
     transition: none;
   }
-  .zs-scrollarea__thumb {
+  [data-slot="scrollarea-thumb"] {
     transition: none;
   }
 }
@@ -381,25 +381,25 @@
  * above so the override pins to the same cascade rung.
  */
 @media (forced-colors: active) {
-  .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="always"] .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="scroll"][data-scrolling]
-    .zs-scrollarea__scrollbar,
-  .zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar {
+  [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="always"] [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="scroll"][data-scrolling]
+    [data-slot="scrollarea-scrollbar"],
+  [data-slot="scrollarea"][data-visibility="hover"]:hover [data-slot="scrollarea-scrollbar"] {
     background-color: ButtonFace;
     border: var(--zs-selection-hairline) solid ButtonText;
   }
-  .zs-scrollarea__thumb,
-  .zs-scrollarea__thumb[data-dragging],
-  .zs-scrollarea__thumb:active {
+  [data-slot="scrollarea-thumb"],
+  [data-slot="scrollarea-thumb"][data-dragging],
+  [data-slot="scrollarea-thumb"]:active {
     background-color: ButtonText;
   }
-  .zs-scrollarea__corner {
+  [data-slot="scrollarea-corner"] {
     background-color: ButtonFace;
     border: var(--zs-selection-hairline) solid ButtonText;
   }
-  .zs-scrollarea__viewport:focus-visible {
+  [data-slot="scrollarea-viewport"]:focus-visible {
     outline-color: Highlight;
   }
 }

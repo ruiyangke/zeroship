@@ -35,7 +35,7 @@
  *   None. The reduced-motion gate exists for parity with the surface.
  */
 
-.zs-form-section {
+[data-slot="form-section"] {
   /* Token knobs a consumer can retune per-section via inline custom
      properties without forking the CSS. */
   --zs-form-section-gap: var(--zs-space-6);
@@ -59,13 +59,13 @@
 
 /* ─── header ──────────────────────────────────────────────────────────
  * Title + description stacked with a tight gap. */
-.zs-form-section__header {
+[data-slot="form-section-header"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-form-section-header-gap);
 }
 
-.zs-form-section__title {
+[data-slot="form-section-title"] {
   margin: 0;
   color: var(--zs-label);
   font-size: var(--zs-text-headline-size);
@@ -73,7 +73,7 @@
   font-weight: 600;
 }
 
-.zs-form-section__description {
+[data-slot="form-section-description"] {
   margin: 0;
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-subheadline-size);
@@ -84,7 +84,7 @@
 /* ─── body ────────────────────────────────────────────────────────────
  * A vertical stack of the consumer's fields. Layout-only (no role). The
  * rhythm between fields comes from the body gap token. */
-.zs-form-section__body {
+[data-slot="form-section-body"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-form-section-body-gap);
@@ -97,13 +97,13 @@
  * The action band: a hairline Separator (when enabled) above a row of
  * Buttons. The Separator owns no outer margin (house rule); the band gap
  * comes from the footer's own flex gap. */
-.zs-form-section__footer {
+[data-slot="form-section-footer"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-4);
 }
 
-.zs-form-section__actions {
+[data-slot="form-section-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -113,21 +113,21 @@
   justify-content: flex-end;
 }
 
-.zs-form-section__footer[data-align="start"] .zs-form-section__actions {
+[data-slot="form-section-footer"][data-align="start"] [data-slot="form-section-actions"] {
   justify-content: flex-start;
 }
 
-.zs-form-section__footer[data-align="between"] .zs-form-section__actions {
+[data-slot="form-section-footer"][data-align="between"] [data-slot="form-section-actions"] {
   justify-content: space-between;
 }
 
-.zs-form-section__footer[data-align="end"] .zs-form-section__actions {
+[data-slot="form-section-footer"][data-align="end"] [data-slot="form-section-actions"] {
   justify-content: flex-end;
 }
 
 /* ─── stacked (default) ───────────────────────────────────────────────
  * Single column: header / body / footer, separated by the section gap. */
-.zs-form-section--stacked {
+[data-slot="form-section"][data-orientation="stacked"] {
   grid-template-columns: 1fr;
   row-gap: var(--zs-form-section-gap);
 }
@@ -139,7 +139,7 @@
  * Named grid areas keep the placement readable regardless of source
  * order: the root emits header → body → footer, and the areas re-place
  * them into the two-column arrangement. */
-.zs-form-section--aside {
+[data-slot="form-section"][data-orientation="aside"] {
   grid-template-columns: var(--zs-form-section-aside-col) 1fr;
   /* The footer SPANS both columns (full-width action band under the
      two-column header/body), matching the file-header contract. The
@@ -152,15 +152,15 @@
   row-gap: var(--zs-form-section-gap);
 }
 
-.zs-form-section--aside > .zs-form-section__header {
+[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-header"] {
   grid-area: header;
 }
 
-.zs-form-section--aside > .zs-form-section__body {
+[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-body"] {
   grid-area: body;
 }
 
-.zs-form-section--aside > .zs-form-section__footer {
+[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-footer"] {
   grid-area: footer;
 }
 
@@ -173,7 +173,7 @@
  * panel) or wide inside a narrow one. Custom properties can't appear in
  * the @container condition, so the literal 48rem mirrors --zs-bp-md. */
 @media (max-width: 47.999rem) {
-  .zs-form-section--aside {
+  [data-slot="form-section"][data-orientation="aside"] {
     grid-template-columns: 1fr;
     grid-template-areas:
       "header"
@@ -189,8 +189,8 @@
  * header/description text resolve to the system text color so the section
  * reads coherently in forced-colors mode. */
 @media (forced-colors: active) {
-  .zs-form-section__title,
-  .zs-form-section__description {
+  [data-slot="form-section-title"],
+  [data-slot="form-section-description"] {
     color: CanvasText;
   }
 }
@@ -199,7 +199,7 @@
  * No-op — FormSection has no transitions. The gate exists for parity
  * with the rest of the surface. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-form-section {
+  [data-slot="form-section"] {
     /* nothing to disable; placeholder for surface parity */
   }
 }

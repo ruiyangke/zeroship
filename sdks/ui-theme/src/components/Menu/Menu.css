@@ -36,7 +36,7 @@
  */
 
 /* ─── Backdrop (opt-in) ────────────────────────────────────────────── */
-.zs-menu-backdrop {
+[data-slot="menu-backdrop"] {
   position: fixed;
   inset: 0;
   z-index: var(--zs-z-modal);
@@ -44,8 +44,8 @@
   opacity: 1;
   transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
 }
-.zs-menu-backdrop[data-starting-style],
-.zs-menu-backdrop[data-ending-style] {
+[data-slot="menu-backdrop"][data-starting-style],
+[data-slot="menu-backdrop"][data-ending-style] {
   opacity: 0;
 }
 
@@ -55,13 +55,13 @@
  * paint it (it carries inline transform / x / y styles). Stack above
  * dialogs via `--zs-z-modal + 10` so menus float over an open dialog
  * when both are mounted. Same z-token Popover uses. */
-.zs-menu-positioner {
+[data-slot="menu-positioner"] {
   z-index: calc(var(--zs-z-modal) + 10);
   outline: none;
 }
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
-.zs-menu-popup {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"]) {
   /* Computable background-color + active material/rim tokens. */
   background-color: var(--zs-surface);
   color: var(--zs-label);
@@ -101,7 +101,7 @@
 
 /* Submenu popup uses a slightly smaller minimum inline-size so nested
  * surfaces don't dominate the parent. */
-.zs-menu-popup--submenu {
+[data-slot="menu-popup-submenu"] {
   min-inline-size: 10rem;
 }
 
@@ -110,28 +110,28 @@
  * Transform-origin reflects the anchored side so the popup grows out
  * of the trigger edge, not its own centre. Base UI stamps `data-side`
  * on the popup automatically. */
-.zs-menu-popup[data-side="top"] {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-side="top"] {
   transform-origin: bottom center;
 }
-.zs-menu-popup[data-side="bottom"] {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-side="bottom"] {
   transform-origin: top center;
 }
-.zs-menu-popup[data-side="left"] {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-side="left"] {
   transform-origin: center right;
 }
-.zs-menu-popup[data-side="right"] {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-side="right"] {
   transform-origin: center left;
 }
-.zs-menu-popup[data-starting-style],
-.zs-menu-popup[data-ending-style] {
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-starting-style],
+:is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-ending-style] {
   opacity: 0;
   transform: scale(0.96);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zs-menu-popup,
-  .zs-menu-popup[data-starting-style],
-  .zs-menu-popup[data-ending-style] {
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"]),
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-starting-style],
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-ending-style] {
     transition: none;
   }
   /* Neutralize the enter/leave keyframe START state, not just the
@@ -142,26 +142,26 @@
    * that frame the popup is `data-open` and focus-trapped yet painted at
    * opacity 0. A reduced-motion user would see an open-but-invisible
    * menu. Snap it to the steady-open state so it appears instantly. */
-  .zs-menu-popup[data-starting-style],
-  .zs-menu-popup[data-ending-style] {
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-starting-style],
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"])[data-ending-style] {
     opacity: 1;
     transform: none;
   }
-  .zs-menu-backdrop {
+  [data-slot="menu-backdrop"] {
     transition: none;
   }
-  .zs-menu-backdrop[data-starting-style],
-  .zs-menu-backdrop[data-ending-style] {
+  [data-slot="menu-backdrop"][data-starting-style],
+  [data-slot="menu-backdrop"][data-ending-style] {
     opacity: 1;
   }
-  .zs-menu-item {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
     transition: none;
   }
   /* CheckboxItem + RadioItem indicator glyphs have their own opacity
    * transition (fade-in when [data-checked] flips). Suppress it under
    * reduced motion so the indicator snaps instead of fading — same
    * contract as the popup enter/leave above. */
-  .zs-menu-item__indicator-glyph {
+  [data-slot="menu-item-indicator-glyph"] {
     transition: none;
   }
 }
@@ -173,7 +173,7 @@
  * second is a soft label-shadow that anchors the arrow to the surface
  * underneath. The arrow's body inherits --zs-surface so it carries the
  * popup's opaque colour onto the triangle. */
-.zs-menu-arrow {
+[data-slot="menu-arrow"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -187,7 +187,7 @@
         color-mix(in oklch, var(--zs-label) 14%, transparent)
     );
 }
-.zs-menu-arrow > svg {
+[data-slot="menu-arrow"] > svg {
   display: block;
   inline-size: 100%;
   block-size: 100%;
@@ -202,7 +202,7 @@
  * text column from blowing past its content box (the default `1fr`
  * computes a min-content floor which lets a long shortcut push the row
  * wider than the popup). */
-.zs-menu-item {
+:is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
   position: relative;
   display: grid;
   grid-template-columns: var(--zs-space-4) minmax(0, 1fr) auto;
@@ -227,11 +227,11 @@
 }
 
 /* Highlight (keyboard roving / pointer hover via Base UI). */
-.zs-menu-item[data-highlighted]:not([data-disabled]) {
+:is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) {
   background-color: var(--zs-fill-tertiary);
   color: var(--zs-label);
 }
-.zs-menu-item[data-disabled] {
+:is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] {
   color: var(--zs-label-tertiary);
   cursor: not-allowed;
 }
@@ -242,7 +242,7 @@
  * Item / CheckboxItem / RadioItem types. The indicator glyph lives
  * inside a fixed-size square; CheckboxItem + RadioItem render the
  * glyph; plain Item leaves it empty. */
-.zs-menu-item__indicator {
+[data-slot="menu-item-indicator"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -250,7 +250,7 @@
   block-size: var(--zs-space-4);
   color: var(--zs-accent);
 }
-.zs-menu-item__indicator-glyph {
+[data-slot="menu-item-indicator-glyph"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -259,13 +259,13 @@
   opacity: 0;
   transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-.zs-menu-item__indicator-glyph > svg {
+[data-slot="menu-item-indicator-glyph"] > svg {
   display: block;
   inline-size: 100%;
   block-size: 100%;
 }
-.zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator-glyph,
-.zs-menu-radio-item[data-checked] .zs-menu-item__indicator-glyph {
+[data-slot="menu-checkbox-item"][data-checked] [data-slot="menu-item-indicator-glyph"],
+[data-slot="menu-radio-item"][data-checked] [data-slot="menu-item-indicator-glyph"] {
   opacity: 1;
 }
 
@@ -274,7 +274,7 @@
  * box reads as a small accent chip with ink-on-accent contrast). The
  * inset hairline mirrors the accent border so the chip edge stays
  * crisp against the popup hover tint. */
-.zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator {
+[data-slot="menu-checkbox-item"][data-checked] [data-slot="menu-item-indicator"] {
   background-color: var(--zs-accent);
   color: var(--zs-accent-ink);
   border-radius: var(--zs-radius-1);
@@ -283,11 +283,11 @@
 
 /* RadioItem visual reuse: filled dot (the CSS just paints accent via
  * the glyph's `currentColor` — same dot Radio renders). */
-.zs-menu-radio-item[data-checked] .zs-menu-item__indicator {
+[data-slot="menu-radio-item"][data-checked] [data-slot="menu-item-indicator"] {
   color: var(--zs-accent-active);
 }
 
-.zs-menu-item__text {
+[data-slot="menu-item-text"] {
   min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -300,7 +300,7 @@
  * Mono-stack, caption-1 size, tertiary ink so it reads as quiet
  * metadata; pinned to the inline-end edge with a comfortable gap from
  * the text lane. */
-.zs-menu-item__shortcut {
+[data-slot="menu-item-shortcut"] {
   justify-self: end;
   margin-inline-start: var(--zs-space-6);
   font-family: var(--zs-font-mono);
@@ -311,10 +311,10 @@
   /* The shortcut tail follows the row's disabled/highlighted tint so it
    * reads consistently in every state. */
 }
-.zs-menu-item[data-highlighted]:not([data-disabled]) .zs-menu-item__shortcut {
+:is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) [data-slot="menu-item-shortcut"] {
   color: var(--zs-label-secondary);
 }
-.zs-menu-item[data-disabled] .zs-menu-item__shortcut {
+:is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] [data-slot="menu-item-shortcut"] {
   color: inherit;
 }
 
@@ -322,10 +322,10 @@
  *
  * Native <a>. Inherits the row layout; we suppress the UA underline
  * since the row highlight communicates the focusable affordance. */
-.zs-menu-link-item {
+[data-slot="menu-link-item"] {
   color: inherit;
 }
-.zs-menu-link-item:visited {
+[data-slot="menu-link-item"]:visited {
   color: inherit;
 }
 
@@ -334,7 +334,7 @@
  * The chevron occupies the row's trailing column (the same `auto` lane
  * used by `.zs-menu-item__shortcut`). The base `.zs-menu-item` grid
  * already declares it; no override needed here. */
-.zs-menu-submenu-trigger__chevron {
+[data-slot="menu-submenu-trigger-chevron"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -346,22 +346,22 @@
    * and toward the submenu in RTL. Floating UI flips the popup side
    * automatically; the chevron tail follows. */
 }
-.zs-menu-submenu-trigger__chevron > svg {
+[data-slot="menu-submenu-trigger-chevron"] > svg {
   display: block;
   inline-size: 100%;
   block-size: 100%;
 }
-[dir="rtl"] .zs-menu-submenu-trigger__chevron > svg {
+[dir="rtl"] [data-slot="menu-submenu-trigger-chevron"] > svg {
   transform: scaleX(-1);
 }
 
 /* ─── Group + GroupLabel ───────────────────────────────────────────── */
-.zs-menu-group {
+[data-slot="menu-group"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-half);
 }
-.zs-menu-group + .zs-menu-group {
+[data-slot="menu-group"] + [data-slot="menu-group"] {
   margin-block-start: var(--zs-space-1);
 }
 /* GroupLabel — caption-2 size + tertiary ink so cluster headers read
@@ -369,7 +369,7 @@
  * Inline-start padding reserves the indicator gutter (space-2 row
  * padding + space-4 gutter + space-2 column gap) so the label aligns
  * to the text lane of the items it labels. */
-.zs-menu-group-label {
+[data-slot="menu-group-label"] {
   padding-block: var(--zs-space-half) 0;
   padding-inline-start: calc(
     var(--zs-space-2) + var(--zs-space-4) + var(--zs-space-2)
@@ -384,7 +384,7 @@
 }
 
 /* ─── Separator ────────────────────────────────────────────────────── */
-.zs-menu-separator {
+[data-slot="menu-separator"] {
   block-size: 0.0625rem;
   background-color: var(--zs-separator);
   margin-block: var(--zs-space-half);
@@ -394,7 +394,7 @@
 
 /* ─── Coarse pointer — bump hit-target floor ───────────────────────── */
 @media (pointer: coarse) {
-  .zs-menu-item {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
     min-block-size: var(--zs-hit-min);
   }
 }
@@ -407,7 +407,7 @@
  * MUST be re-emitted at matching specificity so the system palette
  * wins. Slice 5/6/7 lesson. */
 @media (forced-colors: active) {
-  .zs-menu-popup {
+  :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"]) {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
@@ -415,55 +415,55 @@
     -webkit-backdrop-filter: none;
     forced-color-adjust: none;
   }
-  .zs-menu-backdrop {
+  [data-slot="menu-backdrop"] {
     background-color: color-mix(in oklch, CanvasText 40%, transparent);
   }
-  .zs-menu-arrow {
+  [data-slot="menu-arrow"] {
     color: Canvas;
     filter: drop-shadow(0 0 0.0625rem CanvasText);
   }
 
   /* Base item reset — Canvas/CanvasText paint regardless of inherited
    * highlight tints. */
-  .zs-menu-item {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
     background-color: Canvas;
     color: CanvasText;
   }
   /* Highlight mirror — equal specificity to the base highlight rule
    * (`[data-highlighted]:not([data-disabled])`). */
-  .zs-menu-item[data-highlighted]:not([data-disabled]) {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-menu-item[data-disabled] {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] {
     color: GrayText;
   }
 
   /* Checkbox / Radio checked rows — Highlight box + system Highlight
    * ink for the indicator. Equal specificity to the base [data-checked]
    * rules above. */
-  .zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator,
-  .zs-menu-radio-item[data-checked] .zs-menu-item__indicator {
+  [data-slot="menu-checkbox-item"][data-checked] [data-slot="menu-item-indicator"],
+  [data-slot="menu-radio-item"][data-checked] [data-slot="menu-item-indicator"] {
     background-color: Canvas;
     color: Highlight;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
   /* When the checked row is also highlighted (keyboard rover or
    * pointer hover), the indicator stays readable on Highlight. */
-  .zs-menu-item[data-highlighted][data-checked]:not([data-disabled])
-    .zs-menu-item__indicator {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted][data-checked]:not([data-disabled])
+    [data-slot="menu-item-indicator"] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem HighlightText;
   }
 
-  .zs-menu-group-label {
+  [data-slot="menu-group-label"] {
     color: GrayText;
   }
-  .zs-menu-separator {
+  [data-slot="menu-separator"] {
     background-color: GrayText;
   }
-  .zs-menu-submenu-trigger__chevron {
+  [data-slot="menu-submenu-trigger-chevron"] {
     color: CanvasText;
   }
 
@@ -471,13 +471,13 @@
    * which inherits, so the per-state oklch token rules above paint
    * through high-contrast mode unless explicitly re-mapped here.
    * Equal specificity to the base highlight/disabled selectors. */
-  .zs-menu-item__shortcut {
+  [data-slot="menu-item-shortcut"] {
     color: GrayText;
   }
-  .zs-menu-item[data-highlighted]:not([data-disabled]) .zs-menu-item__shortcut {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) [data-slot="menu-item-shortcut"] {
     color: HighlightText;
   }
-  .zs-menu-item[data-disabled] .zs-menu-item__shortcut {
+  :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] [data-slot="menu-item-shortcut"] {
     color: GrayText;
   }
 }

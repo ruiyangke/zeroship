@@ -15,9 +15,9 @@
  * slice needs them) can extend `.zs-checkbox-field`, `.zs-switch-field`,
  * `.zs-radio-field` in their own CSS.
  */
-.zs-checkbox-field,
-.zs-switch-field,
-.zs-radio-field {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]) {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-2);
@@ -26,9 +26,9 @@
   cursor: pointer;
 }
 
-.zs-checkbox-field[data-disabled],
-.zs-switch-field[data-disabled],
-.zs-radio-field[data-disabled] {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
   cursor: not-allowed;
   color: var(--zs-label-tertiary);
 }
@@ -37,9 +37,9 @@
  * shape (`zs-X-field__text`) so the row layout and the chip stay
  * decoupled. Default sits at body-text size so a default-sized row
  * matches the surrounding body type rhythm. */
-.zs-checkbox-field__text,
-.zs-switch-field__text,
-.zs-radio-field__text {
+[data-slot="checkbox-field-text"],
+[data-slot="switch-field-text"],
+[data-slot="radio-field-text"] {
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
   color: inherit;
@@ -59,25 +59,25 @@
  *     regular — see styles.css for the type-scale tokens).
  * That makes the size axis a real "scale the WHOLE control" axis, not
  * a "swap a slightly bigger chip" cosmetic. */
-.zs-checkbox-field--sm,
-.zs-switch-field--sm,
-.zs-radio-field--sm {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] {
   gap: var(--zs-space-1);
 }
-.zs-checkbox-field--lg,
-.zs-switch-field--lg,
-.zs-radio-field--lg {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] {
   gap: var(--zs-space-3);
 }
-.zs-checkbox-field--sm .zs-checkbox-field__text,
-.zs-switch-field--sm .zs-switch-field__text,
-.zs-radio-field--sm .zs-radio-field__text {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="checkbox-field-text"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="switch-field-text"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="radio-field-text"] {
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
 }
-.zs-checkbox-field--lg .zs-checkbox-field__text,
-.zs-switch-field--lg .zs-switch-field__text,
-.zs-radio-field--lg .zs-radio-field__text {
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="checkbox-field-text"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="switch-field-text"],
+:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="radio-field-text"] {
   font-size: var(--zs-text-headline-size);
   line-height: var(--zs-text-headline-line);
 }

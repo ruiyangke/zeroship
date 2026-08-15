@@ -15,7 +15,7 @@
  * Motion: none.
  */
 
-.zs-empty-state {
+[data-slot="empty-state"] {
   /* Generous breathing room so the panel reads as a deliberate "empty"
      surface rather than a collapsed container. Logical padding so RTL /
      vertical writing modes inset correctly. */
@@ -25,7 +25,7 @@
   color: var(--zs-label);
 }
 
-.zs-empty-state__column {
+[data-slot="empty-state-column"] {
   /* Cap the measure so long descriptions wrap into a readable column
      instead of stretching the full region width. */
   max-inline-size: 28rem;
@@ -38,7 +38,7 @@
   margin-inline: auto;
 }
 
-.zs-empty-state__icon {
+[data-slot="empty-state-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -49,12 +49,12 @@
   line-height: 1;
 }
 
-.zs-empty-state__icon svg {
+[data-slot="empty-state-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-.zs-empty-state__title {
+[data-slot="empty-state-title"] {
   margin: 0;
   color: var(--zs-label);
   font-size: var(--zs-text-title-3-size);
@@ -62,7 +62,7 @@
   font-weight: 600;
 }
 
-.zs-empty-state__description {
+[data-slot="empty-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
      --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
@@ -79,7 +79,7 @@
   margin-block-start: calc(-1 * var(--zs-space-1));
 }
 
-.zs-empty-state__actions {
+[data-slot="empty-state-actions"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -92,13 +92,13 @@
 
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */
 @media (forced-colors: active) {
-  .zs-empty-state__title {
+  [data-slot="empty-state-title"] {
     color: CanvasText;
   }
-  .zs-empty-state__description {
+  [data-slot="empty-state-description"] {
     color: CanvasText;
   }
-  .zs-empty-state__icon {
+  [data-slot="empty-state-icon"] {
     color: CanvasText;
     forced-color-adjust: none;
   }

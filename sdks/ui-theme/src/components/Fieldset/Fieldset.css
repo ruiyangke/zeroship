@@ -34,7 +34,7 @@
  * via the RTL story.
  */
 
-.zs-fieldset {
+[data-slot="fieldset"] {
   /* Reset the UA stylesheet's default fieldset chrome. The native
      border + padding combo doesn't match our token system, and the
      `min-inline-size: min-content` quirk blocks Form-level shrink. */
@@ -52,12 +52,12 @@
 }
 
 /* ─── sizes ───────────────────────────────────────────────────────── */
-.zs-fieldset--sm {
+[data-slot="fieldset"][data-size="sm"] {
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-3);
   gap: var(--zs-space-3);
 }
-.zs-fieldset--lg {
+[data-slot="fieldset"][data-size="lg"] {
   padding-block: var(--zs-space-5);
   padding-inline: var(--zs-space-5);
   gap: var(--zs-space-5);
@@ -75,7 +75,7 @@
  * story places the legend at the bottom of the fieldset via `order:
  * 999` on a wrapping class; the underlying contract (aria-labelledby
  * tracks the legend by id, regardless of DOM order) is unaffected. */
-.zs-fieldset__legend {
+[data-slot="fieldset-legend"] {
   margin: 0;
   padding: 0;
   font-size: var(--zs-text-subheadline-size);
@@ -112,8 +112,8 @@
  * aria-wiring still works (Base UI binds by id, not DOM nesting),
  * but the disabled greying wouldn't fire. Mirror in forced-colors
  * below. */
-.zs-fieldset[data-disabled] .zs-fieldset__legend,
-.zs-fieldset:disabled .zs-fieldset__legend {
+[data-slot="fieldset"][data-disabled] [data-slot="fieldset-legend"],
+[data-slot="fieldset"]:disabled [data-slot="fieldset-legend"] {
   color: var(--zs-label-secondary);
 }
 
@@ -127,14 +127,14 @@
  * GrayText is the system color for inactive content; CanvasText for
  * default text. */
 @media (forced-colors: active) {
-  .zs-fieldset {
+  [data-slot="fieldset"] {
     color: CanvasText;
   }
-  .zs-fieldset__legend {
+  [data-slot="fieldset-legend"] {
     color: CanvasText;
   }
-  .zs-fieldset[data-disabled] .zs-fieldset__legend,
-  .zs-fieldset:disabled .zs-fieldset__legend {
+  [data-slot="fieldset"][data-disabled] [data-slot="fieldset-legend"],
+  [data-slot="fieldset"]:disabled [data-slot="fieldset-legend"] {
     color: GrayText;
   }
 }
@@ -145,7 +145,7 @@
  * reduced-motion contract is visible in the stylesheet for future
  * audits. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-fieldset {
+  [data-slot="fieldset"] {
     /* explicit no-op — descendants handle their own motion via
        --zs-motion-* tokens which are already reduced. */
   }

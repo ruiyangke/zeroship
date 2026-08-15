@@ -76,6 +76,21 @@ function stringLiteralsOf(type) {
 }
 
 /**
+ * Every concrete string a template can produce, or null if any interpolated
+ * part is not a string-literal union.
+ */
+function expandTemplate(node, checker) {
+  let names = [node.head.text];
+  for (const span of node.templateSpans) {
+    const parts = stringLiteralsOf(checker.getTypeAtLocation(span.expression));
+    if (!parts) return null;
+    const tail = span.literal.text;
+    names = names.flatMap((prefix) => parts.map((p) => prefix + p + tail));
+  }
+  return names;
+}
+
+/**
  * The concrete name(s) a `data-slot` can take, or null if it cannot be pinned.
  *
  * Three shapes exist and only the first is greppable, which is why a text
@@ -161,7 +176,14 @@ function tagsOf(file) {
             ts.isTemplateExpression(literal) &&
             literal.head.text.startsWith("zs-")
           ) {
-            classes.push(literal.getText(source));
+            // Expand the interpolation into concrete class names when the
+            // interpolated parts are string-literal unions. SelectionRow
+            // builds `zs-${base}-field`, so the real classes are
+            // zs-checkbox-field / zs-radio-field / zs-switch-field -- and the
+            // theme styles them by those names. Keeping only the raw template
+            // text leaves those selectors with nothing to match.
+            const expanded = expandTemplate(literal, checker);
+            classes.push(...(expanded ?? [literal.getText(source)]));
           }
         }
       }

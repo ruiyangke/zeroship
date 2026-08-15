@@ -21,7 +21,7 @@
  * (margin-inline-*, padding-inline-*). Tested via the RTL story.
  */
 
-.zs-field {
+[data-slot="field"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-field-gap);
@@ -37,24 +37,24 @@
  * brief (replaces the broken flex-wrap approach that left description +
  * error inline with the control rather than stacking below).
  */
-.zs-field--horizontal {
+[data-slot="field"][data-orientation="horizontal"] {
   display: grid;
   grid-template-columns: var(--zs-field-horizontal-label-w) 1fr;
   column-gap: var(--zs-space-4);
   row-gap: var(--zs-field-gap);
   align-items: start;
 }
-.zs-field--horizontal > .zs-field__label {
+[data-slot="field"][data-orientation="horizontal"] > [data-slot="field-label"] {
   grid-column: 1;
   padding-block-start: var(--zs-space-2);  /* visually center w/ control */
 }
-.zs-field--horizontal > :not(.zs-field__label) {
+[data-slot="field"][data-orientation="horizontal"] > [data-slot="field-label"]:not() {
   grid-column: 2;
   min-inline-size: 0;
 }
 
 /* ─── Label ───────────────────────────────────────────────────────────── */
-.zs-field__label {
+[data-slot="field-label"] {
   display: inline-flex;
   align-items: baseline;
   gap: var(--zs-field-label-gap);
@@ -66,13 +66,13 @@
 
 /* When the enclosing Field is disabled, the auto-bound label takes the
    disabled label color so the entire row reads grayed-out together. */
-.zs-field[data-disabled] > .zs-field__label,
-.zs-field__label[data-disabled] {
+[data-slot="field"][data-disabled] > [data-slot="field-label"],
+[data-slot="field-label"][data-disabled] {
   color: var(--zs-label-tertiary);
 }
 
 /* ─── Description ─────────────────────────────────────────────────────── */
-.zs-field__description {
+[data-slot="field-description"] {
   margin: 0;
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
@@ -82,7 +82,7 @@
 /* ─── Error ───────────────────────────────────────────────────────────── */
 /* Multiple <Field.Error match="…"> can render at once (e.g. valueMissing
    + typeMismatch). Stack them with a small gap so the row stays legible. */
-.zs-field__error {
+[data-slot="field-error"] {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   color: var(--zs-field-error-ink);
@@ -92,7 +92,7 @@
 }
 
 /* ─── Required indicator ──────────────────────────────────────────────── */
-.zs-field__required {
+:is([data-slot="field-required"], [data-slot="field-required-fallback"]) {
   color: var(--zs-field-required-ink);
   font-weight: 700;
   font-size: var(--zs-text-subheadline-size);
@@ -108,7 +108,7 @@
    (WCAG 1.4.3). Item 8 contingency fires: keep color on
    --zs-label-secondary and let the size + spacing carry the recede.
    Same fallback the Card-polish commit made for Description. */
-.zs-field__required--fallback {
+[data-slot="field-required-fallback"] {
   color: var(--zs-label-secondary);
   font-weight: 400;
   font-size: var(--zs-text-caption-1-size);
@@ -118,17 +118,17 @@
 
 /* ─── forced-colors / Windows High Contrast ───────────────────────────── */
 @media (forced-colors: active) {
-  .zs-field__label {
+  [data-slot="field-label"] {
     color: CanvasText;
   }
-  .zs-field__description {
+  [data-slot="field-description"] {
     color: GrayText;
   }
-  .zs-field__error,
-  .zs-field__required {
+  [data-slot="field-error"],
+  :is([data-slot="field-required"], [data-slot="field-required-fallback"]) {
     color: Mark;
   }
-  .zs-field__required--fallback {
+  [data-slot="field-required-fallback"] {
     color: GrayText;
   }
 }

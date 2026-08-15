@@ -117,7 +117,7 @@
    out of the AT tree in some engines, and a rem value rounds to a
    sub-pixel that some screen readers skip. Do NOT introduce other
    raw px anywhere in the codebase. */
-.zs-visually-hidden {
+[data-slot="visually-hidden"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -137,7 +137,7 @@
    :focus / :focus-visible it un-hides and pins to the inline-start/top of
    the shell as a real, styled control. Logical properties keep the pin
    correct under RTL. */
-.zs-skip-link {
+[data-slot="skip-link"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -149,8 +149,8 @@
   border: 0;
 }
 
-.zs-skip-link:focus,
-.zs-skip-link:focus-visible {
+[data-slot="skip-link"]:focus,
+[data-slot="skip-link"]:focus-visible {
   position: fixed;
   inset-block-start: var(--zs-space-2);
   inset-inline-start: var(--zs-space-2);
@@ -172,8 +172,8 @@
 }
 
 @media (forced-colors: active) {
-  .zs-skip-link:focus,
-  .zs-skip-link:focus-visible {
+  [data-slot="skip-link"]:focus,
+  [data-slot="skip-link"]:focus-visible {
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;

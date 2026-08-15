@@ -31,7 +31,7 @@
  * under prefers-reduced-motion.
  */
 
-.zs-stepper {
+[data-slot="stepper"] {
   display: flex;
   margin: 0;
   padding: 0;
@@ -49,12 +49,12 @@
  *   the next step's indicator centre.
  * vertical: a column of steps; each step is a row (indicator → text) and
  *   the connector runs in the block axis down the indicator column. */
-.zs-stepper[data-orientation="horizontal"] {
+[data-slot="stepper"][data-orientation="horizontal"] {
   flex-direction: row;
   align-items: flex-start;
 }
 
-.zs-stepper[data-orientation="vertical"] {
+[data-slot="stepper"][data-orientation="vertical"] {
   flex-direction: column;
 }
 
@@ -64,12 +64,12 @@
  * step is an equal-width centred column so indicators land on a regular
  * grid the connector can bridge. In vertical mode the step is a block
  * column (trigger then in-flow connector). */
-.zs-stepper__step {
+[data-slot="stepper-step"] {
   display: flex;
   position: relative;
 }
 
-.zs-stepper[data-orientation="horizontal"] > .zs-stepper__step {
+[data-slot="stepper"][data-orientation="horizontal"] > [data-slot="stepper-step"] {
   /* Equal-width steps so each indicator sits at the step's horizontal
      centre (50%). The connector is an absolutely-positioned rule running
      from this centre to the next step's centre, so it needs equal tracks
@@ -79,13 +79,13 @@
   align-items: center;
 }
 
-.zs-stepper[data-orientation="horizontal"] > .zs-stepper__step:last-child {
+[data-slot="stepper"][data-orientation="horizontal"] > [data-slot="stepper-step"]:last-child {
   /* Last step has no connector; equal width is unnecessary but harmless
      and keeps the indicator centred under its label like the others. */
   flex: 1 1 0;
 }
 
-.zs-stepper[data-orientation="vertical"] > .zs-stepper__step {
+[data-slot="stepper"][data-orientation="vertical"] > [data-slot="stepper-step"] {
   flex-direction: column;
 }
 
@@ -93,7 +93,7 @@
  * Reset UA button chrome so the <button> path reads identically to the
  * static <span>. The interactive affordances (pointer, focus ring) are
  * scoped to the button via :is(button). */
-.zs-stepper__trigger {
+[data-slot="stepper-trigger"] {
   display: flex;
   align-items: center;
   gap: var(--zs-space-2);
@@ -106,7 +106,7 @@
   text-align: start;
 }
 
-.zs-stepper[data-orientation="vertical"] .zs-stepper__trigger {
+[data-slot="stepper"][data-orientation="vertical"] [data-slot="stepper-trigger"] {
   align-items: flex-start;
 }
 
@@ -114,19 +114,19 @@
    indicator on the step's horizontal centre so the connector (drawn from
    centre to centre) links indicator centres, not the trailing edge of a
    side-by-side label. */
-.zs-stepper[data-orientation="horizontal"] .zs-stepper__trigger {
+[data-slot="stepper"][data-orientation="horizontal"] [data-slot="stepper-trigger"] {
   flex-direction: column;
   align-items: center;
   gap: var(--zs-space-1);
   text-align: center;
 }
 
-button.zs-stepper__trigger {
+[data-slot="stepper-trigger"]button {
   cursor: pointer;
   border-radius: var(--zs-radius-2);
 }
 
-button.zs-stepper__trigger:focus-visible {
+[data-slot="stepper-trigger"]button:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
@@ -134,7 +134,7 @@ button.zs-stepper__trigger:focus-visible {
 /* ─── indicator ────────────────────────────────────────────────────────
  * The round badge: a number for current/upcoming, a check for complete.
  * Color/fill is keyed off the parent [data-status]. */
-.zs-stepper__indicator {
+[data-slot="stepper-indicator"] {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -157,7 +157,7 @@ button.zs-stepper__trigger:focus-visible {
 }
 
 /* complete → accent-filled badge carrying the white-on-accent check. */
-.zs-stepper__step[data-status="complete"] .zs-stepper__indicator {
+[data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-indicator"] {
   background-color: var(--zs-accent);
   color: var(--zs-accent-ink);
   box-shadow: none;
@@ -165,13 +165,13 @@ button.zs-stepper__trigger:focus-visible {
 
 /* current → accent ring + accent number on the surface, so it reads as
    "you are here" distinct from the solid-filled completed badges. */
-.zs-stepper__step[data-status="current"] .zs-stepper__indicator {
+[data-slot="stepper-step"][data-status="current"] [data-slot="stepper-indicator"] {
   background-color: transparent;
   color: var(--zs-accent);
   box-shadow: inset 0 0 0 0.125rem var(--zs-accent);
 }
 
-.zs-stepper__check {
+[data-slot="stepper-check"] {
   /* The check inherits the badge's accent-ink color via currentColor. */
   color: inherit;
 }
@@ -179,14 +179,14 @@ button.zs-stepper__trigger:focus-visible {
 /* ─── text column ──────────────────────────────────────────────────────
  * Label over optional description. The visually-hidden status word is a
  * child here but never affects layout. */
-.zs-stepper__text {
+[data-slot="stepper-text"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-half, 0.125rem);
   min-inline-size: 0;
 }
 
-.zs-stepper__label {
+[data-slot="stepper-label"] {
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
   font-weight: 500;
@@ -194,16 +194,16 @@ button.zs-stepper__trigger:focus-visible {
 }
 
 /* current/complete labels brighten to primary ink; upcoming stays muted. */
-.zs-stepper__step[data-status="current"] .zs-stepper__label,
-.zs-stepper__step[data-status="complete"] .zs-stepper__label {
+[data-slot="stepper-step"][data-status="current"] [data-slot="stepper-label"],
+[data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-label"] {
   color: var(--zs-label);
 }
 
-.zs-stepper__step[data-status="current"] .zs-stepper__label {
+[data-slot="stepper-step"][data-status="current"] [data-slot="stepper-label"] {
   font-weight: 600;
 }
 
-.zs-stepper__description {
+[data-slot="stepper-description"] {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   color: var(--zs-label-tertiary);
@@ -216,14 +216,14 @@ button.zs-stepper__trigger:focus-visible {
  * props are inert). Tint mirrors completion: a connector LEAVING a
  * completed step is accent (the path already walked); everything else is
  * the muted separator. */
-.zs-stepper__connector {
+[data-slot="stepper-connector"] {
   flex: 1 1 auto;
   align-self: center;
   background-color: var(--zs-separator);
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
-.zs-stepper__step[data-status="complete"] .zs-stepper__connector {
+[data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-connector"] {
   background-color: var(--zs-accent);
 }
 
@@ -238,7 +238,7 @@ button.zs-stepper__trigger:focus-visible {
    badges. Vertically it is pinned to the indicator's centre — half the
    badge height down from the step's block-start (the trigger's first row
    is the indicator). */
-.zs-stepper[data-orientation="horizontal"] .zs-stepper__connector {
+[data-slot="stepper"][data-orientation="horizontal"] [data-slot="stepper-connector"] {
   position: absolute;
   block-size: 0.125rem;
   /* From this indicator's centre to the next indicator's centre, inset a
@@ -256,7 +256,7 @@ button.zs-stepper__trigger:focus-visible {
 /* vertical: a thin block-axis rule running down the indicator column.
    The step is a flex-column (trigger then connector); the connector sits
    under the trigger, offset to align with the indicator centre. */
-.zs-stepper[data-orientation="vertical"] .zs-stepper__step:not(:last-child) {
+[data-slot="stepper"][data-orientation="vertical"] [data-slot="stepper-step"]:not(:last-child) {
   /* Give every non-last step a minimum height so the connector has room
      to run; the connector itself grows to fill it. Scoped to :not(:last-
      child) — the last step has no connector, so padding there is dead
@@ -264,7 +264,7 @@ button.zs-stepper__trigger:focus-visible {
   padding-block-end: var(--zs-space-2);
 }
 
-.zs-stepper[data-orientation="vertical"] .zs-stepper__connector {
+[data-slot="stepper"][data-orientation="vertical"] [data-slot="stepper-connector"] {
   inline-size: 0.125rem;
   min-block-size: var(--zs-space-4);
   /* Drop the line down from the trigger and centre it under the
@@ -279,8 +279,8 @@ button.zs-stepper__trigger:focus-visible {
  * Kill the indicator/connector color transitions; the painted state is
  * preserved (only the animation between states is removed). */
 @media (prefers-reduced-motion: reduce) {
-  .zs-stepper__indicator,
-  .zs-stepper__connector {
+  [data-slot="stepper-indicator"],
+  [data-slot="stepper-connector"] {
     transition: none;
   }
 }
@@ -292,33 +292,33 @@ button.zs-stepper__trigger:focus-visible {
  * keep connectors visible. The check glyph (currentColor → CanvasText)
  * and the visually-hidden status word carry the meaning regardless. */
 @media (forced-colors: active) {
-  .zs-stepper__indicator {
+  [data-slot="stepper-indicator"] {
     forced-color-adjust: none;
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   /* complete → filled (SelectedItem) badge with contrasting check. */
-  .zs-stepper__step[data-status="complete"] .zs-stepper__indicator {
+  [data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-indicator"] {
     background-color: SelectedItem;
     color: SelectedItemText;
     box-shadow: none;
   }
   /* current → thicker ring so "you are here" reads against the canvas. */
-  .zs-stepper__step[data-status="current"] .zs-stepper__indicator {
+  [data-slot="stepper-step"][data-status="current"] [data-slot="stepper-indicator"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.1875rem CanvasText;
   }
   /* Connectors and labels stay on the system text color. */
-  .zs-stepper__connector {
+  [data-slot="stepper-connector"] {
     forced-color-adjust: none;
     background-color: CanvasText;
   }
-  .zs-stepper__step[data-status="complete"] .zs-stepper__connector {
+  [data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-connector"] {
     background-color: SelectedItem;
   }
-  button.zs-stepper__trigger:focus-visible {
+  [data-slot="stepper-trigger"]button:focus-visible {
     outline-color: Highlight;
   }
 }

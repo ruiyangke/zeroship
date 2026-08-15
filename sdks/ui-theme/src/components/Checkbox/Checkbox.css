@@ -54,7 +54,7 @@
  */
 
 /* ─── component-local tokens (consumer override hooks) ──────────────── */
-.zs-checkbox {
+[data-slot="checkbox"] {
   /* Visual chip sizes — derive from the control-rhythm tokens so the
      selection chip sizes track the Input family (slice-4 visual-polish
      item 5). Half the per-size control height keeps the chip
@@ -89,7 +89,7 @@
 }
 
 /* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
-.zs-checkbox {
+[data-slot="checkbox"] {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
@@ -121,7 +121,7 @@
  * indicator inside is `position: relative` (its z-index auto wins
  * over the absolute `::before` at z-index auto), so the glyph stays
  * tappable too. Slice-4 review fix item 3. */
-.zs-checkbox::before {
+[data-slot="checkbox"]::before {
   content: "";
   position: absolute;
   /* Physical centering is correct here: this is purely geometric
@@ -142,17 +142,17 @@
   pointer-events: auto;
 }
 @media (pointer: coarse) {
-  .zs-checkbox::before {
+  [data-slot="checkbox"]::before {
     --zs-hit-target: var(--zs-hit-min);
   }
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
-.zs-checkbox--sm {
+[data-slot="checkbox"][data-size="sm"] {
   inline-size: var(--zs-checkbox-size-sm);
   block-size: var(--zs-checkbox-size-sm);
 }
-.zs-checkbox--lg {
+[data-slot="checkbox"][data-size="lg"] {
   inline-size: var(--zs-checkbox-size-lg);
   block-size: var(--zs-checkbox-size-lg);
   border-radius: var(--zs-radius-2);
@@ -166,7 +166,7 @@
  * borderless tinted unchecked checkbox landing visually between the
  * default unchecked (with hairline) and the disabled state on crystal,
  * making it unclear which affordance the user was looking at. */
-.zs-checkbox--tinted {
+[data-slot="checkbox"][data-variant="tinted"] {
   background-color: var(--zs-checkbox-bg-tinted);
   box-shadow:
     inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted),
@@ -175,13 +175,13 @@
 
 /* ─── hover (hover-capable pointers only) ──────────────────────────── */
 @media (hover: hover) {
-  .zs-checkbox:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
+  [data-slot="checkbox"]:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-hover);
     box-shadow:
       inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-hover),
       0 0 0 0 transparent;
   }
-  .zs-checkbox--tinted:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
+  [data-slot="checkbox"][data-variant="tinted"]:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-tinted-hover);
     box-shadow:
       inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted-hover),
@@ -190,8 +190,8 @@
 }
 
 /* ─── checked + indeterminate share the accent fill ─────────────────── */
-.zs-checkbox[data-checked],
-.zs-checkbox[data-indeterminate] {
+[data-slot="checkbox"][data-checked],
+[data-slot="checkbox"][data-indeterminate] {
   background-color: var(--zs-checkbox-fill-checked);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zs-checkbox-border-checked),
@@ -205,13 +205,13 @@
  * target. Use `outline` (not `box-shadow`) so the ring paints even
  * when checked/indeterminate already use box-shadow for the inner
  * border. The forced-colors fallback inherits this. */
-.zs-checkbox:focus-visible {
+[data-slot="checkbox"]:focus-visible {
   outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
-.zs-checkbox[data-disabled] {
+[data-slot="checkbox"][data-disabled] {
   background-color: var(--zs-input-bg-disabled);
   color: var(--zs-label-tertiary);
   cursor: not-allowed;
@@ -219,8 +219,8 @@
     inset 0 0 0 0.0625rem var(--zs-checkbox-border),
     0 0 0 0 transparent;
 }
-.zs-checkbox[data-disabled][data-checked],
-.zs-checkbox[data-disabled][data-indeterminate] {
+[data-slot="checkbox"][data-disabled][data-checked],
+[data-slot="checkbox"][data-disabled][data-indeterminate] {
   background-color: var(--zs-fill-secondary);
   color: var(--zs-label-tertiary);
 }
@@ -239,15 +239,15 @@
  *     fill the editable checked state uses). The ring keeps the
  *     "yes, this is currently selected" signal while the fill
  *     softening keeps the "you can't edit this" signal. */
-.zs-checkbox[data-readonly] {
+[data-slot="checkbox"][data-readonly] {
   cursor: default;
 }
-.zs-checkbox[data-readonly]:not([data-checked]):not([data-indeterminate]) {
+[data-slot="checkbox"][data-readonly]:not([data-checked]):not([data-indeterminate]) {
   background-color: var(--zs-selection-bg-readonly);
   color: var(--zs-selection-ink-readonly);
 }
-.zs-checkbox[data-readonly][data-checked],
-.zs-checkbox[data-readonly][data-indeterminate] {
+[data-slot="checkbox"][data-readonly][data-checked],
+[data-slot="checkbox"][data-readonly][data-indeterminate] {
   background-color: var(--zs-selection-bg-readonly);
   color: var(--zs-accent);
   box-shadow:
@@ -256,7 +256,7 @@
 }
 
 /* ─── the indicator glyph ───────────────────────────────────────────── */
-.zs-checkbox__indicator {
+[data-slot="checkbox-indicator"] {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -273,7 +273,7 @@
  * without the wrapper threading the `indeterminate` prop explicitly
  * (slice-4 review fix item 6). The two SVGs stack via absolute
  * positioning inside the relatively-positioned indicator container. */
-.zs-checkbox__indicator [data-glyph] {
+[data-slot="checkbox-indicator"] [data-glyph] {
   position: absolute;
   /* Physical centering (see `.zs-checkbox::before` for the same
    * rationale): the glyph is centered inside a symmetric indicator
@@ -289,10 +289,10 @@
   opacity: 0;
   transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-.zs-checkbox[data-checked]:not([data-indeterminate]) .zs-checkbox__indicator [data-glyph="check"] {
+[data-slot="checkbox"][data-checked]:not([data-indeterminate]) [data-slot="checkbox-indicator"] [data-glyph="check"] {
   opacity: 1;
 }
-.zs-checkbox[data-indeterminate] .zs-checkbox__indicator [data-glyph="minus"] {
+[data-slot="checkbox"][data-indeterminate] [data-slot="checkbox-indicator"] [data-glyph="minus"] {
   opacity: 1;
 }
 
@@ -306,8 +306,8 @@
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-checkbox,
-  .zs-checkbox__indicator [data-glyph] {
+  [data-slot="checkbox"],
+  [data-slot="checkbox-indicator"] [data-glyph] {
     transition: none;
   }
 }
@@ -331,7 +331,7 @@
  * normal accent fill instead of the GrayText border + Canvas fill the
  * disabled affordance demands. */
 @media (forced-colors: active) {
-  .zs-checkbox {
+  [data-slot="checkbox"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow:
@@ -339,18 +339,18 @@
       0 0 0 0 transparent;
     forced-color-adjust: none;
   }
-  .zs-checkbox[data-checked],
-  .zs-checkbox[data-indeterminate] {
+  [data-slot="checkbox"][data-checked],
+  [data-slot="checkbox"][data-indeterminate] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0 transparent;
   }
-  .zs-checkbox:focus-visible {
+  [data-slot="checkbox"]:focus-visible {
     outline-color: Highlight;
   }
-  .zs-checkbox[data-disabled] {
+  [data-slot="checkbox"][data-disabled] {
     background-color: Canvas;
     color: GrayText;
     box-shadow:
@@ -364,8 +364,8 @@
    * above). Paint GrayText border + Canvas fill + GrayText glyph so
    * the disabled affordance wins, and the on-state still reads via
    * shape (check / minus). */
-  .zs-checkbox[data-disabled][data-checked],
-  .zs-checkbox[data-disabled][data-indeterminate] {
+  [data-slot="checkbox"][data-disabled][data-checked],
+  [data-slot="checkbox"][data-disabled][data-indeterminate] {
     background-color: Canvas;
     color: GrayText;
     box-shadow:
@@ -376,7 +376,7 @@
    * want a clear "not editable" signal. Use CanvasText border so the
    * chip stays present (it's not disabled), but the consumer can tell
    * by hover/cursor that interaction is suppressed. */
-  .zs-checkbox[data-readonly]:not([data-checked]):not([data-indeterminate]) {
+  [data-slot="checkbox"][data-readonly]:not([data-checked]):not([data-indeterminate]) {
     background-color: Canvas;
     color: CanvasText;
     box-shadow:
@@ -387,15 +387,15 @@
    * signal survives, and pair with a HighlightText glyph so the check
    * remains legible. Specificity (0,2,1) mirrors the normal-mode
    * readonly+checked selector. */
-  .zs-checkbox[data-readonly][data-checked],
-  .zs-checkbox[data-readonly][data-indeterminate] {
+  [data-slot="checkbox"][data-readonly][data-checked],
+  [data-slot="checkbox"][data-readonly][data-indeterminate] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0 transparent;
   }
-  .zs-checkbox-field[data-disabled] {
+  :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
     color: GrayText;
   }
 }

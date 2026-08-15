@@ -26,7 +26,7 @@
  */
 
 /* ─── Root ──────────────────────────────────────────────────────────── */
-.zs-toolbar {
+[data-slot="toolbar"] {
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -41,7 +41,7 @@
   outline: none;
 }
 
-.zs-toolbar--vertical {
+[data-slot="toolbar"][data-orientation="vertical"] {
   flex-direction: column;
   align-items: stretch;
 }
@@ -51,7 +51,7 @@
  * The canonical Toolbar item. Paints label-only at rest (no surface)
  * and lights up on hover / focus / open so the cluster chrome stays
  * low until the user is actively engaging. */
-.zs-toolbar-button {
+[data-slot="toolbar-button"] {
   appearance: none;
   display: inline-flex;
   align-items: center;
@@ -73,26 +73,26 @@
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
-.zs-toolbar-button:hover:not([data-disabled]) {
+[data-slot="toolbar-button"]:hover:not([data-disabled]) {
   background-color: var(--zs-fill-tertiary);
 }
 
-.zs-toolbar-button:active:not([data-disabled]) {
+[data-slot="toolbar-button"]:active:not([data-disabled]) {
   background-color: var(--zs-fill-secondary);
 }
 
-.zs-toolbar-button:focus-visible {
+[data-slot="toolbar-button"]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-.zs-toolbar-button[data-disabled] {
+[data-slot="toolbar-button"][data-disabled] {
   color: var(--zs-label-tertiary);
   cursor: not-allowed;
 }
 
 /* ─── Input items ──────────────────────────────────────────────────── */
-.zs-toolbar-input {
+[data-slot="toolbar-input"] {
   appearance: none;
   block-size: 1.75rem;
   padding-block: 0;
@@ -105,7 +105,7 @@
   font: inherit;
 }
 
-.zs-toolbar-input:focus-visible {
+[data-slot="toolbar-input"]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
@@ -116,7 +116,7 @@
  * `aria-orientation` flipped relative to the parent toolbar
  * (vertical line inside a horizontal toolbar). We size off that
  * attribute so authors don't need a wrapping class. */
-.zs-toolbar-separator {
+[data-slot="toolbar-separator"] {
   background-color: var(--zs-separator);
   /* The default is "vertical inside a horizontal toolbar". */
   inline-size: var(--zs-selection-hairline);
@@ -126,7 +126,7 @@
   flex: 0 0 auto;
 }
 
-.zs-toolbar-separator[aria-orientation="horizontal"] {
+[data-slot="toolbar-separator"][aria-orientation="horizontal"] {
   /* Flip dimensions for separators inside a vertical toolbar. */
   inline-size: 1.25rem;
   block-size: var(--zs-selection-hairline);
@@ -142,13 +142,13 @@
  * so there's nothing to paint here. We only neutralise the default
  * outline on the container so Safari doesn't paint a stray ring when
  * items briefly hand focus back to the root during arrow-key roving. */
-.zs-toolbar:focus {
+[data-slot="toolbar"]:focus {
   outline: none;
 }
 
 /* ─── reduced-motion ───────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-toolbar-button {
+  [data-slot="toolbar-button"] {
     transition: none;
   }
 }
@@ -160,40 +160,40 @@
  * mirrors, the oklch hover/active fills above can outrank the bare
  * `.zs-toolbar-button` reset under high-contrast emulation. */
 @media (forced-colors: active) {
-  .zs-toolbar {
+  [data-slot="toolbar"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  .zs-toolbar-button {
+  [data-slot="toolbar-button"] {
     color: CanvasText;
     background-color: Canvas;
     forced-color-adjust: none;
   }
-  .zs-toolbar-button:hover:not([data-disabled]) {
+  [data-slot="toolbar-button"]:hover:not([data-disabled]) {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-toolbar-button:active:not([data-disabled]) {
+  [data-slot="toolbar-button"]:active:not([data-disabled]) {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-toolbar-button:focus-visible {
+  [data-slot="toolbar-button"]:focus-visible {
     outline-color: Highlight;
   }
-  .zs-toolbar-button[data-disabled] {
+  [data-slot="toolbar-button"][data-disabled] {
     color: GrayText;
   }
-  .zs-toolbar-input {
+  [data-slot="toolbar-input"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
-  .zs-toolbar-input:focus-visible {
+  [data-slot="toolbar-input"]:focus-visible {
     outline-color: Highlight;
   }
-  .zs-toolbar-separator {
+  [data-slot="toolbar-separator"] {
     background-color: CanvasText;
     forced-color-adjust: none;
   }

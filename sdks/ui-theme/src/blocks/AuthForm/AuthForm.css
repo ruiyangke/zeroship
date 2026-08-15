@@ -17,7 +17,7 @@
  * RTL. The width knob is a single token a consumer can retune.
  */
 
-.zs-auth-form-center {
+[data-slot="auth-form-center"] {
   /* Give the Center room so vertical centering reads on a full-page auth
      surface. `100%` only resolves against a definite-height ancestor —
      without one the box collapses to its content height and the card
@@ -31,7 +31,7 @@
   font-family: var(--zs-font-system);
 }
 
-.zs-auth-form {
+[data-slot="auth-form"] {
   /* Single width knob — retune per call site via inline custom property
      without forking the CSS. A login card sits comfortably around 24rem;
      wide enough for a 40-char email, narrow enough to read as a focused
@@ -44,12 +44,12 @@
 
 /* The <form> is layout-only; the inner Stack owns the rhythm. Reset any
    inherited form spacing so the Card padding governs the inset. */
-.zs-auth-form__form {
+[data-slot="auth-form-form"] {
   margin: 0;
 }
 
 /* ─── header ─────────────────────────────────────────────────────────── */
-.zs-auth-form__title {
+[data-slot="auth-form-title"] {
   margin: 0;
   color: var(--zs-label);
   font-size: var(--zs-text-title-2-size);
@@ -61,7 +61,7 @@
   text-align: center;
 }
 
-.zs-auth-form__description {
+[data-slot="auth-form-description"] {
   margin: 0;
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-subheadline-size);
@@ -71,7 +71,7 @@
 }
 
 /* ─── error Banner ───────────────────────────────────────────────────── */
-.zs-auth-form__error {
+[data-slot="auth-form-error"] {
   /* The Banner brings its own surface; no override needed beyond letting
      it span the form width. */
   inline-size: 100%;
@@ -81,7 +81,7 @@
 /* Strip the legacy <fieldset> chrome (UA border + inline padding + the
    intrinsic min-inline-size that prevents shrink-to-fit). The fieldset is
    purely the disable-all-while-loading mechanism. */
-.zs-auth-form__fieldset {
+[data-slot="auth-form-fields"] {
   margin: 0;
   padding: 0;
   border: 0;
@@ -91,7 +91,7 @@
 }
 
 /* ─── secondary action (e.g. "Forgot password?") ────────────────────── */
-.zs-auth-form__secondary {
+[data-slot="auth-form-secondary"] {
   display: flex;
   /* Trailing inline edge — sits under the password field, aligned to the
      end so it reads as an inline affordance, not a primary action. */
@@ -112,8 +112,8 @@
    in side-by-side stories. That pin must NOT collapse our full-width
    submit while loading — match the busy state at equal specificity (and
    later in the cascade via the import order) so 100% wins. */
-.zs-auth-form__submit,
-.zs-auth-form__submit[aria-busy="true"] {
+[data-slot="auth-form-submit"],
+[data-slot="auth-form-submit"][aria-busy="true"] {
   inline-size: 100%;
 }
 
@@ -121,18 +121,18 @@
 /* A labelled rule: hairline — "or" — hairline. The two Separators flex to
    fill the space on either side of the centered label. Logical properties
    keep it symmetric under RTL. */
-.zs-auth-form__or {
+[data-slot="auth-form-or"] {
   display: flex;
   align-items: center;
   gap: var(--zs-space-3);
 }
 
-.zs-auth-form__or-line {
+[data-slot="auth-form-or-line"] {
   /* Each Separator grows to consume the free space beside the label. */
   flex: 1 1 0;
 }
 
-.zs-auth-form__or-label {
+[data-slot="auth-form-or-label"] {
   /* label-secondary (not tertiary): at the small footnote size the
      tertiary ink lands ~4.46:1 over the crystal surface — just under the
      4.5:1 AA threshold axe enforces. Secondary clears it. */
@@ -147,24 +147,24 @@
 /* The social-actions slot lays its children in a column so stacked
    provider buttons each span the card width when the consumer makes them
    full-width; consumers wanting a row can wrap in their own Cluster. */
-.zs-auth-form__social-actions {
+[data-slot="auth-form-social-actions"] {
   inline-size: 100%;
 }
 
 /* ─── footer ─────────────────────────────────────────────────────────── */
-.zs-auth-form__footer {
+[data-slot="auth-form-footer"] {
   display: flex;
   justify-content: center;
 }
 
-.zs-auth-form__footer-default {
+[data-slot="auth-form-footer-default"] {
   /* The prompt + the plain mode-switch Button sit on one centered line,
      wrapping on narrow widths. */
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
 }
 
-.zs-auth-form__footer-prompt {
+[data-slot="auth-form-footer-prompt"] {
   color: var(--zs-label-secondary);
 }
 
@@ -173,10 +173,10 @@
    assert the block's own text resolves to the system palette so the
    heading, description, "or" label, and footer prompt stay legible. */
 @media (forced-colors: active) {
-  .zs-auth-form__title,
-  .zs-auth-form__description,
-  .zs-auth-form__or-label,
-  .zs-auth-form__footer-prompt {
+  [data-slot="auth-form-title"],
+  [data-slot="auth-form-description"],
+  [data-slot="auth-form-or-label"],
+  [data-slot="auth-form-footer-prompt"] {
     color: CanvasText;
   }
 }
@@ -186,7 +186,7 @@
    and Card honor reduced-motion in their own CSS). The gate exists for
    parity with the rest of the surface. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-auth-form {
+  [data-slot="auth-form"] {
     /* nothing to disable; placeholder for surface parity */
   }
 }

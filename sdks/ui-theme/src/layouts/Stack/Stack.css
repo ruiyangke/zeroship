@@ -24,7 +24,7 @@
  * Motion: none. Stack carries no transitions.
  */
 
-.zs-stack {
+[data-slot="stack"] {
   display: flex;
   flex-direction: var(--stack-direction, column);
   gap: var(--stack-gap, var(--zs-space-0));
@@ -38,7 +38,7 @@
  * forces the flex item to its min-content width and blows the Stack out
  * past its parent; the logical min-sizes keep RTL + vertical writing modes
  * correct. */
-.zs-stack > * {
+[data-slot="stack"] > * {
   min-inline-size: 0;
   min-block-size: 0;
 }

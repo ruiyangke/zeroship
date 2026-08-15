@@ -17,7 +17,7 @@
  * non-animated busy indicator). Mirrors the Button spinner.
  */
 
-.zs-spinner {
+[data-slot="spinner"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -34,17 +34,17 @@
   color: var(--zs-accent);
 }
 
-.zs-spinner--sm {
+[data-slot="spinner"][data-size="sm"] {
   --zs-spinner-size: 1rem;
   /* At 1rem the derived track is hairline-thin; lift the track contrast
      one step so the ring stays legible against the page. */
   --zs-spinner-track-color: var(--zs-separator);
 }
-.zs-spinner--lg {
+[data-slot="spinner"][data-size="lg"] {
   --zs-spinner-size: 2.5rem;
 }
 
-.zs-spinner__ring {
+[data-slot="spinner-ring"] {
   inline-size: 100%;
   block-size: 100%;
   border-radius: var(--zs-radius-full);
@@ -66,7 +66,7 @@
  * quadrant) stays painted as a non-animated busy indicator. The
  * role="status" label still announces "loading" to AT. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-spinner__ring {
+  [data-slot="spinner-ring"] {
     animation: none;
   }
 }
@@ -75,7 +75,7 @@
  * Map the ring to system colors so it stays visible: the track to
  * GrayText, the active arc to Highlight. */
 @media (forced-colors: active) {
-  .zs-spinner__ring {
+  [data-slot="spinner-ring"] {
     border-color: GrayText;
     border-block-start-color: Highlight;
     forced-color-adjust: none;

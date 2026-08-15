@@ -2,7 +2,7 @@
  * ScrollRail — full-width horizontal rail aligned to a governed container.
  */
 
-.zs-scroll-rail {
+[data-slot="scroll-rail"] {
   --zs-scroll-rail-edge: max(
     var(--zs-scroll-rail-pad, var(--zs-space-6)),
     calc((100vw - var(--zs-scroll-rail-max-width, var(--zs-container-wide))) / 2)
@@ -23,20 +23,20 @@
   scrollbar-width: none;
 }
 
-.zs-scroll-rail::-webkit-scrollbar {
+[data-slot="scroll-rail"]::-webkit-scrollbar {
   display: none;
 }
 
-.zs-scroll-rail[data-snap="start"] {
+[data-slot="scroll-rail"][data-snap="start"] {
   scroll-snap-type: inline proximity;
 }
 
-.zs-scroll-rail[data-snap="start"] > * {
+[data-slot="scroll-rail"][data-snap="start"] > * {
   scroll-snap-align: start;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zs-scroll-rail {
+  [data-slot="scroll-rail"] {
     scroll-behavior: auto;
   }
 }

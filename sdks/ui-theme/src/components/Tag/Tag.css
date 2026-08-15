@@ -21,7 +21,7 @@
  * tap-target uses the standard active-scale guarded the same way.
  */
 
-.zs-tag {
+[data-slot="tag"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-1);
@@ -41,14 +41,14 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-.zs-tag--sm {
+[data-slot="tag"][data-size="sm"] {
   padding-block: var(--zs-space-half);
   padding-inline: var(--zs-space-2);
   font-size: var(--zs-text-caption-1-size);
   line-height: var(--zs-text-caption-1-line);
 }
 
-.zs-tag--md {
+[data-slot="tag"][data-size="md"] {
   padding-block: var(--zs-space-1);
   padding-inline: var(--zs-space-3);
   font-size: var(--zs-text-footnote-size);
@@ -57,25 +57,25 @@
 
 /* Tighten the trailing edge when a remove button rides along so the ×
    doesn't sit too far from the chip edge. */
-.zs-tag--removable.zs-tag--sm {
+[data-slot="tag"][data-removable][data-size="sm"] {
   padding-inline-end: var(--zs-space-1);
 }
-.zs-tag--removable.zs-tag--md {
+[data-slot="tag"][data-removable][data-size="md"] {
   padding-inline-end: var(--zs-space-2);
 }
 
-.zs-tag__icon {
+[data-slot="tag-icon"] {
   display: inline-flex;
   align-items: center;
   font-size: 1em;
   line-height: 1;
 }
-.zs-tag__icon svg {
+[data-slot="tag-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-.zs-tag__label {
+[data-slot="tag-label"] {
   display: block;
   min-inline-size: 0;
   overflow: hidden;
@@ -87,7 +87,7 @@
  * trailing edge. The glyph is centered; the button grows a subtle
  * hover/active wash so the affordance reads.
  */
-.zs-tag__remove {
+[data-slot="tag-remove"] {
   /* Relative so the invisible hit-area `::before` centers on the button. */
   position: relative;
   display: inline-flex;
@@ -107,17 +107,17 @@
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
     opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-.zs-tag__remove[data-size="sm"] {
+[data-slot="tag-remove"][data-size="sm"] {
   inline-size: 1rem;
   block-size: 1rem;
   font-size: var(--zs-text-footnote-size);
 }
-.zs-tag__remove[data-size="md"] {
+[data-slot="tag-remove"][data-size="md"] {
   inline-size: 1.25rem;
   block-size: 1.25rem;
   font-size: var(--zs-text-callout-size);
 }
-.zs-tag__remove-glyph {
+[data-slot="tag-remove-glyph"] {
   line-height: 1;
 }
 /* 44pt minimum tap target. The visible button stays small (1–1.25rem) so
@@ -127,7 +127,7 @@
    Mirrors Button.css's coarse-pointer hit-target trick, applied on every
    pointer here because the × is too small to reliably hit even with a
    mouse. */
-.zs-tag__remove::before {
+[data-slot="tag-remove"]::before {
   content: "";
   position: absolute;
   inset-block-start: 50%;
@@ -139,15 +139,15 @@
   pointer-events: auto;
 }
 @media (hover: hover) {
-  .zs-tag__remove:hover {
+  [data-slot="tag-remove"]:hover {
     opacity: 1;
     background: color-mix(in oklch, var(--zs-label) 14%, transparent);
   }
 }
-.zs-tag__remove:active {
+[data-slot="tag-remove"]:active {
   background: color-mix(in oklch, var(--zs-label) 20%, transparent);
 }
-.zs-tag__remove:focus-visible {
+[data-slot="tag-remove"]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
   opacity: 1;
@@ -157,25 +157,25 @@
  * Root is a <button aria-pressed>. Unselected reads like the neutral
  * resting chip; selected swaps to the opaque accent fill.
  */
-.zs-tag--filter {
+[data-slot="tag"][data-filter] {
   cursor: pointer;
 }
 @media (hover: hover) {
-  .zs-tag--filter:hover:not([data-selected]) {
+  [data-slot="tag"][data-filter]:hover:not([data-selected]) {
     background: color-mix(in oklch, var(--zs-label) 12%, var(--zs-surface));
   }
 }
-.zs-tag--filter:focus-visible {
+[data-slot="tag"][data-filter]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
-.zs-tag--filter[data-selected] {
+[data-slot="tag"][data-filter][data-selected] {
   background: var(--zs-accent);
   color: var(--zs-accent-ink);
   border-color: var(--zs-accent);
 }
 @media (hover: hover) {
-  .zs-tag--filter[data-selected]:hover {
+  [data-slot="tag"][data-filter][data-selected]:hover {
     background: var(--zs-accent-hover);
     border-color: var(--zs-accent-hover);
   }
@@ -187,21 +187,21 @@
  * filter state maps to the Highlight pair.
  */
 @media (forced-colors: active) {
-  .zs-tag {
+  [data-slot="tag"] {
     forced-color-adjust: none;
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;
   }
-  .zs-tag__remove {
+  [data-slot="tag-remove"] {
     color: CanvasText;
     opacity: 1;
   }
-  .zs-tag__remove:hover,
-  .zs-tag__remove:active {
+  [data-slot="tag-remove"]:hover,
+  [data-slot="tag-remove"]:active {
     background: transparent;
   }
-  .zs-tag--filter[data-selected] {
+  [data-slot="tag"][data-filter][data-selected] {
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
@@ -214,20 +214,20 @@
      paint the OKLCH `--zs-label`/`--zs-accent-hover` mix instead of the
      system colors. Each mirror reuses the SAME selector shape so
      specificity ties and source order (this block is last) wins. */
-  .zs-tag--filter:hover:not([data-selected]) {
+  [data-slot="tag"][data-filter]:hover:not([data-selected]) {
     forced-color-adjust: none;
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;
   }
-  .zs-tag--filter[data-selected]:hover {
+  [data-slot="tag"][data-filter][data-selected]:hover {
     forced-color-adjust: none;
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
   }
-  .zs-tag--filter:focus-visible,
-  .zs-tag__remove:focus-visible {
+  [data-slot="tag"][data-filter]:focus-visible,
+  [data-slot="tag-remove"]:focus-visible {
     outline-color: CanvasText;
   }
 }

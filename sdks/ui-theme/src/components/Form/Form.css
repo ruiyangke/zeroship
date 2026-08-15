@@ -31,7 +31,7 @@
  * margin-left / margin-right in this file. Tested via the RTL story.
  */
 
-.zs-form {
+[data-slot="form-card"] {
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--zs-form-gap, var(--zs-space-5));
@@ -47,7 +47,7 @@
  * doesn't double the chrome. Padding lifts from --zs-card-padding-md
  * for the same reason.
  */
-.zs-form--card {
+[data-slot="form-card"] {
   padding: var(--zs-card-padding-md);
   border-radius: var(--zs-card-radius-md);
   background-color: var(--zs-surface);
@@ -71,7 +71,7 @@
   /* No per-component motion to disable — placeholder so the
      reduced-motion contract is visible in the stylesheet for future
      audits. */
-  .zs-form {
+  [data-slot="form-card"] {
     /* explicit no-op */
   }
 }
@@ -88,10 +88,10 @@
  * default rule. Today the only state worth mirroring is the
  * variant=card chrome; the default variant has no chrome to mirror. */
 @media (forced-colors: active) {
-  .zs-form {
+  [data-slot="form-card"] {
     color: CanvasText;
   }
-  .zs-form--card {
+  [data-slot="form-card"] {
     background-color: Canvas;
     /* `box-shadow` is flattened in forced-colors mode; use a real
        border in CanvasText so the rim survives. The `0.0625rem`

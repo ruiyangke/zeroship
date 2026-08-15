@@ -20,7 +20,7 @@
  */
 
 /* ─── base ─────────────────────────────────────────────────────────────── */
-.zs-button {
+[data-slot="button"] {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -54,7 +54,7 @@
 }
 
 @media (pointer: coarse) {
-  .zs-button:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])::before {
+  [data-slot="button"]:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])::before {
     content: "";
     position: absolute;
     top: 50%;
@@ -66,7 +66,7 @@
   }
 }
 
-.zs-button__inner {
+[data-slot="button-inner"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -83,7 +83,7 @@
   transition: transform var(--zs-motion-fast) var(--zs-motion-spring);
 }
 
-.zs-button__label {
+[data-slot="button-label"] {
   /* Long-label policy: clip + ellipsize. Block display (not inline-flex)
      so `overflow: hidden` + `text-overflow: ellipsis` constrain the
      label's layout box to the flex-shrunk width. `min-width: 0` allows
@@ -96,8 +96,8 @@
   white-space: nowrap;
 }
 
-.zs-button__start,
-.zs-button__end {
+[data-slot="button-start"],
+[data-slot="button-end"] {
   display: inline-flex;
   align-items: center;
   pointer-events: none;
@@ -110,13 +110,13 @@
   line-height: 1;
 }
 
-.zs-button__start svg,
-.zs-button__end svg {
+[data-slot="button-start"] svg,
+[data-slot="button-end"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-.zs-button:focus-visible {
+[data-slot="button"]:focus-visible {
   /* Button-polish item 3. Narrower outline (0.125rem vs the foundation
      --zs-focus-ring-width 0.1875rem) + Button-specific quieter alpha
      (--zs-button-focus-ring-color, 0.28 vs the foundation 0.35) so the
@@ -126,13 +126,13 @@
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-.zs-button:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) .zs-button__inner {
+[data-slot="button"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) [data-slot="button-inner"] {
   transform: scale(var(--zs-button-active-scale, 0.97));
 }
 
-.zs-button:disabled,
-.zs-button[aria-disabled="true"],
-.zs-button[aria-busy="true"] {
+[data-slot="button"]:disabled,
+[data-slot="button"][aria-disabled="true"],
+[data-slot="button"][aria-busy="true"] {
   /* HTML `disabled` already prevents activation; for `asChild` anchors
      and other elements where `disabled` does not apply, the
      `[aria-disabled="true"]` mirror keeps the cursor/affordance
@@ -148,7 +148,7 @@
    surfaces). See variant blocks below for the disabled overrides. */
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-.zs-button--small {
+[data-slot="button"][data-size="small"] {
   height: var(--zs-button-height-sm, 2rem);    /* 32 */
   padding-inline: var(--zs-button-padding-sm, var(--zs-space-3));
   font-size: var(--zs-text-subheadline-size);
@@ -157,7 +157,7 @@
   border-radius: var(--zs-button-radius-sm, var(--zs-radius-2));
 }
 
-.zs-button--medium {
+[data-slot="button"][data-size="medium"] {
   height: var(--zs-button-height-md, 2.5rem);  /* 40 */
   padding-inline: var(--zs-button-padding-md, var(--zs-space-4));
   font-size: var(--zs-text-body-size);
@@ -166,7 +166,7 @@
   border-radius: var(--zs-button-radius-md, var(--zs-radius-3));
 }
 
-.zs-button--large {
+[data-slot="button"][data-size="large"] {
   height: var(--zs-button-height-lg, 3rem);    /* 48 */
   padding-inline: var(--zs-button-padding-lg, var(--zs-space-5));
   font-size: var(--zs-text-headline-size);
@@ -176,24 +176,24 @@
 }
 
 /* ─── variants × accent (Style) ────────────────────────────────────────── */
-.zs-button--filled {
+[data-slot="button"][data-variant="filled"] {
   background-color: var(--zs-button-filled-bg, var(--zs-accent));
   color: var(--zs-button-filled-ink, var(--zs-accent-ink));
   box-shadow: var(--zs-button-filled-shadow, none);
 }
 @media (hover: hover) {
-  .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(--zs-button-filled-bg-hover, var(--zs-accent-hover));
     filter: brightness(1.015);
   }
 }
-.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(--zs-button-filled-bg-active, var(--zs-accent-active));
   filter: brightness(0.985);
 }
-.zs-button--filled:disabled,
-.zs-button--filled[aria-disabled="true"],
-.zs-button--filled[aria-busy="true"] {
+[data-slot="button"][data-variant="filled"]:disabled,
+[data-slot="button"][data-variant="filled"][aria-disabled="true"],
+[data-slot="button"][data-variant="filled"][aria-busy="true"] {
   background-color: var(
     --zs-button-filled-bg-disabled,
     color-mix(in oklch, var(--zs-accent) 38%, transparent)
@@ -203,7 +203,7 @@
   filter: none;
 }
 
-.zs-button--tinted {
+[data-slot="button"][data-variant="tinted"] {
   background-color: var(
     --zs-button-tinted-bg,
     color-mix(in oklch, var(--zs-accent) 14%, transparent)
@@ -214,22 +214,22 @@
   box-shadow: var(--zs-button-tinted-shadow, none);
 }
 @media (hover: hover) {
-  .zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
       --zs-button-tinted-bg-hover,
       color-mix(in oklch, var(--zs-accent) 22%, transparent)
     );
   }
 }
-.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
     --zs-button-tinted-bg-active,
     color-mix(in oklch, var(--zs-accent) 30%, transparent)
   );
 }
-.zs-button--tinted:disabled,
-.zs-button--tinted[aria-disabled="true"],
-.zs-button--tinted[aria-busy="true"] {
+[data-slot="button"][data-variant="tinted"]:disabled,
+[data-slot="button"][data-variant="tinted"][aria-disabled="true"],
+[data-slot="button"][data-variant="tinted"][aria-busy="true"] {
   background-color: var(
     --zs-button-tinted-bg-disabled,
     color-mix(in oklch, var(--zs-accent) 8%, transparent)
@@ -241,7 +241,7 @@
   box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
-.zs-button--gray {
+[data-slot="button"][data-variant="gray"] {
   background-color: var(
     --zs-button-gray-bg,
     color-mix(in oklch, var(--zs-label) 8%, transparent)
@@ -252,22 +252,22 @@
   box-shadow: var(--zs-button-gray-shadow, none);
 }
 @media (hover: hover) {
-  .zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
       --zs-button-gray-bg-hover,
       color-mix(in oklch, var(--zs-label) 12%, transparent)
     );
   }
 }
-.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
     --zs-button-gray-bg-active,
     color-mix(in oklch, var(--zs-label) 16%, transparent)
   );
 }
-.zs-button--gray:disabled,
-.zs-button--gray[aria-disabled="true"],
-.zs-button--gray[aria-busy="true"] {
+[data-slot="button"][data-variant="gray"]:disabled,
+[data-slot="button"][data-variant="gray"][aria-disabled="true"],
+[data-slot="button"][data-variant="gray"][aria-busy="true"] {
   background-color: var(
     --zs-button-gray-bg-disabled,
     color-mix(in oklch, var(--zs-label) 4%, transparent)
@@ -276,43 +276,43 @@
   box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
-.zs-button--plain {
+[data-slot="button"][data-variant="plain"] {
   background-color: transparent;
   color: var(--zs-button-plain-ink, var(--zs-accent));
   box-shadow: none;
 }
 @media (hover: hover) {
-  .zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(--zs-button-plain-bg-hover, var(--zs-fill-tertiary));
   }
 }
-.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(--zs-button-plain-bg-active, var(--zs-fill));
 }
-.zs-button--plain:disabled,
-.zs-button--plain[aria-disabled="true"],
-.zs-button--plain[aria-busy="true"] {
+[data-slot="button"][data-variant="plain"]:disabled,
+[data-slot="button"][data-variant="plain"][aria-disabled="true"],
+[data-slot="button"][data-variant="plain"][aria-busy="true"] {
   color: var(--zs-label-tertiary);
   background-color: transparent;
 }
 
 /* ─── destructive override (intent; works across variants) ────────────── */
-.zs-button--destructive.zs-button--filled {
+[data-slot="button"][data-intent="destructive"][data-variant="filled"] {
   background-color: var(--zs-button-destructive-filled-bg, var(--zs-system-red));
   color: var(--zs-button-destructive-filled-ink, var(--zs-button-filled-ink, var(--zs-accent-ink)));
   box-shadow: var(--zs-button-destructive-filled-shadow, var(--zs-button-filled-shadow, none));
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(--zs-button-destructive-filled-bg-hover, var(--zs-system-red-hover));
   }
 }
-.zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-intent="destructive"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(--zs-button-destructive-filled-bg-active, var(--zs-system-red-active));
 }
-.zs-button--destructive.zs-button--filled:disabled,
-.zs-button--destructive.zs-button--filled[aria-disabled="true"],
-.zs-button--destructive.zs-button--filled[aria-busy="true"] {
+[data-slot="button"][data-intent="destructive"][data-variant="filled"]:disabled,
+[data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-disabled="true"],
+[data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-busy="true"] {
   background-color: var(
     --zs-button-destructive-filled-bg-disabled,
     color-mix(in oklch, var(--zs-system-red) 22%, var(--zs-fill-secondary))
@@ -321,7 +321,7 @@
   box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
-.zs-button--destructive.zs-button--tinted {
+[data-slot="button"][data-intent="destructive"][data-variant="tinted"] {
   background-color: var(
     --zs-button-destructive-tinted-bg,
     color-mix(in oklch, var(--zs-system-red-active) 18%, transparent)
@@ -330,22 +330,22 @@
   box-shadow: var(--zs-button-destructive-tinted-shadow, var(--zs-button-tinted-shadow, none));
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
       --zs-button-destructive-tinted-bg-hover,
       color-mix(in oklch, var(--zs-system-red-active) 28%, transparent)
     );
   }
 }
-.zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-intent="destructive"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
     --zs-button-destructive-tinted-bg-active,
     color-mix(in oklch, var(--zs-system-red-active) 36%, transparent)
   );
 }
-.zs-button--destructive.zs-button--tinted:disabled,
-.zs-button--destructive.zs-button--tinted[aria-disabled="true"],
-.zs-button--destructive.zs-button--tinted[aria-busy="true"] {
+[data-slot="button"][data-intent="destructive"][data-variant="tinted"]:disabled,
+[data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-disabled="true"],
+[data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-busy="true"] {
   background-color: var(
     --zs-button-destructive-tinted-bg-disabled,
     color-mix(in oklch, var(--zs-system-red-active) 8%, var(--zs-fill-secondary))
@@ -357,26 +357,26 @@
   box-shadow: var(--zs-button-disabled-shadow, none);
 }
 
-.zs-button--destructive.zs-button--plain {
+[data-slot="button"][data-intent="destructive"][data-variant="plain"] {
   color: var(--zs-button-destructive-plain-ink, var(--zs-system-red));
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
       --zs-button-destructive-plain-bg-hover,
       color-mix(in oklch, var(--zs-system-red) 12%, transparent)
     );
   }
 }
-.zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-intent="destructive"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
     --zs-button-destructive-plain-bg-active,
     color-mix(in oklch, var(--zs-system-red) 18%, transparent)
   );
 }
-.zs-button--destructive.zs-button--plain:disabled,
-.zs-button--destructive.zs-button--plain[aria-disabled="true"],
-.zs-button--destructive.zs-button--plain[aria-busy="true"] {
+[data-slot="button"][data-intent="destructive"][data-variant="plain"]:disabled,
+[data-slot="button"][data-intent="destructive"][data-variant="plain"][aria-disabled="true"],
+[data-slot="button"][data-intent="destructive"][data-variant="plain"][aria-busy="true"] {
   /* Without this, the destructive-plain disabled state keeps system-red
      text — wrong signal for a disabled control. Defer to the neutral
      disabled label color. */
@@ -387,20 +387,20 @@
 /* gray + destructive: keep the neutral gray fill (no strong combination
    exists for this pairing), but signal destructive intent through the
    LABEL color so the cell isn't silently neutral. */
-.zs-button--destructive.zs-button--gray {
+[data-slot="button"][data-intent="destructive"][data-variant="gray"] {
   color: var(--zs-system-red);
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     color: var(--zs-system-red-hover);
   }
 }
-.zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-slot="button"][data-intent="destructive"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   color: var(--zs-system-red-active);
 }
-.zs-button--destructive.zs-button--gray:disabled,
-.zs-button--destructive.zs-button--gray[aria-disabled="true"],
-.zs-button--destructive.zs-button--gray[aria-busy="true"] {
+[data-slot="button"][data-intent="destructive"][data-variant="gray"]:disabled,
+[data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-disabled="true"],
+[data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-busy="true"] {
   color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
 }
 
@@ -411,9 +411,9 @@
    doesn't collapse) and keeps the label in the AT tree, unlike
    `visibility: hidden` which removes it. `pointer-events: none` is
    belt-and-braces (the button is already disabled+aria-busy). */
-.zs-button[aria-busy="true"] .zs-button__label,
-.zs-button[aria-busy="true"] .zs-button__start,
-.zs-button[aria-busy="true"] .zs-button__end {
+[data-slot="button"][aria-busy="true"] [data-slot="button-label"],
+[data-slot="button"][aria-busy="true"] [data-slot="button-start"],
+[data-slot="button"][aria-busy="true"] [data-slot="button-end"] {
   opacity: 0;
   pointer-events: none;
 }
@@ -429,11 +429,11 @@
    box). Excluded buttons that intentionally constrain width via
    max-inline-size on the long-label story by only applying when the
    author has NOT overridden width. */
-.zs-button[aria-busy="true"] {
+[data-slot="button"][aria-busy="true"] {
   inline-size: max-content;
 }
 
-.zs-button__spinner {
+[data-slot="button-spinner"] {
   position: absolute;
   inset: 0;
   display: grid;
@@ -441,13 +441,13 @@
   pointer-events: none;
 }
 
-.zs-button__spinner svg {
+[data-slot="button-spinner"] svg {
   width: 1rem;
   height: 1rem;
   animation: zs-button-spin 1s linear infinite;
 }
 
-.zs-button__spinner circle {
+[data-slot="button-spinner"] circle {
   fill: none;
   stroke: currentColor;
   /* SVG attribute units (viewBox space), not CSS px. */
@@ -466,10 +466,10 @@
    `stroke: currentColor` rule keeps composing — destructive-non-filled
    spinners pick up --zs-system-red; filled destructive re-pins to the
    accent-ink so white-on-red doesn't get a red spinner over a red fill. */
-.zs-button--destructive .zs-button__spinner {
+[data-slot="button"][data-intent="destructive"] [data-slot="button-spinner"] {
   color: var(--zs-system-red);
 }
-.zs-button--destructive.zs-button--filled .zs-button__spinner {
+[data-slot="button"][data-intent="destructive"][data-variant="filled"] [data-slot="button-spinner"] {
   color: var(--zs-accent-ink);
 }
 
@@ -478,7 +478,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zs-button__spinner svg {
+  [data-slot="button-spinner"] svg {
     /* Stop the keyframe entirely; the partial-circle arc stays static. */
     animation: none;
   }
@@ -512,42 +512,42 @@
  * token color, not a system color. The mirror restores parity.
  */
 @media (forced-colors: active) {
-  .zs-button {
+  [data-slot="button"] {
     border: 0.0625rem solid CanvasText;
     forced-color-adjust: none;
   }
 
   /* Base variants — rest state. */
-  .zs-button--filled {
+  [data-slot="button"][data-variant="filled"] {
     background: Highlight;
     color: HighlightText;
   }
-  .zs-button--tinted,
-  .zs-button--gray {
+  [data-slot="button"][data-variant="tinted"],
+  [data-slot="button"][data-variant="gray"] {
     background: Canvas;
     color: CanvasText;
   }
-  .zs-button--plain {
+  [data-slot="button"][data-variant="plain"] {
     background: transparent;
     color: LinkText;
   }
 
   /* Variant hover mirrors. Match the normal-mode selector shape so
      specificity ties and source order wins. */
-  .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: Highlight;
     color: HighlightText;
   }
-  .zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: Canvas;
     color: CanvasText;
   }
-  .zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: transparent;
     color: LinkText;
     /* Suppress the hover underline in forced-colors so the system-
@@ -560,18 +560,18 @@
      normal-mode `.zs-button--filled:disabled` form (class:1, pseudo/
      attr:1) — and adding `[aria-disabled="true"]` keeps parity for
      asChild anchors. */
-  .zs-button--filled:disabled,
-  .zs-button--filled[aria-disabled="true"],
-  .zs-button--filled[aria-busy="true"],
-  .zs-button--tinted:disabled,
-  .zs-button--tinted[aria-disabled="true"],
-  .zs-button--tinted[aria-busy="true"],
-  .zs-button--gray:disabled,
-  .zs-button--gray[aria-disabled="true"],
-  .zs-button--gray[aria-busy="true"],
-  .zs-button--plain:disabled,
-  .zs-button--plain[aria-disabled="true"],
-  .zs-button--plain[aria-busy="true"] {
+  [data-slot="button"][data-variant="filled"]:disabled,
+  [data-slot="button"][data-variant="filled"][aria-disabled="true"],
+  [data-slot="button"][data-variant="filled"][aria-busy="true"],
+  [data-slot="button"][data-variant="tinted"]:disabled,
+  [data-slot="button"][data-variant="tinted"][aria-disabled="true"],
+  [data-slot="button"][data-variant="tinted"][aria-busy="true"],
+  [data-slot="button"][data-variant="gray"]:disabled,
+  [data-slot="button"][data-variant="gray"][aria-disabled="true"],
+  [data-slot="button"][data-variant="gray"][aria-busy="true"],
+  [data-slot="button"][data-variant="plain"]:disabled,
+  [data-slot="button"][data-variant="plain"][aria-disabled="true"],
+  [data-slot="button"][data-variant="plain"][aria-busy="true"] {
     background: Canvas;
     color: GrayText;
     border-color: GrayText;
@@ -579,33 +579,33 @@
 
   /* Destructive — rest, hover, active. Class-compound (0,2,0) matches
      the normal-mode `.zs-button--destructive.zs-button--filled` rule. */
-  .zs-button--destructive.zs-button--filled {
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"] {
     background: Highlight;
     color: HighlightText;
   }
-  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: Highlight;
     color: HighlightText;
   }
-  .zs-button--destructive.zs-button--tinted,
-  .zs-button--destructive.zs-button--gray {
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"],
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"] {
     background: Canvas;
     color: CanvasText;
   }
-  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: Canvas;
     color: CanvasText;
   }
-  .zs-button--destructive.zs-button--plain {
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"] {
     background: transparent;
     color: LinkText;
   }
-  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
-  .zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: transparent;
     color: LinkText;
     text-decoration: none;
@@ -613,18 +613,18 @@
 
   /* Destructive disabled mirrors. Class-compound + attr matches
      normal-mode `.zs-button--destructive.zs-button--filled:disabled`. */
-  .zs-button--destructive.zs-button--filled:disabled,
-  .zs-button--destructive.zs-button--filled[aria-disabled="true"],
-  .zs-button--destructive.zs-button--filled[aria-busy="true"],
-  .zs-button--destructive.zs-button--tinted:disabled,
-  .zs-button--destructive.zs-button--tinted[aria-disabled="true"],
-  .zs-button--destructive.zs-button--tinted[aria-busy="true"],
-  .zs-button--destructive.zs-button--gray:disabled,
-  .zs-button--destructive.zs-button--gray[aria-disabled="true"],
-  .zs-button--destructive.zs-button--gray[aria-busy="true"],
-  .zs-button--destructive.zs-button--plain:disabled,
-  .zs-button--destructive.zs-button--plain[aria-disabled="true"],
-  .zs-button--destructive.zs-button--plain[aria-busy="true"] {
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"]:disabled,
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-disabled="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-busy="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:disabled,
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-disabled="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-busy="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"]:disabled,
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-disabled="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-busy="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"]:disabled,
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"][aria-disabled="true"],
+  [data-slot="button"][data-intent="destructive"][data-variant="plain"][aria-busy="true"] {
     background: Canvas;
     color: GrayText;
     border-color: GrayText;
@@ -632,9 +632,9 @@
 
   /* Generic disabled fallback (kept for any future selector that uses
      the bare `.zs-button:disabled` shape). */
-  .zs-button:disabled,
-  .zs-button[aria-disabled="true"],
-  .zs-button[aria-busy="true"] {
+  [data-slot="button"]:disabled,
+  [data-slot="button"][aria-disabled="true"],
+  [data-slot="button"][aria-busy="true"] {
     color: GrayText;
     border-color: GrayText;
   }
@@ -642,13 +642,13 @@
   /* Spinner — both the default rule and the destructive overrides
      must defer to system colors so the spinner stroke (currentColor
      on the SVG circle) reads as a system color, not the token mix. */
-  .zs-button__spinner,
-  .zs-button--destructive .zs-button__spinner,
-  .zs-button--destructive.zs-button--filled .zs-button__spinner {
+  [data-slot="button-spinner"],
+  [data-slot="button"][data-intent="destructive"] [data-slot="button-spinner"],
+  [data-slot="button"][data-intent="destructive"][data-variant="filled"] [data-slot="button-spinner"] {
     color: CanvasText;
   }
 
-  .zs-button:focus-visible {
+  [data-slot="button"]:focus-visible {
     outline: 0.125rem solid Highlight;
     outline-offset: 0.125rem;
   }

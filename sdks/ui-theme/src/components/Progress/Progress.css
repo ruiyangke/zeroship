@@ -28,7 +28,7 @@
  * `prefers-reduced-motion: reduce`.
  */
 
-.zs-progress {
+[data-slot="progress"] {
   display: grid;
   inline-size: 100%;
   font-family: var(--zs-font-system);
@@ -40,21 +40,21 @@
   --zs-progress-track-block: 0.375rem;
 }
 
-.zs-progress--sm {
+[data-slot="progress"][data-size="sm"] {
   --zs-progress-track-block: 0.25rem;
 }
-.zs-progress--lg {
+[data-slot="progress"][data-size="lg"] {
   --zs-progress-track-block: 0.5rem;
 }
 
 /* CompletionCelebrate state — value === max. Indicator collapses to
    system-green so a finished bar reads "done" instead of "in progress". */
-.zs-progress[data-status="complete"] {
+[data-slot="progress"][data-status="complete"] {
   --zs-progress-color: var(--zs-system-green);
 }
 
 /* ─── Header row ───────────────────────────────────────────────────── */
-.zs-progress__header {
+[data-slot="progress-header"] {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -63,19 +63,19 @@
   line-height: var(--zs-text-footnote-line);
 }
 
-.zs-progress__label {
+[data-slot="progress-label"] {
   color: var(--zs-label-secondary);
   font-weight: 500;
 }
 
-.zs-progress__value {
+[data-slot="progress-value"] {
   color: var(--zs-label);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
 /* ─── Track — the rail ─────────────────────────────────────────────── */
-.zs-progress__track {
+[data-slot="progress-track"] {
   position: relative;
   inline-size: 100%;
   block-size: var(--zs-progress-track-block);
@@ -92,7 +92,7 @@
  *
  * Both modes share the surface color (accent → system-green on
  * complete). */
-.zs-progress__indicator {
+[data-slot="progress-indicator"] {
   block-size: 100%;
   background: var(--zs-progress-color);
   border-radius: inherit;
@@ -101,7 +101,7 @@
 
 /* Indeterminate — Base UI doesn't paint width inline; size the shimmer
    bar to 33% of the track and sweep it horizontally. */
-.zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+[data-slot="progress"][data-status="indeterminate"] [data-slot="progress-indicator"] {
   inline-size: 33%;
   animation: zs-progress-shimmer 1.4s var(--zs-motion-ease) infinite;
 }
@@ -122,7 +122,7 @@
    prior `[dir="rtl"]` attribute selector only matched when the
    attribute lived literally on a `.zs-progress` ancestor element that
    happened to also descend through the selector. */
-.zs-progress[data-status="indeterminate"]:dir(rtl) .zs-progress__indicator {
+[data-slot="progress"][data-status="indeterminate"]:dir(rtl) [data-slot="progress-indicator"] {
   animation-name: zs-progress-shimmer-rtl;
 }
 @keyframes zs-progress-shimmer-rtl {
@@ -138,15 +138,15 @@
      upload). Track dims; indicator goes to label-quaternary. The
      indeterminate animation stops so the row reads "paused" rather than
      "still loading". */
-.zs-progress[data-disabled] .zs-progress__track {
+[data-slot="progress"][data-disabled] [data-slot="progress-track"] {
   background: var(--zs-fill-quaternary);
 }
-.zs-progress[data-disabled] .zs-progress__indicator {
+[data-slot="progress"][data-disabled] [data-slot="progress-indicator"] {
   background: var(--zs-label-quaternary);
   animation: none;
 }
-.zs-progress[data-disabled] .zs-progress__label,
-.zs-progress[data-disabled] .zs-progress__value {
+[data-slot="progress"][data-disabled] [data-slot="progress-label"],
+[data-slot="progress"][data-disabled] [data-slot="progress-value"] {
   color: var(--zs-label-tertiary);
 }
 
@@ -156,10 +156,10 @@
  * Replace the shimmer with a static dim accent surface so the user
  * still gets a "this is in progress" cue without the motion. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-progress__indicator {
+  [data-slot="progress-indicator"] {
     transition: none;
   }
-  .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+  [data-slot="progress"][data-status="indeterminate"] [data-slot="progress-indicator"] {
     animation: none;
     /* Static fill at 100% so the bar looks "active but not animating".
        The dimmer color-mix below tells the eye "this is a placeholder,
@@ -177,15 +177,15 @@
      `prefers-reduced-motion: reduce`. Re-emit at the same (0,2,1)
      specificity so the cascade resolves on source order in favour of
      the disabled paint. */
-  .zs-progress[data-disabled] .zs-progress__track {
+  [data-slot="progress"][data-disabled] [data-slot="progress-track"] {
     background: var(--zs-fill-quaternary);
   }
-  .zs-progress[data-disabled] .zs-progress__indicator {
+  [data-slot="progress"][data-disabled] [data-slot="progress-indicator"] {
     background: var(--zs-label-quaternary);
     animation: none;
   }
-  .zs-progress[data-disabled] .zs-progress__label,
-  .zs-progress[data-disabled] .zs-progress__value {
+  [data-slot="progress"][data-disabled] [data-slot="progress-label"],
+  [data-slot="progress"][data-disabled] [data-slot="progress-value"] {
     color: var(--zs-label-tertiary);
   }
 }
@@ -195,19 +195,19 @@
  * Slice 5/6 lesson: mirror every state selector at EQUAL specificity so
  * the system palette wins. */
 @media (forced-colors: active) {
-  .zs-progress__track {
+  [data-slot="progress-track"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  .zs-progress__indicator {
+  [data-slot="progress-indicator"] {
     background: Highlight;
     forced-color-adjust: none;
   }
   /* Completion mirror — under forced-colors there's no green slot, so we
      keep Highlight (Mark would read as warning, not "done"). The visual
      cue under forced-colors is the bar at 100% width — that's enough. */
-  .zs-progress[data-status="complete"] .zs-progress__indicator {
+  [data-slot="progress"][data-status="complete"] [data-slot="progress-indicator"] {
     background: Highlight;
   }
   /* Suppress the indeterminate shimmer under forced-colors so the
@@ -219,25 +219,25 @@
      (Source order would alone resolve this if the reduced-motion rule
      didn't set `background` at the same specificity; making the
      forced-colors rule explicit is the durable fix.) */
-  .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+  [data-slot="progress"][data-status="indeterminate"] [data-slot="progress-indicator"] {
     animation: none;
     inline-size: 100%;
     background: Highlight;
   }
-  .zs-progress__label,
-  .zs-progress__value {
+  [data-slot="progress-label"],
+  [data-slot="progress-value"] {
     color: CanvasText;
   }
-  .zs-progress[data-disabled] .zs-progress__track {
+  [data-slot="progress"][data-disabled] [data-slot="progress-track"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  .zs-progress[data-disabled] .zs-progress__indicator {
+  [data-slot="progress"][data-disabled] [data-slot="progress-indicator"] {
     background: GrayText;
     animation: none;
   }
-  .zs-progress[data-disabled] .zs-progress__label,
-  .zs-progress[data-disabled] .zs-progress__value {
+  [data-slot="progress"][data-disabled] [data-slot="progress-label"],
+  [data-slot="progress"][data-disabled] [data-slot="progress-value"] {
     color: GrayText;
   }
 }

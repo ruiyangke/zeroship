@@ -65,7 +65,7 @@
  * --zs-control-h-* tokens so a Toggle next to either reads coherent.
  * Inline padding matches the Button equivalents so icon-only toggles
  * end up square (h == padded-w with a 1em glyph). */
-.zs-toggle {
+[data-slot="toggle"] {
   --zs-toggle-h-sm: var(--zs-control-h-sm);          /* 2rem */
   --zs-toggle-h-md: var(--zs-control-h-md);          /* 2.5rem (default) */
   --zs-toggle-h-lg: var(--zs-control-h-lg);          /* 3rem */
@@ -116,7 +116,7 @@
 }
 
 /* ─── the standalone toggle ─────────────────────────────────────────── */
-.zs-toggle {
+[data-slot="toggle"] {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -145,7 +145,7 @@
 /* Icon sizing — force consumer-supplied SVG to a 1em square so glyphs
  * stay coherent across sizes. Brief contingency: SVGs with intrinsic
  * width/height attributes otherwise pop out of scale at sm vs lg. */
-.zs-toggle > svg {
+[data-slot="toggle"] > svg {
   inline-size: 1em;
   block-size: 1em;
   flex: 0 0 auto;
@@ -170,14 +170,14 @@
  * Browser support: `:has()` is Chrome 105+ / Safari 15.4+ / Firefox 121+
  * — all modern. Older browsers fall back to the text-button padding
  * (acceptable). */
-.zs-toggle[aria-label]:has(> svg:only-child) {
+[data-slot="toggle"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zs-toggle-h-md);
   padding-inline: var(--zs-space-0);
 }
-.zs-toggle--sm[aria-label]:has(> svg:only-child) {
+[data-slot="toggle"][data-size="sm"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zs-toggle-h-sm);
 }
-.zs-toggle--lg[aria-label]:has(> svg:only-child) {
+[data-slot="toggle"][data-size="lg"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zs-toggle-h-lg);
 }
 
@@ -186,12 +186,12 @@
  * tuned for text-only segments; once an icon joins the label the
  * 8-unit gap reads mechanically separated. Scope via `:has(> svg)` so
  * text-only segments keep the roomier rhythm. */
-.zs-toggle:has(> svg) {
+[data-slot="toggle"]:has(> svg) {
   gap: var(--zs-space-1);
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
-.zs-toggle--sm {
+[data-slot="toggle"][data-size="sm"] {
   block-size: var(--zs-toggle-h-sm);
   padding-inline: var(--zs-toggle-px-sm);
   border-radius: var(--zs-toggle-radius-sm);
@@ -199,7 +199,7 @@
   line-height: 1;
   gap: var(--zs-toggle-gap-sm);
 }
-.zs-toggle--lg {
+[data-slot="toggle"][data-size="lg"] {
   block-size: var(--zs-toggle-h-lg);
   padding-inline: var(--zs-toggle-px-lg);
   border-radius: var(--zs-toggle-radius-lg);
@@ -212,16 +212,16 @@
  *
  * Matches Button's `--gray` rest surface (8% label-tinted mix). Hover
  * deepens to 12%, active to 16%. */
-.zs-toggle--default {
+[data-slot="toggle"][data-variant="default"] {
   background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
   color: var(--zs-label);
 }
 @media (hover: hover) {
-  .zs-toggle--default:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
   }
 }
-.zs-toggle--default:not([data-disabled]):not([data-pressed]):active {
+[data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zs-label) 16%, transparent);
 }
 
@@ -230,16 +230,16 @@
  * No surface at rest. Hover paints the same 8% wash `default` rests on
  * — i.e. a plain Toggle "fills in" to default on hover, then to accent
  * on press. */
-.zs-toggle--plain {
+[data-slot="toggle"][data-variant="plain"] {
   background-color: transparent;
   color: var(--zs-label);
 }
 @media (hover: hover) {
-  .zs-toggle--plain:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
   }
 }
-.zs-toggle--plain:not([data-disabled]):not([data-pressed]):active {
+[data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
 }
 
@@ -257,16 +257,16 @@
  * Hover / active deepen the surface in step with Button's hover/active
  * mix (22% / 30%); the pressed state inherits the standalone pressed
  * pill above (solid `--zs-accent` + `--zs-accent-ink`). */
-.zs-toggle--tinted {
+[data-slot="toggle"][data-variant="tinted"] {
   background-color: color-mix(in oklch, var(--zs-accent) 18%, transparent);
   color: var(--zs-accent-active);
 }
 @media (hover: hover) {
-  .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
   }
 }
-.zs-toggle--tinted:not([data-disabled]):not([data-pressed]):active {
+[data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
 }
 
@@ -291,37 +291,37 @@
  * `forced-colors` block below mirrors per-variant pressed → `Highlight`/
  * `HighlightText`; tinted retains the inset edge so the variant cue
  * survives high-contrast emulation. */
-.zs-toggle[data-pressed] {
+[data-slot="toggle"][data-pressed] {
   background-color: var(--zs-toggle-pressed-bg);
   color: var(--zs-toggle-pressed-ink);
 }
-.zs-toggle--plain[data-pressed] {
+[data-slot="toggle"][data-variant="plain"][data-pressed] {
   background-color: var(--zs-toggle-plain-pressed-bg);
   color: var(--zs-toggle-plain-pressed-ink);
 }
-.zs-toggle--tinted[data-pressed] {
+[data-slot="toggle"][data-variant="tinted"][data-pressed] {
   background-color: var(--zs-toggle-tinted-pressed-bg);
   color: var(--zs-accent-ink);
   box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-toggle-tinted-pressed-edge);
 }
 @media (hover: hover) {
-  .zs-toggle[data-pressed]:not([data-disabled]):hover {
+  [data-slot="toggle"][data-pressed]:not([data-disabled]):hover {
     background-color: var(--zs-accent-hover);
   }
-  .zs-toggle--plain[data-pressed]:not([data-disabled]):hover {
+  [data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):hover {
     background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
   }
-  .zs-toggle--tinted[data-pressed]:not([data-disabled]):hover {
+  [data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):hover {
     background-color: var(--zs-accent-active);
   }
 }
-.zs-toggle[data-pressed]:not([data-disabled]):active {
+[data-slot="toggle"][data-pressed]:not([data-disabled]):active {
   background-color: var(--zs-accent-active);
 }
-.zs-toggle--plain[data-pressed]:not([data-disabled]):active {
+[data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):active {
   background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
 }
-.zs-toggle--tinted[data-pressed]:not([data-disabled]):active {
+[data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):active {
   background-color: var(--zs-accent-active);
 }
 
@@ -330,18 +330,18 @@
  * Brief principle 6: the ring must escape the group's inset rim and
  * surrounding overflow. `outline` does that for free; `box-shadow`
  * would clip. */
-.zs-toggle:focus-visible {
+[data-slot="toggle"]:focus-visible {
   outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
-.zs-toggle[data-disabled] {
+[data-slot="toggle"][data-disabled] {
   cursor: not-allowed;
   color: var(--zs-label-tertiary);
   background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
 }
-.zs-toggle[data-disabled][data-pressed] {
+[data-slot="toggle"][data-disabled][data-pressed] {
   /* Polish item 4: desaturated lavender fill + hairline inset edge.
    *
    * Pre-polish, the 30% accent mix read close enough to an enabled tinted
@@ -358,7 +358,7 @@
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
-.zs-toggle-group {
+[data-slot="toggle-group"] {
   display: inline-grid;
   grid-auto-flow: column;
   /* Equal-width default — the children fill the grid track. */
@@ -374,16 +374,16 @@
   min-inline-size: 0;
 }
 
-.zs-toggle-group--vertical {
+[data-slot="toggle-group"][data-orientation="vertical"] {
   grid-auto-flow: row;
   grid-auto-rows: minmax(0, auto);
   grid-auto-columns: auto;
 }
 
-.zs-toggle-group--sm {
+[data-slot="toggle-group"][data-size="sm"] {
   border-radius: var(--zs-toggle-radius-sm);
 }
-.zs-toggle-group--lg {
+[data-slot="toggle-group"][data-size="lg"] {
   border-radius: var(--zs-toggle-radius-lg);
 }
 
@@ -391,19 +391,19 @@
  * toolbars where icon-only segments mix with text-only ones (brief
  * principle 3). The columns become `auto` so each segment sizes to
  * its own content. */
-.zs-toggle-group[data-equal-width="false"]:not(.zs-toggle-group--vertical) {
+[data-slot="toggle-group"][data-orientation="vertical"][data-equal-width="false"]:not() {
   grid-auto-columns: auto;
 }
 
 /* Vertical groups force each segment to fit its content (brief
  * contingency: avoid unnatural stretching). */
-.zs-toggle-group--vertical .zs-toggle {
+[data-slot="toggle-group"][data-orientation="vertical"] [data-slot="toggle"] {
   inline-size: max-content;
   justify-self: stretch;
 }
 /* When equalWidth is true on a vertical group, segments share a column
  * width via 100% so the rail reads as one rail. */
-.zs-toggle-group--vertical[data-equal-width="true"] .zs-toggle {
+[data-slot="toggle-group"][data-orientation="vertical"][data-equal-width="true"] [data-slot="toggle"] {
   inline-size: 100%;
 }
 
@@ -418,7 +418,7 @@
  * rule (same specificity, later wins) and leave pressed segments
  * painted transparent over the rail — exactly the axe color-contrast
  * failure caught during slice-5 review. */
-.zs-toggle-group .zs-toggle:not([data-pressed]) {
+[data-slot="toggle-group"] [data-slot="toggle"]:not([data-pressed]) {
   background-color: transparent;
 }
 
@@ -431,13 +431,13 @@
  *
  * The radius is slightly tighter than the standalone so the pressed pill
  * nests inside the group's rim with a small breathing margin. */
-.zs-toggle-group .zs-toggle[data-size="sm"] {
+[data-slot="toggle-group"] [data-slot="toggle"][data-size="sm"] {
   border-radius: calc(var(--zs-toggle-radius-sm) - 0.0625rem);
 }
-.zs-toggle-group .zs-toggle[data-size="md"] {
+[data-slot="toggle-group"] [data-slot="toggle"][data-size="md"] {
   border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
 }
-.zs-toggle-group .zs-toggle[data-size="lg"] {
+[data-slot="toggle-group"] [data-slot="toggle"][data-size="lg"] {
   /* Polish item 5: keep the full lg radius — subtracting 0.125rem made the
    * pressed pill read tab-like (sharp shoulders at the larger size). The
    * group's `--zs-space-1` padding already insets the pill from the rim;
@@ -448,27 +448,27 @@
 }
 
 @media (hover: hover) {
-  .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zs-label) 6%, transparent);
   }
 }
-.zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):active {
+[data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zs-label) 10%, transparent);
 }
 
 /* Plain group: drop the track surface; segments become a row of
  * independent (but still focus-grouped) buttons. */
-.zs-toggle-group--plain {
+[data-slot="toggle-group"][data-variant="plain"] {
   background-color: transparent;
   box-shadow: none;
   padding: 0;
   gap: var(--zs-space-1);
 }
-.zs-toggle-group--plain .zs-toggle:not([data-pressed]) {
+[data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-pressed]) {
   background-color: transparent;
 }
 @media (hover: hover) {
-  .zs-toggle-group--plain .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
   }
 }
@@ -481,10 +481,10 @@
  * resolved variant is also `tinted` — without that, a tinted group with
  * an explicit `<Toggle variant="plain">` child would still get the
  * accent-tinted text from the group, breaking the prop-wins cascade. */
-.zs-toggle-group--tinted {
+[data-slot="toggle-group"][data-variant="tinted"] {
   background-color: color-mix(in oklch, var(--zs-accent) 10%, transparent);
 }
-.zs-toggle-group--tinted .zs-toggle[data-variant="tinted"]:not([data-pressed]) {
+[data-slot="toggle-group"][data-variant="tinted"] [data-slot="toggle"][data-variant="tinted"]:not([data-pressed]) {
   color: var(--zs-accent);
 }
 
@@ -493,20 +493,20 @@
  * pill — same specificity, but the unpressed-only group rule above
  * lets it win). z-index lifts the pill over the group's track so the
  * focus outline isn't clipped. */
-.zs-toggle-group .zs-toggle[data-pressed] {
+[data-slot="toggle-group"] [data-slot="toggle"][data-pressed] {
   z-index: 1;
 }
 
 /* Group disabled cascade — Base UI propagates disabled to each child,
  * but the group root also paints a faded surface so the rail itself
  * reads inactive. */
-.zs-toggle-group[data-disabled] {
+[data-slot="toggle-group"][data-disabled] {
   background-color: color-mix(in oklch, var(--zs-fill-secondary) 60%, transparent);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-toggle {
+  [data-slot="toggle"] {
     transition: none;
   }
 }
@@ -518,7 +518,7 @@
  * Highlight outline so the ring stays visible against either Canvas
  * or Highlight backgrounds. */
 @media (forced-colors: active) {
-  .zs-toggle {
+  [data-slot="toggle"] {
     background-color: Canvas;
     color: CanvasText;
     forced-color-adjust: none;
@@ -527,7 +527,7 @@
      * forced-colors. */
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
-  .zs-toggle[data-pressed] {
+  [data-slot="toggle"][data-pressed] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
@@ -538,16 +538,16 @@
    * inset-edge variant cue is replaced with the same Highlight ring used
    * by the base rule, so we re-stamp it for specificity parity with the
    * oklch tinted-pressed rule. */
-  .zs-toggle--plain[data-pressed],
-  .zs-toggle--tinted[data-pressed] {
+  [data-slot="toggle"][data-variant="plain"][data-pressed],
+  [data-slot="toggle"][data-variant="tinted"][data-pressed] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  .zs-toggle:focus-visible {
+  [data-slot="toggle"]:focus-visible {
     outline-color: Highlight;
   }
-  .zs-toggle[data-disabled] {
+  [data-slot="toggle"][data-disabled] {
     /* Item-C fix: re-stamp `background-color: Canvas` inside the
      * forced-colors disabled mirror. The base oklch rule
      * `.zs-toggle[data-disabled]` paints a token-derived
@@ -561,18 +561,18 @@
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  .zs-toggle[data-disabled][data-pressed] {
+  [data-slot="toggle"][data-disabled][data-pressed] {
     background-color: Canvas;
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  .zs-toggle-group {
+  [data-slot="toggle-group"] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   /* Inside a group, suppress the per-segment border so the group rim
    * carries the only visible edge. */
-  .zs-toggle-group .zs-toggle:not([data-pressed]) {
+  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-pressed]) {
     box-shadow: none;
   }
 
@@ -589,38 +589,38 @@
    * Verify with Playwright `emulateMedia({ forcedColors: 'active' })` —
    * computed background-color must equal `Canvas` or `Highlight`. */
   @media (hover: hover) {
-    .zs-toggle--default:not([data-disabled]):not([data-pressed]):hover,
-    .zs-toggle--plain:not([data-disabled]):not([data-pressed]):hover,
-    .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):hover {
+    [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
       background-color: Canvas;
       color: CanvasText;
     }
-    .zs-toggle[data-pressed]:not([data-disabled]):hover {
+    [data-slot="toggle"][data-pressed]:not([data-disabled]):hover {
       background-color: Highlight;
       color: HighlightText;
     }
     /* Group + per-variant hover surfaces — same equal-specificity dance.
      * Without these the group descendant rules at `:339`/`:359` would
      * outrank the forced-colors reset on `.zs-toggle`. */
-    .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):hover,
-    .zs-toggle-group--plain .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+    [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
       background-color: Canvas;
       color: CanvasText;
     }
   }
 
   /* Active (mouse-down) states across every variant + the group track. */
-  .zs-toggle--default:not([data-disabled]):not([data-pressed]):active,
-  .zs-toggle--plain:not([data-disabled]):not([data-pressed]):active,
-  .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):active {
+  [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active,
+  [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active,
+  [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
     background-color: Canvas;
     color: CanvasText;
   }
-  .zs-toggle[data-pressed]:not([data-disabled]):active {
+  [data-slot="toggle"][data-pressed]:not([data-disabled]):active {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):active {
+  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):active {
     background-color: Canvas;
     color: CanvasText;
   }
@@ -629,14 +629,14 @@
    * rule paints a faded oklch fill. Re-emit to Canvas under forced-colors
    * so the rail reads system-neutral, and stamp GrayText on every child
    * so the disabled cascade is visible. */
-  .zs-toggle-group[data-disabled] {
+  [data-slot="toggle-group"][data-disabled] {
     background-color: Canvas;
   }
-  .zs-toggle-group[data-disabled] .zs-toggle {
+  [data-slot="toggle-group"][data-disabled] [data-slot="toggle"] {
     background-color: Canvas;
     color: GrayText;
   }
-  .zs-toggle-group[data-disabled] .zs-toggle[data-pressed] {
+  [data-slot="toggle-group"][data-disabled] [data-slot="toggle"][data-pressed] {
     background-color: Canvas;
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;

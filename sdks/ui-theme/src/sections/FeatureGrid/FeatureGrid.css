@@ -35,7 +35,7 @@
  * carries no motion), so there is nothing here to disable.
  */
 
-.zs-feature-grid {
+[data-slot="feature-grid"] {
   /* Local single-knob custom properties (the house idiom, cf.
      --zs-pricing-lead-measure / --zs-hero-measure): named, tunable handles
      for the band's calibrated literals so the intent is legible and a
@@ -62,7 +62,7 @@
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
-.zs-feature-grid__header {
+[data-slot="feature-grid-header"] {
   /* Cap the header to a readable measure above the grid. Centered when the
      band is centered (the composed Stack `align="center"` already centers
      the inline children); start-aligned otherwise. */
@@ -70,12 +70,12 @@
   margin-block-end: var(--zs-space-9);
 }
 
-.zs-feature-grid[data-align="center"] .zs-feature-grid__header {
+[data-slot="feature-grid"][data-align="center"] [data-slot="feature-grid-header"] {
   margin-inline: auto;
   text-align: center;
 }
 
-.zs-feature-grid[data-align="start"] .zs-feature-grid__header {
+[data-slot="feature-grid"][data-align="start"] [data-slot="feature-grid-header"] {
   text-align: start;
 }
 
@@ -83,7 +83,7 @@
    footnote, 600, 0.04em, uppercase) defined once in _section-tone.css; this
    BEM hook remains only as a stable consumer target. */
 
-.zs-feature-grid__title {
+[data-slot="feature-grid-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2> so the band header
      carries real weight. */
@@ -95,7 +95,7 @@
   text-wrap: balance;
 }
 
-.zs-feature-grid__description {
+[data-slot="feature-grid-description"] {
   margin-block: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
@@ -112,7 +112,7 @@
    no local collapse override. */
 
 /* ─── Item — icon badge → title → description ────────────────────────────── */
-.zs-feature-grid__item {
+[data-slot="feature-grid-item"] {
   display: flex;
   flex-direction: column;
   /* The title→description pair sits on a tight gap; the icon badge gets a
@@ -123,13 +123,13 @@
 }
 
 /* Centered band: center the icon badge + text within each cell. */
-.zs-feature-grid[data-align="center"] .zs-feature-grid__item {
+[data-slot="feature-grid"][data-align="center"] [data-slot="feature-grid-item"] {
   align-items: center;
   text-align: center;
 }
 
 /* Start band: hug the inline-start edge. */
-.zs-feature-grid[data-align="start"] .zs-feature-grid__item {
+[data-slot="feature-grid"][data-align="start"] [data-slot="feature-grid-item"] {
   align-items: flex-start;
   text-align: start;
 }
@@ -139,7 +139,7 @@
    Badge's soft variant) so it tracks the accent token and stays token-pure.
    The Icon inside paints with currentColor → we set the badge ink to the
    accent so the glyph reads as an accent-tinted mark. */
-.zs-feature-grid__item-icon {
+[data-slot="feature-grid-item-icon"] {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -164,12 +164,12 @@
    outranks it regardless of stylesheet concat order, so the badge owns the
    glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
    to the badge's glyph token. */
-.zs-feature-grid__item-icon .zs-icon {
+[data-slot="feature-grid-item-icon"] [data-slot="icon"] {
   inline-size: var(--zs-feature-grid-icon-glyph);
   block-size: var(--zs-feature-grid-icon-glyph);
 }
 
-.zs-feature-grid__item-title {
+[data-slot="feature-grid-item-title"] {
   margin-block: 0;
   font-size: var(--zs-text-headline-size);
   line-height: var(--zs-text-headline-line);
@@ -179,7 +179,7 @@
   text-wrap: balance;
 }
 
-.zs-feature-grid__item-description {
+[data-slot="feature-grid-item-description"] {
   margin-block: 0;
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
@@ -195,18 +195,18 @@
  * drops out). The composed Icon paints with currentColor, so it follows the
  * badge ink automatically — no extra rule needed. */
 @media (forced-colors: active) {
-  .zs-feature-grid,
-  .zs-feature-grid__eyebrow,
-  .zs-feature-grid__title,
-  .zs-feature-grid__description,
-  .zs-feature-grid__item-title,
-  .zs-feature-grid__item-description {
+  [data-slot="feature-grid"],
+  [data-slot="feature-grid-eyebrow"],
+  [data-slot="feature-grid-title"],
+  [data-slot="feature-grid-description"],
+  [data-slot="feature-grid-item-title"],
+  [data-slot="feature-grid-item-description"] {
     color: CanvasText;
   }
   /* The badge's tinted surface drops out; give it a system border so it
      stays a visible mark, and resolve its ink to CanvasText so the glyph
      stays legible. */
-  .zs-feature-grid__item-icon {
+  [data-slot="feature-grid-item-icon"] {
     border: var(--zs-selection-hairline) solid CanvasText;
     color: CanvasText;
   }

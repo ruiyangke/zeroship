@@ -20,7 +20,7 @@
  * reduced-motion handling).
  */
 
-.zs-pagination {
+[data-slot="pagination"] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -46,12 +46,12 @@
  * collapses to chevron-only so the page-number track keeps room; the
  * aria-label on the Button carries the meaning regardless. */
 
-.zs-pagination__edge-label {
+[data-slot="pagination-edge-label"] {
   display: inline;
 }
 
 @container (max-width: 30rem) {
-  .zs-pagination__edge-label {
+  [data-slot="pagination-edge-label"] {
     /* Hidden, not removed: the Button's aria-label still announces
        "Go to previous/next page", so AT is unaffected. */
     display: none;
@@ -60,7 +60,7 @@
 
 /* ─── summary ──────────────────────────────────────────────────────────── */
 
-.zs-pagination__summary {
+[data-slot="pagination-summary"] {
   margin: 0;
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-footnote-size);
@@ -74,7 +74,7 @@
  * Inline label + <Select>. The label rides the footnote rhythm so it
  * reads as a quiet companion to the control, not a form field title. */
 
-.zs-pagination__page-size {
+[data-slot="pagination-page-size"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-2);
@@ -83,7 +83,7 @@
   margin-inline-start: auto;
 }
 
-.zs-pagination__page-size-label {
+[data-slot="pagination-page-size-label"] {
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
@@ -96,7 +96,7 @@
  * When it is absent the page row itself takes the auto margin to drift to
  * the end, away from the start-anchored summary. */
 
-.zs-pagination__pages {
+[data-slot="pagination-pages"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -115,7 +115,7 @@
    auto-margins would instead SPLIT the free space and scatter the two
    controls, so drop the page row's auto-margin in that case — the page
    row then trails the page-size with only the flex gap between them. */
-.zs-pagination__page-size + .zs-pagination__pages {
+[data-slot="pagination-page-size"] + [data-slot="pagination-pages"] {
   margin-inline-start: 0;
 }
 
@@ -125,7 +125,7 @@
  * the same footprint. The edge (Prev/Next) buttons keep their label and
  * so size to content. */
 
-.zs-pagination__button.zs-pagination__button--page {
+[data-slot="pagination-page"] {
   /* Match the small/medium control heights for a square numeric chip. */
   min-inline-size: var(--zs-control-h-md);
   padding-inline: var(--zs-space-2);
@@ -134,11 +134,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-.zs-pagination[data-size="sm"] .zs-pagination__button--page {
+[data-slot="pagination"][data-size="sm"] [data-slot="pagination-page"] {
   min-inline-size: var(--zs-control-h-sm);
 }
 
-.zs-pagination__chevron {
+[data-slot="pagination-chevron"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -152,7 +152,7 @@
  * A non-actionable elided range. Sized to the page-button track so it sits
  * on the same baseline, centered, with no interactive affordance. */
 
-.zs-pagination__ellipsis {
+[data-slot="pagination-ellipsis"] {
   display: inline-flex;
   align-items: flex-end;
   justify-content: center;
@@ -165,7 +165,7 @@
   user-select: none;
 }
 
-.zs-pagination[data-size="sm"] .zs-pagination__ellipsis {
+[data-slot="pagination"][data-size="sm"] [data-slot="pagination-ellipsis"] {
   block-size: var(--zs-control-h-sm);
   font-size: var(--zs-text-subheadline-size);
 }
@@ -175,11 +175,11 @@
  * decorative text legible under a forced palette. */
 
 @media (forced-colors: active) {
-  .zs-pagination__summary,
-  .zs-pagination__page-size-label {
+  [data-slot="pagination-summary"],
+  [data-slot="pagination-page-size-label"] {
     color: CanvasText;
   }
-  .zs-pagination__ellipsis {
+  [data-slot="pagination-ellipsis"] {
     color: GrayText;
     forced-color-adjust: none;
   }

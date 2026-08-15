@@ -20,7 +20,7 @@
  * Motion: none.
  */
 
-.zs-center {
+[data-slot="center"] {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -34,13 +34,13 @@
  * lets it shrink past its min-content size, `max-inline-size: 100%` caps
  * it at the box so it can't spill out either side. Logical properties so
  * RTL + vertical writing modes stay correct. */
-.zs-center > * {
+[data-slot="center"] > * {
   min-inline-size: 0;
   max-inline-size: 100%;
 }
 
 /* Horizontal-only: keep justify-content centered (main axis = inline in
  * the default row direction) but stop centering on the block axis. */
-.zs-center--inline {
+[data-slot="center"][data-inline] {
   align-items: flex-start;
 }

@@ -26,7 +26,7 @@
  * Motion: none.
  */
 
-.zs-grid {
+[data-slot="grid"] {
   display: grid;
   gap: var(--grid-gap, var(--zs-space-0));
   align-items: var(--grid-align, stretch);
@@ -38,7 +38,7 @@
  * track wider than its share and blows the whole grid out horizontally —
  * on both the intrinsic and explicit paths. The logical form keeps RTL +
  * vertical writing modes correct. */
-.zs-grid > * {
+[data-slot="grid"] > * {
   min-inline-size: 0;
 }
 
@@ -48,7 +48,7 @@
  * --grid-min-col: when the container is narrower than --grid-min-col the
  * `100%` arm wins so the single column shrinks to fit instead of forcing
  * horizontal overflow. */
-.zs-grid--intrinsic {
+[data-slot="grid"][data-intrinsic] {
   grid-template-columns: repeat(
     auto-fit,
     minmax(min(var(--grid-min-col), 100%), 1fr)
@@ -58,7 +58,7 @@
 /* Explicit path — fixed equal-fraction columns. --grid-cols is the base
  * (mobile-first) count; the responsive object switches it at breakpoints
  * below. */
-.zs-grid--explicit {
+[data-slot="grid"][data-explicit] {
   grid-template-columns: repeat(var(--grid-cols, 1), minmax(0, 1fr));
 }
 
@@ -74,7 +74,7 @@
  * provided count forward. Mobile-first: widest matching query wins by
  * source order, so lg overrides md overrides sm overrides the base. */
 @media (min-width: 40rem) { /* --zs-bp-sm */
-  .zs-grid--explicit[data-responsive] {
+  [data-slot="grid"][data-explicit][data-responsive] {
     grid-template-columns: repeat(
       var(--grid-cols-sm, var(--grid-cols)),
       minmax(0, 1fr)
@@ -83,7 +83,7 @@
 }
 
 @media (min-width: 48rem) { /* --zs-bp-md */
-  .zs-grid--explicit[data-responsive] {
+  [data-slot="grid"][data-explicit][data-responsive] {
     grid-template-columns: repeat(
       var(--grid-cols-md, var(--grid-cols-sm, var(--grid-cols))),
       minmax(0, 1fr)
@@ -92,7 +92,7 @@
 }
 
 @media (min-width: 64rem) { /* --zs-bp-lg */
-  .zs-grid--explicit[data-responsive] {
+  [data-slot="grid"][data-explicit][data-responsive] {
     grid-template-columns: repeat(
       var(
         --grid-cols-lg,

@@ -29,7 +29,7 @@
  *     ink clears 4.5:1 on the light tinted base.
  */
 
-.zs-badge {
+[data-slot="badge"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -55,7 +55,7 @@
 
 /* `asChild` has no inner label span, so apply the clamp to the routed root.
    This primarily covers plain-text anchors used as linked badges. */
-.zs-badge[data-as-child] {
+[data-slot="badge"][data-as-child] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -64,7 +64,7 @@
    `text-overflow: ellipsis` effective (it is inert on the inline-flex
    root). Leading/trailing icons stay OUTSIDE this span so only the text
    clamps. */
-.zs-badge__label {
+[data-slot="badge-label"] {
   display: block;
   min-inline-size: 0;
   overflow: hidden;
@@ -72,14 +72,14 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-.zs-badge--sm {
+[data-slot="badge"][data-size="sm"] {
   padding-block: var(--zs-space-half);
   padding-inline: var(--zs-space-2);
   font-size: var(--zs-text-caption-1-size);
   line-height: var(--zs-text-caption-1-line);
 }
 
-.zs-badge--md {
+[data-slot="badge"][data-size="md"] {
   padding-block: var(--zs-space-1);
   padding-inline: var(--zs-space-3);
   font-size: var(--zs-text-footnote-size);
@@ -93,7 +93,7 @@
  */
 
 /* neutral — label/fill greys. */
-.zs-badge--neutral {
+[data-slot="badge"][data-intent="neutral"] {
   --zs-badge-solid-bg: var(--zs-label-secondary);
   --zs-badge-solid-ink: var(--zs-accent-ink);
   --zs-badge-soft-bg: color-mix(in oklch, var(--zs-label) 10%, var(--zs-surface));
@@ -102,7 +102,7 @@
 }
 
 /* info — accent palette. */
-.zs-badge--info {
+[data-slot="badge"][data-intent="info"] {
   --zs-badge-solid-bg: var(--zs-accent);
   --zs-badge-solid-ink: var(--zs-accent-ink);
   --zs-badge-soft-bg: color-mix(in oklch, var(--zs-accent) 14%, var(--zs-surface));
@@ -111,7 +111,7 @@
 }
 
 /* success — system-green. Solid fill deepened so near-white ink clears AA. */
-.zs-badge--success {
+[data-slot="badge"][data-intent="success"] {
   /* Deepening toward --zs-label uses rectangular oklab so the hue stays
      green (polar oklch would rotate it toward teal). */
   --zs-badge-solid-bg: color-mix(in oklab, var(--zs-system-green) 78%, var(--zs-label));
@@ -122,7 +122,7 @@
 }
 
 /* warning — system-orange. Lightest intent; solid fill deepened most. */
-.zs-badge--warning {
+[data-slot="badge"][data-intent="warning"] {
   /* Deepening toward --zs-label uses rectangular oklab so the hue stays
      orange (polar oklch would rotate it toward magenta/red). */
   --zs-badge-solid-bg: color-mix(in oklab, var(--zs-system-orange) 64%, var(--zs-label));
@@ -133,7 +133,7 @@
 }
 
 /* danger — system-red. */
-.zs-badge--danger {
+[data-slot="badge"][data-intent="danger"] {
   --zs-badge-solid-bg: var(--zs-system-red);
   --zs-badge-solid-ink: var(--zs-accent-ink);
   --zs-badge-soft-bg: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-surface));
@@ -144,17 +144,17 @@
 /* ─── variants ───────────────────────────────────────────────────────────
  * Each consumes the intent locals. Backgrounds are always opaque.
  */
-.zs-badge--solid {
+[data-slot="badge"][data-variant="solid"] {
   background: var(--zs-badge-solid-bg);
   color: var(--zs-badge-solid-ink);
 }
 
-.zs-badge--soft {
+[data-slot="badge"][data-variant="soft"] {
   background: var(--zs-badge-soft-bg);
   color: var(--zs-badge-soft-ink);
 }
 
-.zs-badge--outline {
+[data-slot="badge"][data-variant="outline"] {
   /* Opaque surface base so axe always has something to measure against;
      the intent shows through the border + ink, not via alpha. */
   background: var(--zs-surface);
@@ -170,17 +170,17 @@
  * the chip shape survives.
  */
 @media (forced-colors: active) {
-  .zs-badge {
+  [data-slot="badge"] {
     forced-color-adjust: none;
     border-color: CanvasText;
   }
-  .zs-badge--solid {
+  [data-slot="badge"][data-variant="solid"] {
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
   }
-  .zs-badge--soft,
-  .zs-badge--outline {
+  [data-slot="badge"][data-variant="soft"],
+  [data-slot="badge"][data-variant="outline"] {
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;

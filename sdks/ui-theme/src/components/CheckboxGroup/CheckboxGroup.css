@@ -41,7 +41,7 @@
  */
 
 /* ─── group container ───────────────────────────────────────────────── */
-.zs-checkbox-group {
+[data-slot="checkbox-group"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-2);
@@ -50,7 +50,7 @@
   color: var(--zs-label);
 }
 
-.zs-checkbox-group--horizontal {
+[data-slot="checkbox-group"][data-orientation="horizontal"] {
   flex-direction: row;
   flex-wrap: wrap;
   gap: var(--zs-space-4);

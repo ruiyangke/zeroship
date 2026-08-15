@@ -32,7 +32,7 @@
  */
 
 /* ─── Root — the layout grid ───────────────────────────────────────── */
-.zs-slider {
+[data-slot="slider"] {
   position: relative;
   display: grid;
   inline-size: 100%;
@@ -54,10 +54,10 @@
    tight. Four lg-control-heights gives the track room to read as a
    slider rather than a hyphen. Field cascade hands the Slider its full
    container width; the floor is the lower bound. */
-.zs-slider--horizontal {
+[data-slot="slider"][data-orientation="horizontal"] {
   min-inline-size: var(--zs-slider-inline-min, calc(var(--zs-control-h-lg) * 4));
 }
-.zs-field > .zs-slider--horizontal {
+[data-slot="field"] > [data-slot="slider"][data-orientation="horizontal"] {
   inline-size: 100%;
 }
 
@@ -66,7 +66,7 @@
    (Slider.tsx) — single-thumb takes the scalar value, range mode reads
    the first thumb. Without an inline override the badge centers above
    the control so the rest state stays readable. */
-.zs-slider__value {
+[data-slot="slider-value"] {
   position: absolute;
   inset-block-end: calc(100% + var(--zs-space-2));
   inset-inline-start: var(--zs-slider-value-position, 50%);
@@ -82,7 +82,7 @@
 
 /* Control fills the row, no grid-column span needed in the single-column
    layout. */
-.zs-slider__control {
+[data-slot="slider-control"] {
   grid-column: 1;
   grid-row: 2;
   position: relative;
@@ -96,12 +96,12 @@
   touch-action: none;
 }
 
-.zs-slider[data-disabled] .zs-slider__control {
+[data-slot="slider"][data-disabled] [data-slot="slider-control"] {
   cursor: not-allowed;
 }
 
 /* ─── Track — the rail ─────────────────────────────────────────────── */
-.zs-slider__track {
+[data-slot="slider-track"] {
   position: relative;
   inline-size: 100%;
   block-size: var(--zs-slider-track-block, 0.375rem);
@@ -113,18 +113,18 @@
 }
 
 /* Per-size track block-size — sm 0.25rem / md 0.375rem / lg 0.5rem. */
-.zs-slider--sm .zs-slider__track {
+[data-slot="slider"][data-size="sm"] [data-slot="slider-track"] {
   --zs-slider-track-block: 0.25rem;
 }
-.zs-slider--md .zs-slider__track {
+[data-slot="slider"][data-size="md"] [data-slot="slider-track"] {
   --zs-slider-track-block: 0.375rem;
 }
-.zs-slider--lg .zs-slider__track {
+[data-slot="slider"][data-size="lg"] [data-slot="slider-track"] {
   --zs-slider-track-block: 0.5rem;
 }
 
 /* Outline variant — transparent rail with an inset hairline. */
-.zs-slider--outline .zs-slider__track {
+[data-slot="slider"][data-variant="outline"] [data-slot="slider-track"] {
   background: transparent;
   box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
 }
@@ -135,7 +135,7 @@
  * handle orientation, so we only paint surface here (background +
  * radius). The rounded ends carry the track radius so the progress fill
  * meets the track edges cleanly. */
-.zs-slider__indicator {
+[data-slot="slider-indicator"] {
   background: var(--zs-accent);
   border-radius: inherit;
 }
@@ -143,7 +143,7 @@
 /* Outline variant indicator — accent at 45% mix so the rim stays the
    dominant edge and the fill reads as a quieter trail behind the
    thumb (Slice 7 visual-polish item 4). */
-.zs-slider--outline .zs-slider__indicator {
+[data-slot="slider"][data-variant="outline"] [data-slot="slider-indicator"] {
   background: color-mix(in oklch, var(--zs-accent) 45%, transparent);
 }
 
@@ -157,7 +157,7 @@
  * Base UI translates the thumb via `--position` (inline-style) so it
  * follows the value. We use translate(-50%) so the thumb centers on
  * that position rather than left-edge-aligning. */
-.zs-slider__thumb {
+[data-slot="slider-thumb"] {
   /* Base UI emits inline styles for position + translate; we only set
      dimensions / surface / cursor here. The thumb sits ON TOP of the
      indicator (z-index 1 lifts it over the indicator's surface paint
@@ -193,10 +193,10 @@
    `--zs-slider-hit` defaults to 1.75rem; coarse pointer overrides it
    to `--zs-hit-min` (2.75rem ≈ Apple HIG 44 device-units) below so
    a finger lands the thumb. */
-.zs-slider__thumb {
+[data-slot="slider-thumb"] {
   --zs-slider-hit: 1.75rem;
 }
-.zs-slider__thumb::after {
+[data-slot="slider-thumb"]::after {
   content: "";
   position: absolute;
   inset: 50%;
@@ -208,20 +208,20 @@
   background: transparent;
 }
 
-.zs-slider--sm .zs-slider__thumb {
+[data-slot="slider"][data-size="sm"] [data-slot="slider-thumb"] {
   --zs-slider-thumb-size: 0.875rem;
 }
-.zs-slider--md .zs-slider__thumb {
+[data-slot="slider"][data-size="md"] [data-slot="slider-thumb"] {
   --zs-slider-thumb-size: 1rem;
 }
-.zs-slider--lg .zs-slider__thumb {
+[data-slot="slider"][data-size="lg"] [data-slot="slider-thumb"] {
   --zs-slider-thumb-size: 1.25rem;
 }
 
 /* Outline variant — accent rim only, no inner accent halo.
    Slice 7 visual-polish item 4: rim drops to a single hairline so the
    outline read is genuinely thinner than the default-variant rim. */
-.zs-slider--outline .zs-slider__thumb {
+[data-slot="slider"][data-variant="outline"] [data-slot="slider-thumb"] {
   background: var(--zs-surface-raised);
   box-shadow:
     0 0 0 var(--zs-selection-hairline) var(--zs-accent),
@@ -229,14 +229,14 @@
 }
 
 @media (hover: hover) {
-  .zs-slider:not([data-disabled]) .zs-slider__thumb:hover {
+  [data-slot="slider"]:not([data-disabled]) [data-slot="slider-thumb"]:hover {
     /* Base UI sets a CSS `translate` for positioning, which is independent
        of `transform`. We scale via `transform` so the two compose
        additively without us needing to know the position offset. */
     transform: scale(1.1);
   }
 }
-.zs-slider__thumb[data-dragging] {
+[data-slot="slider-thumb"][data-dragging] {
   cursor: grabbing;
   transform: scale(1.15);
 }
@@ -244,7 +244,7 @@
 /* Focus ring on the input nested inside the Thumb. Base UI renders
    <input type="range"> inside .zs-slider__thumb; sighted focus is the
    ring on the knob itself. */
-.zs-slider__thumb:focus-within {
+[data-slot="slider-thumb"]:focus-within {
   box-shadow:
     0 0 0 0.1875rem var(--zs-accent),
     0 0 0 calc(0.1875rem + var(--zs-focus-ring-width)) var(--zs-input-focus-ring-color),
@@ -253,7 +253,7 @@
 
 /* The nested input absorbs focus events but is visually hidden — Base UI
    already does this via opacity:0 on the input. We pin it for safety. */
-.zs-slider__thumb input[type="range"] {
+[data-slot="slider-thumb"] input[type="range"] {
   position: absolute;
   inset: 0;
   opacity: 0;
@@ -270,17 +270,17 @@
  * tokens: indicator drops to `--zs-fill` (the same alpha the input
  * filled-bg lands on, a quiet plate) and the thumb's rim drops to the
  * weakest label rung (`--zs-label-quaternary`) at hairline weight. */
-.zs-slider[data-disabled] .zs-slider__indicator {
+[data-slot="slider"][data-disabled] [data-slot="slider-indicator"] {
   background: var(--zs-fill);
 }
-.zs-slider[data-disabled] .zs-slider__thumb {
+[data-slot="slider"][data-disabled] [data-slot="slider-thumb"] {
   background: var(--zs-surface-raised);
   cursor: not-allowed;
   box-shadow:
     0 0 0 var(--zs-selection-hairline) var(--zs-label-quaternary),
     0 0 0 0 transparent;
 }
-.zs-slider--outline[data-disabled] .zs-slider__thumb {
+[data-slot="slider"][data-variant="outline"][data-disabled] [data-slot="slider-thumb"] {
   background: var(--zs-surface-raised);
   box-shadow:
     0 0 0 var(--zs-selection-hairline) var(--zs-label-quaternary),
@@ -288,10 +288,10 @@
 }
 
 /* ─── Invalid state ────────────────────────────────────────────────── */
-.zs-slider[data-invalid] .zs-slider__indicator {
+[data-slot="slider"][data-invalid] [data-slot="slider-indicator"] {
   background: var(--zs-system-red);
 }
-.zs-slider[data-invalid] .zs-slider__thumb {
+[data-slot="slider"][data-invalid] [data-slot="slider-thumb"] {
   background: var(--zs-surface-raised);
   box-shadow:
     0 0 0 0.1875rem var(--zs-system-red),
@@ -299,7 +299,7 @@
 }
 
 /* ─── Vertical orientation ─────────────────────────────────────────── */
-.zs-slider--vertical {
+[data-slot="slider"][data-orientation="vertical"] {
   grid-template-columns: auto;
   grid-template-rows: auto 1fr;
   inline-size: auto;
@@ -309,7 +309,7 @@
      allowed to collapse to the track width. */
   min-inline-size: 0;
 }
-.zs-slider--vertical .zs-slider__value {
+[data-slot="slider"][data-orientation="vertical"] [data-slot="slider-value"] {
   /* Vertical reverts to in-flow above the track — the inline-axis
      positioning that tracks the thumb doesn't translate to a vertical
      track, so we anchor the badge to the top of the control area. */
@@ -320,7 +320,7 @@
   text-align: center;
   justify-self: center;
 }
-.zs-slider--vertical .zs-slider__control {
+[data-slot="slider"][data-orientation="vertical"] [data-slot="slider-control"] {
   grid-column: 1;
   grid-row: 2;
   inline-size: auto;
@@ -328,7 +328,7 @@
   block-size: 100%;
   justify-content: center;
 }
-.zs-slider--vertical .zs-slider__track {
+[data-slot="slider"][data-orientation="vertical"] [data-slot="slider-track"] {
   inline-size: var(--zs-slider-track-block, 0.375rem);
   block-size: 100%;
 }
@@ -347,13 +347,13 @@
  * touch surface gets the full hit floor on coarse devices. The visible
  * knob stays at its design size; only the transparent ::after grows. */
 @media (pointer: coarse) {
-  .zs-slider__thumb {
+  [data-slot="slider-thumb"] {
     --zs-slider-hit: var(--zs-hit-min);
   }
-  .zs-slider__control {
+  [data-slot="slider-control"] {
     min-block-size: var(--zs-hit-min);
   }
-  .zs-slider--vertical .zs-slider__control {
+  [data-slot="slider"][data-orientation="vertical"] [data-slot="slider-control"] {
     /* Vertical orientation: the control's inline-axis is the cross
        axis; the brief floor applies to whatever axis the user touches.
        Grow both so the vertical thumb has a coarse-pointer reachable
@@ -364,12 +364,12 @@
 
 /* ─── Reduced motion ───────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-slider__thumb {
+  [data-slot="slider-thumb"] {
     transition: none;
   }
   @media (hover: hover) {
-    .zs-slider:not([data-disabled]) .zs-slider__thumb:hover,
-    .zs-slider:not([data-disabled]) .zs-slider__thumb[data-dragging] {
+    [data-slot="slider"]:not([data-disabled]) [data-slot="slider-thumb"]:hover,
+    [data-slot="slider"]:not([data-disabled]) [data-slot="slider-thumb"][data-dragging] {
       transform: none;
     }
   }
@@ -394,16 +394,16 @@
  * blanket-lock the variant rule from any future user-stylesheet
  * adjustment. */
 @media (forced-colors: active) {
-  .zs-slider__track {
+  [data-slot="slider-track"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  .zs-slider__indicator {
+  [data-slot="slider-indicator"] {
     background: Highlight;
     forced-color-adjust: none;
   }
-  .zs-slider__thumb {
+  [data-slot="slider-thumb"] {
     background: Highlight;
     box-shadow:
       0 0 0 0.0625rem CanvasText,
@@ -420,29 +420,29 @@
      transparent-background rule doesn't bleed accent-token border
      through. Under forced-colors both variants collapse to the same
      Canvas/CanvasText system surface. */
-  .zs-slider--outline .zs-slider__track {
+  [data-slot="slider"][data-variant="outline"] [data-slot="slider-track"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
-  .zs-slider--outline .zs-slider__indicator {
+  [data-slot="slider"][data-variant="outline"] [data-slot="slider-indicator"] {
     background: Highlight;
   }
-  .zs-slider--outline .zs-slider__thumb {
+  [data-slot="slider"][data-variant="outline"] [data-slot="slider-thumb"] {
     background: Highlight;
     box-shadow:
       0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
   }
-  .zs-slider__thumb:focus-within {
+  [data-slot="slider-thumb"]:focus-within {
     box-shadow:
       0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight,
       0 0 0 0 transparent;
   }
-  .zs-slider[data-disabled] .zs-slider__indicator {
+  [data-slot="slider"][data-disabled] [data-slot="slider-indicator"] {
     background: GrayText;
   }
-  .zs-slider[data-disabled] .zs-slider__thumb {
+  [data-slot="slider"][data-disabled] [data-slot="slider-thumb"] {
     background: GrayText;
     box-shadow:
       0 0 0 0.0625rem GrayText,
@@ -453,16 +453,16 @@
      `.zs-slider--outline[data-disabled] .zs-slider__thumb` rule above
      re-paints with the accent-derived surface-raised background under
      forced-colors. */
-  .zs-slider--outline[data-disabled] .zs-slider__thumb {
+  [data-slot="slider"][data-variant="outline"][data-disabled] [data-slot="slider-thumb"] {
     background: GrayText;
     box-shadow:
       0 0 0 0.0625rem GrayText,
       0 0 0 0 transparent;
   }
-  .zs-slider[data-invalid] .zs-slider__indicator {
+  [data-slot="slider"][data-invalid] [data-slot="slider-indicator"] {
     background: Mark;
   }
-  .zs-slider[data-invalid] .zs-slider__thumb {
+  [data-slot="slider"][data-invalid] [data-slot="slider-thumb"] {
     background: Mark;
     box-shadow:
       0 0 0 0.0625rem Mark,
@@ -472,21 +472,21 @@
   /* Hover / drag mirror so the oklch :hover rule above doesn't outrank
      the system-color base under forced-colors. Same shape as Slice 5/6. */
   @media (hover: hover) {
-    .zs-slider:not([data-disabled]) .zs-slider__thumb:hover,
-    .zs-slider--vertical:not([data-disabled]) .zs-slider__thumb:hover {
+    [data-slot="slider"]:not([data-disabled]) [data-slot="slider-thumb"]:hover,
+    [data-slot="slider"][data-orientation="vertical"]:not([data-disabled]) [data-slot="slider-thumb"]:hover {
       background: Highlight;
       box-shadow:
         0 0 0 0.0625rem CanvasText,
         0 0 0 0 transparent;
     }
   }
-  .zs-slider__thumb[data-dragging] {
+  [data-slot="slider-thumb"][data-dragging] {
     background: Highlight;
     box-shadow:
       0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
   }
-  .zs-slider__value {
+  [data-slot="slider-value"] {
     color: CanvasText;
   }
 }

@@ -18,7 +18,7 @@
  * Motion: none.
  */
 
-.zs-container {
+[data-slot="container"] {
   inline-size: 100%;
   min-inline-size: 0;
   box-sizing: border-box;

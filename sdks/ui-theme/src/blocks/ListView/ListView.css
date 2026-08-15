@@ -24,7 +24,7 @@
  * between rows.
  */
 
-.zs-list-view {
+[data-slot="list-view"] {
   /* The list paints nothing of its own beyond resetting UA list styling;
      rows carry the padding and dividers. */
   margin: 0;
@@ -34,7 +34,7 @@
   color: var(--zs-label);
 }
 
-.zs-list-view__item {
+[data-slot="list-view-item"] {
   display: flex;
   align-items: center;
   gap: var(--zs-space-3);
@@ -43,13 +43,13 @@
 /* Divider: a logical hairline between rows. Drawn as a block-start
    border on every row except the first so the list reads as a grouped
    set without a leading or trailing rule. */
-.zs-list-view[data-divided] .zs-list-view__item + .zs-list-view__item {
+[data-slot="list-view"][data-divided] [data-slot="list-view-item"] + [data-slot="list-view-item"] {
   border-block-start: 0.0625rem solid var(--zs-separator);
 }
 
 /* ─── main area (the row's clickable content) ──────────────────────────── */
 
-.zs-list-view__main {
+[data-slot="list-view-main"] {
   /* Grows to fill the row; lays leading · content out inline. The block
      padding here is the row's vertical rhythm so the hover/focus
      affordance fills the row height edge-to-edge on the inline-start
@@ -74,7 +74,7 @@
 /* Interactive main (the <a>/<button> path) gets the pointer + hover tint
    + a focus-visible ring. The non-interactive <div> path carries no
    data-interactive, so none of this applies. */
-.zs-list-view__main[data-interactive] {
+[data-slot="list-view-main"][data-interactive] {
   cursor: pointer;
   border-radius: var(--zs-radius-2);
   /* Pull the rounded hover/focus surface a hair past the text so the
@@ -92,19 +92,19 @@
 }
 
 @media (hover: hover) {
-  .zs-list-view__main[data-interactive]:hover {
+  [data-slot="list-view-main"][data-interactive]:hover {
     background-color: var(--zs-card-hover-tint);
   }
 }
 
-.zs-list-view__main[data-interactive]:focus-visible {
+[data-slot="list-view-main"][data-interactive]:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── leading ──────────────────────────────────────────────────────────── */
 
-.zs-list-view__leading {
+[data-slot="list-view-leading"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -114,14 +114,14 @@
 
 /* ─── content column ───────────────────────────────────────────────────── */
 
-.zs-list-view__content {
+[data-slot="list-view-content"] {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-1);
   min-inline-size: 0; /* enable truncation of long titles/descriptions */
 }
 
-.zs-list-view__title {
+[data-slot="list-view-title"] {
   color: var(--zs-label);
   font-size: var(--zs-text-callout-size);
   line-height: var(--zs-text-callout-line);
@@ -132,7 +132,7 @@
   white-space: nowrap;
 }
 
-.zs-list-view__description {
+[data-slot="list-view-description"] {
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
@@ -143,7 +143,7 @@
 
 /* ─── aside (meta + trailing — outside the row link) ───────────────────── */
 
-.zs-list-view__aside {
+[data-slot="list-view-aside"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-3);
@@ -153,14 +153,14 @@
   padding-block: var(--zs-list-view-padding-block);
 }
 
-.zs-list-view__meta {
+[data-slot="list-view-meta"] {
   color: var(--zs-label-tertiary);
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   white-space: nowrap;
 }
 
-.zs-list-view__trailing {
+[data-slot="list-view-trailing"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-2);
@@ -169,40 +169,40 @@
 
 /* ─── density (block padding only) ─────────────────────────────────────── */
 
-.zs-list-view[data-density="comfortable"] {
+[data-slot="list-view"][data-density="comfortable"] {
   --zs-list-view-padding-block: var(--zs-space-3);
 }
 
-.zs-list-view[data-density="compact"] {
+[data-slot="list-view"][data-density="compact"] {
   --zs-list-view-padding-block: var(--zs-space-2);
 }
 
 /* ─── reduced motion ───────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-list-view__main[data-interactive] {
+  [data-slot="list-view-main"][data-interactive] {
     transition: none;
   }
 }
 
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ──── */
 @media (forced-colors: active) {
-  .zs-list-view[data-divided] .zs-list-view__item + .zs-list-view__item {
+  [data-slot="list-view"][data-divided] [data-slot="list-view-item"] + [data-slot="list-view-item"] {
     border-block-start-color: CanvasText;
   }
-  .zs-list-view__title,
-  .zs-list-view__description,
-  .zs-list-view__meta,
-  .zs-list-view__leading,
-  .zs-list-view__trailing {
+  [data-slot="list-view-title"],
+  [data-slot="list-view-description"],
+  [data-slot="list-view-meta"],
+  [data-slot="list-view-leading"],
+  [data-slot="list-view-trailing"] {
     color: CanvasText;
   }
   /* The hover tint is invisible in forced-colors; lean on the native
      link/button highlight instead, and keep the focus ring visible. */
-  .zs-list-view__main[data-interactive]:hover {
+  [data-slot="list-view-main"][data-interactive]:hover {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-list-view__main[data-interactive]:focus-visible {
+  [data-slot="list-view-main"][data-interactive]:focus-visible {
     outline-color: Highlight;
   }
 }

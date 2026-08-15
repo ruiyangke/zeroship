@@ -21,7 +21,7 @@
  * so it flips correctly under RTL.
  */
 
-.zs-description-list {
+[data-slot="description-list"] {
   /* Width of the term column in horizontal mode. A token so a consumer
      can retune it per-list via inline `--zs-dl-term-w: …`. */
   --zs-dl-term-w: 10rem;
@@ -32,23 +32,23 @@
 }
 
 /* ─── item ────────────────────────────────────────────────────────────── */
-.zs-description-list__item {
+[data-slot="description-list-item"] {
   /* The block-axis gap between consecutive rows. */
   padding-block: var(--zs-space-2);
 }
 
-.zs-description-list__item:first-child {
+[data-slot="description-list-item"]:first-child {
   padding-block-start: 0;
 }
 
-.zs-description-list__item:last-child {
+[data-slot="description-list-item"]:last-child {
   padding-block-end: 0;
 }
 
 /* ─── term / detail typography ─────────────────────────────────────────
  * Term is the quieter secondary label; detail carries the primary label
  * weight so the value reads as the answer. */
-.zs-description-list__term {
+[data-slot="description-list-term"] {
   margin: 0;
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-subheadline-size);
@@ -56,7 +56,7 @@
   font-weight: 500;
 }
 
-.zs-description-list__detail {
+[data-slot="description-list-detail"] {
   /* Reset the UA default <dd> indent (a ~2.5rem inline-start margin). */
   margin: 0;
   color: var(--zs-label);
@@ -74,7 +74,7 @@
 /* ─── horizontal (default) ─────────────────────────────────────────────
  * Two-column grid: a fixed-ish term track, then the detail filling the
  * rest. align-items:baseline keeps the term/value sitting on one line. */
-.zs-description-list--horizontal .zs-description-list__item {
+[data-slot="description-list"][data-orientation="horizontal"] [data-slot="description-list-item"] {
   display: grid;
   /* minmax(0, 1fr) instead of 1fr: a bare 1fr track has an implicit
      min-width:auto, so a long unbreakable detail value forces the track
@@ -87,7 +87,7 @@
 
 /* ─── vertical ─────────────────────────────────────────────────────────
  * Term caption stacked above the detail value. */
-.zs-description-list--vertical .zs-description-list__term {
+[data-slot="description-list"][data-orientation="vertical"] [data-slot="description-list-term"] {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   margin-block-end: var(--zs-space-half);
@@ -95,7 +95,7 @@
 
 /* ─── divider ──────────────────────────────────────────────────────────
  * Logical block-start hairline on every item after the first. */
-.zs-description-list--divided .zs-description-list__item + .zs-description-list__item {
+[data-slot="description-list"][data-divided] [data-slot="description-list-item"] + [data-slot="description-list-item"] {
   border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
 }
 
@@ -103,9 +103,9 @@
  * The separator color has no system slot; map the divider to CanvasText
  * so the row delineation survives HCM. */
 @media (forced-colors: active) {
-  .zs-description-list--divided
-    .zs-description-list__item
-    + .zs-description-list__item {
+  [data-slot="description-list"][data-divided]
+    [data-slot="description-list-item"]
+    + [data-slot="description-list-item"] {
     border-block-start-color: CanvasText;
   }
 }

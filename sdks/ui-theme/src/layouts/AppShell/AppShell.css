@@ -47,7 +47,7 @@
  * Theme: the shell MUST NOT set `data-theme` — the theme host is <html>.
  */
 
-.zs-app-shell {
+[data-slot="app-shell"] {
   display: flex;
   flex-direction: column;
   /* The shell ALWAYS fills its container's inline-size — its width must
@@ -73,13 +73,13 @@
 /* Fallback for engines without dynamic-viewport-unit support: a definite
  * 100vh so the frame still has a fixed height for Main to scroll within. */
 @supports not (height: 100dvh) {
-  .zs-app-shell {
+  [data-slot="app-shell"] {
     block-size: 100vh;
   }
 }
 
 /* ─── Header — raised band + bottom hairline ──────────────────────────── */
-.zs-app-shell__header {
+[data-slot="app-shell-header"] {
   flex: 0 0 auto;
   /* A real bar: a comfortable minimum height + vertically-centered content
    * so a brand lockup and actions sit on a baseline rather than collapsing
@@ -99,7 +99,7 @@
 }
 
 /* ─── Body — the Split row fills the remaining block-size ─────────────── */
-.zs-app-shell__body {
+[data-slot="app-shell-body"] {
   flex: 1 1 auto;
   min-block-size: 0;
 }
@@ -117,7 +117,7 @@
  * Open width comes from the Split.Side `flex-basis` (sideWidth wires
  * `--app-shell-sidebar-width`), so this rule owns only the surface,
  * the divider, padding, overflow, and the collapse transition. */
-.zs-app-shell__sidebar {
+[data-slot="app-shell-sidebar"] {
   overflow: hidden auto;
   background: var(--zs-shell-sidebar-bg, var(--zs-surface-sunken));
   backdrop-filter: var(--zs-material-thin);
@@ -134,10 +134,10 @@
  * it to inline-start. We key off the shell root's `[data-sidebar-side]`
  * (the side attr the root always carries) rather than the rail element,
  * which does not. */
-.zs-app-shell[data-sidebar-side="start"] .zs-app-shell__sidebar {
+[data-slot="app-shell"][data-sidebar-side="start"] [data-slot="app-shell-sidebar"] {
   border-inline-end: var(--zs-selection-hairline) solid var(--zs-separator);
 }
-.zs-app-shell[data-sidebar-side="end"] .zs-app-shell__sidebar {
+[data-slot="app-shell"][data-sidebar-side="end"] [data-slot="app-shell-sidebar"] {
   border-inline-start: var(--zs-selection-hairline) solid var(--zs-separator);
 }
 
@@ -150,7 +150,7 @@
  * Removal from the AT tree + focus order is handled by `inert` +
  * `aria-hidden` on the rail element (set from AppShell.tsx when closed),
  * which is the animation-safe equivalent of dropping it via display. */
-.zs-app-shell__body:not([data-sidebar-open]) > .zs-app-shell__sidebar {
+[data-slot="app-shell-body"]:not([data-sidebar-open]) > [data-slot="app-shell-sidebar"] {
   flex-basis: 0;
   inline-size: 0;
   min-inline-size: 0;
@@ -159,13 +159,13 @@
 }
 
 /* ─── Main — fluid; arrange-only (no paint of its own) ────────────────── */
-.zs-app-shell__main {
+[data-slot="app-shell-main"] {
   min-inline-size: 0;
   overflow: auto;
 }
 
 /* ─── Footer — muted footnote band, top hairline ──────────────────────── */
-.zs-app-shell__footer {
+[data-slot="app-shell-footer"] {
   flex: 0 0 auto;
   /* A quiet footnote band: vertically centered, muted secondary label
    * colour, footnote type scale, with the page content centered on the
@@ -185,7 +185,7 @@
 
 /* ─── prefers-reduced-motion — drop the rail collapse transition ──────── */
 @media (prefers-reduced-motion: reduce) {
-  .zs-app-shell__sidebar {
+  [data-slot="app-shell-sidebar"] {
     transition: none;
   }
 }
@@ -196,27 +196,27 @@
  * dropped; mirror the painted bands so the Header/Footer keep a visible
  * system-color edge against the page. */
 @media (forced-colors: active) {
-  .zs-app-shell {
+  [data-slot="app-shell"] {
     background: Canvas;
     color: CanvasText;
   }
-  .zs-app-shell__header {
+  [data-slot="app-shell-header"] {
     background: Canvas;
     border-block-end-color: CanvasText;
   }
   /* The sunken rail surface is dropped in a forced-colors pass; mirror the
    * dividing hairline so the rail keeps a visible system-color edge against
    * Main on whichever side it sits. */
-  .zs-app-shell__sidebar {
+  [data-slot="app-shell-sidebar"] {
     background: Canvas;
   }
-  .zs-app-shell[data-sidebar-side="start"] .zs-app-shell__sidebar {
+  [data-slot="app-shell"][data-sidebar-side="start"] [data-slot="app-shell-sidebar"] {
     border-inline-end-color: CanvasText;
   }
-  .zs-app-shell[data-sidebar-side="end"] .zs-app-shell__sidebar {
+  [data-slot="app-shell"][data-sidebar-side="end"] [data-slot="app-shell-sidebar"] {
     border-inline-start-color: CanvasText;
   }
-  .zs-app-shell__footer {
+  [data-slot="app-shell-footer"] {
     border-block-start-color: CanvasText;
   }
 }
