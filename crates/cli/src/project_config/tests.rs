@@ -468,6 +468,14 @@ fn crlf_jsonc_parses() {
 }
 
 #[test]
+fn bare_carriage_return_line_endings_are_rejected() {
+    let text = FULL.replace('\n', "\r");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("bare carriage returns must not be parsed differently from TypeScript");
+    assert!(err.contains("bare carriage return"), "{err}");
+}
+
+#[test]
 fn unicode_escaped_keys_and_values_parse() {
     let text = FULL
         .replacen("\"name\": \"demo-app\"", "\"\\u006eame\": \"demo-app\"", 1)
@@ -482,6 +490,18 @@ fn unicode_escaped_keys_and_values_parse() {
         resolved.str("build.serverEntry"),
         Some("caf\u{e9}-\u{1f600}.ts")
     );
+}
+
+#[test]
+fn unpaired_surrogate_is_rejected() {
+    let text = FULL.replacen(
+        "\"mode\": \"full\"",
+        "\"mode\": \"full\", \"serverEntry\": \"src/\\ud800.ts\"",
+        1,
+    );
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("an unpaired surrogate is not a Unicode scalar value");
+    assert!(err.contains("unpaired high surrogate"), "{err}");
 }
 
 #[test]

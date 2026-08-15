@@ -65,6 +65,7 @@ pub fn append_top_level_string(text: &str, key: &str, value: &str) -> Result<Str
 /// JSON's four code points, and raw C0 controls inside quoted strings. The
 /// scanner keeps comments distinct, so controls in comments remain harmless.
 fn validate_scanned_source(text: &str) -> Result<(), String> {
+    reject_bare_carriage_returns(text)?;
     let mut scanner = Scanner::new(text, &SCANNER_OPTIONS);
     let mut previous_end = 0;
     loop {
@@ -78,6 +79,19 @@ fn validate_scanned_source(text: &str) -> Result<(), String> {
             Some(_) => previous_end = scanner.token_end(),
             None => return Ok(()),
         }
+    }
+}
+
+fn reject_bare_carriage_returns(text: &str) -> Result<(), String> {
+    let bytes = text.as_bytes();
+    let invalid = bytes
+        .iter()
+        .enumerate()
+        .find(|(index, byte)| **byte == b'\r' && bytes.get(index + 1) != Some(&b'\n'));
+    if let Some((index, _)) = invalid {
+        Err(format!("bare carriage return in JSONC at byte {index}"))
+    } else {
+        Ok(())
     }
 }
 

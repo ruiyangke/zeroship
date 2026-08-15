@@ -387,6 +387,48 @@ else
   fail "the readers disagree on a raw string control (ts=$raw_control_ts_rc rs=$raw_control_rs_rc)"
 fi
 
+BARE_CR_FIXTURE="$WORK/bare-cr.jsonc"
+node - "$MINIMAL_FIXTURE" "$BARE_CR_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+fs.writeFileSync(target, fs.readFileSync(source, "utf8").replaceAll("\n", "\r"));
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BARE_CR_FIXTURE" ) \
+  >"$WORK/bare-cr-ts.json" 2>"$WORK/bare-cr-ts.err"
+bare_cr_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$BARE_CR_FIXTURE" ) \
+  >"$WORK/bare-cr-rs.json" 2>"$WORK/bare-cr-rs.err"
+bare_cr_rs_rc=$?
+if [ "$bare_cr_ts_rc" != 0 ] && [ "$bare_cr_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject bare carriage return line endings"
+else
+  fail "the readers disagree on bare carriage return line endings (ts=$bare_cr_ts_rc rs=$bare_cr_rs_rc)"
+fi
+
+UNPAIRED_FIXTURE="$WORK/unpaired-surrogate.jsonc"
+node - "$MINIMAL_FIXTURE" "$UNPAIRED_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+const before = fs.readFileSync(source, "utf8");
+const after = before.replace(
+  '"mode": "full",',
+  '"mode": "full", "serverEntry": "src/\\ud800.ts",',
+);
+if (after === before) throw new Error("fixture insertion did not apply");
+fs.writeFileSync(target, after);
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$UNPAIRED_FIXTURE" ) \
+  >"$WORK/unpaired-ts.json" 2>"$WORK/unpaired-ts.err"
+unpaired_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$UNPAIRED_FIXTURE" ) \
+  >"$WORK/unpaired-rs.json" 2>"$WORK/unpaired-rs.err"
+unpaired_rs_rc=$?
+if [ "$unpaired_ts_rc" != 0 ] && [ "$unpaired_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject an unpaired surrogate"
+else
+  fail "the readers disagree on an unpaired surrogate (ts=$unpaired_ts_rc rs=$unpaired_rs_rc)"
+fi
+
 # MUTATION A. Remove a cross-tool key from a file that exists. NEITHER reader
 # may quietly supply a value: the schema requires it, so both must refuse and
 # both must name it. A run where one of them answered with a path would be the

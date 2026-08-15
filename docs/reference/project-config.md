@@ -14,6 +14,9 @@ It is read by exactly two readers:
   `sdks/vite-plugin/src/project-config/`
 
 Both readers are generated from one JSON Schema, `schema/project-v1.json`.
+They accept JSON comments and trailing commas, plus standard JSON escapes.
+CRLF line endings and valid Unicode surrogate pairs are accepted. A bare
+carriage return or an unpaired surrogate is rejected by both readers.
 
 ## What it is not
 
