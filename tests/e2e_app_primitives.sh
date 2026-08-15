@@ -308,6 +308,82 @@ INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP_ID', '$OW
 ON CONFLICT (app_id, user_id) DO UPDATE SET role = 'owner';
 SQL
 
+# Build a worker dispatch frame for the pre-migrate diagnostic probes.
+zs_unmigrated_frame() {
+  node -e '
+const fs = require("fs");
+const [out, method, url, body, accept] = process.argv.slice(1);
+const headers = [["content-type", "application/json"]];
+if (accept) headers.push(["accept", accept]);
+const meta = Buffer.from(JSON.stringify({ method, url, headers }), "utf8");
+const len = Buffer.alloc(4);
+len.writeUInt32LE(meta.length, 0);
+fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
+' "$@"
+}
+
+echo ""
+echo "=== Stage 4b: unmigrated app diagnostics ==="
+APP_ROLE="app_${APP_ID}_role"
+if [ "$(psql_q "select count(*) from pg_roles where rolname='$APP_ROLE'")" != "0" ]; then
+  fail "precondition failed: $APP_ROLE already exists"
+  exit 1
+fi
+sleep 4
+
+zs_unmigrated_frame "$WORK/frame-unmigrated-auto.bin" POST \
+  "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
+AUTO_RESP="$(curl -sS -w '\n%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
+  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H 'content-type: application/octet-stream' \
+  --data-binary @"$WORK/frame-unmigrated-auto.bin")"
+AUTO_CODE="$(echo "$AUTO_RESP" | tail -1)"
+AUTO_BODY="$(echo "$AUTO_RESP" | sed '$d')"
+if [ "$AUTO_CODE" = "500" ] \
+  && grep -Eq '"code":"(schema_not_provisioned|SCHEMA_NOT_PROVISIONED)"' <<<"$AUTO_BODY" \
+  && grep -Fq 'zeroship migrate' <<<"$AUTO_BODY"; then
+  pass "unmigrated autocommit response names zeroship migrate"
+else
+  fail "unmigrated autocommit response lost remediation: HTTP $AUTO_CODE body=$AUTO_BODY"
+fi
+
+zs_unmigrated_frame "$WORK/frame-unmigrated-tx.bin" POST \
+  "http://db-todos-e2e.localhost/__zeroship/v1/diagnostics.unmigratedTransaction" \
+  '{"json":null}'
+TX_RESP="$(curl -sS -w '\n%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
+  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H 'content-type: application/octet-stream' \
+  --data-binary @"$WORK/frame-unmigrated-tx.bin")"
+TX_CODE="$(echo "$TX_RESP" | tail -1)"
+TX_BODY="$(echo "$TX_RESP" | sed '$d')"
+if [ "$TX_CODE" = "500" ] \
+  && grep -Eq '"code":"(schema_not_provisioned|SCHEMA_NOT_PROVISIONED)"' <<<"$TX_BODY" \
+  && grep -Fq 'zeroship migrate' <<<"$TX_BODY"; then
+  pass "unmigrated transaction response names zeroship migrate"
+else
+  fail "unmigrated transaction response lost remediation: HTTP $TX_CODE body=$TX_BODY"
+fi
+
+zs_unmigrated_frame "$WORK/frame-unmigrated-stream.bin" POST \
+  "http://db-todos-e2e.localhost/__zeroship/v1/todos.subscribe" \
+  '{"json":{"userId":"user_missing"}}' 'text/event-stream'
+STREAM_RESP="$(curl -sS -N -w '\n%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
+  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H 'content-type: application/octet-stream' \
+  --data-binary @"$WORK/frame-unmigrated-stream.bin")"
+STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
+STREAM_BODY="$(echo "$STREAM_RESP" | sed '$d')"
+if [ "$STREAM_CODE" = "200" ] \
+  && grep -Eq '"code":"(schema_not_provisioned|SCHEMA_NOT_PROVISIONED)"' <<<"$STREAM_BODY" \
+  && grep -Fq 'zeroship migrate' <<<"$STREAM_BODY"; then
+  pass "unmigrated streaming response names zeroship migrate"
+else
+  fail "unmigrated streaming response lost remediation: HTTP $STREAM_CODE body=$STREAM_BODY"
+fi
+
 # THE STEP THIS HARNESS WAS MISSING. Deploy does not apply migrations, so
 # without this the app runs against a schema that does not exist and every
 # env.db arm below fails on the absent per-app role. Driven through the CLI and
