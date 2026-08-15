@@ -267,7 +267,7 @@ const AppShellRoot = forwardRef<HTMLDivElement, AppShellProps>(
           className={composedClassName}
           style={layoutVars}
         >
-          <a className="zs-skip-link" href={`#${mainId}`}>
+          <a className="zs-skip-link" data-slot="skip-link" href={`#${mainId}`}>
             {skipLinkLabel}
           </a>
           {children}
@@ -341,6 +341,7 @@ const AppShellSidebar = forwardRef<HTMLElement, AppShellSidebarProps>(
           inert={collapsed ? true : undefined}
           aria-hidden={collapsed ? true : undefined}
           className={classnames("zs-app-shell__sidebar", className)}
+          data-slot="app-shell-sidebar"
         >
           {children}
         </Comp>

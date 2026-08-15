@@ -85,8 +85,10 @@ export interface AuthFormValues {
   name?: string;
 }
 
-export interface AuthFormProps
-  extends Omit<ComponentPropsWithoutRef<"form">, "onSubmit" | "title"> {
+export interface AuthFormProps extends Omit<
+  ComponentPropsWithoutRef<"form">,
+  "onSubmit" | "title"
+> {
   /**
    * Which form to show. `signIn` (default) = Email + Password; `signUp`
    * = (Name when `showName`) + Email + Password. Drives the default
@@ -111,7 +113,10 @@ export interface AuthFormProps
    * owns the credential exchange. Empty required fields block submit and
    * focus the first invalid control before this fires.
    */
-  onSubmit?: (values: AuthFormValues, event: FormEvent<HTMLFormElement>) => void;
+  onSubmit?: (
+    values: AuthFormValues,
+    event: FormEvent<HTMLFormElement>,
+  ) => void;
 
   /**
    * Mark the request in flight. Busies the submit `Button` (aria-busy +
@@ -269,8 +274,12 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
           justify="center"
           wrap
           className="zs-auth-form__footer-default"
+          data-slot="auth-form-footer-default"
         >
-          <span className="zs-auth-form__footer-prompt">
+          <span
+            className="zs-auth-form__footer-prompt"
+            data-slot="auth-form-footer-prompt"
+          >
             {FOOTER_COPY[mode].prompt}
           </span>
           <Button
@@ -290,11 +299,7 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
         className={classnames("zs-auth-form-center", className)}
         data-slot="auth-form-center"
       >
-        <Card
-          variant="elevated"
-          className="zs-auth-form"
-          data-slot="auth-form"
-        >
+        <Card variant="elevated" className="zs-auth-form" data-slot="auth-form">
           <Form
             {...rest}
             ref={ref}
@@ -306,7 +311,11 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
             <Stack gap={5}>
               {/* Header — title heading + optional description. */}
               <Stack gap={1} data-slot="auth-form-header">
-                <h2 id={titleId} className="zs-auth-form__title" data-slot="auth-form-title">
+                <h2
+                  id={titleId}
+                  className="zs-auth-form__title"
+                  data-slot="auth-form-title"
+                >
                   {resolvedTitle}
                 </h2>
                 {description != null ? (
@@ -328,6 +337,7 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
                     intent="danger"
                     live
                     className="zs-auth-form__error"
+                    data-slot="auth-form-error"
                   >
                     {error}
                   </Banner>
@@ -412,13 +422,29 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
                 <Stack gap={4} data-slot="auth-form-social">
                   <div
                     className="zs-auth-form__or"
+                    data-slot="auth-form-or"
                     role="presentation"
                   >
-                    <Separator className="zs-auth-form__or-line" />
-                    <span className="zs-auth-form__or-label">or</span>
-                    <Separator className="zs-auth-form__or-line" />
+                    <Separator
+                      className="zs-auth-form__or-line"
+                      data-slot="auth-form-or-line"
+                    />
+                    <span
+                      className="zs-auth-form__or-label"
+                      data-slot="auth-form-or-label"
+                    >
+                      or
+                    </span>
+                    <Separator
+                      className="zs-auth-form__or-line"
+                      data-slot="auth-form-or-line"
+                    />
                   </div>
-                  <Stack gap={3} className="zs-auth-form__social-actions">
+                  <Stack
+                    gap={3}
+                    className="zs-auth-form__social-actions"
+                    data-slot="auth-form-social-actions"
+                  >
                     {socialActions}
                   </Stack>
                 </Stack>

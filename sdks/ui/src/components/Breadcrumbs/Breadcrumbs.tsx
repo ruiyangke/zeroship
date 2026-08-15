@@ -88,8 +88,10 @@ export interface BreadcrumbItem {
   current?: boolean;
 }
 
-export interface BreadcrumbsProps
-  extends Omit<ComponentPropsWithoutRef<"nav">, "title"> {
+export interface BreadcrumbsProps extends Omit<
+  ComponentPropsWithoutRef<"nav">,
+  "title"
+> {
   /**
    * Ergonomic trail. Map each entry to a crumb; the platform inserts
    * separators between them. Omit and use compound parts
@@ -122,13 +124,11 @@ export interface BreadcrumbsProps
   children?: ReactNode;
 }
 
-export interface BreadcrumbsItemProps
-  extends ComponentPropsWithoutRef<"li"> {
+export interface BreadcrumbsItemProps extends ComponentPropsWithoutRef<"li"> {
   children?: ReactNode;
 }
 
-export interface BreadcrumbsLinkProps
-  extends ComponentPropsWithoutRef<"a"> {
+export interface BreadcrumbsLinkProps extends ComponentPropsWithoutRef<"a"> {
   /**
    * Render-as the single child element rather than an `<a>` — pass a
    * router `<Link>` so client navigation works while keeping the
@@ -139,13 +139,11 @@ export interface BreadcrumbsLinkProps
   children?: ReactNode;
 }
 
-export interface BreadcrumbsPageProps
-  extends ComponentPropsWithoutRef<"span"> {
+export interface BreadcrumbsPageProps extends ComponentPropsWithoutRef<"span"> {
   children?: ReactNode;
 }
 
-export interface BreadcrumbsSeparatorProps
-  extends ComponentPropsWithoutRef<"li"> {
+export interface BreadcrumbsSeparatorProps extends ComponentPropsWithoutRef<"li"> {
   /** Separator glyph/node. Falls back to the chevron default. */
   children?: ReactNode;
 }
@@ -280,10 +278,7 @@ BreadcrumbsSeparator.displayName = "Breadcrumbs.Separator";
 function flattenFragments(children: ReactNode): ReactNode[] {
   const out: ReactNode[] = [];
   for (const child of Children.toArray(children)) {
-    if (
-      isValidElement(child) &&
-      (child as ReactElement).type === Fragment
-    ) {
+    if (isValidElement(child) && (child as ReactElement).type === Fragment) {
       // Recurse into the Fragment's children (handles nested fragments).
       out.push(
         ...flattenFragments(
@@ -307,8 +302,7 @@ function withAutoSeparators(
   let sepKey = 0;
   for (const child of array) {
     const isItem =
-      isValidElement(child) &&
-      (child as ReactElement).type === BreadcrumbsItem;
+      isValidElement(child) && (child as ReactElement).type === BreadcrumbsItem;
     if (isItem && lastWasItem) {
       out.push(
         <BreadcrumbsSeparator key={`__auto-sep-${sepKey++}`}>
@@ -376,7 +370,11 @@ function EllipsisCrumb({
         aria-label={`Show ${hiddenCount} hidden breadcrumbs`}
         onClick={onExpand}
       >
-        <span aria-hidden="true" className="zs-breadcrumbs__ellipsis-glyph">
+        <span
+          aria-hidden="true"
+          className="zs-breadcrumbs__ellipsis-glyph"
+          data-slot="breadcrumbs-ellipsis-glyph"
+        >
           {"…"}
         </span>
       </button>
@@ -406,8 +404,7 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
     const [expanded, setExpanded] = useState(false);
 
     const hasItems = Array.isArray(items);
-    const hasChildren =
-      children != null && Children.count(children) > 0;
+    const hasChildren = children != null && Children.count(children) > 0;
 
     if (process.env.NODE_ENV !== "production" && hasItems && hasChildren) {
       // eslint-disable-next-line no-console
@@ -456,7 +453,8 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
       // kept visible: if its resolved index falls in the hidden middle we
       // extend the tail to start no later than it.
       const headCount = 1;
-      const baseTailStart = list.length - Math.max(maxItems != null ? maxItems - 1 : 0, 1);
+      const baseTailStart =
+        list.length - Math.max(maxItems != null ? maxItems - 1 : 0, 1);
       // Keep the current crumb visible by pulling the tail start back to it.
       const tailStart = Math.min(baseTailStart, currentIndex);
       const hiddenCount = Math.max(tailStart - headCount, 0);
@@ -510,7 +508,9 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
         aria-label={ariaLabel}
         className={classnames("zs-breadcrumbs", className)}
       >
-        <ol className="zs-breadcrumbs__list">{body}</ol>
+        <ol className="zs-breadcrumbs__list" data-slot="breadcrumbs-list">
+          {body}
+        </ol>
       </nav>
     );
   },

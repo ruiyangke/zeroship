@@ -190,14 +190,19 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   // Check is the SHAPE signal for a done step; aria-hidden
                   // because the visually-hidden status word carries the
                   // AT meaning, not the glyph.
-                  <Icon as={Check} size="sm" className="zs-stepper__check" />
+                  <Icon
+                    as={Check}
+                    size="sm"
+                    className="zs-stepper__check"
+                    data-slot="stepper-check"
+                  />
                 ) : (
                   // 1-based step number for current/upcoming. aria-hidden:
                   // the position is already exposed by the <ol>/<li>.
                   <span aria-hidden="true">{index + 1}</span>
                 )}
               </span>
-              <span className="zs-stepper__text">
+              <span className="zs-stepper__text" data-slot="stepper-text">
                 <span className="zs-stepper__label" data-slot="stepper-label">
                   {step.label}
                 </span>
@@ -210,7 +215,10 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   </span>
                 ) : null}
                 {/* The non-color status carrier (WCAG 1.4.1). */}
-                <span className="zs-visually-hidden">
+                <span
+                  className="zs-visually-hidden"
+                  data-slot="visually-hidden"
+                >
                   {STATUS_WORD[status]}
                 </span>
               </span>
@@ -235,7 +243,12 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   {inner}
                 </button>
               ) : (
-                <span className="zs-stepper__trigger">{inner}</span>
+                <span
+                  className="zs-stepper__trigger"
+                  data-slot="stepper-trigger"
+                >
+                  {inner}
+                </span>
               )}
               {/* Connector to the NEXT step. Decorative — its completion
                   tint is a visual reinforcement of the [data-status]

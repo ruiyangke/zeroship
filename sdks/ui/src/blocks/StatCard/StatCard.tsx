@@ -151,14 +151,20 @@ export const StatCard = forwardRef<HTMLDivElement, StatCardProps>(
             data-slot="stat-card-delta"
             data-direction={delta.direction}
           >
-            <span aria-hidden="true" className="zs-stat-card__delta-glyph">
+            <span
+              aria-hidden="true"
+              className="zs-stat-card__delta-glyph"
+              data-slot="stat-card-delta-glyph"
+            >
               {meta.glyph}
             </span>
             {/* SR-announced direction word — the non-color signal that
                 makes "increased 12%" legible to assistive tech. The
                 trailing space keeps the announcement from running into
                 the value text. */}
-            <span className="zs-visually-hidden">{meta.label} </span>
+            <span className="zs-visually-hidden" data-slot="visually-hidden">
+              {meta.label}{" "}
+            </span>
             {delta.value}
           </div>
         ) : null}

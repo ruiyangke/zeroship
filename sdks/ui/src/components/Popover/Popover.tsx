@@ -82,8 +82,10 @@ export const createPopoverHandle = BasePopover.createHandle;
  * We omit `render` for the same reason Dialog does — Root is a context
  * provider with no DOM, so `render` has no meaning at this layer.
  */
-export interface PopoverProps<Payload = unknown>
-  extends Omit<BasePopover.Root.Props<Payload>, "render"> {}
+export interface PopoverProps<Payload = unknown> extends Omit<
+  BasePopover.Root.Props<Payload>,
+  "render"
+> {}
 
 /* ─── Root ──────────────────────────────────────────────────────────── *
  *
@@ -122,10 +124,7 @@ export type PopoverTriggerProps = BaseTriggerProps;
 const PopoverTrigger = forwardRef<HTMLElement, PopoverTriggerProps>(
   function PopoverTrigger(props, ref) {
     return (
-      <BasePopover.Trigger
-        ref={ref as Ref<HTMLButtonElement>}
-        {...props}
-      />
+      <BasePopover.Trigger ref={ref as Ref<HTMLButtonElement>} {...props} />
     );
   },
 );
@@ -157,6 +156,7 @@ const PopoverBackdrop = forwardRef<HTMLDivElement, PopoverBackdropProps>(
       <BasePopover.Backdrop
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-popover-backdrop", className)}
+        data-slot="popover-backdrop"
         {...rest}
       />
     );
@@ -226,6 +226,7 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
     return (
       <BasePopover.Positioner
         className="zs-popover-positioner"
+        data-slot="popover-positioner"
         side={side}
         align={align}
         sideOffset={sideOffset}
@@ -234,6 +235,7 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
           {...rest}
           ref={composedRef as Ref<HTMLDivElement>}
           className={composeBaseClass("zs-popover-popup", className)}
+          data-slot="popover-popup"
         >
           {children}
         </BasePopover.Popup>
@@ -254,6 +256,7 @@ const PopoverTitle = forwardRef<HTMLHeadingElement, PopoverTitleProps>(
       <BasePopover.Title
         ref={ref}
         className={composeBaseClass("zs-popover__title", className)}
+        data-slot="popover-title"
         {...rest}
       />
     );
@@ -274,6 +277,7 @@ const PopoverDescription = forwardRef<
     <BasePopover.Description
       ref={ref}
       className={composeBaseClass("zs-popover__description", className)}
+      data-slot="popover-description"
       {...rest}
     />
   );
@@ -298,6 +302,7 @@ const PopoverArrow = forwardRef<HTMLDivElement, PopoverArrowProps>(
       <BasePopover.Arrow
         ref={ref}
         className={composeBaseClass("zs-popover-arrow", className)}
+        data-slot="popover-arrow"
         {...rest}
       >
         {children ?? <ArrowGlyph />}

@@ -147,8 +147,10 @@ function useScrollAreaContext(): ScrollAreaContextValue {
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseScrollArea.Root>;
 
-export interface ScrollAreaRootProps
-  extends Omit<BaseRootProps, "render" | "className" | "onScroll"> {
+export interface ScrollAreaRootProps extends Omit<
+  BaseRootProps,
+  "render" | "className" | "onScroll"
+> {
   /**
    * Visibility policy for the scrollbar chrome. Drives `data-visibility`
    * on the Root which CSS scopes to. Native scroll behavior (inertia,
@@ -214,6 +216,7 @@ function ScrollAreaRootInner(
         ref={ref}
         style={rootStyle}
         className={classnames("zs-scrollarea", className)}
+        data-slot="scrollarea"
         data-visibility={type}
         data-orientation={orientation}
       >
@@ -227,8 +230,10 @@ function ScrollAreaRootInner(
 
 type BaseViewportProps = ComponentPropsWithRef<typeof BaseScrollArea.Viewport>;
 
-export interface ScrollAreaViewportProps
-  extends Omit<BaseViewportProps, "render" | "className"> {
+export interface ScrollAreaViewportProps extends Omit<
+  BaseViewportProps,
+  "render" | "className"
+> {
   /** Optional class hook on the Viewport. */
   className?: string;
   /** Viewport children — typically a `ScrollArea.Content` wrapper. */
@@ -242,6 +247,7 @@ const ScrollAreaViewport = forwardRef<HTMLDivElement, ScrollAreaViewportProps>(
         {...rest}
         ref={ref}
         className={classnames("zs-scrollarea__viewport", className)}
+        data-slot="scrollarea-viewport"
       />
     );
   },
@@ -253,8 +259,10 @@ const ScrollAreaViewport = forwardRef<HTMLDivElement, ScrollAreaViewportProps>(
 
 type BaseContentProps = ComponentPropsWithRef<typeof BaseScrollArea.Content>;
 
-export interface ScrollAreaContentProps
-  extends Omit<BaseContentProps, "render" | "className"> {
+export interface ScrollAreaContentProps extends Omit<
+  BaseContentProps,
+  "render" | "className"
+> {
   /** Optional class hook on the Content wrapper. */
   className?: string;
   /** Content children — the actual scrollable payload. */
@@ -268,6 +276,7 @@ const ScrollAreaContent = forwardRef<HTMLDivElement, ScrollAreaContentProps>(
         {...rest}
         ref={ref}
         className={classnames("zs-scrollarea__content", className)}
+        data-slot="scrollarea-content"
       />
     );
   },
@@ -281,8 +290,10 @@ type BaseScrollbarProps = ComponentPropsWithRef<
   typeof BaseScrollArea.Scrollbar
 >;
 
-export interface ScrollAreaScrollbarProps
-  extends Omit<BaseScrollbarProps, "render" | "className"> {
+export interface ScrollAreaScrollbarProps extends Omit<
+  BaseScrollbarProps,
+  "render" | "className"
+> {
   /**
    * Which axis this Scrollbar controls. `vertical` (default) renders a
    * tall bar pinned to the inline-end edge; `horizontal` renders a wide
@@ -325,6 +336,7 @@ const ScrollAreaScrollbar = forwardRef<
         `zs-scrollarea__scrollbar--${orientation}`,
         className,
       )}
+      data-slot="scrollarea-scrollbar"
       data-orientation={orientation}
     />
   );
@@ -336,8 +348,10 @@ const ScrollAreaScrollbar = forwardRef<
 
 type BaseThumbProps = ComponentPropsWithRef<typeof BaseScrollArea.Thumb>;
 
-export interface ScrollAreaThumbProps
-  extends Omit<BaseThumbProps, "render" | "className"> {
+export interface ScrollAreaThumbProps extends Omit<
+  BaseThumbProps,
+  "render" | "className"
+> {
   /** Optional class hook on the draggable thumb. */
   className?: string;
 }
@@ -349,6 +363,7 @@ const ScrollAreaThumb = forwardRef<HTMLDivElement, ScrollAreaThumbProps>(
         {...rest}
         ref={ref}
         className={classnames("zs-scrollarea__thumb", className)}
+        data-slot="scrollarea-thumb"
       />
     );
   },
@@ -359,8 +374,10 @@ const ScrollAreaThumb = forwardRef<HTMLDivElement, ScrollAreaThumbProps>(
 
 type BaseCornerProps = ComponentPropsWithRef<typeof BaseScrollArea.Corner>;
 
-export interface ScrollAreaCornerProps
-  extends Omit<BaseCornerProps, "render" | "className"> {
+export interface ScrollAreaCornerProps extends Omit<
+  BaseCornerProps,
+  "render" | "className"
+> {
   /** Optional class hook on the corner square. */
   className?: string;
 }
@@ -372,6 +389,7 @@ const ScrollAreaCorner = forwardRef<HTMLDivElement, ScrollAreaCornerProps>(
         {...rest}
         ref={ref}
         className={classnames("zs-scrollarea__corner", className)}
+        data-slot="scrollarea-corner"
       />
     );
   },
@@ -393,11 +411,10 @@ const ScrollAreaCorner = forwardRef<HTMLDivElement, ScrollAreaCornerProps>(
  * attaching an onScroll to the Viewport, splitting the shorthand to
  * inject toolbar chrome) use the compound API directly. */
 
-export interface ScrollAreaProps
-  extends Omit<
-    ScrollAreaRootProps,
-    "type" | "scrollHideDelay" | "orientation" | "className" | "children"
-  > {
+export interface ScrollAreaProps extends Omit<
+  ScrollAreaRootProps,
+  "type" | "scrollHideDelay" | "orientation" | "className" | "children"
+> {
   /**
    * Visibility policy for the scrollbar chrome. See `ScrollAreaType`
    * for the four policies.

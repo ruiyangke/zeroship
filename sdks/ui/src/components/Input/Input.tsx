@@ -76,11 +76,10 @@ import { classnames } from "../_classnames";
 export type InputSize = "sm" | "md" | "lg";
 export type InputVariant = "outline" | "filled" | "plain";
 
-export interface InputProps
-  extends Omit<
-    ComponentPropsWithoutRef<"input">,
-    "size" | "prefix" | "children"
-  > {
+export interface InputProps extends Omit<
+  ComponentPropsWithoutRef<"input">,
+  "size" | "prefix" | "children"
+> {
   /** Visual size — sm 32 / md 40 / lg 48. Defaults to `md`. */
   size?: InputSize;
 
@@ -233,8 +232,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
       disabled={disabled || undefined}
       render={(controlProps: ControlRenderProps, state) => {
         // state: { disabled, touched, dirty, valid, filled, focused }
-        const dataInvalid =
-          state.valid === false || isInvalid ? "" : undefined;
+        const dataInvalid = state.valid === false || isInvalid ? "" : undefined;
         const dataDisabled = state.disabled ? "" : undefined;
         const dataFocused = state.focused ? "" : undefined;
         const dataFilled = state.filled ? "" : undefined;
@@ -260,6 +258,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               wrapperClassName,
               wrapperProps?.className,
             )}
+            data-slot="input"
             data-variant={variant}
             data-size={size}
             data-invalid={dataInvalid}
@@ -272,7 +271,10 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               // No `aria-hidden` by default — consumers wrap decorative
               // icons themselves so semantic prefixes (currency, units)
               // stay announced. See InputProps slot-accessibility note.
-              <span className="zs-input__slot zs-input__slot--start">
+              <span
+                className="zs-input__slot zs-input__slot--start"
+                data-slot="input-slot-start"
+              >
                 {startSlot}
               </span>
             ) : null}
@@ -305,13 +307,17 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
                 className,
                 controlProps.className,
               )}
+              data-slot="input-control"
               aria-invalid={
                 isInvalid || controlProps["aria-invalid"] || undefined
               }
               aria-required={required || undefined}
             />
             {endSlot != null ? (
-              <span className="zs-input__slot zs-input__slot--end">
+              <span
+                className="zs-input__slot zs-input__slot--end"
+                data-slot="input-slot-end"
+              >
                 {endSlot}
               </span>
             ) : null}
@@ -324,70 +330,69 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
 
 /* ─── public Input ──────────────────────────────────────────────────── */
 
-export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  props,
-  ref,
-) {
-  const { label, description, error, ...rest } = props;
-  // `error={false}` is an explicit "no error" intent — don't promote it
-  // to combined-wrapping. Only consider error truthy if it's a defined,
-  // non-null, non-false value (either a ReactNode message or `true`).
-  const errorIsTruthyOrMessage =
-    error !== undefined && error !== null && error !== false;
-  const hasCombined =
-    label != null || description != null || errorIsTruthyOrMessage;
+export const Input = forwardRef<HTMLInputElement, InputProps>(
+  function Input(props, ref) {
+    const { label, description, error, ...rest } = props;
+    // `error={false}` is an explicit "no error" intent — don't promote it
+    // to combined-wrapping. Only consider error truthy if it's a defined,
+    // non-null, non-false value (either a ReactNode message or `true`).
+    const errorIsTruthyOrMessage =
+      error !== undefined && error !== null && error !== false;
+    const hasCombined =
+      label != null || description != null || errorIsTruthyOrMessage;
 
-  if (!hasCombined) {
-    return <InputInner {...rest} ref={ref} />;
-  }
+    if (!hasCombined) {
+      return <InputInner {...rest} ref={ref} />;
+    }
 
-  const errorMessage =
-    error !== true && error !== false && error != null ? error : null;
-  // The inline Field's `invalid` is whatever the caller explicitly
-  // requested or whatever the `error` payload implies. We feed it into
-  // BaseField.Root so Field state matches the shorthand intent.
-  const inlineInvalid = props.invalid === true || errorIsTruthyOrMessage;
+    const errorMessage =
+      error !== true && error !== false && error != null ? error : null;
+    // The inline Field's `invalid` is whatever the caller explicitly
+    // requested or whatever the `error` payload implies. We feed it into
+    // BaseField.Root so Field state matches the shorthand intent.
+    const inlineInvalid = props.invalid === true || errorIsTruthyOrMessage;
 
-  return (
-    <Field
-      invalid={inlineInvalid || undefined}
-      required={props.required}
-      // Forward `disabled` to the inline Field root so `<Input label
-      // disabled>` is equivalent to the decomposed form `<Field
-      // disabled><Field.Label/><Input/></Field>`. Without this, the
-      // shorthand greyed only the native input (via the `disabled`
-      // attribute carried through `...rest`) but the wrapping Field
-      // row — and the linked label — stayed live. Pass `undefined`
-      // when not disabled so Base UI's controlled/uncontrolled
-      // distinction doesn't flip into "controlled false".
-      disabled={props.disabled || undefined}
-    >
-      {label != null ? (
-        <Field.Label>
-          {label}
-          {props.required ? (
-            <>
-              {" "}
-              <Field.Required />
-            </>
-          ) : null}
-        </Field.Label>
-      ) : null}
-      <InputInner {...rest} ref={ref} forcedInvalid={inlineInvalid} />
-      {description != null ? (
-        <Field.Description>{description}</Field.Description>
-      ) : null}
-      {errorMessage != null ? (
-        // `match` accepts `boolean | keyof ValidityState | undefined`
-        // per the @base-ui/react@1.4.1 source
-        // (node_modules/.pnpm/@base-ui+react@1.4.1/.../field/error/
-        // FieldError.d.ts:25 — `match?: boolean | keyof ValidityState`).
-        // Passing the bare boolean `match` (shorthand for `match={true}`)
-        // lets the shorthand drive visibility from the prop instead of
-        // native validity. Item 7 of the slice-2 review-fix brief.
-        <Field.Error match>{errorMessage}</Field.Error>
-      ) : null}
-    </Field>
-  );
-});
+    return (
+      <Field
+        invalid={inlineInvalid || undefined}
+        required={props.required}
+        // Forward `disabled` to the inline Field root so `<Input label
+        // disabled>` is equivalent to the decomposed form `<Field
+        // disabled><Field.Label/><Input/></Field>`. Without this, the
+        // shorthand greyed only the native input (via the `disabled`
+        // attribute carried through `...rest`) but the wrapping Field
+        // row — and the linked label — stayed live. Pass `undefined`
+        // when not disabled so Base UI's controlled/uncontrolled
+        // distinction doesn't flip into "controlled false".
+        disabled={props.disabled || undefined}
+      >
+        {label != null ? (
+          <Field.Label>
+            {label}
+            {props.required ? (
+              <>
+                {" "}
+                <Field.Required />
+              </>
+            ) : null}
+          </Field.Label>
+        ) : null}
+        <InputInner {...rest} ref={ref} forcedInvalid={inlineInvalid} />
+        {description != null ? (
+          <Field.Description>{description}</Field.Description>
+        ) : null}
+        {errorMessage != null ? (
+          // `match` accepts `boolean | keyof ValidityState | undefined`
+          // per the @base-ui/react@1.4.1 source
+          // (node_modules/.pnpm/@base-ui+react@1.4.1/.../field/error/
+          // FieldError.d.ts:25 — `match?: boolean | keyof ValidityState`).
+          // Passing the bare boolean `match` (shorthand for `match={true}`)
+          // lets the shorthand drive visibility from the prop instead of
+          // native validity. Item 7 of the slice-2 review-fix brief.
+          <Field.Error match>{errorMessage}</Field.Error>
+        ) : null}
+      </Field>
+    );
+  },
+);
 Input.displayName = "Input";

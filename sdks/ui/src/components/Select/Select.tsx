@@ -81,7 +81,11 @@ const SelectContext = createContext<SelectContextValue | null>(null);
 
 function useSelectContext(): SelectContextValue {
   return (
-    useContext(SelectContext) ?? { size: "md", variant: "default", multiple: false }
+    useContext(SelectContext) ?? {
+      size: "md",
+      variant: "default",
+      multiple: false,
+    }
   );
 }
 
@@ -98,11 +102,7 @@ function useSelectContext(): SelectContextValue {
 
 type BaseRootShapeProps<Value, Multiple extends boolean | undefined> = Omit<
   Parameters<typeof BaseSelect.Root<Value, Multiple>>[0],
-  | "value"
-  | "defaultValue"
-  | "onValueChange"
-  | "multiple"
-  | "render"
+  "value" | "defaultValue" | "onValueChange" | "multiple" | "render"
 >;
 
 interface SelectBaseProps<Value> extends BaseRootShapeProps<Value, false> {
@@ -171,8 +171,7 @@ export interface SelectMultipleProps<Value> extends SelectBaseProps<Value> {
  * `Value=string[]` instead of `Value=string`).
  */
 export type SelectProps<Value = string> =
-  | SelectSingleProps<Value>
-  | SelectMultipleProps<Value>;
+  SelectSingleProps<Value> | SelectMultipleProps<Value>;
 
 /* ─── Root + Trigger composition ──────────────────────────────────────
  *
@@ -239,7 +238,8 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
 
   const fieldCtx = useFieldContext();
   const fieldSize: FieldSize | undefined = fieldCtx?.size;
-  const size: SelectSize = sizeProp ?? (fieldSize as SelectSize | undefined) ?? "md";
+  const size: SelectSize =
+    sizeProp ?? (fieldSize as SelectSize | undefined) ?? "md";
   const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
   const required = requiredProp ?? fieldCtx?.required ?? false;
 
@@ -297,8 +297,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
    * uses).
    */
   const ariaLabelFallback: string | undefined =
-    ariaLabel ??
-    (fieldCtx || ariaLabelledBy ? undefined : placeholder);
+    ariaLabel ?? (fieldCtx || ariaLabelledBy ? undefined : placeholder);
   const triggerAriaProps: {
     "aria-label"?: string;
     "aria-labelledby"?: string;
@@ -312,6 +311,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     <SelectContext.Provider value={ctxValue}>
       <BaseSelect.Root {...rootProps}>
         <BaseSelect.Trigger
+          data-slot="select-trigger"
           {...triggerAriaProps}
           data-testid={dataTestid}
           className={classnames(
@@ -334,10 +334,9 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
            * merge and union it with the consumer's id(s).
            */
           render={(triggerProps) => {
-            const baseDescribedBy =
-              (triggerProps as { "aria-describedby"?: string })[
-                "aria-describedby"
-              ];
+            const baseDescribedBy = (
+              triggerProps as { "aria-describedby"?: string }
+            )["aria-describedby"];
             const mergedDescribedBy =
               [baseDescribedBy, ariaDescribedBy].filter(Boolean).join(" ") ||
               undefined;
@@ -352,6 +351,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
         >
           <BaseSelect.Value
             className="zs-select-trigger__value"
+            data-slot="select-trigger-value"
             placeholder={placeholder}
           >
             {/* A function child, which Base UI calls with the selected value.
@@ -371,6 +371,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
           </BaseSelect.Value>
           <BaseSelect.Icon
             className="zs-select-trigger__icon"
+            data-slot="select-trigger-icon"
             aria-hidden="true"
           >
             <Icon as={ChevronDown} size="sm" />
@@ -379,6 +380,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
         <BaseSelect.Portal>
           <BaseSelect.Positioner
             className="zs-select-positioner"
+            data-slot="select-positioner"
             align={align}
             side={placement}
             sideOffset={sideOffset}
@@ -401,9 +403,13 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
                 "zs-select-popup",
                 `zs-select-popup--${size}`,
               )}
+              data-slot="select-popup"
               data-size={size}
             >
-              <BaseSelect.List className="zs-select-list">
+              <BaseSelect.List
+                className="zs-select-list"
+                data-slot="select-list"
+              >
                 {children}
               </BaseSelect.List>
             </BaseSelect.Popup>
@@ -435,16 +441,21 @@ const SelectItem = forwardRef<HTMLElement, SelectItemProps>(function SelectItem(
     <BaseSelect.Item
       ref={ref as Ref<HTMLDivElement>}
       className={composeBaseClass("zs-select-item", className) as string}
+      data-slot="select-item"
       data-size={size}
       {...rest}
     >
       <BaseSelect.ItemIndicator
         className="zs-select-item__indicator"
+        data-slot="select-item-indicator"
         keepMounted
       >
         <Icon as={Check} size="sm" />
       </BaseSelect.ItemIndicator>
-      <BaseSelect.ItemText className="zs-select-item__text">
+      <BaseSelect.ItemText
+        className="zs-select-item__text"
+        data-slot="select-item-text"
+      >
         {children}
       </BaseSelect.ItemText>
     </BaseSelect.Item>
@@ -477,6 +488,7 @@ const SelectGroup = forwardRef<HTMLDivElement, SelectGroupProps>(
       <BaseSelect.Group
         ref={ref}
         className={composeBaseClass("zs-select-group", className)}
+        data-slot="select-group"
         {...rest}
       >
         {label != null ? <SelectGroupLabel>{label}</SelectGroupLabel> : null}
@@ -487,7 +499,9 @@ const SelectGroup = forwardRef<HTMLDivElement, SelectGroupProps>(
 );
 SelectGroup.displayName = "Select.Group";
 
-type BaseGroupLabelProps = ComponentPropsWithoutRef<typeof BaseSelect.GroupLabel>;
+type BaseGroupLabelProps = ComponentPropsWithoutRef<
+  typeof BaseSelect.GroupLabel
+>;
 export type SelectGroupLabelProps = BaseGroupLabelProps;
 
 const SelectGroupLabel = forwardRef<HTMLDivElement, SelectGroupLabelProps>(
@@ -496,6 +510,7 @@ const SelectGroupLabel = forwardRef<HTMLDivElement, SelectGroupLabelProps>(
       <BaseSelect.GroupLabel
         ref={ref}
         className={composeBaseClass("zs-select-group-label", className)}
+        data-slot="select-group-label"
         {...rest}
       />
     );
@@ -514,6 +529,7 @@ const SelectSeparator = forwardRef<HTMLDivElement, SelectSeparatorProps>(
       <BaseSelect.Separator
         ref={ref}
         className={composeBaseClass("zs-select-separator", className)}
+        data-slot="select-separator"
         {...rest}
       />
     );

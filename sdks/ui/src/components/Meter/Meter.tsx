@@ -70,8 +70,10 @@ export type MeterIntent = "neutral" | "success" | "warning" | "danger";
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseMeter.Root>;
 
-export interface MeterProps
-  extends Omit<BaseRootProps, "className" | "render"> {
+export interface MeterProps extends Omit<
+  BaseRootProps,
+  "className" | "render"
+> {
   /** Visual size — sm 0.25rem / md 0.375rem (default) / lg 0.5rem track. */
   size?: MeterSize;
   /**
@@ -122,7 +124,8 @@ export const Meter = forwardRef<HTMLDivElement, MeterProps>(function Meter(
   // Meter.Label (defaultProps before elementProps in useRenderElement;
   // a literal-undefined still overwrites). Same shape Slider fixed in
   // slice-7 review item 2.
-  const ariaForwarded: Record<string, AriaAttributes[keyof AriaAttributes]> = {};
+  const ariaForwarded: Record<string, AriaAttributes[keyof AriaAttributes]> =
+    {};
   if (ariaLabel != null) ariaForwarded["aria-label"] = ariaLabel;
   if (ariaLabelledBy != null) ariaForwarded["aria-labelledby"] = ariaLabelledBy;
   if (ariaDescribedBy != null)
@@ -139,24 +142,34 @@ export const Meter = forwardRef<HTMLDivElement, MeterProps>(function Meter(
         `zs-meter--${size}`,
         className,
       )}
+      data-slot="meter"
       data-intent={intent}
       data-size={size}
       data-testid={dataTestId}
     >
       {label != null || showValue ? (
-        <div className="zs-meter__header">
+        <div className="zs-meter__header" data-slot="meter-header">
           {label != null ? (
-            <BaseMeter.Label className="zs-meter__label">
+            <BaseMeter.Label
+              className="zs-meter__label"
+              data-slot="meter-label"
+            >
               {label}
             </BaseMeter.Label>
           ) : null}
           {showValue ? (
-            <BaseMeter.Value className="zs-meter__value" />
+            <BaseMeter.Value
+              className="zs-meter__value"
+              data-slot="meter-value"
+            />
           ) : null}
         </div>
       ) : null}
-      <BaseMeter.Track className="zs-meter__track">
-        <BaseMeter.Indicator className="zs-meter__indicator" />
+      <BaseMeter.Track className="zs-meter__track" data-slot="meter-track">
+        <BaseMeter.Indicator
+          className="zs-meter__indicator"
+          data-slot="meter-indicator"
+        />
       </BaseMeter.Track>
     </BaseMeter.Root>
   );

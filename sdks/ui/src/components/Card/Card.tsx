@@ -200,8 +200,9 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
   // none, dimmed) is paired with JS-level suppression: pointer-events
   // blocks the mouse, but keyboard activation runs JS-side, so we must
   // also short-circuit `onClick` and the Enter/Space handler.
-  const ariaDisabled =
-    (rest as { "aria-disabled"?: boolean | "true" | "false" })["aria-disabled"];
+  const ariaDisabled = (
+    rest as { "aria-disabled"?: boolean | "true" | "false" }
+  )["aria-disabled"];
   const isAriaDisabled = ariaDisabled === true || ariaDisabled === "true";
 
   // Dev-mode validation surfaces guidance the AI agent / consumer can
@@ -435,32 +436,33 @@ export interface CardMediaProps extends DivProps {
   side?: CardMediaSide;
 }
 
-const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(
-  function CardMedia({ side = "top", className, ...rest }, ref) {
-    // `side="fill"` is a decorative background layer — default it to
-    // aria-hidden so AT doesn't double-announce the card surface
-    // (review-fix item 16). Consumers wanting a meaningful fill-mode
-    // media override via the `rest` spread — JSX last-write-wins, so
-    // putting `aria-hidden` BEFORE rest lets explicit
-    // `aria-hidden={false}` from the consumer apply.
-    //
-    // `data-slot`/`data-side` are internal contract attrs — they sit
-    // AFTER rest so callers cannot desync them via raw spread; the
-    // documented surface for `data-side` is the `side` prop
-    // (wave-7 🟢 6).
-    const isDecorative = side === "fill";
-    return (
-      <div
-        aria-hidden={isDecorative ? true : undefined}
-        {...rest}
-        ref={ref}
-        data-slot="card-media"
-        data-side={side}
-        className={classnames("zs-card__media", className)}
-      />
-    );
-  },
-);
+const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(function CardMedia(
+  { side = "top", className, ...rest },
+  ref,
+) {
+  // `side="fill"` is a decorative background layer — default it to
+  // aria-hidden so AT doesn't double-announce the card surface
+  // (review-fix item 16). Consumers wanting a meaningful fill-mode
+  // media override via the `rest` spread — JSX last-write-wins, so
+  // putting `aria-hidden` BEFORE rest lets explicit
+  // `aria-hidden={false}` from the consumer apply.
+  //
+  // `data-slot`/`data-side` are internal contract attrs — they sit
+  // AFTER rest so callers cannot desync them via raw spread; the
+  // documented surface for `data-side` is the `side` prop
+  // (wave-7 🟢 6).
+  const isDecorative = side === "fill";
+  return (
+    <div
+      aria-hidden={isDecorative ? true : undefined}
+      {...rest}
+      ref={ref}
+      data-slot="card-media"
+      data-side={side}
+      className={classnames("zs-card__media", className)}
+    />
+  );
+});
 CardMedia.displayName = "Card.Media";
 
 const CardContent = forwardRef<HTMLDivElement, CardContentProps>(

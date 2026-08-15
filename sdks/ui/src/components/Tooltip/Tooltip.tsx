@@ -58,7 +58,9 @@ export type TooltipSide = "top" | "right" | "bottom" | "left";
 export type TooltipAlign = "start" | "center" | "end";
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseTooltip.Root>;
-type BaseTooltipHandle<Payload> = ReturnType<typeof BaseTooltip.createHandle<Payload>>;
+type BaseTooltipHandle<Payload> = ReturnType<
+  typeof BaseTooltip.createHandle<Payload>
+>;
 
 /**
  * Wrapper handle. Base UI's `createHandle` returns a `TooltipHandle`
@@ -85,7 +87,9 @@ export type TooltipHandle<Payload = unknown> = BaseTooltipHandle<Payload> & {
  * per handle instance; collisions across handles are harmless because
  * each instance pairs a single Root with its own Trigger.
  */
-export function createTooltipHandle<Payload = unknown>(): TooltipHandle<Payload> {
+export function createTooltipHandle<
+  Payload = unknown,
+>(): TooltipHandle<Payload> {
   const handle = BaseTooltip.createHandle<Payload>() as TooltipHandle<Payload>;
   const id = `zs-tooltip-${Math.random().toString(36).slice(2, 10)}`;
   Object.defineProperty(handle, "popupId", {
@@ -162,8 +166,9 @@ type TooltipRootRuntimeContext = {
   delay: number | undefined;
   popupId: string;
 };
-const TooltipRootRuntimeCtx =
-  createContext<TooltipRootRuntimeContext | null>(null);
+const TooltipRootRuntimeCtx = createContext<TooltipRootRuntimeContext | null>(
+  null,
+);
 
 function TooltipRoot({ delay, children, ...rest }: TooltipProps) {
   // When a `handle` is supplied, prefer its stable popupId so a
@@ -199,11 +204,7 @@ export type TooltipTriggerProps = BaseTriggerProps;
 
 const TooltipTrigger = forwardRef<HTMLElement, TooltipTriggerProps>(
   function TooltipTrigger(
-    {
-      delay: delayProp,
-      "aria-describedby": ariaDescribedByProp,
-      ...rest
-    },
+    { delay: delayProp, "aria-describedby": ariaDescribedByProp, ...rest },
     ref,
   ) {
     // Pull the Root-level delay (if any) into the Trigger's `delay` so
@@ -294,6 +295,7 @@ const TooltipPopup = forwardRef<HTMLElement, TooltipPopupProps>(
     return (
       <BaseTooltip.Positioner
         className="zs-tooltip-positioner"
+        data-slot="tooltip-positioner"
         side={side}
         align={align}
         sideOffset={sideOffset}
@@ -303,6 +305,7 @@ const TooltipPopup = forwardRef<HTMLElement, TooltipPopupProps>(
           ref={ref as Ref<HTMLDivElement>}
           id={popupId}
           className={composeBaseClass("zs-tooltip-popup", className)}
+          data-slot="tooltip-popup"
         >
           {children}
         </BaseTooltip.Popup>
@@ -328,6 +331,7 @@ const TooltipArrow = forwardRef<HTMLDivElement, TooltipArrowProps>(
       <BaseTooltip.Arrow
         ref={ref}
         className={composeBaseClass("zs-tooltip-arrow", className)}
+        data-slot="tooltip-arrow"
         {...rest}
       >
         {children ?? <ArrowGlyph />}

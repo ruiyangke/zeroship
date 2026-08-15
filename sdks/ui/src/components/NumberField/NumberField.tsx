@@ -107,8 +107,10 @@ type NumberFieldRootRenderState = {
 
 /* ─── public API ────────────────────────────────────────────────────── */
 
-export interface NumberFieldProps
-  extends Omit<BaseRootProps, "className" | "render"> {
+export interface NumberFieldProps extends Omit<
+  BaseRootProps,
+  "className" | "render"
+> {
   /** Size — sm 32 / md 40 (default) / lg 48 — matches Input rhythm. */
   size?: NumberFieldSize;
   /** Visual variant — `default` filled / `outline` border-only. Mirrors Input. */
@@ -246,15 +248,11 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           // props) with our local bare-focus tracking. Replacing the
           // handlers — the pre-fix shape — silently dropped any
           // consumer-attached focus listeners (Wave-9 review item 2).
-          const composedFocus = (
-            event: ReactFocusEvent<HTMLDivElement>,
-          ) => {
+          const composedFocus = (event: ReactFocusEvent<HTMLDivElement>) => {
             rootProps.onFocus?.(event);
             handleFocus(event);
           };
-          const composedBlur = (
-            event: ReactFocusEvent<HTMLDivElement>,
-          ) => {
+          const composedBlur = (event: ReactFocusEvent<HTMLDivElement>) => {
             rootProps.onBlur?.(event);
             handleBlur(event);
           };
@@ -268,6 +266,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
                 className,
                 rootProps.className,
               )}
+              data-slot="number-field"
               data-variant={variant}
               data-size={size}
               data-focused={dataFocused}
@@ -282,8 +281,14 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
         }}
       >
         {showScrub ? (
-          <BaseNumberField.ScrubArea className="zs-number-field__scrub">
-            <BaseNumberField.ScrubAreaCursor className="zs-number-field__scrub-cursor">
+          <BaseNumberField.ScrubArea
+            className="zs-number-field__scrub"
+            data-slot="number-field-scrub"
+          >
+            <BaseNumberField.ScrubAreaCursor
+              className="zs-number-field__scrub-cursor"
+              data-slot="number-field-scrub-cursor"
+            >
               {/* The cursor element gets pointer-locked while dragging.
                   We render a horizontal-resize glyph so the affordance
                   reads. aria-hidden because the spinbutton already
@@ -295,17 +300,18 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
                 width="26"
                 height="14"
               >
-                <path
-                  fill="currentColor"
-                  d="M0 7l5-5v3h16V2l5 5-5 5V9H5v3z"
-                />
+                <path fill="currentColor" d="M0 7l5-5v3h16V2l5 5-5 5V9H5v3z" />
               </svg>
             </BaseNumberField.ScrubAreaCursor>
           </BaseNumberField.ScrubArea>
         ) : null}
-        <BaseNumberField.Group className="zs-number-field__group">
+        <BaseNumberField.Group
+          className="zs-number-field__group"
+          data-slot="number-field-group"
+        >
           <BaseNumberField.Decrement
             className="zs-number-field__step zs-number-field__step--dec"
+            data-slot="number-field-step-dec"
             aria-label="Decrement"
           >
             {/* Minus glyph — decorative; the button carries aria-label.
@@ -315,6 +321,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           </BaseNumberField.Decrement>
           <BaseNumberField.Input
             className="zs-number-field__input"
+            data-slot="number-field-input"
             placeholder={placeholder}
             data-testid={dataTestId}
             // ───────────────────────────────────────────────────────
@@ -340,9 +347,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
             // defined. `aria-describedby` is UNIONED so external
             // help text composes with Field's announcements (Input
             // pattern, sdks/ui/src/components/Input/Input.tsx:243-250).
-            render={(
-              inputProps: InputHTMLAttributes<HTMLInputElement>,
-            ) => {
+            render={(inputProps: InputHTMLAttributes<HTMLInputElement>) => {
               const mergedDescribedBy =
                 [inputProps["aria-describedby"], ariaDescribedBy]
                   .filter(Boolean)
@@ -365,6 +370,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           />
           <BaseNumberField.Increment
             className="zs-number-field__step zs-number-field__step--inc"
+            data-slot="number-field-step-inc"
             aria-label="Increment"
           >
             {/* Plus glyph — decorative; the button carries aria-label. */}

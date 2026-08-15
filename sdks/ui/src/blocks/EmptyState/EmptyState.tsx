@@ -64,8 +64,10 @@ import { classnames } from "../../components/_classnames";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
 
-export interface EmptyStateProps
-  extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
+export interface EmptyStateProps extends Omit<
+  ComponentPropsWithoutRef<"div">,
+  "title"
+> {
   /**
    * Decorative leading glyph (an icon element). Wrapped in an
    * `aria-hidden` container — the title carries the accessible meaning,
@@ -137,13 +139,20 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
     // ergonomic-prop content renders first, then any compound children.
     const column = (
       <Center asChild data-slot="empty-state-column">
-        <Stack className="zs-empty-state__column" align="center" gap={3}>
+        <Stack
+          className="zs-empty-state__column"
+          data-slot="empty-state-column"
+          align="center"
+          gap={3}
+        >
           {icon != null ? <EmptyStateIcon>{icon}</EmptyStateIcon> : null}
           {title != null ? <EmptyStateTitle>{title}</EmptyStateTitle> : null}
           {description != null ? (
             <EmptyStateDescription>{description}</EmptyStateDescription>
           ) : null}
-          {action != null ? <EmptyStateActions>{action}</EmptyStateActions> : null}
+          {action != null ? (
+            <EmptyStateActions>{action}</EmptyStateActions>
+          ) : null}
           {children}
         </Stack>
       </Center>
@@ -198,7 +207,10 @@ export interface EmptyStateTitleProps extends HeadingProps {
 }
 
 const EmptyStateTitle = forwardRef<HTMLHeadingElement, EmptyStateTitleProps>(
-  function EmptyStateTitle({ asChild = false, className, children, ...rest }, ref) {
+  function EmptyStateTitle(
+    { asChild = false, className, children, ...rest },
+    ref,
+  ) {
     if (asChild) {
       if (!isValidElement(children)) {
         if (process.env.NODE_ENV !== "production") {

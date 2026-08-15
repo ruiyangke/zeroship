@@ -35,10 +35,7 @@
  * is static structured content; the semantics come entirely from the
  * native dl/dt/dd elements.
  */
-import {
-  forwardRef,
-  type ComponentPropsWithoutRef,
-} from "react";
+import { forwardRef, type ComponentPropsWithoutRef } from "react";
 import { classnames } from "../../components/_classnames";
 
 export type DescriptionListOrientation = "horizontal" | "vertical";
@@ -90,33 +87,33 @@ export type DescriptionListItemProps = DivProps;
 export type DescriptionListTermProps = ComponentPropsWithoutRef<"dt">;
 export type DescriptionListDetailProps = ComponentPropsWithoutRef<"dd">;
 
-const DescriptionListItem = forwardRef<HTMLDivElement, DescriptionListItemProps>(
-  function DescriptionListItem({ className, ...rest }, ref) {
+const DescriptionListItem = forwardRef<
+  HTMLDivElement,
+  DescriptionListItemProps
+>(function DescriptionListItem({ className, ...rest }, ref) {
+  return (
+    <div
+      {...rest}
+      ref={ref}
+      data-slot="description-list-item"
+      className={classnames("zs-description-list__item", className)}
+    />
+  );
+});
+DescriptionListItem.displayName = "DescriptionList.Item";
+
+const DescriptionListTerm = forwardRef<HTMLElement, DescriptionListTermProps>(
+  function DescriptionListTerm({ className, ...rest }, ref) {
     return (
-      <div
+      <dt
         {...rest}
         ref={ref}
-        data-slot="description-list-item"
-        className={classnames("zs-description-list__item", className)}
+        data-slot="description-list-term"
+        className={classnames("zs-description-list__term", className)}
       />
     );
   },
 );
-DescriptionListItem.displayName = "DescriptionList.Item";
-
-const DescriptionListTerm = forwardRef<
-  HTMLElement,
-  DescriptionListTermProps
->(function DescriptionListTerm({ className, ...rest }, ref) {
-  return (
-    <dt
-      {...rest}
-      ref={ref}
-      data-slot="description-list-term"
-      className={classnames("zs-description-list__term", className)}
-    />
-  );
-});
 DescriptionListTerm.displayName = "DescriptionList.Term";
 
 const DescriptionListDetail = forwardRef<
@@ -142,8 +139,7 @@ type DescriptionListComponent = typeof DescriptionListRoot & {
   Detail: typeof DescriptionListDetail;
 };
 
-export const DescriptionList =
-  DescriptionListRoot as DescriptionListComponent;
+export const DescriptionList = DescriptionListRoot as DescriptionListComponent;
 DescriptionList.Item = DescriptionListItem;
 DescriptionList.Term = DescriptionListTerm;
 DescriptionList.Detail = DescriptionListDetail;

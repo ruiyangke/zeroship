@@ -158,10 +158,7 @@ export type PreviewCardHandle = BasePreviewCardHandle & {
  * `PreviewCardHandle` shape, and so the registry is GC-clean when a
  * handle is no longer referenced.
  */
-const handleSubscribers = new WeakMap<
-  PreviewCardHandle,
-  Set<() => void>
->();
+const handleSubscribers = new WeakMap<PreviewCardHandle, Set<() => void>>();
 
 function subscribeToPreviewCardHandle(
   handle: PreviewCardHandle | undefined,
@@ -235,8 +232,7 @@ export function createPreviewCardHandle(): PreviewCardHandle {
  * is per-anchor). We expose them at Root for legibility — Tooltip uses
  * the same trick — and forward via an internal context the Trigger reads.
  */
-export interface PreviewCardProps
-  extends Omit<BaseRootProps, "render"> {
+export interface PreviewCardProps extends Omit<BaseRootProps, "render"> {
   /**
    * Milliseconds the pointer must rest on the Trigger before the Popup
    * opens. When omitted, Base UI's intent timer applies (currently
@@ -335,7 +331,9 @@ PreviewCardRoot.displayName = "PreviewCard";
  * button / span via the shared Slot helper (no rerender-prop ceremony
  * for the common case). Mirrors Dialog.Close's `3a64a726` pattern. */
 
-type BaseTriggerProps = ComponentPropsWithoutRef<typeof BasePreviewCard.Trigger>;
+type BaseTriggerProps = ComponentPropsWithoutRef<
+  typeof BasePreviewCard.Trigger
+>;
 
 /**
  * Props for the PreviewCard trigger.
@@ -345,8 +343,10 @@ type BaseTriggerProps = ComponentPropsWithoutRef<typeof BasePreviewCard.Trigger>
  * "one knob per Root" contract; consumers who genuinely need per-Trigger
  * timing can drop down to `<BasePreviewCard.Trigger delay={…}>` directly.
  */
-export interface PreviewCardTriggerProps
-  extends Omit<BaseTriggerProps, "delay" | "closeDelay"> {
+export interface PreviewCardTriggerProps extends Omit<
+  BaseTriggerProps,
+  "delay" | "closeDelay"
+> {
   /**
    * Render as the single child element rather than the default `<a>`.
    * Routed through the shared `_slot.ts` Slot so className, style, refs,
@@ -462,8 +462,9 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
           ref={ref as Ref<HTMLAnchorElement>}
           render={(triggerProps) => {
             const triggerRef = (triggerProps as { ref?: Ref<unknown> }).ref;
-            const { className: slotClassName, ...slotProps } =
-              triggerProps as { className?: string } & Record<string, unknown>;
+            const { className: slotClassName, ...slotProps } = triggerProps as {
+              className?: string;
+            } & Record<string, unknown>;
             return (
               <Slot
                 {...slotProps}
@@ -491,6 +492,7 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
         closeDelay={resolvedCloseDelay}
         aria-describedby={ariaDescribedBy}
         className={composeBaseClass("zs-preview-card-trigger", className)}
+        data-slot="preview-card-trigger"
         {...rest}
       >
         {children}
@@ -518,21 +520,25 @@ PreviewCardPortal.displayName = "PreviewCard.Portal";
  * the modal-feel edge case (campaign teaser preview, e.g.) but keep it
  * opt-in. */
 
-type BaseBackdropProps = ComponentPropsWithoutRef<typeof BasePreviewCard.Backdrop>;
+type BaseBackdropProps = ComponentPropsWithoutRef<
+  typeof BasePreviewCard.Backdrop
+>;
 /** Props for the optional `<PreviewCard.Backdrop>`. */
 export type PreviewCardBackdropProps = BaseBackdropProps;
 
-const PreviewCardBackdrop = forwardRef<HTMLDivElement, PreviewCardBackdropProps>(
-  function PreviewCardBackdrop({ className, ...rest }, ref) {
-    return (
-      <BasePreviewCard.Backdrop
-        ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-preview-card-backdrop", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const PreviewCardBackdrop = forwardRef<
+  HTMLDivElement,
+  PreviewCardBackdropProps
+>(function PreviewCardBackdrop({ className, ...rest }, ref) {
+  return (
+    <BasePreviewCard.Backdrop
+      ref={ref as Ref<HTMLDivElement>}
+      className={composeBaseClass("zs-preview-card-backdrop", className)}
+      data-slot="preview-card-backdrop"
+      {...rest}
+    />
+  );
+});
 PreviewCardBackdrop.displayName = "PreviewCard.Backdrop";
 
 /* ─── Positioner (exposed for symmetry; rarely reached for) ─────────── */
@@ -556,6 +562,7 @@ const PreviewCardPositioner = forwardRef<
     <BasePreviewCard.Positioner
       ref={ref as Ref<HTMLDivElement>}
       className={composeBaseClass("zs-preview-card-positioner", className)}
+      data-slot="preview-card-positioner"
       {...rest}
     />
   );
@@ -622,6 +629,7 @@ const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
     return (
       <BasePreviewCard.Positioner
         className="zs-preview-card-positioner"
+        data-slot="preview-card-positioner"
         side={side}
         align={align}
         sideOffset={sideOffset}
@@ -632,6 +640,7 @@ const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
           id={popupId}
           data-size={size}
           className={composeBaseClass("zs-preview-card-popup", className)}
+          data-slot="preview-card-popup"
         >
           {children}
         </BasePreviewCard.Popup>
@@ -658,6 +667,7 @@ const PreviewCardArrow = forwardRef<HTMLDivElement, PreviewCardArrowProps>(
       <BasePreviewCard.Arrow
         ref={ref}
         className={composeBaseClass("zs-preview-card-arrow", className)}
+        data-slot="preview-card-arrow"
         {...rest}
       >
         {children ?? <ArrowGlyph />}

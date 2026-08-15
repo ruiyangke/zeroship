@@ -42,11 +42,7 @@
  * asChild escape hatch (selection primitives are chips with hidden
  * inputs, not button-shaped surfaces — slice-4 review fix item 1).
  */
-import {
-  forwardRef,
-  type ComponentPropsWithRef,
-  type ReactNode,
-} from "react";
+import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { Switch as BaseSwitch } from "@base-ui/react/switch";
 import {
   useFieldContext,
@@ -75,11 +71,10 @@ type BaseSwitchRootProps = ComponentPropsWithRef<typeof BaseSwitch.Root>;
 // can't slip through. If Switch ever needs element replacement, route it
 // through explicit `_slot.ts` rather than re-opening `nativeButton` on
 // the public surface.
-export interface SwitchProps
-  extends Omit<
-    BaseSwitchRootProps,
-    "className" | "render" | "children" | "nativeButton"
-  > {
+export interface SwitchProps extends Omit<
+  BaseSwitchRootProps,
+  "className" | "render" | "children" | "nativeButton"
+> {
   /** Visual size — small 1.5rem wide, medium 2rem (default), large 2.5rem. */
   size?: SwitchSize;
 
@@ -154,7 +149,7 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
       className={trackClassName}
       data-size={size}
     >
-      <BaseSwitch.Thumb className="zs-switch__thumb" />
+      <BaseSwitch.Thumb className="zs-switch__thumb" data-slot="switch-thumb" />
     </BaseSwitch.Root>
   );
 
@@ -168,7 +163,9 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
         fieldProps={fieldProps}
       >
         {track}
-        <span className="zs-switch-field__text">{label}</span>
+        <span className="zs-switch-field__text" data-slot="switch-field-text">
+          {label}
+        </span>
       </SelectionRow>
     );
   }

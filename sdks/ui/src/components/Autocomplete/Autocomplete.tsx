@@ -55,7 +55,9 @@ interface AutocompleteContextValue {
   size: AutocompleteSize;
   variant: AutocompleteVariant;
 }
-const AutocompleteContext = createContext<AutocompleteContextValue | null>(null);
+const AutocompleteContext = createContext<AutocompleteContextValue | null>(
+  null,
+);
 function useAutocompleteContext(): AutocompleteContextValue {
   return useContext(AutocompleteContext) ?? { size: "md", variant: "default" };
 }
@@ -67,8 +69,9 @@ type BaseAutocompleteRootShape<Value> = Omit<
   "render" | "children"
 >;
 
-export interface AutocompleteProps<Value extends string = string>
-  extends BaseAutocompleteRootShape<Value> {
+export interface AutocompleteProps<
+  Value extends string = string,
+> extends BaseAutocompleteRootShape<Value> {
   size?: AutocompleteSize;
   variant?: AutocompleteVariant;
   placeholder?: string;
@@ -211,16 +214,19 @@ function AutocompleteRoot<Value extends string = string>(
             `zs-combobox-input-group--${size}`,
             className,
           )}
+          data-slot="autocomplete-input-group"
           data-variant={variant}
           data-size={size}
         >
           <BaseAutocomplete.Input
             className="zs-combobox-input"
+            data-slot="combobox-input"
             placeholder={placeholder}
             {...inputAriaProps}
           />
           <BaseAutocomplete.Icon
             className="zs-combobox-input-group__icon"
+            data-slot="combobox-input-group-icon"
             aria-hidden="true"
           >
             <Icon as={ChevronDown} size="sm" />
@@ -229,6 +235,7 @@ function AutocompleteRoot<Value extends string = string>(
         <BaseAutocomplete.Portal>
           <BaseAutocomplete.Positioner
             className="zs-combobox-positioner"
+            data-slot="combobox-positioner"
             align={align}
             side={placement}
             sideOffset={sideOffset}
@@ -239,9 +246,13 @@ function AutocompleteRoot<Value extends string = string>(
                 "zs-autocomplete-popup",
                 `zs-combobox-popup--${size}`,
               )}
+              data-slot="autocomplete-popup"
               data-size={size}
             >
-              <BaseAutocomplete.List className="zs-combobox-list">
+              <BaseAutocomplete.List
+                className="zs-combobox-list"
+                data-slot="combobox-list"
+              >
                 {children}
               </BaseAutocomplete.List>
             </BaseAutocomplete.Popup>
@@ -274,10 +285,16 @@ const AutocompleteItem = forwardRef<HTMLDivElement, AutocompleteItemProps>(
           "zs-autocomplete-item zs-combobox-item",
           className,
         )}
+        data-slot="autocomplete-item"
         data-size={size}
         {...rest}
       >
-        <span className="zs-autocomplete-item__text">{children}</span>
+        <span
+          className="zs-autocomplete-item__text"
+          data-slot="autocomplete-item-text"
+        >
+          {children}
+        </span>
       </BaseAutocomplete.Item>
     );
   },

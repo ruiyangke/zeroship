@@ -86,8 +86,10 @@ const altWarned = new Set<string>();
 
 /* ─── Avatar.Root ───────────────────────────────────────────────────── */
 
-export interface AvatarRootProps
-  extends Omit<BaseRootProps, "className" | "render"> {
+export interface AvatarRootProps extends Omit<
+  BaseRootProps,
+  "className" | "render"
+> {
   /**
    * Visual size — `xs` 1.5rem / `sm` 2rem / `md` 2.5rem (default) /
    * `lg` 3rem / `xl` 4rem. Drives both the container box AND the
@@ -121,6 +123,7 @@ const AvatarRoot = forwardRef<HTMLSpanElement, AvatarRootProps>(
           `zs-avatar--${shape}`,
           className,
         )}
+        data-slot="avatar"
         data-size={size}
         data-shape={shape}
       >
@@ -141,8 +144,10 @@ AvatarRoot.displayName = "Avatar.Root";
  * default to `""` because that would silently mark every identity
  * avatar decorative and ship a worse-than-nothing default. */
 
-export interface AvatarImageProps
-  extends Omit<BaseImageProps, "className" | "render" | "alt"> {
+export interface AvatarImageProps extends Omit<
+  BaseImageProps,
+  "className" | "render" | "alt"
+> {
   /**
    * Optional class hook on the underlying `<img>`. The default class
    * paints the image flush against the Root's content-box at the
@@ -165,6 +170,7 @@ const AvatarImage = forwardRef<HTMLImageElement, AvatarImageProps>(
         ref={ref}
         alt={alt}
         className={classnames("zs-avatar__image", className)}
+        data-slot="avatar-image"
       />
     );
   },
@@ -173,8 +179,10 @@ AvatarImage.displayName = "Avatar.Image";
 
 /* ─── Avatar.Fallback ───────────────────────────────────────────────── */
 
-export interface AvatarFallbackProps
-  extends Omit<BaseFallbackProps, "className" | "render"> {
+export interface AvatarFallbackProps extends Omit<
+  BaseFallbackProps,
+  "className" | "render"
+> {
   /**
    * Delay in ms before the fallback paints. Useful for suppressing a
    * flash of initials when the image is likely to arrive within a
@@ -195,6 +203,7 @@ const AvatarFallback = forwardRef<HTMLSpanElement, AvatarFallbackProps>(
         {...(rest as BaseFallbackProps)}
         ref={ref as Ref<HTMLSpanElement>}
         className={classnames("zs-avatar__fallback", className)}
+        data-slot="avatar-fallback"
       >
         {children}
       </BaseAvatar.Fallback>
@@ -272,7 +281,7 @@ const AvatarShorthand = forwardRef<HTMLSpanElement, AvatarProps>(
           // eslint-disable-next-line no-console
           console.warn(
             `[Avatar] Rendered with src="${src}" but no \`alt\`. ` +
-              "Pass `alt=\"\"` for decorative images, or a descriptive " +
+              'Pass `alt=""` for decorative images, or a descriptive ' +
               "string for identity images. AT users will hear the " +
               "raw URL otherwise.",
           );

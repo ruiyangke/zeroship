@@ -114,7 +114,10 @@ function flattenChildren(children: ReactNode): ReactNode[] {
   return out;
 }
 
-function containsDisplayName(children: ReactNode, displayName: string): boolean {
+function containsDisplayName(
+  children: ReactNode,
+  displayName: string,
+): boolean {
   let found = false;
   Children.forEach(children, (child) => {
     if (found || !isValidElement(child)) return;
@@ -138,8 +141,10 @@ function containsDisplayName(children: ReactNode, displayName: string): boolean 
  * `aria-labelledby` always resolves to a present element. */
 const FormSectionTitleIdContext = createContext<string | undefined>(undefined);
 
-export interface FormSectionProps
-  extends Omit<ComponentPropsWithoutRef<"section">, "title"> {
+export interface FormSectionProps extends Omit<
+  ComponentPropsWithoutRef<"section">,
+  "title"
+> {
   /**
    * Section heading. Rendered as a relevelable `<h3>` (see `headingLevel`
    * note on `FormSection.Title`) and used as the section's accessible
@@ -341,7 +346,10 @@ export interface FormSectionTitleProps extends HeadingProps {
 }
 
 const FormSectionTitle = forwardRef<HTMLHeadingElement, FormSectionTitleProps>(
-  function FormSectionTitle({ asChild = false, className, children, ...rest }, ref) {
+  function FormSectionTitle(
+    { asChild = false, className, children, ...rest },
+    ref,
+  ) {
     // Read the shared id minted at the root so the heading element is the
     // exact target of the root's `aria-labelledby`.
     const titleId = useContext(FormSectionTitleIdContext);

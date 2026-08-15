@@ -59,8 +59,10 @@ import { classnames } from "../../components/_classnames";
 
 export type PaginationSize = "sm" | "md";
 
-export interface PaginationProps
-  extends Omit<ComponentPropsWithoutRef<"nav">, "onChange"> {
+export interface PaginationProps extends Omit<
+  ComponentPropsWithoutRef<"nav">,
+  "onChange"
+> {
   /** 1-based current page (controlled). Clamped into `[1, pageCount]`. */
   page: number;
   /** Items per page. Drives `pageCount = ceil(total / pageSize)`. */
@@ -111,8 +113,7 @@ export interface PaginationProps
  * positions (head / tail) keep their identity across renders.
  */
 type PageItem =
-  | { type: "page"; page: number }
-  | { type: "ellipsis"; key: "start" | "end" };
+  { type: "page"; page: number } | { type: "ellipsis"; key: "start" | "end" };
 
 /**
  * Build the ordered list of page slots. Pure function of the resolved
@@ -136,7 +137,10 @@ export function buildPageItems(
   // a direct caller (e.g. DataTable) may pass raw numbers.
   const siblings = Math.max(0, Math.floor(siblingCount));
   const boundaries = Math.max(0, Math.floor(boundaryCount));
-  const count = Math.max(1, Number.isFinite(pageCount) ? Math.floor(pageCount) : 1);
+  const count = Math.max(
+    1,
+    Number.isFinite(pageCount) ? Math.floor(pageCount) : 1,
+  );
   const current = Math.min(
     Math.max(Number.isFinite(currentPage) ? Math.floor(currentPage) : 1, 1),
     count,
@@ -276,7 +280,10 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
             data-slot="pagination-page-size"
             className="zs-pagination__page-size"
           >
-            <span className="zs-pagination__page-size-label">
+            <span
+              className="zs-pagination__page-size-label"
+              data-slot="pagination-page-size-label"
+            >
               Rows per page
             </span>
             <Select
@@ -309,10 +316,19 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
             disabled={disabled || atStart}
             onClick={() => goTo(currentPage - 1)}
           >
-            <span aria-hidden="true" className="zs-pagination__chevron">
+            <span
+              aria-hidden="true"
+              className="zs-pagination__chevron"
+              data-slot="pagination-chevron"
+            >
               {"‹"}
             </span>
-            <span className="zs-pagination__edge-label">Prev</span>
+            <span
+              className="zs-pagination__edge-label"
+              data-slot="pagination-edge-label"
+            >
+              Prev
+            </span>
           </Button>
 
           {items.map((item) =>
@@ -354,8 +370,17 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
             disabled={disabled || atEnd}
             onClick={() => goTo(currentPage + 1)}
           >
-            <span className="zs-pagination__edge-label">Next</span>
-            <span aria-hidden="true" className="zs-pagination__chevron">
+            <span
+              className="zs-pagination__edge-label"
+              data-slot="pagination-edge-label"
+            >
+              Next
+            </span>
+            <span
+              aria-hidden="true"
+              className="zs-pagination__chevron"
+              data-slot="pagination-chevron"
+            >
               {"›"}
             </span>
           </Button>

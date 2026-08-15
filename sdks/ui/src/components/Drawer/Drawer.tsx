@@ -131,10 +131,7 @@ export type DrawerTriggerProps = BaseTriggerProps;
 const DrawerTrigger = forwardRef<HTMLElement, DrawerTriggerProps>(
   function DrawerTrigger(props, ref) {
     return (
-      <BaseDialog.Trigger
-        ref={ref as Ref<HTMLButtonElement>}
-        {...props}
-      />
+      <BaseDialog.Trigger ref={ref as Ref<HTMLButtonElement>} {...props} />
     );
   },
 );
@@ -168,6 +165,7 @@ const DrawerBackdrop = forwardRef<HTMLElement, DrawerBackdropProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-drawer-backdrop", className)}
+        data-slot="drawer-backdrop"
       />
     );
   },
@@ -207,6 +205,7 @@ const DrawerContent = forwardRef<HTMLElement, DrawerContentProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-drawer-content", className)}
+        data-slot="drawer-content"
         data-side={side}
         data-size={size}
       />
@@ -242,12 +241,19 @@ const DrawerHeader = forwardRef<HTMLDivElement, DrawerHeaderProps>(
       <div
         ref={ref}
         className={classnames("zs-drawer__header", className)}
+        data-slot="drawer-header"
         {...rest}
       >
-        <div className="zs-drawer__header-content">{children}</div>
+        <div
+          className="zs-drawer__header-content"
+          data-slot="drawer-header-content"
+        >
+          {children}
+        </div>
         {showClose ? (
           <BaseDialog.Close
             className="zs-drawer__header-close"
+            data-slot="drawer-header-close"
             aria-label={closeLabel}
           >
             <Icon as={X} size="sm" />
@@ -271,6 +277,7 @@ const DrawerTitle = forwardRef<HTMLHeadingElement, DrawerTitleProps>(
       <BaseDialog.Title
         ref={ref}
         className={composeBaseClass("zs-drawer__title", className)}
+        data-slot="drawer-title"
         {...rest}
       />
     );
@@ -278,21 +285,25 @@ const DrawerTitle = forwardRef<HTMLHeadingElement, DrawerTitleProps>(
 );
 DrawerTitle.displayName = "Drawer.Title";
 
-type BaseDescriptionProps = ComponentPropsWithoutRef<typeof BaseDialog.Description>;
+type BaseDescriptionProps = ComponentPropsWithoutRef<
+  typeof BaseDialog.Description
+>;
 /** Props for `Drawer.Description`. Base UI auto-wires
  * `aria-describedby` on Content. */
 export type DrawerDescriptionProps = BaseDescriptionProps;
-const DrawerDescription = forwardRef<HTMLParagraphElement, DrawerDescriptionProps>(
-  function DrawerDescription({ className, ...rest }, ref) {
-    return (
-      <BaseDialog.Description
-        ref={ref}
-        className={composeBaseClass("zs-drawer__description", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const DrawerDescription = forwardRef<
+  HTMLParagraphElement,
+  DrawerDescriptionProps
+>(function DrawerDescription({ className, ...rest }, ref) {
+  return (
+    <BaseDialog.Description
+      ref={ref}
+      className={composeBaseClass("zs-drawer__description", className)}
+      data-slot="drawer-description"
+      {...rest}
+    />
+  );
+});
 DrawerDescription.displayName = "Drawer.Description";
 
 /* ─── Body / Footer (layout-only) ───────────────────────────────────── */
@@ -305,6 +316,7 @@ const DrawerBody = forwardRef<HTMLDivElement, DrawerBodyProps>(
       <div
         ref={ref}
         className={classnames("zs-drawer__body", className)}
+        data-slot="drawer-body"
         {...rest}
       />
     );
@@ -320,6 +332,7 @@ const DrawerFooter = forwardRef<HTMLDivElement, DrawerFooterProps>(
       <div
         ref={ref}
         className={classnames("zs-drawer__footer", className)}
+        data-slot="drawer-footer"
         {...rest}
       />
     );
@@ -382,7 +395,11 @@ const DrawerClose = forwardRef<HTMLButtonElement, DrawerCloseProps>(
     // the inspection above.
     const nativeButton = asChild ? asChildIsNativeButton : true;
 
-    if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+    if (
+      process.env.NODE_ENV !== "production" &&
+      asChild &&
+      !isValidElement(children)
+    ) {
       // eslint-disable-next-line no-console
       console.error(
         "Drawer.Close asChild expects a single React element child; received " +
@@ -446,10 +463,7 @@ const DrawerClose = forwardRef<HTMLButtonElement, DrawerCloseProps>(
               <Slot
                 {...closeProps}
                 {...rest}
-                ref={composeRefs(
-                  ref as Ref<unknown>,
-                  closePropsRef,
-                )}
+                ref={composeRefs(ref as Ref<unknown>, closePropsRef)}
                 onClick={composedOnClick}
               >
                 {children}

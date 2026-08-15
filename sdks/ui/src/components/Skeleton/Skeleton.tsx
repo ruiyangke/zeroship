@@ -105,7 +105,11 @@ export const Skeleton = forwardRef<HTMLDivElement, SkeletonProps>(
         aria-hidden="true"
         data-slot="skeleton"
         data-variant={variant}
-        className={classnames("zs-skeleton", `zs-skeleton--${variant}`, className)}
+        className={classnames(
+          "zs-skeleton",
+          `zs-skeleton--${variant}`,
+          className,
+        )}
         style={sizeStyle}
       />
     );

@@ -138,9 +138,12 @@ function RemoveButton({
         }
       }}
     >
-      <span aria-hidden="true" className="zs-tag__remove-glyph">
-        {/* Multiplication sign — the canonical close glyph. */}
-        ×
+      <span
+        aria-hidden="true"
+        className="zs-tag__remove-glyph"
+        data-slot="tag-remove-glyph"
+      >
+        {/* Multiplication sign — the canonical close glyph. */}×
       </span>
     </button>
   );
@@ -213,7 +216,7 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
         console.warn(
           "Tag is removable but its children are not a plain string, so " +
             "the remove button's accessible name cannot be derived. Pass " +
-            "`removeLabel` (e.g. removeLabel=\"Remove React\") so screen " +
+            '`removeLabel` (e.g. removeLabel="Remove React") so screen ' +
             "readers announce what is being removed. Falling back to " +
             '"Remove".',
         );
@@ -232,11 +235,13 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
   const inner = (
     <>
       {leadingIcon != null ? (
-        <span aria-hidden="true" className="zs-tag__icon">
+        <span aria-hidden="true" className="zs-tag__icon" data-slot="tag-icon">
           {leadingIcon}
         </span>
       ) : null}
-      <span className="zs-tag__label">{children}</span>
+      <span className="zs-tag__label" data-slot="tag-label">
+        {children}
+      </span>
     </>
   );
 
@@ -254,16 +259,16 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
         className={composedClassName}
         aria-pressed={isSelected}
         onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
-          (onClick as ((e: ReactMouseEvent<HTMLButtonElement>) => void) | undefined)?.(
-            event,
-          );
+          (
+            onClick as
+              ((e: ReactMouseEvent<HTMLButtonElement>) => void) | undefined
+          )?.(event);
           if (event.defaultPrevented) return;
           onSelectedChange?.(!isSelected);
         }}
         onKeyDown={
           onKeyDown as
-            | ((e: ReactKeyboardEvent<HTMLButtonElement>) => void)
-            | undefined
+            ((e: ReactKeyboardEvent<HTMLButtonElement>) => void) | undefined
         }
       >
         {inner}
@@ -284,11 +289,12 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
       data-slot="tag"
       data-size={size}
       className={composedClassName}
-      onClick={onClick as ((e: ReactMouseEvent<HTMLSpanElement>) => void) | undefined}
+      onClick={
+        onClick as ((e: ReactMouseEvent<HTMLSpanElement>) => void) | undefined
+      }
       onKeyDown={
         onKeyDown as
-          | ((e: ReactKeyboardEvent<HTMLSpanElement>) => void)
-          | undefined
+          ((e: ReactKeyboardEvent<HTMLSpanElement>) => void) | undefined
       }
     >
       {inner}

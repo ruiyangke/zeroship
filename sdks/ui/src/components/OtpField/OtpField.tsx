@@ -137,8 +137,10 @@ type OtpFieldRootRenderState = {
   valid: boolean | null;
 };
 
-export interface OtpFieldProps
-  extends Omit<BaseRootProps, "className" | "render" | "length"> {
+export interface OtpFieldProps extends Omit<
+  BaseRootProps,
+  "className" | "render" | "length"
+> {
   /** Number of digits — default 6. */
   length?: number;
   /** Visual size — sm 32 / md 40 (default) / lg 48. */
@@ -225,8 +227,7 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
     // text into our hidden span because Base UI strips `aria-label`
     // from the Root group, leaving nothing for an `aria-labelledby`
     // chain to point at.
-    const renderGroupHiddenLabel =
-      ariaLabelledBy == null && fieldCtx == null;
+    const renderGroupHiddenLabel = ariaLabelledBy == null && fieldCtx == null;
     const groupFallbackText: string =
       ariaLabel != null ? ariaLabel : "Verification code";
 
@@ -298,6 +299,7 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
                 className,
                 rootProps.className,
               )}
+              data-slot="otp-field"
               data-variant={variant}
               data-size={size}
               data-focused={dataFocused}
@@ -309,13 +311,13 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
               data-testid={dataTestId}
             >
               {/* Group-name hidden span. Rendered when neither
-                * aria-labelledby nor a Field wraps us. Cell 0 carries
-                * no per-cell aria-label (Base UI strips it by design)
-                * so the group label is the ONLY thing naming cell 0.
-                * The hidden-span id is seeded on the Root's
-                * aria-labelledby above, so Base UI resolves it back
-                * onto `rootProps["aria-labelledby"]` for us to compose
-                * into each per-cell aria-labelledby chain below. */}
+               * aria-labelledby nor a Field wraps us. Cell 0 carries
+               * no per-cell aria-label (Base UI strips it by design)
+               * so the group label is the ONLY thing naming cell 0.
+               * The hidden-span id is seeded on the Root's
+               * aria-labelledby above, so Base UI resolves it back
+               * onto `rootProps["aria-labelledby"]` for us to compose
+               * into each per-cell aria-labelledby chain below. */}
               {renderGroupHiddenLabel ? (
                 <span id={hiddenLabelId} style={visuallyHiddenStyle}>
                   {groupFallbackText}
@@ -359,6 +361,7 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
                     </span>
                     <BaseOTPField.Input
                       className="zs-otp-field__input"
+                      data-slot="otp-field-input"
                       aria-labelledby={cellLabelledBy}
                       aria-describedby={cellDescribedBy}
                       aria-invalid={cellAriaInvalid}

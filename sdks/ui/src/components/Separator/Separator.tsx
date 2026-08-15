@@ -49,11 +49,7 @@
  *      toolbar buttons (vertical orientation) without consumers
  *      branching at the call site.
  */
-import {
-  forwardRef,
-  type ComponentPropsWithRef,
-  type Ref,
-} from "react";
+import { forwardRef, type ComponentPropsWithRef, type Ref } from "react";
 import { Separator as BaseSeparator } from "@base-ui/react/separator";
 import { classnames } from "../_classnames";
 
@@ -62,16 +58,15 @@ export type SeparatorVariant = "hairline" | "thick";
 
 type BaseSeparatorProps = ComponentPropsWithRef<typeof BaseSeparator>;
 
-export interface SeparatorProps
-  extends Omit<
-    BaseSeparatorProps,
-    | "className"
-    | "render"
-    | "orientation"
-    | "role"
-    | "aria-orientation"
-    | "aria-hidden"
-  > {
+export interface SeparatorProps extends Omit<
+  BaseSeparatorProps,
+  | "className"
+  | "render"
+  | "orientation"
+  | "role"
+  | "aria-orientation"
+  | "aria-hidden"
+> {
   /**
    * Layout axis — `horizontal` (default) cuts a row; `vertical` cuts a
    * column. Drives both the visible line direction (border on the end

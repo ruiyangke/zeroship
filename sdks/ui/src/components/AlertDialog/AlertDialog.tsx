@@ -66,10 +66,7 @@ export interface AlertDialogProps {
    * | 'imperative-action' | 'none'`. Note: `'outside-press'` never
    * fires here — AlertDialog ignores outside-click by Base UI design.
    */
-  onOpenChange?: (
-    open: boolean,
-    eventDetails: BaseChangeEventDetails,
-  ) => void;
+  onOpenChange?: (open: boolean, eventDetails: BaseChangeEventDetails) => void;
   children?: ReactNode;
 }
 
@@ -85,13 +82,12 @@ export interface AlertDialogProps {
  */
 type AlertButtonRole = "action" | "cancel";
 
-function readAlertButtonRole(
-  type: unknown,
-): AlertButtonRole | undefined {
+function readAlertButtonRole(type: unknown): AlertButtonRole | undefined {
   if (!type || (typeof type !== "function" && typeof type !== "object")) {
     return undefined;
   }
-  const direct = (type as { __zsAlertButton?: AlertButtonRole }).__zsAlertButton;
+  const direct = (type as { __zsAlertButton?: AlertButtonRole })
+    .__zsAlertButton;
   if (direct === "action" || direct === "cancel") return direct;
   // memo(inner): `type` is the memo shell; `type.type` is the inner
   // forwardRef object. memo copies statics off the SHELL but for
@@ -209,20 +205,24 @@ AlertDialogRootImpl.displayName = "AlertDialog";
 
 /* ─── Trigger ───────────────────────────────────────────────────────── */
 
-type BaseTriggerProps = ComponentPropsWithoutRef<typeof BaseAlertDialog.Trigger>;
+type BaseTriggerProps = ComponentPropsWithoutRef<
+  typeof BaseAlertDialog.Trigger
+>;
 export type AlertDialogTriggerProps = BaseTriggerProps;
 
-const AlertDialogTrigger = forwardRef<HTMLButtonElement, AlertDialogTriggerProps>(
-  function AlertDialogTrigger({ className, ...rest }, ref) {
-    return (
-      <BaseAlertDialog.Trigger
-        ref={ref}
-        className={composeBaseClass("zs-alertdialog-trigger", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const AlertDialogTrigger = forwardRef<
+  HTMLButtonElement,
+  AlertDialogTriggerProps
+>(function AlertDialogTrigger({ className, ...rest }, ref) {
+  return (
+    <BaseAlertDialog.Trigger
+      ref={ref}
+      className={composeBaseClass("zs-alertdialog-trigger", className)}
+      data-slot="alertdialog-trigger"
+      {...rest}
+    />
+  );
+});
 AlertDialogTrigger.displayName = "AlertDialog.Trigger";
 
 /* ─── Portal / Backdrop ─────────────────────────────────────────────── */
@@ -235,26 +235,30 @@ function AlertDialogPortal(props: AlertDialogPortalProps) {
 }
 AlertDialogPortal.displayName = "AlertDialog.Portal";
 
-type BaseBackdropProps = ComponentPropsWithoutRef<typeof BaseAlertDialog.Backdrop>;
+type BaseBackdropProps = ComponentPropsWithoutRef<
+  typeof BaseAlertDialog.Backdrop
+>;
 export type AlertDialogBackdropProps = BaseBackdropProps;
 
-const AlertDialogBackdrop = forwardRef<HTMLDivElement, AlertDialogBackdropProps>(
-  function AlertDialogBackdrop({ className, ...rest }, ref) {
-    return (
-      <BaseAlertDialog.Backdrop
-        ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass(
-          "zs-dialog-backdrop zs-alertdialog-backdrop",
-          className,
-        )}
-        // Alerts use the canonical scrim — no `tint` prop offered.
-        // The popup inherits `.zs-dialog-popup` forced-colors rules.
-        data-tint="scrim"
-        {...rest}
-      />
-    );
-  },
-);
+const AlertDialogBackdrop = forwardRef<
+  HTMLDivElement,
+  AlertDialogBackdropProps
+>(function AlertDialogBackdrop({ className, ...rest }, ref) {
+  return (
+    <BaseAlertDialog.Backdrop
+      ref={ref as Ref<HTMLDivElement>}
+      className={composeBaseClass(
+        "zs-dialog-backdrop zs-alertdialog-backdrop",
+        className,
+      )}
+      data-slot="alertdialog-backdrop"
+      // Alerts use the canonical scrim — no `tint` prop offered.
+      // The popup inherits `.zs-dialog-popup` forced-colors rules.
+      data-tint="scrim"
+      {...rest}
+    />
+  );
+});
 AlertDialogBackdrop.displayName = "AlertDialog.Backdrop";
 
 /* ─── Popup ─────────────────────────────────────────────────────────── */
@@ -274,6 +278,7 @@ const AlertDialogPopup = forwardRef<HTMLDivElement, AlertDialogPopupProps>(
           "zs-dialog-popup zs-alertdialog-popup",
           className,
         )}
+        data-slot="alertdialog-popup"
         data-size={size}
         {...rest}
       />
@@ -284,8 +289,7 @@ AlertDialogPopup.displayName = "AlertDialog.Popup";
 
 /* ─── Header / Title / Description / Body ───────────────────────────── */
 
-export interface AlertDialogHeaderProps
-  extends ComponentPropsWithoutRef<"div"> {}
+export interface AlertDialogHeaderProps extends ComponentPropsWithoutRef<"div"> {}
 
 const AlertDialogHeader = forwardRef<HTMLDivElement, AlertDialogHeaderProps>(
   function AlertDialogHeader({ className, children, ...rest }, ref) {
@@ -299,9 +303,15 @@ const AlertDialogHeader = forwardRef<HTMLDivElement, AlertDialogHeaderProps>(
           "zs-dialog__header zs-alertdialog__header",
           className,
         )}
+        data-slot="alertdialog-header"
         {...rest}
       >
-        <div className="zs-dialog__header-content">{children}</div>
+        <div
+          className="zs-dialog__header-content"
+          data-slot="dialog-header-content"
+        >
+          {children}
+        </div>
       </div>
     );
   },
@@ -317,6 +327,7 @@ const AlertDialogTitle = forwardRef<HTMLHeadingElement, AlertDialogTitleProps>(
       <BaseAlertDialog.Title
         ref={ref}
         className={composeBaseClass("zs-dialog__title", className)}
+        data-slot="dialog-title"
         {...rest}
       />
     );
@@ -324,20 +335,24 @@ const AlertDialogTitle = forwardRef<HTMLHeadingElement, AlertDialogTitleProps>(
 );
 AlertDialogTitle.displayName = "AlertDialog.Title";
 
-type BaseDescriptionProps = ComponentPropsWithoutRef<typeof BaseAlertDialog.Description>;
+type BaseDescriptionProps = ComponentPropsWithoutRef<
+  typeof BaseAlertDialog.Description
+>;
 export type AlertDialogDescriptionProps = BaseDescriptionProps;
 
-const AlertDialogDescription = forwardRef<HTMLParagraphElement, AlertDialogDescriptionProps>(
-  function AlertDialogDescription({ className, ...rest }, ref) {
-    return (
-      <BaseAlertDialog.Description
-        ref={ref}
-        className={composeBaseClass("zs-dialog__description", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const AlertDialogDescription = forwardRef<
+  HTMLParagraphElement,
+  AlertDialogDescriptionProps
+>(function AlertDialogDescription({ className, ...rest }, ref) {
+  return (
+    <BaseAlertDialog.Description
+      ref={ref}
+      className={composeBaseClass("zs-dialog__description", className)}
+      data-slot="dialog-description"
+      {...rest}
+    />
+  );
+});
 AlertDialogDescription.displayName = "AlertDialog.Description";
 
 export type AlertDialogBodyProps = ComponentPropsWithoutRef<"div">;
@@ -351,6 +366,7 @@ const AlertDialogBody = forwardRef<HTMLDivElement, AlertDialogBodyProps>(
           "zs-dialog__body zs-alertdialog__body",
           className,
         )}
+        data-slot="alertdialog-body"
         {...rest}
       />
     );
@@ -360,8 +376,7 @@ AlertDialogBody.displayName = "AlertDialog.Body";
 
 /* ─── Footer ────────────────────────────────────────────────────────── */
 
-export interface AlertDialogFooterProps
-  extends ComponentPropsWithoutRef<"div"> {}
+export interface AlertDialogFooterProps extends ComponentPropsWithoutRef<"div"> {}
 
 /**
  * Flatten footer children into a list of `{element, role}` for the
@@ -394,7 +409,8 @@ function flattenAlertButtons(children: ReactNode): FlattenedAlertButton[] {
       elementType === undefined ||
       // React.Fragment is a Symbol; identity check below covers it.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (typeof elementType === "symbol" && elementType.toString().includes("react.fragment"))
+      (typeof elementType === "symbol" &&
+        elementType.toString().includes("react.fragment"))
     ) {
       visit((node.props as { children?: ReactNode }).children);
       return;
@@ -403,8 +419,7 @@ function flattenAlertButtons(children: ReactNode): FlattenedAlertButton[] {
     if (role) {
       const tone =
         role === "action"
-          ? ((node.props as { tone?: AlertDialogActionTone }).tone ??
-              "normal")
+          ? ((node.props as { tone?: AlertDialogActionTone }).tone ?? "normal")
           : "normal";
       out.push({ role, tone, index: nextIndex++ });
     }
@@ -487,6 +502,7 @@ const AlertDialogFooter = forwardRef<HTMLDivElement, AlertDialogFooterProps>(
           "zs-dialog__footer zs-alertdialog__footer",
           className,
         )}
+        data-slot="alertdialog-footer"
         data-button-count={buttonCount}
         {...rest}
       >
@@ -620,8 +636,10 @@ const AlertDialogCancel = forwardRef<HTMLElement, AlertDialogCancelProps>(
 );
 AlertDialogCancel.displayName = "AlertDialog.Cancel";
 
-export interface AlertDialogActionProps
-  extends Omit<ButtonProps, "type" | "intent"> {
+export interface AlertDialogActionProps extends Omit<
+  ButtonProps,
+  "type" | "intent"
+> {
   /**
    * Action tone. `destructive` flips the underlying Button to
    * `intent="destructive"` — the red-system action. Default `normal`.
@@ -701,10 +719,12 @@ AlertDialogAction.displayName = "AlertDialog.Action";
 /* Attach sentinels for the Footer's child-walk (review-fix item 4).
  * memo wrappers copy static properties off the inner forwardRef, so
  * the sentinel survives that path. */
-(AlertDialogAction as unknown as { __zsAlertButton: AlertButtonRole }).__zsAlertButton =
-  "action";
-(AlertDialogCancel as unknown as { __zsAlertButton: AlertButtonRole }).__zsAlertButton =
-  "cancel";
+(
+  AlertDialogAction as unknown as { __zsAlertButton: AlertButtonRole }
+).__zsAlertButton = "action";
+(
+  AlertDialogCancel as unknown as { __zsAlertButton: AlertButtonRole }
+).__zsAlertButton = "cancel";
 
 /* ─── public namespace ──────────────────────────────────────────────── */
 

@@ -32,13 +32,7 @@ import { classnames } from "../../components/_classnames";
 import { type Pad, spaceVar } from "../_layout-primitives";
 
 export type ContainerSize =
-  | "sm"
-  | "md"
-  | "lg"
-  | "xl"
-  | "product"
-  | "wide"
-  | "full";
+  "sm" | "md" | "lg" | "xl" | "product" | "wide" | "full";
 
 export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
   /**

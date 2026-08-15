@@ -88,23 +88,13 @@ export type ToastPayload = ToastRootToastObject<Record<string, unknown>>;
 
 /** Variant tone. Drives the leading-icon tint, the aria-live priority,
  * and the role exposed by Toast.Root. */
-export type ToastVariant =
-  | "default"
-  | "success"
-  | "error"
-  | "warning"
-  | "info";
+export type ToastVariant = "default" | "success" | "error" | "warning" | "info";
 
 /** Viewport corner. `top` and `bottom` center on the inline axis;
  * `top-start`, `top-end`, `bottom-start`, `bottom-end` anchor to the
  * logical inline ends (RTL-correct). */
 export type ToastPosition =
-  | "top-start"
-  | "top-end"
-  | "bottom-start"
-  | "bottom-end"
-  | "top"
-  | "bottom";
+  "top-start" | "top-end" | "bottom-start" | "bottom-end" | "top" | "bottom";
 
 /** Swipe axis Toast.Root accepts dismiss gestures along. `start`/`end`
  * map to logical inline ends; `up`/`down` map to block ends. */
@@ -132,8 +122,7 @@ const ToastConfigContext = createContext<ToastConfigContextValue>({
   swipeDirection: undefined,
 });
 
-export interface ToastProviderProps
-  extends Omit<BaseProviderProps, "timeout"> {
+export interface ToastProviderProps extends Omit<BaseProviderProps, "timeout"> {
   /**
    * Default auto-dismiss duration in milliseconds. A toast with
    * `duration: 0` never auto-dismisses (manual `dismiss()` only).
@@ -174,11 +163,7 @@ function ToastProvider({
   ...rest
 }: ToastProviderProps) {
   return (
-    <BaseToast.Provider
-      timeout={duration}
-      limit={limit}
-      {...rest}
-    >
+    <BaseToast.Provider timeout={duration} limit={limit} {...rest}>
       <ToastConfigContext.Provider value={{ swipeDirection }}>
         {children}
       </ToastConfigContext.Provider>
@@ -206,8 +191,10 @@ ToastProvider.displayName = "Toast.Provider";
 
 type BaseViewportProps = ComponentPropsWithoutRef<typeof BaseToast.Viewport>;
 
-export interface ToastViewportProps
-  extends Omit<BaseViewportProps, "className"> {
+export interface ToastViewportProps extends Omit<
+  BaseViewportProps,
+  "className"
+> {
   /**
    * Where the toast stack anchors inside the viewport. Logical-end
    * variants (`top-start`/`top-end`/`bottom-start`/`bottom-end`) flip
@@ -242,6 +229,7 @@ const ToastViewport = forwardRef<HTMLDivElement, ToastViewportProps>(
           `zs-toast-viewport--${position}`,
           className,
         )}
+        data-slot="toast-viewport"
       >
         {children ?? <DefaultToastList />}
       </BaseToast.Viewport>
@@ -270,12 +258,8 @@ function DefaultToastList() {
   return (
     <>
       {manager.toasts.map((entry) => (
-        <ToastRoot
-          key={entry.id}
-          toast={entry}
-          swipeDirection={swipeDirection}
-        >
-          <div className="zs-toast-content">
+        <ToastRoot key={entry.id} toast={entry} swipeDirection={swipeDirection}>
+          <div className="zs-toast-content" data-slot="toast-content">
             {entry.title ? <ToastTitle>{entry.title}</ToastTitle> : null}
             {entry.description ? (
               <ToastDescription>{entry.description}</ToastDescription>
@@ -335,11 +319,10 @@ type BaseRootProps = ComponentPropsWithRef<typeof BaseToast.Root>;
  * Internal `data-variant` / `className` reach the DOM unconditionally
  * because we apply them last, after `...rest`.
  */
-export interface ToastRootProps
-  extends Omit<
-    BaseRootProps,
-    "className" | "swipeDirection" | "role" | "aria-live" | "render"
-  > {
+export interface ToastRootProps extends Omit<
+  BaseRootProps,
+  "className" | "swipeDirection" | "role" | "aria-live" | "render"
+> {
   /**
    * Direction(s) the toast can be swiped to dismiss. Logical `start`/
    * `end` map to the inline axis (resolved at render time off the
@@ -382,9 +365,7 @@ function resolveRole(variant: ToastVariant): "status" | "alert" {
 }
 
 function resolveAriaLive(variant: ToastVariant): "polite" | "assertive" {
-  return variant === "error" || variant === "warning"
-    ? "assertive"
-    : "polite";
+  return variant === "error" || variant === "warning" ? "assertive" : "polite";
 }
 
 /** Keys we strip from any `...rest` before passing through to Base UI,
@@ -400,60 +381,59 @@ function resolveAriaLive(variant: ToastVariant): "polite" | "assertive" {
  * live-region pair, not a modal flag. */
 const LOCKED_ROOT_KEYS = ["role", "aria-live", "aria-modal", "render"] as const;
 
-const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(
-  function ToastRoot(
-    { toast, swipeDirection, className, ...rest },
-    ref,
-  ) {
-    const direction = useDirection();
-    // `toast.type` is our variant — set by useToast() when adding.
-    // Default to "default" when omitted so role/aria-live still resolve.
-    const variant = (toast.type as ToastVariant | undefined) ?? "default";
-    // Strip locked attributes from `rest` so a runtime cast (or a stale
-    // descriptor on a forwarded ref) can't override them. Internal
-    // values are written below, after the spread, so the variant-derived
-    // contract wins regardless of caller intent.
-    const restRecord = rest as Record<string, unknown>;
-    for (const key of LOCKED_ROOT_KEYS) {
-      delete restRecord[key];
-    }
-    return (
-      <BaseToast.Root
-        ref={ref}
-        toast={toast}
-        {...rest}
-        swipeDirection={resolveSwipeDirection(swipeDirection, direction)}
-        role={resolveRole(variant)}
-        aria-live={resolveAriaLive(variant)}
-        /* Base UI stamps `aria-hidden="true"` on high-priority
-         * (warning/error) toasts until they receive keyboard focus —
-         * see @base-ui/react/toast/root/ToastRoot.js. The intent is
-         * to avoid screen-reader double-announcement (once via the
-         * live region, once via DOM-tree navigation). Modern screen
-         * readers (NVDA, JAWS, VoiceOver) deduplicate live-region
-         * announcements on their own, so the extra aria-hidden costs
-         * us testability (Testing Library treats aria-hidden=true as
-         * not-visible, which makes the Root AND every child
-         * untestable via `toBeVisible()`) for no real a11y gain.
-         * Force it back to undefined so the live region remains the
-         * sole announce channel and the rendered toast is
-         * AT-discoverable on focus as it should be. */
-        aria-hidden={undefined}
-        // Suppress Base UI's default `aria-modal="false"` — invalid on
-        // `role="status"`/`role="alert"`, and a toast is never modal
-        // anyway. Setting `undefined` lets `mergeProps`'s last-wins rule
-        // omit the attribute from the rendered DOM.
-        aria-modal={undefined}
-        data-variant={variant}
-        className={classnames(
-          "zs-toast-root",
-          `zs-toast-root--${variant}`,
-          className,
-        )}
-      />
-    );
-  },
-);
+const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(function ToastRoot(
+  { toast, swipeDirection, className, ...rest },
+  ref,
+) {
+  const direction = useDirection();
+  // `toast.type` is our variant — set by useToast() when adding.
+  // Default to "default" when omitted so role/aria-live still resolve.
+  const variant = (toast.type as ToastVariant | undefined) ?? "default";
+  // Strip locked attributes from `rest` so a runtime cast (or a stale
+  // descriptor on a forwarded ref) can't override them. Internal
+  // values are written below, after the spread, so the variant-derived
+  // contract wins regardless of caller intent.
+  const restRecord = rest as Record<string, unknown>;
+  for (const key of LOCKED_ROOT_KEYS) {
+    delete restRecord[key];
+  }
+  return (
+    <BaseToast.Root
+      ref={ref}
+      toast={toast}
+      {...rest}
+      swipeDirection={resolveSwipeDirection(swipeDirection, direction)}
+      role={resolveRole(variant)}
+      aria-live={resolveAriaLive(variant)}
+      /* Base UI stamps `aria-hidden="true"` on high-priority
+       * (warning/error) toasts until they receive keyboard focus —
+       * see @base-ui/react/toast/root/ToastRoot.js. The intent is
+       * to avoid screen-reader double-announcement (once via the
+       * live region, once via DOM-tree navigation). Modern screen
+       * readers (NVDA, JAWS, VoiceOver) deduplicate live-region
+       * announcements on their own, so the extra aria-hidden costs
+       * us testability (Testing Library treats aria-hidden=true as
+       * not-visible, which makes the Root AND every child
+       * untestable via `toBeVisible()`) for no real a11y gain.
+       * Force it back to undefined so the live region remains the
+       * sole announce channel and the rendered toast is
+       * AT-discoverable on focus as it should be. */
+      aria-hidden={undefined}
+      // Suppress Base UI's default `aria-modal="false"` — invalid on
+      // `role="status"`/`role="alert"`, and a toast is never modal
+      // anyway. Setting `undefined` lets `mergeProps`'s last-wins rule
+      // omit the attribute from the rendered DOM.
+      aria-modal={undefined}
+      data-variant={variant}
+      className={classnames(
+        "zs-toast-root",
+        `zs-toast-root--${variant}`,
+        className,
+      )}
+      data-slot="toast-root"
+    />
+  );
+});
 ToastRoot.displayName = "Toast.Root";
 
 /* ─── Title ─────────────────────────────────────────────────────────── *
@@ -474,6 +454,7 @@ const ToastTitle = forwardRef<HTMLHeadingElement, ToastTitleProps>(
       <BaseToast.Title
         ref={ref}
         className={composeBaseClass("zs-toast-title", className)}
+        data-slot="toast-title"
         {...rest}
       />
     );
@@ -488,8 +469,10 @@ ToastTitle.displayName = "Toast.Title";
 
 type BaseDescriptionProps = ComponentPropsWithRef<typeof BaseToast.Description>;
 
-export interface ToastDescriptionProps
-  extends Omit<BaseDescriptionProps, "className"> {
+export interface ToastDescriptionProps extends Omit<
+  BaseDescriptionProps,
+  "className"
+> {
   /** Optional class hook on the description element. */
   className?: string;
 }
@@ -502,6 +485,7 @@ const ToastDescription = forwardRef<
     <BaseToast.Description
       ref={ref}
       className={composeBaseClass("zs-toast-description", className)}
+      data-slot="toast-description"
       {...rest}
     />
   );
@@ -527,6 +511,7 @@ const ToastAction = forwardRef<HTMLButtonElement, ToastActionProps>(
       <BaseToast.Action
         ref={ref}
         className={composeBaseClass("zs-toast-action", className)}
+        data-slot="toast-action"
         {...rest}
       />
     );
@@ -549,18 +534,14 @@ export interface ToastCloseProps extends Omit<BaseCloseProps, "className"> {
 
 const ToastClose = forwardRef<HTMLButtonElement, ToastCloseProps>(
   function ToastClose(
-    {
-      className,
-      children,
-      "aria-label": ariaLabel,
-      ...rest
-    },
+    { className, children, "aria-label": ariaLabel, ...rest },
     ref,
   ) {
     return (
       <BaseToast.Close
         ref={ref}
         className={composeBaseClass("zs-toast-close", className)}
+        data-slot="toast-close"
         {...rest}
         /* Apply `aria-label` AFTER the spread so the default survives
          * the common `aria-label={maybeLabel}` pattern when `maybeLabel`

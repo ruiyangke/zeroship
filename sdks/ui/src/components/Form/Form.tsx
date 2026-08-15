@@ -53,11 +53,7 @@
  * so our static class always wins while preserving consumer strings or
  * callbacks. Same shape Dialog / Field / Card use.
  */
-import {
-  forwardRef,
-  type ComponentPropsWithRef,
-  type ReactNode,
-} from "react";
+import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { Form as BaseForm } from "@base-ui/react/form";
 import { composeBaseClass } from "../_classnames";
 
@@ -76,10 +72,7 @@ export type FormActions = BaseForm.Actions;
 
 export interface FormProps<
   FormValues extends object = Record<string, unknown>,
-> extends Omit<
-    BaseFormElementProps,
-    "render" | "className" | "onFormSubmit"
-  > {
+> extends Omit<BaseFormElementProps, "render" | "className" | "onFormSubmit"> {
   /**
    * Validation errors returned from a server / form action. Keys MUST
    * match the `name` attribute on the corresponding `<Field>` /
@@ -141,9 +134,7 @@ export interface FormProps<
   children?: ReactNode;
 }
 
-function FormRoot<
-  FormValues extends object = Record<string, unknown>,
->(
+function FormRoot<FormValues extends object = Record<string, unknown>>(
   {
     variant = "default",
     className,
@@ -157,8 +148,7 @@ function FormRoot<
   // contract is identical (each Field collects via its `name` attr) —
   // the cast is purely the generic-narrowing handshake.
   const baseOnFormSubmit = onFormSubmit as
-    | BaseFormElementProps["onFormSubmit"]
-    | undefined;
+    BaseFormElementProps["onFormSubmit"] | undefined;
 
   return (
     <BaseForm
@@ -168,15 +158,14 @@ function FormRoot<
         variant === "card" ? "zs-form zs-form--card" : "zs-form",
         className,
       )}
+      data-slot="form-card"
       data-variant={variant}
       {...rest}
     />
   );
 }
 
-type FormComponent = <
-  FormValues extends object = Record<string, unknown>,
->(
+type FormComponent = <FormValues extends object = Record<string, unknown>>(
   props: FormProps<FormValues> & React.RefAttributes<HTMLFormElement>,
 ) => React.ReactElement | null;
 

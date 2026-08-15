@@ -56,8 +56,10 @@ import { classnames } from "../_classnames";
 
 export type IconSize = "sm" | "md" | "lg";
 
-export interface IconProps
-  extends Omit<ComponentPropsWithoutRef<"svg">, "ref"> {
+export interface IconProps extends Omit<
+  ComponentPropsWithoutRef<"svg">,
+  "ref"
+> {
   /**
    * The icon component to render — a lucide-react icon (e.g. `Search`)
    * or any component that takes `SVGProps<SVGSVGElement>` and renders an

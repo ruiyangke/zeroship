@@ -37,7 +37,12 @@ import {
 } from "react";
 import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
-import { type Gap, type Align, spaceVar, alignValue } from "../_layout-primitives";
+import {
+  type Gap,
+  type Align,
+  spaceVar,
+  alignValue,
+} from "../_layout-primitives";
 
 /**
  * Responsive column counts keyed to the governed breakpoints. The base

@@ -168,10 +168,8 @@ const FieldsetLegend = forwardRef<HTMLDivElement, FieldsetLegendProps>(
     return (
       <BaseFieldset.Legend
         ref={ref}
-        className={composeBaseClass(
-          "zs-fieldset__legend",
-          className,
-        )}
+        className={composeBaseClass("zs-fieldset__legend", className)}
+        data-slot="fieldset-legend"
         {...rest}
       />
     );
@@ -240,6 +238,7 @@ function FieldsetRoot(
   return (
     <FieldsetDisabledContext.Provider value={effectiveDisabled}>
       <BaseFieldset.Root
+        data-slot="fieldset"
         // Base UI's Fieldset.Root ref is typed `HTMLElement`; we
         // narrow at the namespace export to the natural
         // `HTMLFieldSetElement` so consumers forwarding refs land on

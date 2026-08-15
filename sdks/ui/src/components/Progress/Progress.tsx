@@ -83,8 +83,10 @@ type ProgressRootRenderState = {
   status: "indeterminate" | "progressing" | "complete";
 };
 
-export interface ProgressProps
-  extends Omit<BaseRootProps, "className" | "render"> {
+export interface ProgressProps extends Omit<
+  BaseRootProps,
+  "className" | "render"
+> {
   /** Visual size — sm 0.25rem / md 0.375rem (default) / lg 0.5rem track. */
   size?: ProgressSize;
   /** Show the percentage label next to the bar. */
@@ -129,8 +131,7 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
       ariaForwarded["aria-labelledby"] = ariaLabelledBy;
     if (ariaDescribedBy != null)
       ariaForwarded["aria-describedby"] = ariaDescribedBy;
-    if (ariaValueText != null)
-      ariaForwarded["aria-valuetext"] = ariaValueText;
+    if (ariaValueText != null) ariaForwarded["aria-valuetext"] = ariaValueText;
 
     return (
       <BaseProgress.Root
@@ -160,24 +161,40 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
                 className,
                 rootProps.className,
               )}
+              data-slot="progress"
               data-size={size}
               data-status={state.status}
               data-testid={dataTestId}
             >
               {label != null || showValue ? (
-                <div className="zs-progress__header">
+                <div
+                  className="zs-progress__header"
+                  data-slot="progress-header"
+                >
                   {label != null ? (
-                    <BaseProgress.Label className="zs-progress__label">
+                    <BaseProgress.Label
+                      className="zs-progress__label"
+                      data-slot="progress-label"
+                    >
                       {label}
                     </BaseProgress.Label>
                   ) : null}
                   {showValue ? (
-                    <BaseProgress.Value className="zs-progress__value" />
+                    <BaseProgress.Value
+                      className="zs-progress__value"
+                      data-slot="progress-value"
+                    />
                   ) : null}
                 </div>
               ) : null}
-              <BaseProgress.Track className="zs-progress__track">
-                <BaseProgress.Indicator className="zs-progress__indicator" />
+              <BaseProgress.Track
+                className="zs-progress__track"
+                data-slot="progress-track"
+              >
+                <BaseProgress.Indicator
+                  className="zs-progress__indicator"
+                  data-slot="progress-indicator"
+                />
               </BaseProgress.Track>
             </div>
           );

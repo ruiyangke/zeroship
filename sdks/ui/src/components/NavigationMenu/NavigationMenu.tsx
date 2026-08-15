@@ -153,7 +153,7 @@ function NavMenuRoot<Value = unknown>(props: NavigationMenuProps<Value>) {
       className={composeBaseClass(
         classnames("zs-navmenu", `zs-navmenu--${orientation}`),
         className,
-      )}
+      )} data-slot="navmenu"
       data-orientation={orientation}
     >
       {children}
@@ -181,7 +181,7 @@ const NavMenuList = forwardRef<HTMLUListElement, NavMenuListProps>(
       <BaseNavMenu.List
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-list", className)}
+        className={composeBaseClass("zs-navmenu-list", className)} data-slot="navmenu-list"
       />
     );
   },
@@ -209,7 +209,7 @@ const NavMenuItem = forwardRef<HTMLLIElement, NavMenuItemProps>(
       <BaseNavMenu.Item
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-item", className)}
+        className={composeBaseClass("zs-navmenu-item", className)} data-slot="navmenu-item"
       />
     );
   },
@@ -238,7 +238,7 @@ const NavMenuTrigger = forwardRef<HTMLButtonElement, NavMenuTriggerProps>(
       <BaseNavMenu.Trigger
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-trigger", className)}
+        className={composeBaseClass("zs-navmenu-trigger", className)} data-slot="navmenu-trigger"
       />
     );
   },
@@ -268,7 +268,7 @@ const NavMenuContent = forwardRef<HTMLDivElement, NavMenuContentProps>(
       <BaseNavMenu.Content
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-content", className)}
+        className={composeBaseClass("zs-navmenu-content", className)} data-slot="navmenu-content"
       />
     );
   },
@@ -358,7 +358,7 @@ const NavMenuLink = forwardRef<HTMLAnchorElement, NavMenuLinkProps>(
               return <></>;
             }
             return (
-              <Slot
+              <Slot data-slot="navmenu-link"
                 {...(linkProps as Record<string, unknown>)}
                 className={composeBaseClass(
                   "zs-navmenu-link",
@@ -379,7 +379,7 @@ const NavMenuLink = forwardRef<HTMLAnchorElement, NavMenuLinkProps>(
       );
     }
     return (
-      <BaseNavMenu.Link
+      <BaseNavMenu.Link data-slot="navmenu-link"
         {...rest}
         ref={ref}
         className={composeBaseClass("zs-navmenu-link", userClass)}
@@ -454,7 +454,7 @@ const NavMenuPositioner = forwardRef<HTMLDivElement, NavMenuPositionerProps>(
         side={side}
         align={align}
         sideOffset={sideOffset}
-        className={composeBaseClass("zs-navmenu-positioner", className)}
+        className={composeBaseClass("zs-navmenu-positioner", className)} data-slot="navmenu-positioner"
       >
         {children}
       </BaseNavMenu.Positioner>
@@ -485,7 +485,7 @@ const NavMenuPopup = forwardRef<HTMLElement, NavMenuPopupProps>(
       <BaseNavMenu.Popup
         {...rest}
         ref={ref as Ref<HTMLElement>}
-        className={composeBaseClass("zs-navmenu-popup", className)}
+        className={composeBaseClass("zs-navmenu-popup", className)} data-slot="navmenu-popup"
       />
     );
   },
@@ -515,7 +515,7 @@ const NavMenuViewport = forwardRef<HTMLDivElement, NavMenuViewportProps>(
       <BaseNavMenu.Viewport
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-viewport", className)}
+        className={composeBaseClass("zs-navmenu-viewport", className)} data-slot="navmenu-viewport"
       />
     );
   },
@@ -546,7 +546,7 @@ const NavMenuArrow = forwardRef<HTMLDivElement, NavMenuArrowProps>(
       <BaseNavMenu.Arrow
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-arrow", className)}
+        className={composeBaseClass("zs-navmenu-arrow", className)} data-slot="navmenu-arrow"
       >
         {children ?? <ArrowGlyph />}
       </BaseNavMenu.Arrow>
@@ -591,7 +591,7 @@ const NavMenuIcon = forwardRef<HTMLSpanElement, NavMenuIconProps>(
       <BaseNavMenu.Icon
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-icon", className)}
+        className={composeBaseClass("zs-navmenu-icon", className)} data-slot="navmenu-icon"
       >
         {/* The chevron is the governed `Icon` (Lucide chevron-down). It
             renders directly inside the `.zs-navmenu-icon` span, so the

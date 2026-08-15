@@ -70,7 +70,10 @@ import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
 import { Stack } from "../Stack";
 import { Cluster } from "../Cluster";
-import { Breadcrumbs, type BreadcrumbsProps } from "../../components/Breadcrumbs";
+import {
+  Breadcrumbs,
+  type BreadcrumbsProps,
+} from "../../components/Breadcrumbs";
 
 /* ─── props ───────────────────────────────────────────────────────────── */
 
@@ -94,8 +97,7 @@ export interface PageHeaderProps extends ComponentPropsWithoutRef<"div"> {
  * wrapper always forces `"page-header-breadcrumbs"`.
  */
 export type PageHeaderBreadcrumbsProps = Omit<BreadcrumbsProps, "data-slot">;
-export interface PageHeaderTitleProps
-  extends ComponentPropsWithoutRef<"h1"> {
+export interface PageHeaderTitleProps extends ComponentPropsWithoutRef<"h1"> {
   /**
    * Render-as the single child element rather than an `<h1>` — use to
    * relevel the heading (e.g. `<h2>`) so it matches the surrounding

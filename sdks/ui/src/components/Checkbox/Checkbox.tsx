@@ -55,11 +55,7 @@
  * so the swap-the-whole-element idiom doesn't apply — see slice-4
  * review fix item 1.)
  */
-import {
-  forwardRef,
-  type ComponentPropsWithRef,
-  type ReactNode,
-} from "react";
+import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { Checkbox as BaseCheckbox } from "@base-ui/react/checkbox";
 import { Check, Minus } from "lucide-react";
 import {
@@ -77,8 +73,10 @@ export type CheckboxVariant = "default" | "tinted";
 
 type BaseCheckboxRootProps = ComponentPropsWithRef<typeof BaseCheckbox.Root>;
 
-export interface CheckboxProps
-  extends Omit<BaseCheckboxRootProps, "className" | "render" | "children"> {
+export interface CheckboxProps extends Omit<
+  BaseCheckboxRootProps,
+  "className" | "render" | "children"
+> {
   /** Visual size — small 1rem, medium 1.125rem (default), large 1.25rem. */
   size?: CheckboxSize;
 
@@ -205,7 +203,11 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
          * and the chip's `data-checked` / `data-indeterminate` to
          * decide which one is visible.
          */}
-        <BaseCheckbox.Indicator keepMounted className="zs-checkbox__indicator">
+        <BaseCheckbox.Indicator
+          keepMounted
+          className="zs-checkbox__indicator"
+          data-slot="checkbox-indicator"
+        >
           <IndicatorCheck />
           <IndicatorMinus />
         </BaseCheckbox.Indicator>
@@ -225,7 +227,12 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
           fieldProps={fieldProps}
         >
           {chip}
-          <span className="zs-checkbox-field__text">{label}</span>
+          <span
+            className="zs-checkbox-field__text"
+            data-slot="checkbox-field-text"
+          >
+            {label}
+          </span>
         </SelectionRow>
       );
     }

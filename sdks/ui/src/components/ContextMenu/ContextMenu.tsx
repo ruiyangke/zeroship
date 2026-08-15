@@ -136,7 +136,9 @@ ContextMenuRoot.displayName = "ContextMenu";
  * Card root can carry both its own styling and the right-click
  * binding without a wrapper. */
 
-type BaseTriggerProps = ComponentPropsWithoutRef<typeof BaseContextMenu.Trigger>;
+type BaseTriggerProps = ComponentPropsWithoutRef<
+  typeof BaseContextMenu.Trigger
+>;
 export type ContextMenuTriggerProps = BaseTriggerProps & {
   /**
    * Render as the single child element rather than our `<div>`. Used
@@ -204,7 +206,11 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
       [disabled, callerOnContextMenu],
     );
 
-    if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+    if (
+      process.env.NODE_ENV !== "production" &&
+      asChild &&
+      !isValidElement(children)
+    ) {
       // eslint-disable-next-line no-console
       console.error(
         "ContextMenu.Trigger asChild expects a single React element child; received " +
@@ -218,9 +224,10 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
         {...rest}
         ref={ref}
         className={composeBaseClass("zs-contextmenu-trigger", className)}
+        data-slot="contextmenu-trigger"
         tabIndex={resolvedTabIndex}
-        role={asChild ? role : role ?? "button"}
-        aria-haspopup={asChild ? ariaHasPopup : ariaHasPopup ?? "menu"}
+        role={asChild ? role : (role ?? "button")}
+        aria-haspopup={asChild ? ariaHasPopup : (ariaHasPopup ?? "menu")}
         aria-disabled={disabled || undefined}
         onContextMenuCapture={handleContextMenu}
         render={
@@ -243,10 +250,7 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
                 // those — no double-spread. Mirrors Menu.LinkItem
                 // asChild branch (commit 3a64a726).
                 return (
-                  <Slot
-                    {...tp}
-                    ref={composeRefs(ref as Ref<unknown>, tpRef)}
-                  >
+                  <Slot {...tp} ref={composeRefs(ref as Ref<unknown>, tpRef)}>
                     {children as ReactElement}
                   </Slot>
                 );
@@ -300,12 +304,14 @@ const ContextMenuPopup = forwardRef<HTMLElement, ContextMenuPopupProps>(
     return (
       <BaseContextMenu.Positioner
         className="zs-menu-positioner"
+        data-slot="menu-positioner"
         {...positionerProps}
       >
         <BaseMenu.Popup
           {...rest}
           ref={ref as Ref<HTMLDivElement>}
           className={composeBaseClass("zs-menu-popup", className)}
+          data-slot="menu-popup"
         >
           {children}
         </BaseMenu.Popup>

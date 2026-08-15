@@ -116,16 +116,15 @@ type BaseRootProps = ComponentPropsWithoutRef<typeof BaseSlider.Root>;
  * `value` / `defaultValue` / `onValueChange` in the branch types so the
  * discriminant — the value's array vs scalar shape — narrows correctly.
  */
-interface SliderBaseProps
-  extends Omit<
-    BaseRootProps,
-    | "className"
-    | "render"
-    | "value"
-    | "defaultValue"
-    | "onValueChange"
-    | "onValueCommitted"
-  > {
+interface SliderBaseProps extends Omit<
+  BaseRootProps,
+  | "className"
+  | "render"
+  | "value"
+  | "defaultValue"
+  | "onValueChange"
+  | "onValueCommitted"
+> {
   /** Size — sm 24 / md 32 (default) / lg 40 (track block-size). */
   size?: SliderSize;
   /** Visual variant — `default` solid accent / `outline` rim. */
@@ -201,9 +200,7 @@ export interface SliderRangeUncontrolledProps extends SliderBaseProps {
 }
 
 export type SliderProps =
-  | SliderSingleProps
-  | SliderRangeProps
-  | SliderRangeUncontrolledProps;
+  SliderSingleProps | SliderRangeProps | SliderRangeUncontrolledProps;
 
 /* ─── component ─────────────────────────────────────────────────────── *
  *
@@ -226,224 +223,233 @@ export interface SliderComponent {
   displayName?: string;
 }
 
-const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
-  props,
-  ref,
-) {
-  const {
-    size: sizeProp,
-    variant = "default",
-    showValue = false,
-    className,
-    orientation = "horizontal",
-    disabled: disabledProp,
-    required: requiredProp,
-    children,
-    value,
-    defaultValue,
-    onValueChange,
-    onValueCommitted,
-    format,
-    "data-testid": dataTestId,
-    // The forwarded `aria-label` / `aria-labelledby` / `aria-describedby`
-    // belong on the THUMB's nested <input type="range"> (that's the
-    // AT-focusable element), not on the Root <div>. Pull them out of
-    // `rest` so the Root spread doesn't double-label / leak the
-    // description onto a non-focusable wrapper.
-    //
-    // Slice-7 review (codex) item 2: pre-fix only aria-label /
-    // aria-labelledby were sifted; aria-describedby leaked onto Root.
-    "aria-label": rootAriaLabel,
-    "aria-labelledby": rootAriaLabelledBy,
-    "aria-describedby": rootAriaDescribedBy,
-    ...rest
-  } = props as SliderBaseProps & {
-    orientation?: SliderOrientation;
-    disabled?: boolean;
-    required?: boolean;
-    value?: number | readonly number[];
-    defaultValue?: number | readonly number[];
-    onValueChange?: (
-      next: number | number[],
-      details: Parameters<NonNullable<BaseRootProps["onValueChange"]>>[1],
-    ) => void;
-    onValueCommitted?: (
-      next: number | number[],
-      details: Parameters<NonNullable<BaseRootProps["onValueCommitted"]>>[1],
-    ) => void;
-    "aria-label"?: string;
-    "aria-labelledby"?: string;
-    "aria-describedby"?: string;
-  };
-
-  const fieldCtx = useFieldContext();
-  const size: SliderSize = sizeProp ?? fieldCtx?.size ?? "md";
-  const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
-  // Required cascade — explicit prop wins, then enclosing <Field required>,
-  // then false. Base UI's Slider.Root has no `required` prop, so we land
-  // the attribute on each Thumb's nested <input type="range"> through the
-  // `inputRef` callback below; that input is the AT-focusable element
-  // (aria-required is what AT announces, mirroring the Input cascade in
-  // Input.tsx).
-  const required = requiredProp ?? fieldCtx?.required ?? false;
-
-  // Detect range mode from the current value shape. Base UI uses the
-  // value's array-ness as its own range discriminant; mirror that here so
-  // we render the matching number of Thumb children. In uncontrolled mode
-  // we mirror Base UI's emitted value into local state so the value badge's
-  // CSS position follows keyboard/drag updates after the initial
-  // `defaultValue` render.
-  const isControlledValue = value !== undefined;
-  const [uncontrolledObserved, setUncontrolledObserved] = useState<
-    number | readonly number[] | undefined
-  >(defaultValue);
-  const observed = value ?? uncontrolledObserved ?? defaultValue;
-  const isRange = Array.isArray(observed);
-  const thumbCount = isRange ? (observed as readonly number[]).length : 1;
-
-  const handleValueChange = useCallback(
-    (
-      next: number | number[],
-      details: Parameters<NonNullable<BaseRootProps["onValueChange"]>>[1],
-    ) => {
-      if (!isControlledValue) {
-        setUncontrolledObserved(next);
-      }
-      onValueChange?.(next, details);
-    },
-    [isControlledValue, onValueChange],
-  );
-
-  // ──────────────────────────────────────────────────────────────────
-  // Value-label thumb-tracking (Slice 7 visual-polish item 1).
-  //
-  // Compute the active thumb's percentage and emit it as the
-  // `--zs-slider-value-position` custom property on the Root. The
-  // value badge (`.zs-slider__value`) consumes it via
-  // `inset-inline-start: var(--zs-slider-value-position, 50%)` so the
-  // "60%" output floats above the thumb instead of pinning to the
-  // top-right corner of the grid row.
-  //
-  // The current value is read directly from the controlled `value`
-  // prop OR the uncontrolled `defaultValue` so the static
-  // screenshot/SSR pass renders the label in the right place without
-  // a render-callback (Base UI's `state.value` would only update on
-  // the client). For range mode we use the FIRST thumb's value — the
-  // single-thumb shape is the dominant case; future work can paint a
-  // pair of value badges if the brief calls for it.
-  //
-  // The computation is undefined (→ falls back to 50%) when neither
-  // value nor defaultValue is provided AND `showValue` is set — the
-  // Slider has no anchor to track, so center is the safest read.
-  const min = (rest as { min?: number }).min ?? 0;
-  const max = (rest as { max?: number }).max ?? 100;
-  const trackedValue: number | undefined = isRange
-    ? (observed as readonly number[])[0]
-    : (observed as number | undefined);
-  let valuePositionStyle: CSSProperties | undefined;
-  if (
-    showValue &&
-    orientation === "horizontal" &&
-    typeof trackedValue === "number" &&
-    Number.isFinite(trackedValue) &&
-    max > min
-  ) {
-    const ratio = (trackedValue - min) / (max - min);
-    const clamped = Math.max(0, Math.min(1, ratio));
-    const percent = clamped * 100;
-    valuePositionStyle = {
-      ["--zs-slider-value-position" as string]: `${percent}%`,
+const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
+  function Slider(props, ref) {
+    const {
+      size: sizeProp,
+      variant = "default",
+      showValue = false,
+      className,
+      orientation = "horizontal",
+      disabled: disabledProp,
+      required: requiredProp,
+      children,
+      value,
+      defaultValue,
+      onValueChange,
+      onValueCommitted,
+      format,
+      "data-testid": dataTestId,
+      // The forwarded `aria-label` / `aria-labelledby` / `aria-describedby`
+      // belong on the THUMB's nested <input type="range"> (that's the
+      // AT-focusable element), not on the Root <div>. Pull them out of
+      // `rest` so the Root spread doesn't double-label / leak the
+      // description onto a non-focusable wrapper.
+      //
+      // Slice-7 review (codex) item 2: pre-fix only aria-label /
+      // aria-labelledby were sifted; aria-describedby leaked onto Root.
+      "aria-label": rootAriaLabel,
+      "aria-labelledby": rootAriaLabelledBy,
+      "aria-describedby": rootAriaDescribedBy,
+      ...rest
+    } = props as SliderBaseProps & {
+      orientation?: SliderOrientation;
+      disabled?: boolean;
+      required?: boolean;
+      value?: number | readonly number[];
+      defaultValue?: number | readonly number[];
+      onValueChange?: (
+        next: number | number[],
+        details: Parameters<NonNullable<BaseRootProps["onValueChange"]>>[1],
+      ) => void;
+      onValueCommitted?: (
+        next: number | number[],
+        details: Parameters<NonNullable<BaseRootProps["onValueCommitted"]>>[1],
+      ) => void;
+      "aria-label"?: string;
+      "aria-labelledby"?: string;
+      "aria-describedby"?: string;
     };
-  }
 
-  // Merge the caller's `style` with our `--zs-slider-value-position`
-  // custom property. Spreading `rest` after destructuring would
-  // re-introduce the caller's style and clobber the custom property;
-  // explicitly destructure here and rebuild the style attr so both
-  // survive (consumer keys + our CSS var). Order: consumer style first,
-  // then ours — ours wins on the custom-prop collision while the rest
-  // of the consumer style passes through untouched.
-  const { style: consumerStyle, ...restWithoutStyle } = rest as {
-    style?: CSSProperties;
-  } & Record<string, unknown>;
-  const mergedStyle: CSSProperties | undefined =
-    consumerStyle || valuePositionStyle
-      ? { ...(consumerStyle ?? {}), ...(valuePositionStyle ?? {}) }
-      : undefined;
+    const fieldCtx = useFieldContext();
+    const size: SliderSize = sizeProp ?? fieldCtx?.size ?? "md";
+    const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
+    // Required cascade — explicit prop wins, then enclosing <Field required>,
+    // then false. Base UI's Slider.Root has no `required` prop, so we land
+    // the attribute on each Thumb's nested <input type="range"> through the
+    // `inputRef` callback below; that input is the AT-focusable element
+    // (aria-required is what AT announces, mirroring the Input cascade in
+    // Input.tsx).
+    const required = requiredProp ?? fieldCtx?.required ?? false;
 
-  // Per-thumb suffix-label ids. Used in range mode when the caller wires
-  // an external label via `aria-labelledby` — that id wins over the
-  // index-suffixed `aria-label` we build below (Base UI puts
-  // `aria-labelledby` ahead of `aria-label` on the input), so both thumbs
-  // would inherit the SAME accessible name. We render hidden `<span>`s
-  // with " (1 of N)" / " (2 of N)" / … text and append their ids to each
-  // thumb's `aria-labelledby` chain. AT concatenates the names from the
-  // chain, so thumb 1 announces "<external label> (1 of N)" and thumb 2
-  // announces "<external label> (2 of N)" — distinct names without
-  // bypassing the consumer's labelling source.
-  const suffixIdBase = useId();
-  const thumbSuffixIds = Array.from(
-    { length: thumbCount },
-    (_, i) => `${suffixIdBase}-${i}`,
-  );
+    // Detect range mode from the current value shape. Base UI uses the
+    // value's array-ness as its own range discriminant; mirror that here so
+    // we render the matching number of Thumb children. In uncontrolled mode
+    // we mirror Base UI's emitted value into local state so the value badge's
+    // CSS position follows keyboard/drag updates after the initial
+    // `defaultValue` render.
+    const isControlledValue = value !== undefined;
+    const [uncontrolledObserved, setUncontrolledObserved] = useState<
+      number | readonly number[] | undefined
+    >(defaultValue);
+    const observed = value ?? uncontrolledObserved ?? defaultValue;
+    const isRange = Array.isArray(observed);
+    const thumbCount = isRange ? (observed as readonly number[]).length : 1;
 
-  // Attach `aria-required` to each Thumb's nested `<input type="range">`
-  // via the `inputRef` callback. Base UI's `Slider.Root` does NOT expose
-  // a `required` prop, and the wrapper-div spread does not forward
-  // `aria-required` into Thumb's internal `inputProps` (only
-  // aria-label/labelledby/describedby are forwarded). The AT-focusable
-  // element is the input, so setting `aria-required` on the input is
-  // what screen readers announce. Mirror the Input.tsx cascade so
-  // `<Field required>` flows through.
-  const requiredRef = useRef(required);
-  requiredRef.current = required;
-  const setInputAriaRequired = useCallback((el: HTMLInputElement | null) => {
-    if (el == null) return;
-    if (requiredRef.current) {
-      el.setAttribute("aria-required", "true");
-    } else {
-      el.removeAttribute("aria-required");
+    const handleValueChange = useCallback(
+      (
+        next: number | number[],
+        details: Parameters<NonNullable<BaseRootProps["onValueChange"]>>[1],
+      ) => {
+        if (!isControlledValue) {
+          setUncontrolledObserved(next);
+        }
+        onValueChange?.(next, details);
+      },
+      [isControlledValue, onValueChange],
+    );
+
+    // ──────────────────────────────────────────────────────────────────
+    // Value-label thumb-tracking (Slice 7 visual-polish item 1).
+    //
+    // Compute the active thumb's percentage and emit it as the
+    // `--zs-slider-value-position` custom property on the Root. The
+    // value badge (`.zs-slider__value`) consumes it via
+    // `inset-inline-start: var(--zs-slider-value-position, 50%)` so the
+    // "60%" output floats above the thumb instead of pinning to the
+    // top-right corner of the grid row.
+    //
+    // The current value is read directly from the controlled `value`
+    // prop OR the uncontrolled `defaultValue` so the static
+    // screenshot/SSR pass renders the label in the right place without
+    // a render-callback (Base UI's `state.value` would only update on
+    // the client). For range mode we use the FIRST thumb's value — the
+    // single-thumb shape is the dominant case; future work can paint a
+    // pair of value badges if the brief calls for it.
+    //
+    // The computation is undefined (→ falls back to 50%) when neither
+    // value nor defaultValue is provided AND `showValue` is set — the
+    // Slider has no anchor to track, so center is the safest read.
+    const min = (rest as { min?: number }).min ?? 0;
+    const max = (rest as { max?: number }).max ?? 100;
+    const trackedValue: number | undefined = isRange
+      ? (observed as readonly number[])[0]
+      : (observed as number | undefined);
+    let valuePositionStyle: CSSProperties | undefined;
+    if (
+      showValue &&
+      orientation === "horizontal" &&
+      typeof trackedValue === "number" &&
+      Number.isFinite(trackedValue) &&
+      max > min
+    ) {
+      const ratio = (trackedValue - min) / (max - min);
+      const clamped = Math.max(0, Math.min(1, ratio));
+      const percent = clamped * 100;
+      valuePositionStyle = {
+        ["--zs-slider-value-position" as string]: `${percent}%`,
+      };
     }
-  }, []);
 
-  return (
-    <BaseSlider.Root
-      {...(restWithoutStyle as BaseRootProps)}
-      ref={ref}
-      orientation={orientation}
-      disabled={disabled || undefined}
-      value={value as never}
-      defaultValue={defaultValue as never}
-      onValueChange={handleValueChange as never}
-      onValueCommitted={onValueCommitted as never}
-      format={format}
-      className={classnames(
-        "zs-slider",
-        `zs-slider--${variant}`,
-        `zs-slider--${size}`,
-        `zs-slider--${orientation}`,
-        className,
-      )}
-      style={mergedStyle}
-      data-variant={variant}
-      data-size={size}
-      data-orientation={orientation}
-      data-testid={dataTestId}
-    >
-      {children}
-      {showValue ? (
-        // Slider.Value renders an <output> by default; Base UI auto-wires
-        // `for=` to the thumb input ids. The element is announced as part
-        // of the slider — no extra aria needed.
-        <BaseSlider.Value
-          className="zs-slider__value"
-          data-testid={dataTestId ? `${dataTestId}-value` : undefined}
-        />
-      ) : null}
-      <BaseSlider.Control className="zs-slider__control">
-        <BaseSlider.Track className="zs-slider__track">
-          <BaseSlider.Indicator className="zs-slider__indicator" />
-          {/* Per-thumb suffix labels — referenced by each thumb's
+    // Merge the caller's `style` with our `--zs-slider-value-position`
+    // custom property. Spreading `rest` after destructuring would
+    // re-introduce the caller's style and clobber the custom property;
+    // explicitly destructure here and rebuild the style attr so both
+    // survive (consumer keys + our CSS var). Order: consumer style first,
+    // then ours — ours wins on the custom-prop collision while the rest
+    // of the consumer style passes through untouched.
+    const { style: consumerStyle, ...restWithoutStyle } = rest as {
+      style?: CSSProperties;
+    } & Record<string, unknown>;
+    const mergedStyle: CSSProperties | undefined =
+      consumerStyle || valuePositionStyle
+        ? { ...(consumerStyle ?? {}), ...(valuePositionStyle ?? {}) }
+        : undefined;
+
+    // Per-thumb suffix-label ids. Used in range mode when the caller wires
+    // an external label via `aria-labelledby` — that id wins over the
+    // index-suffixed `aria-label` we build below (Base UI puts
+    // `aria-labelledby` ahead of `aria-label` on the input), so both thumbs
+    // would inherit the SAME accessible name. We render hidden `<span>`s
+    // with " (1 of N)" / " (2 of N)" / … text and append their ids to each
+    // thumb's `aria-labelledby` chain. AT concatenates the names from the
+    // chain, so thumb 1 announces "<external label> (1 of N)" and thumb 2
+    // announces "<external label> (2 of N)" — distinct names without
+    // bypassing the consumer's labelling source.
+    const suffixIdBase = useId();
+    const thumbSuffixIds = Array.from(
+      { length: thumbCount },
+      (_, i) => `${suffixIdBase}-${i}`,
+    );
+
+    // Attach `aria-required` to each Thumb's nested `<input type="range">`
+    // via the `inputRef` callback. Base UI's `Slider.Root` does NOT expose
+    // a `required` prop, and the wrapper-div spread does not forward
+    // `aria-required` into Thumb's internal `inputProps` (only
+    // aria-label/labelledby/describedby are forwarded). The AT-focusable
+    // element is the input, so setting `aria-required` on the input is
+    // what screen readers announce. Mirror the Input.tsx cascade so
+    // `<Field required>` flows through.
+    const requiredRef = useRef(required);
+    requiredRef.current = required;
+    const setInputAriaRequired = useCallback((el: HTMLInputElement | null) => {
+      if (el == null) return;
+      if (requiredRef.current) {
+        el.setAttribute("aria-required", "true");
+      } else {
+        el.removeAttribute("aria-required");
+      }
+    }, []);
+
+    return (
+      <BaseSlider.Root
+        {...(restWithoutStyle as BaseRootProps)}
+        ref={ref}
+        orientation={orientation}
+        disabled={disabled || undefined}
+        value={value as never}
+        defaultValue={defaultValue as never}
+        onValueChange={handleValueChange as never}
+        onValueCommitted={onValueCommitted as never}
+        format={format}
+        className={classnames(
+          "zs-slider",
+          `zs-slider--${variant}`,
+          `zs-slider--${size}`,
+          `zs-slider--${orientation}`,
+          className,
+        )}
+        data-slot="slider"
+        style={mergedStyle}
+        data-variant={variant}
+        data-size={size}
+        data-orientation={orientation}
+        data-testid={dataTestId}
+      >
+        {children}
+        {showValue ? (
+          // Slider.Value renders an <output> by default; Base UI auto-wires
+          // `for=` to the thumb input ids. The element is announced as part
+          // of the slider — no extra aria needed.
+          <BaseSlider.Value
+            className="zs-slider__value"
+            data-slot="slider-value"
+            data-testid={dataTestId ? `${dataTestId}-value` : undefined}
+          />
+        ) : null}
+        <BaseSlider.Control
+          className="zs-slider__control"
+          data-slot="slider-control"
+        >
+          <BaseSlider.Track
+            className="zs-slider__track"
+            data-slot="slider-track"
+          >
+            <BaseSlider.Indicator
+              className="zs-slider__indicator"
+              data-slot="slider-indicator"
+            />
+            {/* Per-thumb suffix labels — referenced by each thumb's
               aria-labelledby chain in range mode. Visually hidden
               (`clip: rect(0 0 0 0)`) but kept in the accessibility tree
               so AT concatenates the suffix with the consumer's external
@@ -451,58 +457,61 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
               the AT tree too, breaking the labelledby reference, so we
               use the same visually-hidden style OtpField uses for its
               cell-0 fallback. */}
-          {thumbCount > 1
-            ? thumbSuffixIds.map((id, index) => (
-                <span
-                  key={id}
-                  id={id}
-                  className="zs-slider__thumb-suffix"
-                  style={visuallyHiddenStyle}
-                >
-                  {` (${index + 1} of ${thumbCount})`}
-                </span>
-              ))
-            : null}
-          {Array.from({ length: thumbCount }, (_, index) => {
-            // Range mode: index-suffix the label so AT users can tell
-            // "Price range, thumb 1" from "thumb 2". Single mode: forward
-            // the label verbatim. aria-labelledby (if set) wins over
-            // aria-label on the Base UI side, so when the consumer wires
-            // an external label via `aria-labelledby` we ALSO append the
-            // per-thumb suffix id — otherwise both thumbs would get the
-            // same accessible name.
-            const thumbAriaLabel =
-              rootAriaLabel != null && thumbCount > 1
-                ? `${rootAriaLabel} (${index + 1} of ${thumbCount})`
-                : rootAriaLabel;
-            const thumbAriaLabelledBy =
-              rootAriaLabelledBy != null && thumbCount > 1
-                ? `${rootAriaLabelledBy} ${thumbSuffixIds[index]}`
-                : rootAriaLabelledBy;
-            return (
-              <BaseSlider.Thumb
-                key={index}
-                index={index}
-                className="zs-slider__thumb"
-                aria-label={thumbAriaLabel}
-                aria-labelledby={thumbAriaLabelledBy}
-                aria-describedby={rootAriaDescribedBy}
-                inputRef={setInputAriaRequired}
-                data-testid={
-                  dataTestId
-                    ? thumbCount > 1
-                      ? `${dataTestId}-thumb-${index}`
-                      : `${dataTestId}-thumb`
-                    : undefined
-                }
-              />
-            );
-          })}
-        </BaseSlider.Track>
-      </BaseSlider.Control>
-    </BaseSlider.Root>
-  );
-});
+            {thumbCount > 1
+              ? thumbSuffixIds.map((id, index) => (
+                  <span
+                    key={id}
+                    id={id}
+                    className="zs-slider__thumb-suffix"
+                    data-slot="slider-thumb-suffix"
+                    style={visuallyHiddenStyle}
+                  >
+                    {` (${index + 1} of ${thumbCount})`}
+                  </span>
+                ))
+              : null}
+            {Array.from({ length: thumbCount }, (_, index) => {
+              // Range mode: index-suffix the label so AT users can tell
+              // "Price range, thumb 1" from "thumb 2". Single mode: forward
+              // the label verbatim. aria-labelledby (if set) wins over
+              // aria-label on the Base UI side, so when the consumer wires
+              // an external label via `aria-labelledby` we ALSO append the
+              // per-thumb suffix id — otherwise both thumbs would get the
+              // same accessible name.
+              const thumbAriaLabel =
+                rootAriaLabel != null && thumbCount > 1
+                  ? `${rootAriaLabel} (${index + 1} of ${thumbCount})`
+                  : rootAriaLabel;
+              const thumbAriaLabelledBy =
+                rootAriaLabelledBy != null && thumbCount > 1
+                  ? `${rootAriaLabelledBy} ${thumbSuffixIds[index]}`
+                  : rootAriaLabelledBy;
+              return (
+                <BaseSlider.Thumb
+                  key={index}
+                  index={index}
+                  className="zs-slider__thumb"
+                  data-slot="slider-thumb"
+                  aria-label={thumbAriaLabel}
+                  aria-labelledby={thumbAriaLabelledBy}
+                  aria-describedby={rootAriaDescribedBy}
+                  inputRef={setInputAriaRequired}
+                  data-testid={
+                    dataTestId
+                      ? thumbCount > 1
+                        ? `${dataTestId}-thumb-${index}`
+                        : `${dataTestId}-thumb`
+                      : undefined
+                  }
+                />
+              );
+            })}
+          </BaseSlider.Track>
+        </BaseSlider.Control>
+      </BaseSlider.Root>
+    );
+  },
+);
 SliderForward.displayName = "Slider";
 
 // Cast to the overloaded shape. forwardRef's inferred signature is the

@@ -224,7 +224,11 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
 
         {/* Flex spacer — pushes `actions` to the inline-end edge on a
             single line; harmless (zero-size) once the row wraps. */}
-        <span className="zs-filter-bar__spacer" aria-hidden="true" />
+        <span
+          className="zs-filter-bar__spacer"
+          data-slot="filter-bar-spacer"
+          aria-hidden="true"
+        />
 
         {actions != null ? (
           <Cluster gap={2} data-slot="filter-bar-actions">

@@ -173,20 +173,22 @@ export function useFieldDisabledContext(): boolean {
 // invariant note above.
 
 type LabelProps = ComponentPropsWithoutRef<typeof BaseField.Label>;
-const FieldLabel = forwardRef<HTMLLabelElement, LabelProps>(
-  function FieldLabel({ className, ...rest }, ref) {
-    return (
-      <BaseField.Label
-        // Base UI's Label ref is typed `HTMLElement`; ours narrows to
-        // `HTMLLabelElement` because Label is a native <label> by
-        // default. One safe widening cast keeps the public type clean.
-        ref={ref as React.Ref<HTMLElement>}
-        className={composeBaseClass("zs-field__label", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const FieldLabel = forwardRef<HTMLLabelElement, LabelProps>(function FieldLabel(
+  { className, ...rest },
+  ref,
+) {
+  return (
+    <BaseField.Label
+      // Base UI's Label ref is typed `HTMLElement`; ours narrows to
+      // `HTMLLabelElement` because Label is a native <label> by
+      // default. One safe widening cast keeps the public type clean.
+      ref={ref as React.Ref<HTMLElement>}
+      className={composeBaseClass("zs-field__label", className)}
+      data-slot="field-label"
+      {...rest}
+    />
+  );
+});
 FieldLabel.displayName = "Field.Label";
 
 type DescriptionProps = ComponentPropsWithoutRef<typeof BaseField.Description>;
@@ -196,6 +198,7 @@ const FieldDescription = forwardRef<HTMLParagraphElement, DescriptionProps>(
       <BaseField.Description
         ref={ref}
         className={composeBaseClass("zs-field__description", className)}
+        data-slot="field-description"
         {...rest}
       />
     );
@@ -204,28 +207,30 @@ const FieldDescription = forwardRef<HTMLParagraphElement, DescriptionProps>(
 FieldDescription.displayName = "Field.Description";
 
 type ErrorProps = ComponentPropsWithoutRef<typeof BaseField.Error>;
-const FieldError = forwardRef<HTMLDivElement, ErrorProps>(
-  function FieldError({ className, ...rest }, ref) {
-    return (
-      // Base UI's FieldError implementation (verified against
-      // @base-ui/react@1.4.1 source — node_modules/.pnpm/@base-ui+
-      // react@1.4.1/.../field/error/FieldError.js) does NOT add
-      // `role`, `aria-live`, or `aria-atomic` itself. Without those,
-      // dynamic validity errors (e.g. typeMismatch firing after the
-      // user types) are not announced by screen readers. We add the
-      // live-region semantics here; spreading `...rest` LAST lets a
-      // consumer override on a case-by-case basis.
-      <BaseField.Error
-        ref={ref}
-        role="alert"
-        aria-live="polite"
-        aria-atomic="true"
-        className={composeBaseClass("zs-field__error", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const FieldError = forwardRef<HTMLDivElement, ErrorProps>(function FieldError(
+  { className, ...rest },
+  ref,
+) {
+  return (
+    // Base UI's FieldError implementation (verified against
+    // @base-ui/react@1.4.1 source — node_modules/.pnpm/@base-ui+
+    // react@1.4.1/.../field/error/FieldError.js) does NOT add
+    // `role`, `aria-live`, or `aria-atomic` itself. Without those,
+    // dynamic validity errors (e.g. typeMismatch firing after the
+    // user types) are not announced by screen readers. We add the
+    // live-region semantics here; spreading `...rest` LAST lets a
+    // consumer override on a case-by-case basis.
+    <BaseField.Error
+      ref={ref}
+      role="alert"
+      aria-live="polite"
+      aria-atomic="true"
+      className={composeBaseClass("zs-field__error", className)}
+      data-slot="field-error"
+      {...rest}
+    />
+  );
+});
 FieldError.displayName = "Field.Error";
 
 type ControlProps = ComponentPropsWithoutRef<typeof BaseField.Control>;
@@ -298,6 +303,7 @@ const FieldControl = forwardRef<HTMLInputElement, ControlProps>(
                 callerClass,
                 controlProps.className,
               )}
+              data-slot="field-control"
             />
           );
         }}
@@ -308,17 +314,19 @@ const FieldControl = forwardRef<HTMLInputElement, ControlProps>(
 FieldControl.displayName = "Field.Control";
 
 type ItemProps = ComponentPropsWithoutRef<typeof BaseField.Item>;
-const FieldItem = forwardRef<HTMLDivElement, ItemProps>(
-  function FieldItem({ className, ...rest }, ref) {
-    return (
-      <BaseField.Item
-        ref={ref}
-        className={composeBaseClass("zs-field__item", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const FieldItem = forwardRef<HTMLDivElement, ItemProps>(function FieldItem(
+  { className, ...rest },
+  ref,
+) {
+  return (
+    <BaseField.Item
+      ref={ref}
+      className={composeBaseClass("zs-field__item", className)}
+      data-slot="field-item"
+      {...rest}
+    />
+  );
+});
 FieldItem.displayName = "Field.Item";
 
 // Field.Validity is a render-prop subpart — no className, no ref. We
@@ -326,8 +334,7 @@ FieldItem.displayName = "Field.Item";
 // without reaching into `@base-ui/react/field`.
 const FieldValidity = BaseField.Validity;
 
-export interface FieldRequiredProps
-  extends ComponentPropsWithoutRef<"span"> {
+export interface FieldRequiredProps extends ComponentPropsWithoutRef<"span"> {
   /**
    * Rendered instead of the required-symbol when the enclosing Field
    * is NOT marked `required`. Useful for the "(optional)" affordance
@@ -367,6 +374,7 @@ const FieldRequired = forwardRef<HTMLSpanElement, FieldRequiredProps>(
             "zs-field__required--fallback",
             className,
           )}
+          data-slot="field-required-fallback"
           {...rest}
         >
           {fallback}
@@ -378,6 +386,7 @@ const FieldRequired = forwardRef<HTMLSpanElement, FieldRequiredProps>(
       <span
         ref={ref}
         className={classnames("zs-field__required", className)}
+        data-slot="field-required"
         aria-hidden="true"
         {...rest}
       >
@@ -418,6 +427,7 @@ function FieldRoot(
           size ? `zs-field--${size}` : null,
           className,
         )}
+        data-slot="field"
         data-orientation={orientation}
         data-size={size}
         {...rest}

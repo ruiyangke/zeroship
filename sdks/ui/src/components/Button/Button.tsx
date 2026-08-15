@@ -19,8 +19,10 @@ export type ButtonVariant = "filled" | "tinted" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
 export type ButtonSize = "small" | "medium" | "large";
 
-export interface ButtonProps
-  extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+export interface ButtonProps extends Omit<
+  ButtonHTMLAttributes<HTMLButtonElement>,
+  "children"
+> {
   /**
    * Visual style.
    * - `filled`: prominent, accent fill, white text. The "primary action" look.
@@ -97,7 +99,11 @@ export interface ButtonProps
  */
 function Spinner() {
   return (
-    <span className="zs-button__spinner" aria-hidden="true">
+    <span
+      className="zs-button__spinner"
+      data-slot="button-spinner"
+      aria-hidden="true"
+    >
       <svg viewBox="0 0 16 16" focusable="false">
         <circle cx="8" cy="8" r="6" />
       </svg>
@@ -140,7 +146,11 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   const localRef = useRef<HTMLElement | null>(null);
   useImperativeHandle(ref, () => localRef.current as HTMLElement, []);
   useEffect(() => {
-    if (typeof process === "undefined" || process.env?.NODE_ENV === "production") return;
+    if (
+      typeof process === "undefined" ||
+      process.env?.NODE_ENV === "production"
+    )
+      return;
     const node = localRef.current;
     if (!node) return;
     const text = node.textContent?.trim() ?? "";
@@ -157,10 +167,20 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   }, []);
 
   const buildInner = (labelContent: ReactNode) => (
-    <span className="zs-button__inner">
-      {startSlot != null ? <span className="zs-button__start">{startSlot}</span> : null}
-      <span className="zs-button__label">{labelContent}</span>
-      {endSlot != null ? <span className="zs-button__end">{endSlot}</span> : null}
+    <span className="zs-button__inner" data-slot="button-inner">
+      {startSlot != null ? (
+        <span className="zs-button__start" data-slot="button-start">
+          {startSlot}
+        </span>
+      ) : null}
+      <span className="zs-button__label" data-slot="button-label">
+        {labelContent}
+      </span>
+      {endSlot != null ? (
+        <span className="zs-button__end" data-slot="button-end">
+          {endSlot}
+        </span>
+      ) : null}
     </span>
   );
 

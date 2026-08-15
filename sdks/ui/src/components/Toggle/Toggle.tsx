@@ -110,17 +110,16 @@ type BaseToggleGroupChangeEventDetails = Parameters<
  * permits `aria-orientation`). Consumers passing `role` get a TypeScript
  * error at the call site so the contract is enforced at compile time.
  */
-interface ToggleGroupBaseProps
-  extends Omit<
-    BaseToggleGroupProps,
-    | "className"
-    | "render"
-    | "role"
-    | "value"
-    | "defaultValue"
-    | "onValueChange"
-    | "multiple"
-  > {
+interface ToggleGroupBaseProps extends Omit<
+  BaseToggleGroupProps,
+  | "className"
+  | "render"
+  | "role"
+  | "value"
+  | "defaultValue"
+  | "onValueChange"
+  | "multiple"
+> {
   /** Visual size — inherited by children unless they override. */
   size?: ToggleSize;
   /**
@@ -156,8 +155,9 @@ interface ToggleGroupBaseProps
  * The discriminant is `multiple?: false | undefined` so the default
  * `<Toggle.Group>` (no `multiple` prop) narrows to this branch.
  */
-export interface ToggleGroupSingleProps<Value extends string = string>
-  extends ToggleGroupBaseProps {
+export interface ToggleGroupSingleProps<
+  Value extends string = string,
+> extends ToggleGroupBaseProps {
   /** When omitted or `false`, the group is single-selection. */
   multiple?: false;
   /** Controlled value of the single pressed segment. */
@@ -178,8 +178,9 @@ export interface ToggleGroupSingleProps<Value extends string = string>
  * Multiple-selection variant — value is an array of `Value`s. Discriminant
  * is `multiple: true` (required, not optional).
  */
-export interface ToggleGroupMultipleProps<Value extends string = string>
-  extends ToggleGroupBaseProps {
+export interface ToggleGroupMultipleProps<
+  Value extends string = string,
+> extends ToggleGroupBaseProps {
   /** Required to enter multiple-selection mode. */
   multiple: true;
   /** Controlled set of pressed values. */
@@ -199,8 +200,7 @@ export interface ToggleGroupMultipleProps<Value extends string = string>
  * scalar `value`/`defaultValue`/`onValueChange`.
  */
 export type ToggleGroupProps<Value extends string = string> =
-  | ToggleGroupSingleProps<Value>
-  | ToggleGroupMultipleProps<Value>;
+  ToggleGroupSingleProps<Value> | ToggleGroupMultipleProps<Value>;
 
 /**
  * Module-level dedup map for dev warnings. We key on a stable signature
@@ -384,6 +384,7 @@ function ToggleGroupInner<Value extends string = string>(
       }}
     >
       <BaseToggleGroup
+        data-slot="toggle-group"
         // ToggleGroup review-fix 🔴 #2: stamp `role="toolbar"` AFTER
         // {...rest} so an untyped spread (e.g. a consumer who casts past
         // the public `Omit<…, "role">` type, or a Field/Fieldset that
@@ -423,7 +424,9 @@ function ToggleGroupInner<Value extends string = string>(
   );
 }
 
-const ToggleGroup = forwardRef(ToggleGroupInner) as <Value extends string = string>(
+const ToggleGroup = forwardRef(ToggleGroupInner) as <
+  Value extends string = string,
+>(
   props: ToggleGroupProps<Value> & { ref?: React.Ref<HTMLDivElement> },
 ) => React.JSX.Element;
 (ToggleGroup as React.FC).displayName = "Toggle.Group";
@@ -432,8 +435,10 @@ const ToggleGroup = forwardRef(ToggleGroupInner) as <Value extends string = stri
 
 type BaseToggleRootProps = ComponentPropsWithRef<typeof BaseToggle>;
 
-export interface ToggleProps<Value extends string = string>
-  extends Omit<BaseToggleRootProps, "className" | "render" | "value"> {
+export interface ToggleProps<Value extends string = string> extends Omit<
+  BaseToggleRootProps,
+  "className" | "render" | "value"
+> {
   /**
    * The value this Toggle contributes when rendered inside a
    * `Toggle.Group`. The `<Value>` generic narrows the literal string set
@@ -511,10 +516,16 @@ function ToggleInner<Value extends string = string>(
   // drive Base UI's `nativeButton` correctly. Contingency from the brief
   // — same heuristic Dialog.Close uses (slice-3 review-fix item 2).
   const asChildIsNativeButton =
-    asChild && isValidElement(children) && (children as { type?: unknown }).type === "button";
+    asChild &&
+    isValidElement(children) &&
+    (children as { type?: unknown }).type === "button";
   const nativeButton = asChild ? asChildIsNativeButton : true;
 
-  if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+  if (
+    process.env.NODE_ENV !== "production" &&
+    asChild &&
+    !isValidElement(children)
+  ) {
     // Matches Dialog.Close convention (slice-3 review-fix item 2): the
     // dev-error is NOT deduped across mounts — same shape Dialog.Close
     // uses. Leaving undeduped keeps the misuse loud at dev time.
@@ -665,7 +676,8 @@ function classifyToggleContent(
 ): "text" | "icon" | "ambiguous" {
   const children = (toggle.props as { children?: ReactNode }).children;
   if (children == null) return "ambiguous";
-  if (typeof children === "string" || typeof children === "number") return "text";
+  if (typeof children === "string" || typeof children === "number")
+    return "text";
   if (Array.isArray(children)) {
     const hasText = children.some(
       (c) => typeof c === "string" || typeof c === "number",

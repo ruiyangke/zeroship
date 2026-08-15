@@ -113,17 +113,16 @@ type CollapsibleOnOpenChange = NonNullable<
   BaseCollapsibleRootProps["onOpenChange"]
 >;
 
-export interface CollapsibleRootProps
-  extends Omit<
-    BaseCollapsibleRootProps,
-    | "render"
-    | "className"
-    | "open"
-    | "defaultOpen"
-    | "onOpenChange"
-    | "disabled"
-    | "children"
-  > {
+export interface CollapsibleRootProps extends Omit<
+  BaseCollapsibleRootProps,
+  | "render"
+  | "className"
+  | "open"
+  | "defaultOpen"
+  | "onOpenChange"
+  | "disabled"
+  | "children"
+> {
   /**
    * Controlled open state. When provided, `onOpenChange` MUST also be
    * provided to react to user-driven toggles. Omit both to use
@@ -183,14 +182,14 @@ const CollapsibleRoot = forwardRef<HTMLDivElement, CollapsibleRootProps>(
         }
         disabled={disabled}
         className={classnames("zs-collapsible", className)}
+        data-slot="collapsible"
       >
         {children}
       </BaseCollapsible.Root>
     );
   },
 );
-(CollapsibleRoot as { displayName?: string }).displayName =
-  "Collapsible.Root";
+(CollapsibleRoot as { displayName?: string }).displayName = "Collapsible.Root";
 
 /* ─── Collapsible.Trigger ───────────────────────────────────────────── */
 
@@ -198,11 +197,10 @@ type BaseCollapsibleTriggerProps = ComponentPropsWithRef<
   typeof BaseCollapsible.Trigger
 >;
 
-export interface CollapsibleTriggerProps
-  extends Omit<
-    BaseCollapsibleTriggerProps,
-    "render" | "className" | "type" | "children"
-  > {
+export interface CollapsibleTriggerProps extends Omit<
+  BaseCollapsibleTriggerProps,
+  "render" | "className" | "type" | "children"
+> {
   /** Optional class hook on the trigger button. */
   className?: string;
   /**
@@ -267,6 +265,7 @@ const CollapsibleTrigger = forwardRef<
         ref={ref}
         nativeButton={nativeButton}
         className={classnames("zs-collapsible-trigger", className)}
+        data-slot="collapsible-trigger"
         render={(triggerProps) => {
           if (!isValidElement(children)) return <></>;
           // Slot fans className, style, refs, and event handlers from
@@ -297,9 +296,19 @@ const CollapsibleTrigger = forwardRef<
       type="button"
       nativeButton={nativeButton}
       className={classnames("zs-collapsible-trigger", className)}
+      data-slot="collapsible-trigger"
     >
-      <span className="zs-collapsible-trigger-label">{children}</span>
-      <Icon as={ChevronDown} className="zs-collapsible-trigger-chevron" />
+      <span
+        className="zs-collapsible-trigger-label"
+        data-slot="collapsible-trigger-label"
+      >
+        {children}
+      </span>
+      <Icon
+        as={ChevronDown}
+        className="zs-collapsible-trigger-chevron"
+        data-slot="collapsible-trigger-chevron"
+      />
     </BaseCollapsible.Trigger>
   );
 });
@@ -312,8 +321,10 @@ type BaseCollapsiblePanelProps = ComponentPropsWithRef<
   typeof BaseCollapsible.Panel
 >;
 
-export interface CollapsiblePanelProps
-  extends Omit<BaseCollapsiblePanelProps, "render" | "className" | "children"> {
+export interface CollapsiblePanelProps extends Omit<
+  BaseCollapsiblePanelProps,
+  "render" | "className" | "children"
+> {
   /** Optional class hook on the panel wrapper. */
   className?: string;
   /**
@@ -363,6 +374,7 @@ const CollapsiblePanel = forwardRef<HTMLDivElement, CollapsiblePanelProps>(
           {...rest}
           ref={ref}
           className={classnames("zs-collapsible-panel", className)}
+          data-slot="collapsible-panel"
           render={(panelProps) => {
             if (!isValidElement(children)) return <></>;
             // The caller's element replaces our default `<div>` AND
@@ -386,10 +398,16 @@ const CollapsiblePanel = forwardRef<HTMLDivElement, CollapsiblePanelProps>(
         {...rest}
         ref={ref}
         className={classnames("zs-collapsible-panel", className)}
+        data-slot="collapsible-panel"
       >
         {/* Inner wrapper carries the padding so the outer block-size
             animation cleanly drives `block-size: 0`. */}
-        <div className="zs-collapsible-panel-inner">{children}</div>
+        <div
+          className="zs-collapsible-panel-inner"
+          data-slot="collapsible-panel-inner"
+        >
+          {children}
+        </div>
       </BaseCollapsible.Panel>
     );
   },

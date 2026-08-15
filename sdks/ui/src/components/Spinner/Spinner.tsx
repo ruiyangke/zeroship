@@ -69,9 +69,17 @@ export const Spinner = forwardRef<HTMLSpanElement, SpinnerProps>(
       >
         {/* The visible ring. Decorative — the consumer-supplied name (or
             the visually-hidden label below) carries the accessible name. */}
-        <span className="zs-spinner__ring" aria-hidden="true" />
+        <span
+          className="zs-spinner__ring"
+          data-slot="spinner-ring"
+          aria-hidden="true"
+        />
         {consumerNamed ? null : (
-          <span id={labelId} className="zs-visually-hidden">
+          <span
+            id={labelId}
+            className="zs-visually-hidden"
+            data-slot="visually-hidden"
+          >
             {label}
           </span>
         )}

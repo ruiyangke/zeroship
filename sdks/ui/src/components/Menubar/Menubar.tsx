@@ -70,7 +70,11 @@
  *     would ship inconsistent ARIA. We omit the attribute from the public
  *     type and strip it at runtime (mirror the Toolbar pattern).
  */
-import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import {
+  forwardRef,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from "react";
 import { Menubar as BaseMenubar } from "@base-ui/react/menubar";
 import { classnames, composeBaseClass } from "../_classnames";
 
@@ -103,8 +107,10 @@ type BaseMenubarProps = ComponentPropsWithoutRef<typeof BaseMenubar>;
  * defaults instead of opaque inherited types. Other data-attribute escape
  * hatches remain available via the remaining inherited surface.
  */
-export interface MenubarProps
-  extends Omit<BaseMenubarProps, "render" | "role" | "aria-orientation"> {
+export interface MenubarProps extends Omit<
+  BaseMenubarProps,
+  "render" | "role" | "aria-orientation"
+> {
   /**
    * Layout axis.
    *
@@ -231,6 +237,7 @@ const MenubarRoot = forwardRef<HTMLDivElement, MenubarProps>(
           classnames("zs-menubar", `zs-menubar--${orientation}`),
           className,
         )}
+        data-slot="menubar"
       >
         {children}
       </BaseMenubar>

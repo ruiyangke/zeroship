@@ -67,8 +67,10 @@ import type { Intent } from "../../components/_intent";
  */
 export type ErrorStateIntent = Extract<Intent, "warning" | "danger">;
 
-export interface ErrorStateProps
-  extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
+export interface ErrorStateProps extends Omit<
+  ComponentPropsWithoutRef<"div">,
+  "title"
+> {
   /**
    * Severity — tints the icon and (under forced-colors) the system
    * color mapping.
@@ -163,7 +165,12 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
 
     const column = (
       <Center asChild data-slot="error-state-column">
-        <Stack className="zs-error-state__column" align="center" gap={3}>
+        <Stack
+          className="zs-error-state__column"
+          data-slot="error-state-column"
+          align="center"
+          gap={3}
+        >
           <ErrorStateIcon intent={intent} />
           {title != null ? <ErrorStateTitle>{title}</ErrorStateTitle> : null}
           {description != null ? (
@@ -231,7 +238,10 @@ export interface ErrorStateTitleProps extends HeadingProps {
 }
 
 const ErrorStateTitle = forwardRef<HTMLHeadingElement, ErrorStateTitleProps>(
-  function ErrorStateTitle({ asChild = false, className, children, ...rest }, ref) {
+  function ErrorStateTitle(
+    { asChild = false, className, children, ...rest },
+    ref,
+  ) {
     if (asChild) {
       if (!isValidElement(children)) {
         if (process.env.NODE_ENV !== "production") {

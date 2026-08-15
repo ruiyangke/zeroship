@@ -191,8 +191,7 @@ interface AccordionMultipleProps {
 }
 
 export type AccordionRootProps = (
-  | AccordionSingleProps
-  | AccordionMultipleProps
+  AccordionSingleProps | AccordionMultipleProps
 ) & {
   /**
    * Visual orientation. `vertical` (default) stacks Items top-to-bottom
@@ -322,6 +321,7 @@ function AccordionRootInner(
             `zs-accordion--${orientation}`,
             className,
           )}
+          data-slot="accordion"
           data-orientation={orientation}
         >
           {children}
@@ -331,11 +331,7 @@ function AccordionRootInner(
   }
 
   // Multiple mode. Pass arrays through unchanged.
-  const {
-    type: _type,
-    onValueChange,
-    ...baseRest
-  } = rest;
+  const { type: _type, onValueChange, ...baseRest } = rest;
   void _type;
   const isControlled = "value" in rest;
   const isDefaulted = "defaultValue" in rest;
@@ -367,6 +363,7 @@ function AccordionRootInner(
           `zs-accordion--${orientation}`,
           className,
         )}
+        data-slot="accordion"
         data-orientation={orientation}
       >
         {children}
@@ -379,8 +376,10 @@ function AccordionRootInner(
 
 type BaseAccordionItemProps = ComponentPropsWithRef<typeof BaseAccordion.Item>;
 
-export interface AccordionItemProps
-  extends Omit<BaseAccordionItemProps, "render" | "className" | "value"> {
+export interface AccordionItemProps extends Omit<
+  BaseAccordionItemProps,
+  "render" | "className" | "value"
+> {
   /**
    * The value keying this Item to the root's open-state. Required —
    * Items without a value cannot be addressed by `value`/`defaultValue`
@@ -403,6 +402,7 @@ const AccordionItem = forwardRef<HTMLDivElement, AccordionItemProps>(
           `zs-accordion-item--${orientation}`,
           className,
         )}
+        data-slot="accordion-item"
         data-orientation={orientation}
       />
     );
@@ -416,8 +416,10 @@ type BaseAccordionHeaderProps = ComponentPropsWithRef<
   typeof BaseAccordion.Header
 >;
 
-export interface AccordionHeaderProps
-  extends Omit<BaseAccordionHeaderProps, "render" | "className"> {
+export interface AccordionHeaderProps extends Omit<
+  BaseAccordionHeaderProps,
+  "render" | "className"
+> {
   /** Optional class hook on the header element. */
   className?: string;
 }
@@ -434,13 +436,13 @@ const AccordionHeader = forwardRef<HTMLHeadingElement, AccordionHeaderProps>(
           `zs-accordion-header--${orientation}`,
           className,
         )}
+        data-slot="accordion-header"
         data-orientation={orientation}
       />
     );
   },
 );
-(AccordionHeader as { displayName?: string }).displayName =
-  "Accordion.Header";
+(AccordionHeader as { displayName?: string }).displayName = "Accordion.Header";
 
 /* ─── Accordion.Trigger ─────────────────────────────────────────────── */
 
@@ -448,8 +450,10 @@ type BaseAccordionTriggerProps = ComponentPropsWithRef<
   typeof BaseAccordion.Trigger
 >;
 
-export interface AccordionTriggerProps
-  extends Omit<BaseAccordionTriggerProps, "render" | "className" | "type"> {
+export interface AccordionTriggerProps extends Omit<
+  BaseAccordionTriggerProps,
+  "render" | "className" | "type"
+> {
   /** Optional class hook on the trigger button. */
   className?: string;
 }
@@ -459,6 +463,7 @@ const AccordionTrigger = forwardRef<HTMLButtonElement, AccordionTriggerProps>(
     const { orientation } = useAccordionContext();
     return (
       <BaseAccordion.Trigger
+        data-slot="accordion-trigger"
         {...rest}
         ref={ref as React.Ref<HTMLElement>}
         // Stamp type="button" UNCONDITIONALLY. `type` is omitted from
@@ -473,8 +478,17 @@ const AccordionTrigger = forwardRef<HTMLButtonElement, AccordionTriggerProps>(
         )}
         data-orientation={orientation}
       >
-        <span className="zs-accordion-trigger-label">{children}</span>
-        <Icon as={ChevronDown} className="zs-accordion-trigger-chevron" />
+        <span
+          className="zs-accordion-trigger-label"
+          data-slot="accordion-trigger-label"
+        >
+          {children}
+        </span>
+        <Icon
+          as={ChevronDown}
+          className="zs-accordion-trigger-chevron"
+          data-slot="accordion-trigger-chevron"
+        />
       </BaseAccordion.Trigger>
     );
   },
@@ -488,8 +502,10 @@ type BaseAccordionPanelProps = ComponentPropsWithRef<
   typeof BaseAccordion.Panel
 >;
 
-export interface AccordionPanelProps
-  extends Omit<BaseAccordionPanelProps, "render" | "className"> {
+export interface AccordionPanelProps extends Omit<
+  BaseAccordionPanelProps,
+  "render" | "className"
+> {
   /** Optional class hook on the panel wrapper. */
   className?: string;
 }
@@ -506,12 +522,18 @@ const AccordionPanel = forwardRef<HTMLDivElement, AccordionPanelProps>(
           `zs-accordion-panel--${orientation}`,
           className,
         )}
+        data-slot="accordion-panel"
         data-orientation={orientation}
       >
         {/* Inner wrapper carries the padding so the outer block-size
             animation can drive `block-size: 0` cleanly (padding on the
             outer would create a layout step at the transition end). */}
-        <div className="zs-accordion-panel-inner">{children}</div>
+        <div
+          className="zs-accordion-panel-inner"
+          data-slot="accordion-panel-inner"
+        >
+          {children}
+        </div>
       </BaseAccordion.Panel>
     );
   },
@@ -539,9 +561,4 @@ ForwardedAccordion.Trigger = AccordionTrigger;
 ForwardedAccordion.Panel = AccordionPanel;
 
 export const Accordion = ForwardedAccordion;
-export {
-  AccordionItem,
-  AccordionHeader,
-  AccordionTrigger,
-  AccordionPanel,
-};
+export { AccordionItem, AccordionHeader, AccordionTrigger, AccordionPanel };

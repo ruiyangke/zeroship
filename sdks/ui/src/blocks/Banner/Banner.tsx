@@ -78,8 +78,10 @@ import type { Intent } from "../../components/_intent";
  */
 export type BannerIntent = Exclude<Intent, "neutral">;
 
-export interface BannerProps
-  extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
+export interface BannerProps extends Omit<
+  ComponentPropsWithoutRef<"div">,
+  "title"
+> {
   /**
    * Semantic color family — tints the background, the leading icon, and
    * (when `live`) selects the live-region role.
@@ -255,7 +257,9 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
   // severity picks polite vs assertive: info/success announce politely
   // via `status`; warning/danger interrupt via `alert`.
   const liveProps = live
-    ? ({ role: intent === "warning" || intent === "danger" ? "alert" : "status" } as const)
+    ? ({
+        role: intent === "warning" || intent === "danger" ? "alert" : "status",
+      } as const)
     : undefined;
 
   const dataProps = {
@@ -334,11 +338,7 @@ function BannerIcon({ intent }: { intent: BannerIntent }) {
   // intent color flows through unchanged.
   const glyph = intent === "success" ? CircleCheck : CircleAlert;
   return (
-    <div
-      aria-hidden="true"
-      data-slot="banner-icon"
-      className="zs-banner__icon"
-    >
+    <div aria-hidden="true" data-slot="banner-icon" className="zs-banner__icon">
       <Icon as={glyph} />
     </div>
   );

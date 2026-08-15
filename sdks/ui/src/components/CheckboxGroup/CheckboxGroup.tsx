@@ -44,11 +44,7 @@
  *   7. Forced colors: nothing to mirror at this level. The chips paint
  *      their own forced-colors surface; the group is invisible chrome.
  */
-import {
-  forwardRef,
-  type ComponentPropsWithRef,
-  type ReactNode,
-} from "react";
+import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { CheckboxGroup as BaseCheckboxGroup } from "@base-ui/react/checkbox-group";
 import { useFieldDisabledContext } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
@@ -59,11 +55,15 @@ export type CheckboxGroupValue = string[];
 
 type BaseCheckboxGroupProps = ComponentPropsWithRef<typeof BaseCheckboxGroup>;
 
-export interface CheckboxGroupProps
-  extends Omit<
-    BaseCheckboxGroupProps,
-    "className" | "render" | "value" | "defaultValue" | "onValueChange" | "children"
-  > {
+export interface CheckboxGroupProps extends Omit<
+  BaseCheckboxGroupProps,
+  | "className"
+  | "render"
+  | "value"
+  | "defaultValue"
+  | "onValueChange"
+  | "children"
+> {
   /**
    * Controlled value — names of every Checkbox child that should be
    * ticked. Provide together with `onValueChange`. Mutually exclusive
@@ -83,10 +83,7 @@ export interface CheckboxGroupProps
    * argument is the next value array (order matches click order — Base
    * UI appends new selections and removes by value).
    */
-  onValueChange?: (
-    value: CheckboxGroupValue,
-    eventDetails: unknown,
-  ) => void;
+  onValueChange?: (value: CheckboxGroupValue, eventDetails: unknown) => void;
 
   /**
    * Layout flow — `vertical` stacks (default); `horizontal` is a
@@ -157,6 +154,7 @@ export const CheckboxGroup = forwardRef<HTMLDivElement, CheckboxGroupProps>(
           `zs-checkbox-group--${orientation}`,
           className,
         )}
+        data-slot="checkbox-group"
         data-orientation={orientation}
       >
         {children}

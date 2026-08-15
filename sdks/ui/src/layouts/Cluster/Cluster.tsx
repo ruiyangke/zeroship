@@ -62,52 +62,54 @@ export interface ClusterProps extends ComponentPropsWithoutRef<"div"> {
  * interactive group with roving tabindex, use `Toolbar`. Arrange-only:
  * no paint.
  */
-export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(function Cluster(
-  {
-    gap = 2,
-    align = "center",
-    justify = "start",
-    asChild = false,
-    className,
-    style,
-    children,
-    "data-slot": dataSlot = "cluster",
-    ...rest
-  },
-  ref,
-) {
-  // Dev-mode parity with Card: warn when asChild has no single valid
-  // element child (Slot would render nothing silently). DCEs in prod.
-  if (process.env.NODE_ENV !== "production") {
-    if (asChild && !isValidElement(children)) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "Cluster asChild requires a single React element child; rendering nothing.",
-      );
+export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(
+  function Cluster(
+    {
+      gap = 2,
+      align = "center",
+      justify = "start",
+      asChild = false,
+      className,
+      style,
+      children,
+      "data-slot": dataSlot = "cluster",
+      ...rest
+    },
+    ref,
+  ) {
+    // Dev-mode parity with Card: warn when asChild has no single valid
+    // element child (Slot would render nothing silently). DCEs in prod.
+    if (process.env.NODE_ENV !== "production") {
+      if (asChild && !isValidElement(children)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Cluster asChild requires a single React element child; rendering nothing.",
+        );
+      }
     }
-  }
 
-  const composedClassName = classnames("zs-cluster", className);
+    const composedClassName = classnames("zs-cluster", className);
 
-  const layoutVars: React.CSSProperties = {
-    "--cluster-gap": spaceVar(gap),
-    "--cluster-align": alignValue(align),
-    "--cluster-justify": justifyValue(justify),
-    ...style,
-  } as React.CSSProperties;
+    const layoutVars: React.CSSProperties = {
+      "--cluster-gap": spaceVar(gap),
+      "--cluster-align": alignValue(align),
+      "--cluster-justify": justifyValue(justify),
+      ...style,
+    } as React.CSSProperties;
 
-  const Comp = asChild ? Slot : "div";
+    const Comp = asChild ? Slot : "div";
 
-  return (
-    <Comp
-      {...rest}
-      ref={ref as Ref<HTMLDivElement>}
-      data-slot={dataSlot}
-      className={composedClassName}
-      style={layoutVars}
-    >
-      {children}
-    </Comp>
-  );
-});
+    return (
+      <Comp
+        {...rest}
+        ref={ref as Ref<HTMLDivElement>}
+        data-slot={dataSlot}
+        className={composedClassName}
+        style={layoutVars}
+      >
+        {children}
+      </Comp>
+    );
+  },
+);
 Cluster.displayName = "Cluster";

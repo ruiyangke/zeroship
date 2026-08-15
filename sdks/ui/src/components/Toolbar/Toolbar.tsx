@@ -47,7 +47,11 @@
  *     ToolbarRoot already emits the attribute from the `orientation`
  *     prop; doubling up risks drift.
  */
-import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import {
+  forwardRef,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from "react";
 import { Toolbar as BaseToolbar } from "@base-ui/react/toolbar";
 import { classnames, composeBaseClass } from "../_classnames";
 
@@ -72,8 +76,10 @@ type BaseToolbarRootProps = ComponentPropsWithoutRef<typeof BaseToolbar.Root>;
  *     The `Omit` is the compile-time guard and the runtime strip below
  *     is the spread-injection guard.
  */
-export interface ToolbarProps
-  extends Omit<BaseToolbarRootProps, "render" | "role" | "aria-orientation"> {
+export interface ToolbarProps extends Omit<
+  BaseToolbarRootProps,
+  "render" | "role" | "aria-orientation"
+> {
   /**
    * Layout axis.
    *
@@ -143,6 +149,7 @@ const ToolbarRoot = forwardRef<HTMLDivElement, ToolbarProps>(
           classnames("zs-toolbar", `zs-toolbar--${orientation}`),
           className,
         )}
+        data-slot="toolbar"
       >
         {children}
       </BaseToolbar.Root>
@@ -172,6 +179,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(
         {...rest}
         ref={ref}
         className={composeBaseClass("zs-toolbar-button", className)}
+        data-slot="toolbar-button"
       />
     );
   },
@@ -191,7 +199,11 @@ const ToolbarLink = forwardRef<HTMLAnchorElement, ToolbarLinkProps>(
       <BaseToolbar.Link
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-toolbar-button zs-toolbar-link", className)}
+        className={composeBaseClass(
+          "zs-toolbar-button zs-toolbar-link",
+          className,
+        )}
+        data-slot="toolbar-button"
       />
     );
   },
@@ -215,6 +227,7 @@ const ToolbarInput = forwardRef<HTMLInputElement, ToolbarInputProps>(
         {...rest}
         ref={ref}
         className={composeBaseClass("zs-toolbar-input", className)}
+        data-slot="toolbar-input"
       />
     );
   },
@@ -235,7 +248,9 @@ ToolbarInput.displayName = "Toolbar.Input";
  * `render` is also Omit'd: we own the `<div>` rendering surface (no
  * asChild path here) so the separator role contract sticks. */
 
-type BaseSeparatorProps = ComponentPropsWithoutRef<typeof BaseToolbar.Separator>;
+type BaseSeparatorProps = ComponentPropsWithoutRef<
+  typeof BaseToolbar.Separator
+>;
 
 /**
  * Public Toolbar.Separator props. We deliberately omit:
@@ -252,11 +267,10 @@ type BaseSeparatorProps = ComponentPropsWithoutRef<typeof BaseToolbar.Separator>
  *     be misleading.
  *   - `aria-orientation`: LOCKED to track the resolved orientation.
  */
-export interface ToolbarSeparatorProps
-  extends Omit<
-    BaseSeparatorProps,
-    "render" | "orientation" | "role" | "aria-orientation"
-  > {
+export interface ToolbarSeparatorProps extends Omit<
+  BaseSeparatorProps,
+  "render" | "orientation" | "role" | "aria-orientation"
+> {
   /** Optional class hook on the separator. */
   className?: string;
 }
@@ -286,6 +300,7 @@ const ToolbarSeparator = forwardRef<HTMLDivElement, ToolbarSeparatorProps>(
         {...(restLocked as BaseSeparatorProps)}
         ref={ref}
         className={composeBaseClass("zs-toolbar-separator", className)}
+        data-slot="toolbar-separator"
       />
     );
   },

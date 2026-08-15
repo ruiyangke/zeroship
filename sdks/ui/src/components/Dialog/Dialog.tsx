@@ -124,8 +124,10 @@ const DialogRootRuntimeCtx = createContext<DialogRootRuntimeContext | null>(
  * `disablePointerDismissal` because we expose it under the friendlier
  * `dismissible` name with inverted semantics (see below).
  */
-export interface DialogProps
-  extends Omit<BaseRootProps, "disablePointerDismissal"> {
+export interface DialogProps extends Omit<
+  BaseRootProps,
+  "disablePointerDismissal"
+> {
   /**
    * Whether the dialog can be dismissed by outside-press OR Escape.
    * Default `true`. Setting `false` enforces non-dismissibility for
@@ -217,10 +219,7 @@ const DialogTrigger = forwardRef<HTMLElement, DialogTriggerProps>(
     // Base UI declares Trigger as HTMLButtonElement-typed; we widen to
     // HTMLElement for the consumer surface but cast at the boundary.
     return (
-      <BaseDialog.Trigger
-        ref={ref as Ref<HTMLButtonElement>}
-        {...props}
-      />
+      <BaseDialog.Trigger ref={ref as Ref<HTMLButtonElement>} {...props} />
     );
   },
 );
@@ -247,6 +246,7 @@ const DialogViewport = forwardRef<HTMLDivElement, DialogViewportProps>(
       <BaseDialog.Viewport
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-dialog-viewport", className)}
+        data-slot="dialog-viewport"
         {...rest}
       />
     );
@@ -280,8 +280,8 @@ const DialogBackdrop = forwardRef<HTMLElement, DialogBackdropProps>(
         // eslint-disable-next-line no-console
         console.warn(
           'Dialog.Backdrop tint="invisible" combined with modal' +
-            ' (default) renders a fully transparent click-blocker.' +
-            ' Either set modal={false} or pick a visible tint' +
+            " (default) renders a fully transparent click-blocker." +
+            " Either set modal={false} or pick a visible tint" +
             ' ("scrim" or "material").',
         );
       }
@@ -294,6 +294,7 @@ const DialogBackdrop = forwardRef<HTMLElement, DialogBackdropProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-dialog-backdrop", className)}
+        data-slot="dialog-backdrop"
         data-tint={tint}
       />
     );
@@ -365,6 +366,7 @@ const DialogPopup = forwardRef<HTMLElement, DialogPopupProps>(
         {...rest}
         ref={composedRef as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-dialog-popup", className)}
+        data-slot="dialog-popup"
         data-size={size}
         data-placement={placement}
       />
@@ -400,12 +402,19 @@ const DialogHeader = forwardRef<HTMLDivElement, DialogHeaderProps>(
       <div
         ref={ref}
         className={classnames("zs-dialog__header", className)}
+        data-slot="dialog-header"
         {...rest}
       >
-        <div className="zs-dialog__header-content">{children}</div>
+        <div
+          className="zs-dialog__header-content"
+          data-slot="dialog-header-content"
+        >
+          {children}
+        </div>
         {showClose ? (
           <BaseDialog.Close
             className="zs-dialog__header-close"
+            data-slot="dialog-header-close"
             aria-label={closeLabel}
           >
             <Icon as={X} size="sm" />
@@ -427,6 +436,7 @@ const DialogTitle = forwardRef<HTMLHeadingElement, DialogTitleProps>(
       <BaseDialog.Title
         ref={ref}
         className={composeBaseClass("zs-dialog__title", className)}
+        data-slot="dialog-title"
         {...rest}
       />
     );
@@ -434,19 +444,23 @@ const DialogTitle = forwardRef<HTMLHeadingElement, DialogTitleProps>(
 );
 DialogTitle.displayName = "Dialog.Title";
 
-type BaseDescriptionProps = ComponentPropsWithoutRef<typeof BaseDialog.Description>;
+type BaseDescriptionProps = ComponentPropsWithoutRef<
+  typeof BaseDialog.Description
+>;
 export type DialogDescriptionProps = BaseDescriptionProps;
-const DialogDescription = forwardRef<HTMLParagraphElement, DialogDescriptionProps>(
-  function DialogDescription({ className, ...rest }, ref) {
-    return (
-      <BaseDialog.Description
-        ref={ref}
-        className={composeBaseClass("zs-dialog__description", className)}
-        {...rest}
-      />
-    );
-  },
-);
+const DialogDescription = forwardRef<
+  HTMLParagraphElement,
+  DialogDescriptionProps
+>(function DialogDescription({ className, ...rest }, ref) {
+  return (
+    <BaseDialog.Description
+      ref={ref}
+      className={composeBaseClass("zs-dialog__description", className)}
+      data-slot="dialog-description"
+      {...rest}
+    />
+  );
+});
 DialogDescription.displayName = "Dialog.Description";
 
 /* ─── Body / Footer (layout-only) ───────────────────────────────────── */
@@ -458,6 +472,7 @@ const DialogBody = forwardRef<HTMLDivElement, DialogBodyProps>(
       <div
         ref={ref}
         className={classnames("zs-dialog__body", className)}
+        data-slot="dialog-body"
         {...rest}
       />
     );
@@ -472,6 +487,7 @@ const DialogFooter = forwardRef<HTMLDivElement, DialogFooterProps>(
       <div
         ref={ref}
         className={classnames("zs-dialog__footer", className)}
+        data-slot="dialog-footer"
         {...rest}
       />
     );
@@ -522,14 +538,20 @@ const DialogClose = forwardRef<HTMLButtonElement, DialogCloseProps>(
     // emits a dev error AND applies non-native handlers (role="button",
     // keyboard handlers) when this is mismatched.
     const asChildIsNativeButton =
-      asChild && isValidElement(children) && (children as { type?: unknown }).type === "button";
+      asChild &&
+      isValidElement(children) &&
+      (children as { type?: unknown }).type === "button";
 
     // For the default path we render our Button which renders a real
     // <button>, so `nativeButton={true}`. For asChild paths we trust
     // the inspection above.
     const nativeButton = asChild ? asChildIsNativeButton : true;
 
-    if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+    if (
+      process.env.NODE_ENV !== "production" &&
+      asChild &&
+      !isValidElement(children)
+    ) {
       // eslint-disable-next-line no-console
       console.error(
         "Dialog.Close asChild expects a single React element child; received " +
@@ -584,10 +606,7 @@ const DialogClose = forwardRef<HTMLButtonElement, DialogCloseProps>(
               <Slot
                 {...closeProps}
                 {...rest}
-                ref={composeRefs(
-                  ref as Ref<unknown>,
-                  closePropsRef,
-                )}
+                ref={composeRefs(ref as Ref<unknown>, closePropsRef)}
                 onClick={composedOnClick}
               >
                 {children}

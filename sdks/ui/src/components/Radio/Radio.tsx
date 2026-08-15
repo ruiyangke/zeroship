@@ -100,11 +100,15 @@ function useRadioGroupContext() {
 
 type BaseRadioGroupProps = ComponentPropsWithRef<typeof BaseRadioGroup>;
 
-export interface RadioGroupProps<T = string>
-  extends Omit<
-    BaseRadioGroupProps,
-    "className" | "render" | "children" | "value" | "defaultValue" | "onValueChange"
-  > {
+export interface RadioGroupProps<T = string> extends Omit<
+  BaseRadioGroupProps,
+  | "className"
+  | "render"
+  | "children"
+  | "value"
+  | "defaultValue"
+  | "onValueChange"
+> {
   /** Layout — `vertical` stacks (default); `horizontal` is a wrapping row. */
   orientation?: RadioOrientation;
 
@@ -179,6 +183,7 @@ function RadioGroupInner<T = string>(
   return (
     <RadioGroupContext.Provider value={{ size, disabled }}>
       <BaseRadioGroup
+        data-slot="radio-group"
         {...rest}
         // Base UI's value props are untyped (`unknown` at the public
         // surface). The `as never` keeps our `<T>` discipline visible
@@ -213,11 +218,10 @@ const RadioGroup = forwardRef(RadioGroupInner) as <T = string>(
 
 type BaseRadioRootProps = ComponentPropsWithRef<typeof BaseRadio.Root>;
 
-export interface RadioProps<T = string>
-  extends Omit<
-    BaseRadioRootProps,
-    "className" | "render" | "children" | "value"
-  > {
+export interface RadioProps<T = string> extends Omit<
+  BaseRadioRootProps,
+  "className" | "render" | "children" | "value"
+> {
   /** The discriminant value this Radio represents in the group. */
   value: T;
 
@@ -309,11 +313,7 @@ function RadioInner<T = string>(
     }
   }, [groupCtx]);
 
-  const chipClassName = classnames(
-    "zs-radio",
-    `zs-radio--${size}`,
-    className,
-  );
+  const chipClassName = classnames("zs-radio", `zs-radio--${size}`, className);
 
   // Per-option accessible name (wave10 🔴 a11y fix).
   //
@@ -338,9 +338,7 @@ function RadioInner<T = string>(
   const generatedTextId = useId();
   const hasInlineLabel = label != null;
   const rowTextId =
-    ariaLabelledByProp == null && hasInlineLabel
-      ? generatedTextId
-      : undefined;
+    ariaLabelledByProp == null && hasInlineLabel ? generatedTextId : undefined;
   const chipAriaLabelledBy = ariaLabelledByProp ?? rowTextId;
 
   const chip = (
@@ -356,7 +354,10 @@ function RadioInner<T = string>(
       className={chipClassName}
       data-size={size}
     >
-      <BaseRadio.Indicator className="zs-radio__indicator" />
+      <BaseRadio.Indicator
+        className="zs-radio__indicator"
+        data-slot="radio-indicator"
+      />
     </BaseRadio.Root>
   );
 
@@ -370,7 +371,11 @@ function RadioInner<T = string>(
         fieldProps={fieldProps}
       >
         {chip}
-        <span id={rowTextId} className="zs-radio-field__text">
+        <span
+          id={rowTextId}
+          className="zs-radio-field__text"
+          data-slot="radio-field-text"
+        >
           {label}
         </span>
       </SelectionRow>

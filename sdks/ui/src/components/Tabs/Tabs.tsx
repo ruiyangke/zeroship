@@ -144,8 +144,10 @@ function useTabsContext(): TabsContextValue {
 
 type BaseTabsRootProps = ComponentPropsWithRef<typeof BaseTabs.Root>;
 
-export interface TabsProps
-  extends Omit<BaseTabsRootProps, "render" | "className"> {
+export interface TabsProps extends Omit<
+  BaseTabsRootProps,
+  "render" | "className"
+> {
   /**
    * Visual variant — `default` paints an underline indicator under the
    * active tab; `pill` paints an accent-filled rounded segment behind
@@ -218,6 +220,7 @@ function TabsRootInner(
           `zs-tabs--${orientation}`,
           className,
         )}
+        data-slot="tabs"
         data-variant={variant}
         data-size={size}
         data-orientation={orientation}
@@ -237,8 +240,10 @@ const LazyMountContext = createContext<boolean>(false);
 
 type BaseTabsListProps = ComponentPropsWithRef<typeof BaseTabs.List>;
 
-export interface TabsListProps
-  extends Omit<BaseTabsListProps, "render" | "className" | "activateOnFocus" | "loopFocus"> {
+export interface TabsListProps extends Omit<
+  BaseTabsListProps,
+  "render" | "className" | "activateOnFocus" | "loopFocus"
+> {
   /**
    * When `true`, focusing a Tab via arrow-key navigation activates it
    * immediately (selects the tab and shows its panel). When `false`
@@ -277,6 +282,7 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
         `zs-tabs-list--${orientation}`,
         className,
       )}
+      data-slot="tabs-list"
       data-variant={variant}
       data-size={size}
       data-orientation={orientation}
@@ -289,8 +295,10 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
 
 type BaseTabsTabProps = ComponentPropsWithRef<typeof BaseTabs.Tab>;
 
-export interface TabsTabProps
-  extends Omit<BaseTabsTabProps, "render" | "className" | "value" | "type"> {
+export interface TabsTabProps extends Omit<
+  BaseTabsTabProps,
+  "render" | "className" | "value" | "type"
+> {
   /**
    * The value keying this Tab to its Panel. Required — there is no
    * implicit index-based wiring; Panels reference Tabs by `value`.
@@ -339,6 +347,7 @@ const TabsTab = forwardRef<HTMLButtonElement, TabsTabProps>(function TabsTab(
         `zs-tabs-tab--${ctx.orientation}`,
         className,
       )}
+      data-slot="tabs-tab"
       data-variant={ctx.variant}
       data-size={size}
       data-orientation={ctx.orientation}
@@ -351,8 +360,10 @@ const TabsTab = forwardRef<HTMLButtonElement, TabsTabProps>(function TabsTab(
 
 type BaseTabsPanelProps = ComponentPropsWithRef<typeof BaseTabs.Panel>;
 
-export interface TabsPanelProps
-  extends Omit<BaseTabsPanelProps, "render" | "className" | "value" | "keepMounted"> {
+export interface TabsPanelProps extends Omit<
+  BaseTabsPanelProps,
+  "render" | "className" | "value" | "keepMounted"
+> {
   /**
    * The value of the Tab this Panel pairs with. Required. String-keyed
    * (see Guarantee 9 in the header comment).
@@ -391,6 +402,7 @@ const TabsPanel = forwardRef<HTMLDivElement, TabsPanelProps>(function TabsPanel(
         `zs-tabs-panel--${ctx.orientation}`,
         className,
       )}
+      data-slot="tabs-panel"
       data-variant={ctx.variant}
       data-size={ctx.size}
       data-orientation={ctx.orientation}
@@ -403,8 +415,10 @@ const TabsPanel = forwardRef<HTMLDivElement, TabsPanelProps>(function TabsPanel(
 
 type BaseTabsIndicatorProps = ComponentPropsWithRef<typeof BaseTabs.Indicator>;
 
-export interface TabsIndicatorProps
-  extends Omit<BaseTabsIndicatorProps, "render" | "className"> {
+export interface TabsIndicatorProps extends Omit<
+  BaseTabsIndicatorProps,
+  "render" | "className"
+> {
   /** Optional class hook on the indicator span. */
   className?: string;
 }
@@ -423,6 +437,7 @@ const TabsIndicator = forwardRef<HTMLSpanElement, TabsIndicatorProps>(
           `zs-tabs-indicator--${orientation}`,
           className,
         )}
+        data-slot="tabs-indicator"
         data-variant={variant}
         data-size={size}
         data-orientation={orientation}
@@ -438,14 +453,16 @@ const TabsIndicator = forwardRef<HTMLSpanElement, TabsIndicatorProps>(
  * subpart components are not exported as bare symbols — `Tabs.List`,
  * `Tabs.Tab`, `Tabs.Panel`, `Tabs.Indicator` is the one obvious path. */
 
-const ForwardedTabs = forwardRef<HTMLDivElement, TabsProps>(TabsRootInner) as
-  React.ForwardRefExoticComponent<TabsProps & React.RefAttributes<HTMLDivElement>>
-  & {
-    List: typeof TabsList;
-    Tab: typeof TabsTab;
-    Panel: typeof TabsPanel;
-    Indicator: typeof TabsIndicator;
-  };
+const ForwardedTabs = forwardRef<HTMLDivElement, TabsProps>(
+  TabsRootInner,
+) as React.ForwardRefExoticComponent<
+  TabsProps & React.RefAttributes<HTMLDivElement>
+> & {
+  List: typeof TabsList;
+  Tab: typeof TabsTab;
+  Panel: typeof TabsPanel;
+  Indicator: typeof TabsIndicator;
+};
 
 ForwardedTabs.displayName = "Tabs";
 ForwardedTabs.List = TabsList;
