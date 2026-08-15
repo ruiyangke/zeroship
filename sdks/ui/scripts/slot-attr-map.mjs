@@ -90,6 +90,14 @@ function literalsOf(type) {
   return out.length > 0 ? out : null;
 }
 
+/** Members of an all-string-literal union, or null otherwise. */
+function unionLiteralsOf(type) {
+  if (!type.isUnion() || type.types.some((t) => !t.isStringLiteral())) {
+    return null;
+  }
+  return type.types.map((t) => t.value);
+}
+
 for (const file of files) {
   const source = program.getSourceFile(file);
   if (!source) continue;
@@ -141,12 +149,32 @@ for (const file of files) {
       for (const literal of classNameLiterals(classAttr, checker)) {
         for (const m of literal
           .getText()
-          .matchAll(/`zs-([a-z0-9-]+?)--\$\{([^}]+)\}`/g)) {
-          const [, block, rawExpr] = m;
+          .matchAll(
+            /`zs-(?:([a-z0-9-]+?)|\$\{([^}]+)\}([a-z0-9-]*))--\$\{([^}]+)\}`/g,
+          )) {
+          const [, literalBlock, rawBlockExpr, blockTail = "", rawExpr] = m;
+          const blockLabel =
+            literalBlock ?? `\${${rawBlockExpr.trim()}}${blockTail}`;
+          let blocks = literalBlock ? [literalBlock] : null;
+          if (!blocks) {
+            const blockExpr = ts.isTemplateExpression(literal)
+              ? literal.templateSpans[0]?.expression
+              : null;
+            const blockValues = blockExpr
+              ? unionLiteralsOf(checker.getTypeAtLocation(blockExpr))
+              : null;
+            if (!blockValues) {
+              problems.push(
+                `${rel}: zs-${blockLabel}--\${${rawExpr.trim()}} has a block expression that is not a string-literal union`,
+              );
+              continue;
+            }
+            blocks = blockValues.map((value) => `${value}${blockTail}`);
+          }
           const expr = rawExpr.trim();
           let hit = byExpr.get(expr);
-          if (!hit) {
-            const external = SUPPLIED_BY_BASE_UI[block];
+          if (!hit && literalBlock) {
+            const external = SUPPLIED_BY_BASE_UI[literalBlock];
             if (external && external.expr === expr && anyExpr.has(expr)) {
               // Values come from the expression as usual; only the attribute
               // name comes from Base UI rather than from a data-* on this tag.
@@ -155,27 +183,29 @@ for (const file of files) {
           }
           if (!hit || !hit.expr) {
             problems.push(
-              `${rel}: zs-${block}--\${${expr}} has no data-* fed by the same expression`,
+              `${rel}: zs-${blockLabel}--\${${expr}} has no data-* fed by the same expression`,
             );
             continue;
           }
           const values = literalsOf(checker.getTypeAtLocation(hit.expr));
           if (!values) {
             problems.push(
-              `${rel}: zs-${block}--\${${rawExpr.trim()}} is not a string-literal union`,
+              `${rel}: zs-${blockLabel}--\${${rawExpr.trim()}} is not a string-literal union`,
             );
             continue;
           }
-          if (!map.has(block)) map.set(block, new Map());
-          const byValue = map.get(block);
-          for (const v of values) {
-            const prev = byValue.get(v);
-            if (prev && prev !== hit.attr) {
-              problems.push(
-                `${rel}: zs-${block}--${v} could be data-${prev} or data-${hit.attr}`,
-              );
+          for (const block of blocks) {
+            if (!map.has(block)) map.set(block, new Map());
+            const byValue = map.get(block);
+            for (const v of values) {
+              const prev = byValue.get(v);
+              if (prev && prev !== hit.attr) {
+                problems.push(
+                  `${rel}: zs-${block}--${v} could be data-${prev} or data-${hit.attr}`,
+                );
+              }
+              byValue.set(v, hit.attr);
             }
-            byValue.set(v, hit.attr);
           }
         }
       }
