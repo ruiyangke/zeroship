@@ -352,6 +352,7 @@ function RadioInner<T = string>(
       required={required || undefined}
       aria-labelledby={chipAriaLabelledBy}
       className={chipClassName}
+      data-slot="radio"
       data-size={size}
     >
       <BaseRadio.Indicator

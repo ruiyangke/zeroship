@@ -170,6 +170,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
           {...(restLocked as React.HTMLAttributes<HTMLDivElement>)}
           ref={ref}
           className={composedClassName}
+          data-slot="separator"
           data-orientation={orientation}
           data-variant={variant}
           role="none"
@@ -194,6 +195,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
         ref={ref as Ref<HTMLDivElement>}
         orientation={orientation}
         className={composedClassName}
+        data-slot="separator"
         data-orientation={orientation}
         data-variant={variant}
         aria-hidden={undefined}

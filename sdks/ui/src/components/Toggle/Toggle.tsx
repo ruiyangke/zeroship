@@ -557,6 +557,7 @@ function ToggleInner<Value extends string = string>(
       disabled={disabled || undefined}
       nativeButton={nativeButton}
       className={composedClassName}
+      data-slot="toggle"
       data-size={size}
       data-variant={variant}
       render={(baseProps) => {
@@ -593,6 +594,7 @@ function ToggleInner<Value extends string = string>(
             {...(baseRest as Record<string, unknown>)}
             type={bpType ?? "button"}
             className={composedClassName}
+            data-slot="toggle"
             data-size={size}
             data-variant={variant}
           >

@@ -147,6 +147,7 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
       disabled={disabled || undefined}
       required={required || undefined}
       className={trackClassName}
+      data-slot="switch"
       data-size={size}
     >
       <BaseSwitch.Thumb className="zs-switch__thumb" data-slot="switch-thumb" />

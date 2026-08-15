@@ -1291,6 +1291,8 @@ function DataTableInner<T>(
           aria-label={ariaLabel}
           className={tableClassName}
           data-slot="data-table-table"
+          data-density={density}
+          data-sticky={stickyHeader || undefined}
         >
           {caption != null ? (
             <caption

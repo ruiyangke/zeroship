@@ -22,6 +22,10 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import ts from "typescript";
+import {
+  classNameLiterals,
+  objectProperties,
+} from "./class-name-literals.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
 const files = execFileSync(
@@ -68,6 +72,17 @@ const SUPPLIED_BY_BASE_UI = {
   toolbar: { expr: "orientation", attr: "orientation" },
 };
 
+function propertyName(name) {
+  if (
+    ts.isIdentifier(name) ||
+    ts.isStringLiteral(name) ||
+    ts.isNoSubstitutionTemplateLiteral(name)
+  ) {
+    return name.text;
+  }
+  return null;
+}
+
 /** String-literal members of a type, or null if it is not such a union. */
 function literalsOf(type) {
   const parts = type.isUnion() ? type.types : [type];
@@ -91,6 +106,21 @@ for (const file of files) {
       const anyExpr = new Map(); // expression text -> expr, for every attribute
       let classAttr = null;
       for (const attr of node.attributes.properties) {
+        if (ts.isJsxSpreadAttribute(attr)) {
+          for (const property of objectProperties(attr.expression, checker)) {
+            const name = propertyName(property.name);
+            if (!name) continue;
+            const text = property.initializer.getText().trim();
+            anyExpr.set(text, property.initializer);
+            if (name.startsWith("data-") && name !== "data-slot") {
+              byExpr.set(text, {
+                attr: name.slice("data-".length),
+                expr: property.initializer,
+              });
+            }
+          }
+          continue;
+        }
         if (!ts.isJsxAttribute(attr) || !attr.initializer) continue;
         const name = attr.name.getText(source);
         if (name === "className") {
@@ -113,43 +143,45 @@ for (const file of files) {
       }
       if (!classAttr) return ts.forEachChild(node, visit);
 
-      for (const m of classAttr
-        .getText(source)
-        .matchAll(/`zs-([a-z0-9-]+?)--\$\{([^}]+)\}`/g)) {
-        const [, block, rawExpr] = m;
-        const expr = rawExpr.trim();
-        let hit = byExpr.get(expr);
-        if (!hit) {
-          const external = SUPPLIED_BY_BASE_UI[block];
-          if (external && external.expr === expr && anyExpr.has(expr)) {
-            // Values come from the expression as usual; only the attribute name
-            // comes from Base UI rather than from a data-* on this tag.
-            hit = { attr: external.attr, expr: anyExpr.get(expr) };
+      for (const literal of classNameLiterals(classAttr, checker)) {
+        for (const m of literal
+          .getText()
+          .matchAll(/`zs-([a-z0-9-]+?)--\$\{([^}]+)\}`/g)) {
+          const [, block, rawExpr] = m;
+          const expr = rawExpr.trim();
+          let hit = byExpr.get(expr);
+          if (!hit) {
+            const external = SUPPLIED_BY_BASE_UI[block];
+            if (external && external.expr === expr && anyExpr.has(expr)) {
+              // Values come from the expression as usual; only the attribute
+              // name comes from Base UI rather than from a data-* on this tag.
+              hit = { attr: external.attr, expr: anyExpr.get(expr) };
+            }
           }
-        }
-        if (!hit || !hit.expr) {
-          problems.push(
-            `${rel}: zs-${block}--\${${expr}} has no data-* fed by the same expression`,
-          );
-          continue;
-        }
-        const values = literalsOf(checker.getTypeAtLocation(hit.expr));
-        if (!values) {
-          problems.push(
-            `${rel}: zs-${block}--\${${rawExpr.trim()}} is not a string-literal union`,
-          );
-          continue;
-        }
-        if (!map.has(block)) map.set(block, new Map());
-        const byValue = map.get(block);
-        for (const v of values) {
-          const prev = byValue.get(v);
-          if (prev && prev !== hit.attr) {
+          if (!hit || !hit.expr) {
             problems.push(
-              `${rel}: zs-${block}--${v} could be data-${prev} or data-${hit.attr}`,
+              `${rel}: zs-${block}--\${${expr}} has no data-* fed by the same expression`,
             );
+            continue;
           }
-          byValue.set(v, hit.attr);
+          const values = literalsOf(checker.getTypeAtLocation(hit.expr));
+          if (!values) {
+            problems.push(
+              `${rel}: zs-${block}--\${${rawExpr.trim()}} is not a string-literal union`,
+            );
+            continue;
+          }
+          if (!map.has(block)) map.set(block, new Map());
+          const byValue = map.get(block);
+          for (const v of values) {
+            const prev = byValue.get(v);
+            if (prev && prev !== hit.attr) {
+              problems.push(
+                `${rel}: zs-${block}--${v} could be data-${prev} or data-${hit.attr}`,
+              );
+            }
+            byValue.set(v, hit.attr);
+          }
         }
       }
     }

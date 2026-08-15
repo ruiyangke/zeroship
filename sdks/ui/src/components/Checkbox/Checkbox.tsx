@@ -192,6 +192,7 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
         required={required || undefined}
         indeterminate={indeterminate || undefined}
         className={chipClassName}
+        data-slot="checkbox"
         data-size={size}
         data-variant={variant}
       >

@@ -17,9 +17,12 @@
  * script. The parser knows where a tag ends; no amount of window-tuning does.
  */
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { classNameLiterals } from "./class-name-literals.mjs";
 
+const root = fileURLToPath(new URL("../", import.meta.url));
 const files = execFileSync(
   "git",
   [
@@ -28,26 +31,28 @@ const files = execFileSync(
     "src/layouts/**/*.tsx",
     "src/blocks/**/*.tsx",
   ],
-  { encoding: "utf8", cwd: new URL("..", import.meta.url) },
+  { encoding: "utf8", cwd: root },
 )
   .trim()
   .split("\n")
-  .filter(Boolean);
+  .filter(Boolean)
+  .map((file) => path.join(root, file));
 
-const root = fileURL(new URL("../", import.meta.url));
-function fileURL(u) {
-  return decodeURIComponent(u.pathname);
-}
+const program = ts.createProgram(files, {
+  jsx: ts.JsxEmit.ReactJSX,
+  target: ts.ScriptTarget.Latest,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  strict: true,
+  noEmit: true,
+  skipLibCheck: true,
+});
+const checker = program.getTypeChecker();
 
 /** Every JSX tag in a file that carries a zs- class or a data-slot. */
 function tagsOf(file) {
-  const source = ts.createSourceFile(
-    file,
-    fs.readFileSync(root + file, "utf8"),
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
+  const source = program.getSourceFile(file);
+  if (!source) return [];
+  const rel = path.relative(root, file);
   const out = [];
   const visit = (node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
@@ -58,18 +63,13 @@ function tagsOf(file) {
         const name = attr.name.getText(source);
         if (name === "data-slot") slots++;
         if (name !== "className" || !attr.initializer) continue;
-        // Quoted literals only. A class built from a template
-        // (`zs-input--${variant}`) is a variant, not a part, and the
-        // components already emit data-variant / data-size for those.
-        for (const m of attr.initializer
-          .getText(source)
-          .matchAll(/["'](zs-[^"']*)["']/g)) {
-          classes.push(...m[1].split(/\s+/).filter((c) => c.startsWith("zs-")));
+        for (const literal of classNameLiterals(attr.initializer, checker)) {
+          classes.push(...(literal.getText().match(/\bzs-[a-z0-9_-]+/g) ?? []));
         }
       }
       if (classes.length > 0 || slots > 0) {
         out.push({
-          file,
+          file: rel,
           classes,
           slots,
           line:
@@ -102,9 +102,9 @@ for (const t of doubled) {
 }
 // A floor, so that deleting slots wholesale fails here rather than making the
 // check above vacuously true.
-if (covered.length < 300) {
+if (covered.length < 453) {
   problems.push(
-    `only ${covered.length} slotted elements; expected at least 300`,
+    `only ${covered.length} slotted elements; expected at least 453`,
   );
 }
 

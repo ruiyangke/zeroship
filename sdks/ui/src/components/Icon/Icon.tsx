@@ -111,6 +111,7 @@ export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
       ref={ref as Ref<SVGSVGElement>}
       className={composedClassName}
       data-slot="icon"
+      data-size={size}
       focusable="false"
       // a11y decision, reasserted after the spread so caller props can't
       // contradict it: a name means role="img"; no name means hidden.

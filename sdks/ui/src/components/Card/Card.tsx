@@ -178,7 +178,6 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
   // outer element via its own slot vocabulary. Card's own stories pass
   // no `data-slot`, so the default `"card"` is unchanged.
   const dataProps = {
-    "data-slot": dataSlot,
     "data-variant": variant,
     "data-size": size,
     "data-interactive": interactive ? "" : undefined,
@@ -282,6 +281,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
         {...dataProps}
         ref={ref as Ref<unknown>}
         className={composedClassName}
+        data-slot={dataSlot}
         onClick={handleClick}
         onKeyDown={onKeyDown}
       >
@@ -307,6 +307,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
       {...interactiveAriaProps}
       ref={ref as Ref<HTMLDivElement>}
       className={composedClassName}
+      data-slot={dataSlot}
       tabIndex={ownsActivation ? 0 : undefined}
       onClick={handleClick}
       onKeyDown={handleKeyDown}

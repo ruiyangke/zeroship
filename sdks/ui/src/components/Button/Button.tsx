@@ -70,6 +70,9 @@ export interface ButtonProps extends Omit<
   /** Label content. */
   children?: ReactNode;
 
+  /** Root `data-slot` value. Defaults to `"button"`. */
+  "data-slot"?: string;
+
   /**
    * Render as the single child element rather than a `<button>`. Used
    * for anchors ("Learn more", "Open in browser") that should adopt
@@ -121,6 +124,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
     endSlot,
     children,
     className,
+    "data-slot": dataSlot = "button",
     disabled,
     type,
     asChild = false,
@@ -254,6 +258,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
         {...rest}
         ref={localRef as Ref<unknown>}
         className={composedClassName}
+        data-slot={dataSlot}
         data-variant={variant}
         data-intent={intent}
         data-size={size}
@@ -286,6 +291,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
       ref={localRef as Ref<HTMLButtonElement>}
       type={type ?? "button"}
       className={composedClassName}
+      data-slot={dataSlot}
       data-variant={variant}
       data-intent={intent}
       data-size={size}

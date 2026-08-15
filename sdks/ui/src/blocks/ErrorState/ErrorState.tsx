@@ -159,7 +159,6 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
     // plain region otherwise.
     const liveProps = live ? ({ role: "alert" } as const) : undefined;
     const dataProps = {
-      "data-slot": "error-state",
       "data-intent": intent,
     };
 
@@ -195,6 +194,7 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
         {...dataProps}
         ref={ref}
         className={composedClassName}
+        data-slot="error-state"
       >
         {column}
       </div>

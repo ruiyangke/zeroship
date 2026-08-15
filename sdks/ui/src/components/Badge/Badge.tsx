@@ -116,7 +116,6 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
   );
 
   const dataProps = {
-    "data-slot": "badge",
     "data-intent": intent,
     "data-variant": variant,
     "data-size": size,
@@ -141,6 +140,7 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
         {...dataProps}
         ref={ref as Ref<unknown>}
         className={composedClassName}
+        data-slot="badge"
       >
         {children}
       </Slot>
@@ -153,6 +153,7 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
       {...dataProps}
       ref={ref as Ref<HTMLSpanElement>}
       className={composedClassName}
+      data-slot="badge"
     >
       {/* Text rides in a block label span so `text-overflow: ellipsis`
           works (it is inert on the inline-flex root). If a consumer adds

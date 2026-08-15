@@ -177,6 +177,8 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
       data-slot={dataSlot}
+      data-explicit={!intrinsic || undefined}
+      data-intrinsic={intrinsic || undefined}
       data-responsive={responsive ? "" : undefined}
       className={composedClassName}
       style={layoutVars}

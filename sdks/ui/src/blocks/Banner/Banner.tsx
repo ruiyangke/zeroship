@@ -263,7 +263,6 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
     : undefined;
 
   const dataProps = {
-    "data-slot": "banner",
     "data-intent": intent,
   };
 
@@ -309,6 +308,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
       {...dataProps}
       ref={composedRef}
       className={composedClassName}
+      data-slot="banner"
     >
       {body}
     </div>

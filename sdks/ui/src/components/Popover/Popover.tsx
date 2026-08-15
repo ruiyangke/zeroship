@@ -435,6 +435,7 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
               variant={variant}
               intent={intent}
               className={composedClassName}
+              data-slot="popover-close"
             >
               {children}
             </Button>
