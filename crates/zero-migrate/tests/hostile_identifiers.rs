@@ -79,28 +79,62 @@ const QUOTE_BEARING: &[(&str, &str)] = &[
 
 #[test]
 fn a_double_quote_is_refused_or_escaped_but_never_left_bare() {
-    // TWO SAFE ANSWERS, and the dialects give different ones: PostgreSQL and
-    // MySQL REFUSE these outright, SQLite ESCAPES by doubling the quote, which is
-    // the standard and correct escape. Demanding refusal everywhere would assert
-    // a MECHANISM; the property is that no rendered statement ever carries a bare
+    // TWO SAFE ANSWERS, and the dialects give different ones: PostgreSQL REFUSES
+    // these outright, SQLite and MySQL ESCAPE by doubling the quote, which is the
+    // standard and correct escape. Demanding refusal everywhere would assert a
+    // MECHANISM; the property is that no rendered statement ever carries a bare
     // quote that could close the identifier.
+    //
     // THE DANGEROUS CHARACTER IS DIALECT-SPECIFIC, which is the whole reason this
     // is a loop and not one assertion. A `"` is inert inside MySQL's backticks and
     // a backtick is inert inside PostgreSQL's quotes; each dialect is only at risk
     // from the character that closes ITS OWN quoting. Counting `"` everywhere —
     // which is what I first wrote — reports MySQL as broken for rendering a
     // perfectly safe `` `a"b` ``.
+    //
+    // EACH DIALECT'S OUTCOME IS PINNED, and that is load-bearing. Accepting
+    // "refused OR escaped" from every dialect made this test unable to fail:
+    // breaking the escaper turns the rendered SQL into something the fragment
+    // guard rejects, which the permissive form scored as the refusal branch and
+    // passed. A test that reads a BROKEN ESCAPER as a safe refusal is worse than
+    // no test, so the dialect that is known to escape must still escape.
     for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let quote = match dialect {
-            SqlDialect::Mysql => '`',
-            SqlDialect::Postgres | SqlDialect::Sqlite => '"',
+        let (quote, must_escape) = match dialect {
+            SqlDialect::Mysql => ('`', true),
+            SqlDialect::Sqlite => ('"', true),
+            SqlDialect::Postgres => ('"', false),
         };
         for (label, raw) in QUOTE_BEARING {
             // Reuse the payloads with the dialect's own quote substituted in, so
             // each dialect is attacked with the character that threatens it.
-            let hostile = raw.replace(r#"\""#, &quote.to_string());
-            let Ok(statements) = lower_create_table(&hostile, dialect) else {
-                continue; // refused — the other safe answer
+            // Substitute the dialect's quote in its JSON-ESCAPED form. Splicing a
+            // bare `"` into the envelope makes the JSON itself invalid, and the
+            // resulting parse error is indistinguishable from the engine refusing
+            // the identifier — a fixture failure wearing the costume of a result.
+            let json_form = if quote == '"' { r#"\""# } else { "`" };
+            let hostile = raw.replace(r#"\""#, json_form);
+            let outcome = lower_create_table(&hostile, dialect);
+            let statements = match outcome {
+                Ok(statements) => {
+                    assert!(
+                        must_escape,
+                        "{label} on {dialect:?}: this dialect is recorded as REFUSING a \
+                         {quote:?}-bearing identifier and it rendered one instead. Either \
+                         the refusal was lost or the recorded behaviour is stale: {statements:?}"
+                    );
+                    statements
+                }
+                Err(refusal) => {
+                    assert!(
+                        !must_escape,
+                        "{label} on {dialect:?}: this dialect is recorded as ESCAPING a \
+                         {quote:?}-bearing identifier, and it refused instead. A broken \
+                         escaper renders malformed SQL that the fragment guard rejects, \
+                         which looks exactly like a deliberate refusal — that is why the \
+                         outcome is pinned per dialect rather than accepting either: {refusal}"
+                    );
+                    continue;
+                }
             };
             for sql in &statements {
                 let doubled = format!("{quote}{quote}");
