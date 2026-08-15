@@ -1322,6 +1322,7 @@ test("plan partitions a pending-contract owner and table-blocked migration", () 
   assert.deepEqual(migrationsForPlan(reply, [rename, addNote]), {
     pending: [],
     blocked: [{ version: "mig_add_note", name: "add_note", reason }],
+    drifted: [],
   });
   assert.deepEqual(pendingMigrationsForPlan(reply, [rename, addNote]), []);
 });
@@ -1380,6 +1381,7 @@ test("plan retains explicit pending-contract dependency blocks", () => {
     blocked: [
       { version: "mig_widgets", name: "create_widgets", reason: dependencyReason },
     ],
+    drifted: [],
   });
 });
 

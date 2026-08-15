@@ -1065,6 +1065,10 @@ export interface BlockedMigrationPreview {
 export interface PlanMigrationPreviews {
   pending: PendingMigrationPreview[];
   blocked: BlockedMigrationPreview[];
+  /** Migrations whose source no longer matches what was applied. apply aborts on
+   *  these, so plan must neither count them nor render their edited SQL as work
+   *  it would do (F663). */
+  drifted: BlockedMigrationPreview[];
 }
 
 /** Correlate top-level pending logical plan IDs back to authored envelopes in
@@ -1135,6 +1139,7 @@ export function migrationsForPlan(
   );
   const pending: PendingMigrationPreview[] = [];
   const blocked: BlockedMigrationPreview[] = [];
+  const drifted: BlockedMigrationPreview[] = [];
 
   for (const candidate of candidates) {
     if (contractOwners.has(candidate.version)) continue;
@@ -1181,10 +1186,28 @@ export function migrationsForPlan(
       continue;
     }
 
+    // Drift is checked LAST so a migration that is both blocked and drifted is
+    // reported by the reason apply would hit first, matching the precedence the
+    // interlock/dependency arms above already preserve.
+    //
+    // The condition is the same one `formatStatusHuman` walks for its
+    // checksum-mismatch lines. Re-deriving it here is how plan drifted from
+    // status in the first place (F663).
+    if (plan.state === "drifted" || plan.steps.some((step) => step.state === "drifted")) {
+      drifted.push({
+        version: candidate.version,
+        name: candidate.name,
+        reason:
+          "checksum drift: the source no longer matches what was applied; " +
+          "apply aborts until the migration is restored or superseded",
+      });
+      continue;
+    }
+
     pending.push(candidate);
   }
 
-  return { pending, blocked };
+  return { pending, blocked, drifted };
 }
 
 /** Runnable authored migrations only. Kept as the focused public seam used by
@@ -1229,7 +1252,7 @@ async function runLivePlan(args: Args): Promise<number> {
     process.stderr.write(formatStatusBusy(reply, "plan"));
     return 0;
   }
-  const { pending, blocked } = migrationsForPlan(reply, envelopes);
+  const { pending, blocked, drifted } = migrationsForPlan(reply, envelopes);
   const rendered = previewSql({
     envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
     dialect: driver.kind,
@@ -1260,6 +1283,7 @@ async function runLivePlan(args: Args): Promise<number> {
             sql: rendered[index],
           })),
           blocked,
+          drifted,
           advisories,
         },
         null,
@@ -1270,6 +1294,13 @@ async function runLivePlan(args: Args): Promise<number> {
     const noun = pending.length === 1 ? "migration" : "migrations";
     process.stdout.write(`would apply ${pending.length} ${noun}\n`);
     for (const sql of rendered) process.stdout.write(`${sql}\n`);
+    // Reported, never silently omitted: a migration that vanishes from plan is a
+    // different lie. Its EDITED SQL is deliberately not rendered - the table
+    // already exists in another shape, so printing that statement would mislead
+    // about the database rather than only about the schedule.
+    for (const entry of drifted) {
+      process.stdout.write(`drifted: ${entry.name} (${entry.version}): ${entry.reason}\n`);
+    }
     for (const entry of blocked) {
       process.stdout.write(
         `blocked: ${entry.name} (${entry.version}): ${entry.reason}\n`,
