@@ -30,17 +30,12 @@ import {
 const root = new URL("../", import.meta.url).pathname;
 const files = execFileSync(
   "git",
-  [
-    "ls-files",
-    "src/components/**/*.tsx",
-    "src/layouts/**/*.tsx",
-    "src/blocks/**/*.tsx",
-  ],
+  ["ls-files", "src/components", "src/layouts", "src/blocks"],
   { encoding: "utf8", cwd: root },
 )
   .trim()
   .split("\n")
-  .filter(Boolean)
+  .filter((file) => file.endsWith(".tsx"))
   .map((f) => path.join(root, f));
 
 const program = ts.createProgram(files, {
@@ -194,6 +189,7 @@ const out = {};
 for (const [block, byValue] of [...map].sort()) {
   out[block] = Object.fromEntries([...byValue].sort());
 }
+console.error(`slot attribute map: scanned ${files.length} files`);
 console.log(JSON.stringify(out, null, 2));
 if (problems.length > 0) {
   console.error("\nunresolved:\n  " + [...new Set(problems)].join("\n  "));

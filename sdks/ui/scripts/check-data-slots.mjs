@@ -4,8 +4,10 @@
  *
  * A theme targets `[data-slot="input-control"]`. An element carrying a `zs-*`
  * class but no `data-slot` is reachable only by class name, so a theme written
- * against attributes cannot touch it. The classes are on their way out; the
- * slot is what replaces them, and this is what keeps the replacement total.
+ * against attributes cannot touch it. This includes interpolated templates
+ * whose block name is dynamic, such as `zs-${base}-field`. The classes are on
+ * their way out; the slot is what replaces them, and this is what keeps the
+ * replacement total.
  *
  * It walks the TypeScript AST rather than matching text. Three hand-rolled
  * attempts to find the enclosing JSX tag by string search all produced wrong
@@ -25,17 +27,12 @@ import { classNameLiterals } from "./class-name-literals.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const files = execFileSync(
   "git",
-  [
-    "ls-files",
-    "src/components/**/*.tsx",
-    "src/layouts/**/*.tsx",
-    "src/blocks/**/*.tsx",
-  ],
+  ["ls-files", "src/components", "src/layouts", "src/blocks"],
   { encoding: "utf8", cwd: root },
 )
   .trim()
   .split("\n")
-  .filter(Boolean)
+  .filter((file) => file.endsWith(".tsx"))
   .map((file) => path.join(root, file));
 
 const program = ts.createProgram(files, {
@@ -65,6 +62,12 @@ function tagsOf(file) {
         if (name !== "className" || !attr.initializer) continue;
         for (const literal of classNameLiterals(attr.initializer, checker)) {
           classes.push(...(literal.getText().match(/\bzs-[a-z0-9_-]+/g) ?? []));
+          if (
+            ts.isTemplateExpression(literal) &&
+            literal.head.text.startsWith("zs-")
+          ) {
+            classes.push(literal.getText(source));
+          }
         }
       }
       if (classes.length > 0 || slots > 0) {
@@ -102,12 +105,13 @@ for (const t of doubled) {
 }
 // A floor, so that deleting slots wholesale fails here rather than making the
 // check above vacuously true.
-if (covered.length < 453) {
+if (covered.length < 454) {
   problems.push(
-    `only ${covered.length} slotted elements; expected at least 453`,
+    `only ${covered.length} slotted elements; expected at least 454`,
   );
 }
 
+console.log(`data-slot coverage: scanned ${files.length} files`);
 if (problems.length > 0) {
   console.error("data-slot coverage:\n  " + problems.join("\n  "));
   process.exit(1);

@@ -67,6 +67,7 @@ export const SelectionRow = forwardRef<HTMLLabelElement, SelectionRowProps>(
           className,
           fieldProps?.className,
         )}
+        data-slot={`${base}-field`}
         data-size={size}
         data-disabled={disabled || undefined}
       >
