@@ -767,10 +767,21 @@ fn mutate_table_candidate_keys(
     table: &str,
     mut mutate: impl FnMut(&mut CandidateKeySources),
 ) {
-    for (key, contract) in declared.iter_mut().filter(|(candidate, _)| {
-        candidate.table == table
-            && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-    }) {
+    // One contiguous run under the table-first key order. Reached once per
+    // `createTable` from each of three passes, so filtering the whole map here is
+    // quadratic in op count (F666).
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: String::new(),
+        schema: None,
+    };
+    let group = declared
+        .range_mut(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table)
+        .filter(|(candidate, _)| {
+            schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        });
+    for (key, contract) in group {
         mutate(&mut contract.candidate_key_sources);
         refresh_candidate_keys(&key.column, contract);
     }
@@ -964,10 +975,25 @@ fn remove_declared_per_row_table(
     schema: Option<&str>,
     table: &str,
 ) {
-    declared.retain(|candidate, _| {
-        candidate.table != table
-            || !schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-    });
+    // One contiguous run under the table-first key order. Reached once per
+    // `createTable` and per `dropTable`, from three separate passes, so scanning
+    // the whole map here is quadratic in op count (F666).
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: String::new(),
+        schema: None,
+    };
+    let superseded: Vec<LogicalColumnKey> = declared
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table)
+        .filter(|(candidate, _)| {
+            schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        })
+        .map(|(candidate, _)| candidate.clone())
+        .collect();
+    for key in superseded {
+        declared.remove(&key);
+    }
 }
 
 fn per_row_validation_error(
