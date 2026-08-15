@@ -69,6 +69,26 @@ jobs:
       # is built before the SDKs. Same ordering as the `sdk` job.
       - run: pnpm --filter zero-migrate build
       - run: pnpm build
+      # This is the no-hoist condition the gate must survive. Prove the root
+      # import fails for the expected reason, then prove the declaring package
+      # resolves its own dependency before trusting the contract run.
+      - name: Prove tsx is package-local
+        run: |
+          if node --import tsx --eval "" >"$RUNNER_TEMP/root-tsx.out" \
+              2>"$RUNNER_TEMP/root-tsx.err"; then
+            echo "::error::tsx unexpectedly resolves from the workspace root"
+            exit 1
+          fi
+          if ! grep -q "ERR_MODULE_NOT_FOUND" "$RUNNER_TEMP/root-tsx.err"; then
+            cat "$RUNNER_TEMP/root-tsx.err"
+            echo "::error::root tsx probe failed for an unexpected reason"
+            exit 1
+          fi
+          pnpm --dir sdks/vite-plugin exec node --import tsx --eval ""
+      - name: Build the CLI used by the project config gate
+        run: cargo build -p zeroship --bin zeroship
+      - name: Project config contract
+        run: bash tests/project_config_gate.sh
       - run: cargo check --workspace
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
@@ -1014,8 +1034,6 @@ jobs:
             -p zeroship-gateway -p zeroship --bins
           cargo build --release -p zeroship-migrate-adapter \
             --features platform-cli --bin zeroship-platform-migrate
-      - name: Project config contract
-        run: bash tests/project_config_gate.sh
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
       # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is
