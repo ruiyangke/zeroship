@@ -142,10 +142,14 @@ function assertNoLockAdvisory(result: CliResult, verb: string): void {
 }
 
 function lint(unique: boolean): CliResult {
+  return lintDialect(unique, "postgres");
+}
+
+function lintDialect(unique: boolean, dialect: "postgres" | "mysql" | "sqlite"): CliResult {
   const work = baseProject();
   try {
     addColumnMigration(work, unique);
-    return runCli(work, ["lint", "--explain", "--dialect", "postgres"], {
+    return runCli(work, ["lint", "--explain", "--dialect", dialect], {
       schema: "lint_locksurface",
     });
   } finally {
@@ -198,4 +202,38 @@ test("plan surfaces the unique addColumn ACCESS EXCLUSIVE advisory without gatin
 test("plan control: a plain addColumn surfaces no locking advisory", async (t) => {
   const result = await plan(t, false);
   if (result) assertNoLockAdvisory(result, "plan");
+});
+
+test("F657: a dialect the analyzer cannot read says so instead of reporting clean", () => {
+  // The analyzer parses PostgreSQL. MySQL renders identifiers with backticks, so
+  // every statement fails to parse and the rule set returns nothing -- for SQL
+  // this engine emits and is about to run. The report then read exactly like a
+  // clean one, and an operator had no way to tell "looked, found nothing" from
+  // "could not read any of this".
+  //
+  // The fix is not to invent MySQL coverage: MySQL 8 can often add a unique index
+  // INPLACE where PostgreSQL takes ACCESS EXCLUSIVE, so emitting the PostgreSQL
+  // advisory there would be wrong. The fix is that silence must be attributable.
+  for (const dialect of ["mysql", "sqlite"] as const) {
+    // A PLAIN addColumn, which MySQL accepts. The notice is about analyzer
+    // COVERAGE, not about any one statement, so it must appear whether or not a
+    // rule would have fired -- and this fixture keeps the arm from depending on
+    // MySQL accepting a unique TEXT key, which it refuses for its own reasons.
+    const result = lintDialect(false, dialect);
+    assert.equal(result.code, 0, `${dialect}: a notice must not gate; ${result.text}`);
+    assert.match(
+      result.text,
+      /analyzer_dialect_unsupported/,
+      `${dialect}: an empty advisory list here means UNCHECKED, and the report ` +
+        `must say which one it is; ${result.text}`,
+    );
+  }
+});
+
+test("CONTROL: PostgreSQL still evaluates rules rather than announcing it cannot", () => {
+  // Without this, a fix that declared every dialect unanalyzable would satisfy
+  // the arm above while destroying the advisory surface F650 added.
+  const result = lintDialect(true, "postgres");
+  assert.doesNotMatch(result.text, /analyzer_dialect_unsupported/);
+  assert.match(result.text, /ACCESS\s+EXCLUSIVE/i);
 });

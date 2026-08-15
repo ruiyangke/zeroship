@@ -1374,6 +1374,31 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     };
 
     let mut out = Vec::new();
+
+    // F657. The analyzer parses PostgreSQL. MySQL renders identifiers with
+    // backticks, which is not valid PostgreSQL, so every statement fails to parse
+    // and `analyze` returns an empty vector - for SQL THIS ENGINE EMITS and is
+    // about to run. The result was a clean advisory report on MySQL that meant
+    // "could not read any of this", indistinguishable from "looked and found
+    // nothing". Say which one it is; an operator reading a silent report is
+    // entitled to know the analyzer never spoke.
+    if !matches!(dialect, zero_migrate::SqlDialect::Postgres) {
+        out.push(AdvisoryDto {
+            migration: String::new(),
+            rule: "analyzer_dialect_unsupported".to_string(),
+            severity: "notice".to_string(),
+            message: format!(
+                "operational advisories are not available for {}: the analyzer reads \
+                 PostgreSQL syntax, so no rule was evaluated against these statements. \
+                 An empty advisory list here means UNCHECKED, not clean",
+                dialect_wire_name(dialect)
+            ),
+            suggestion: None,
+            statement: String::new(),
+        });
+        return Ok(out);
+    }
+
     for envelope in &envelopes {
         // Statement-at-a-time so each advisory keeps the statement that raised
         // it. `analyze` over a whole multi-statement `up` would return a flat
@@ -1399,4 +1424,13 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
         }
     }
     Ok(out)
+}
+
+/// The wire spelling of a dialect, for operator-facing text.
+const fn dialect_wire_name(dialect: zero_migrate::SqlDialect) -> &'static str {
+    match dialect {
+        zero_migrate::SqlDialect::Postgres => "postgres",
+        zero_migrate::SqlDialect::Mysql => "mysql",
+        zero_migrate::SqlDialect::Sqlite => "sqlite",
+    }
 }
