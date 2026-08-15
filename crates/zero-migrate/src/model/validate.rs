@@ -2798,6 +2798,62 @@ fn validate_no_column_uses_a_dropped_named_object(
 /// column's expression and a backfill `set` value all name columns too, but as
 /// expression trees rather than identifier lists; walking those is a separate job
 /// and they still fail loudly at the server.
+/// Every column an op names inside an EXPRESSION, attributed to the op's target
+/// table.
+///
+/// Reuses [`crate::render::dml::expr_column_refs`], the renderer's own exhaustive
+/// closed-AST walk, rather than re-deriving one: its match has no catch-all arm,
+/// so a new [`Expr`] variant is a compile error there instead of a silently
+/// missed reference here. It is given the TARGET dialect because it descends only
+/// into the [`Expr::Dialectal`] leg that dialect actually emits — a column named
+/// only in the MySQL leg cannot fail a PostgreSQL apply, and refusing it would
+/// reject a migration the database would have run.
+///
+/// Unqualified is the normal case and resolves to the op's single target table,
+/// which is exactly how the renderer resolves it. A qualified ref naming a
+/// DIFFERENT table is left alone here: this walk only knows the op's own table,
+/// and guessing would refuse legitimate shapes.
+fn expression_column_references<'a>(
+    op: &'a crate::model::ir::Op,
+    target_dialect: Dialect,
+) -> Vec<(&'a str, String)> {
+    use crate::model::ir::{IrConstraintKind, Op};
+    use crate::render::dml::expr_column_refs;
+
+    let sql_dialect = match target_dialect {
+        Dialect::Postgres => crate::schema::query::SqlDialect::Postgres,
+        Dialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,
+        Dialect::Mysql => crate::schema::query::SqlDialect::Mysql,
+    };
+
+    // An extraction failure is NOT a refusal: a malformed expression is another
+    // check's business, and refusing here would report the wrong reason.
+    let refs = |table: &'a str, expr: &Expr| -> Vec<(&'a str, String)> {
+        expr_column_refs(expr, sql_dialect)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .map(|name| (table, name))
+            .collect()
+    };
+
+    match op {
+        Op::AddConstraint {
+            table, constraint, ..
+        } => match &constraint.kind {
+            IrConstraintKind::Check { expr, .. } => refs(table, expr),
+            _ => Vec::new(),
+        },
+        Op::AddColumn {
+            table, generated, ..
+        } => generated
+            .as_ref()
+            .map(|generated| refs(table, &generated.expr))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'a str)> {
     use crate::model::ir::{IndexElement, IrConstraintKind, Op};
 
@@ -2870,8 +2926,13 @@ fn validate_no_op_references_a_dropped_column(
             _ => {}
         }
 
-        for (table, column) in plain_column_references(op) {
-            if dropped.contains(&(table, column)) {
+        let referenced = plain_column_references(op)
+            .into_iter()
+            .map(|(table, column)| (table, column.to_string()))
+            .chain(expression_column_references(op, target_dialect));
+
+        for (table, column) in referenced {
+            if dropped.contains(&(table, column.as_str())) {
                 return Err(AuthoringError {
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
