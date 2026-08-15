@@ -8372,6 +8372,8 @@ mod tests {
 
     fn ir_with(ops: Vec<Op>) -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "n".into(),
             owner_app: String::new(),

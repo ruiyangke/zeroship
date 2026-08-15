@@ -122,6 +122,8 @@ fn ir_pairs_for(
     dialect: SqlDialect,
 ) -> Vec<(String, Option<String>)> {
     let ir = MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 1,
         name: "m".into(),
         owner_app: OWNER.into(),
@@ -681,6 +683,8 @@ fn ir_lower_one(
     dialect: SqlDialect,
 ) -> Vec<zero_migrate::Migration> {
     let ir = MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 1,
         name: "m".into(),
         owner_app: OWNER.into(),
@@ -1187,6 +1191,8 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     );
     let one = |op: Op| {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: OWNER.into(),

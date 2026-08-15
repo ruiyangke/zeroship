@@ -841,6 +841,8 @@ mod tests {
 
     fn ir(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "m".into(),
             owner_app: "app".into(),

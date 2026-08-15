@@ -245,6 +245,33 @@ test("data() and inverse() record independent ordered op streams", () => {
   ]);
 });
 
+test("data() and inverse() emit the recorded reverse op list", () => {
+  const envelope = buildEnvelope(
+    {
+      data() {
+        table("widgets").insert({ rows: { id: 1 } });
+      },
+      inverse() {
+        table("widgets").delete({ where: (col) => col("id").eq(1) });
+      },
+    },
+    { irVersion: 1 },
+  );
+
+  assert.deepEqual(envelope.inverse_ops, [
+    {
+      op: "delete",
+      table: "widgets",
+      where: {
+        node: "binOp",
+        op: "eq",
+        lhs: { node: "colRef", name: "id" },
+        rhs: { node: "literal", value: 1 },
+      },
+    },
+  ]);
+});
+
 test("data() carries its irreversible reason", () => {
   const reason = "the upstream identifiers cannot be reconstructed";
   const recorded = recordMigration(
@@ -266,14 +293,27 @@ test("data() carries its irreversible reason", () => {
   ]);
 });
 
-test("the emitted IR envelope JSON retains exactly ir_version, name, and ops", () => {
+test("irreversible data emits its reason without an inverse_ops key", () => {
+  const reason = "the upstream identifiers cannot be reconstructed";
   const envelope = buildEnvelope(
     {
       data() {
         table("events").insert({ rows: { id: 1 } });
       },
-      inverse() {
-        table("events").delete({ where: (col) => col("id").eq(1) });
+      irreversible: reason,
+    },
+    { irVersion: 1 },
+  );
+
+  assert.equal(envelope.irreversible, reason);
+  assert.equal(Object.hasOwn(envelope, "inverse_ops"), false);
+});
+
+test("a schema envelope JSON retains exactly ir_version, name, and ops", () => {
+  const envelope = buildEnvelope(
+    {
+      schema() {
+        table("events").create({ columns: { id: t.int() } });
       },
     },
     { irVersion: 7, nameFallback: "json_shape" },

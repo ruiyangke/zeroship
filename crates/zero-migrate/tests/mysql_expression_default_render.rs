@@ -61,6 +61,8 @@ fn lower_of_literal() -> IrDefault {
 
 fn add_column_ir(default: IrDefault, ty: ColType) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "add_label".to_string(),
         owner_app: APP.to_string(),

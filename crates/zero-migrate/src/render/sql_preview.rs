@@ -490,6 +490,8 @@ fn advance_preview_table_presence(
 /// (`depends_on`/`supersedes`/`preconditions`) — they do not affect per-op SQL.
 fn single_op_ir(parent: &MigrationIr, op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: parent.ir_version,
         name: parent.name.clone(),
         owner_app: parent.owner_app.clone(),

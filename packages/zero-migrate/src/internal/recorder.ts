@@ -4,8 +4,8 @@
 // runs one `schema()` or `data()` forward phase under a fresh ambient recorder,
 // drains the op list, and emits the `{ ir_version, name, ops }` ENVELOPE for the
 // Rust host to read back. A data migration's optional `inverse()` is recorded in
-// a second, independent pass and stays on the recorder-only return value until
-// the IR and Rust host grow that field together.
+// a second, independent pass and carried on the envelope as `inverse_ops`; an
+// irreversible data migration instead carries its authored reason.
 //
 // It takes an already-imported migration module (the facade / a bundler resolves
 // the `.ts`), runs the recorder, and returns the envelope. It deliberately DOES NOT
@@ -40,6 +40,10 @@ export interface IrEnvelope {
   name: string;
   /** The recorded canonical op list drained from the DSL recorder. */
   ops: unknown[];
+  /** The independently recorded reverse op stream for reversible data. */
+  inverse_ops?: unknown[];
+  /** Why an irreversible data migration cannot be reversed. */
+  irreversible?: string;
 }
 
 type MigrationPhase = () => unknown;
@@ -265,11 +269,10 @@ export interface BuildEnvelopeOptions {
   nameFallback?: string;
 }
 
-/** Recorder-owned output that keeps reverse authoring beside, but never inside,
- * the Rust-bound envelope. A later coordinated IR/Rust change can decide how to
- * transport these fields without changing today's deny-unknown-fields JSON. */
+/** Recorder-owned output that keeps reverse authoring beside the base envelope
+ * until {@link buildEnvelope} maps it to the Rust wire names. */
 export interface RecordedMigration {
-  /** Exactly the historical `{ ir_version, name, ops }` JSON envelope. */
+  /** The common `{ ir_version, name, ops }` envelope fields. */
   envelope: IrEnvelope;
   /** The independently recorded `inverse()` stream for reversible data. */
   inverseOps?: unknown[];
@@ -305,15 +308,22 @@ export function recordMigration(
 }
 
 /**
- * Build only the unchanged Rust-bound IR envelope. Reverse metadata remains on
- * {@link recordMigration}'s wrapper and is deliberately not serialized here:
- * Rust's current `MigrationIr` denies unknown fields.
+ * Build the Rust-bound IR envelope. Reverse metadata is included only for data
+ * migrations and omitted entirely when absent so schema envelopes retain their
+ * historical three-key wire shape.
  */
 export function buildEnvelope(
   mod: MigrationModule,
   opts: BuildEnvelopeOptions,
 ): IrEnvelope {
-  return recordMigration(mod, opts).envelope;
+  const recorded = recordMigration(mod, opts);
+  if (recorded.inverseOps !== undefined) {
+    return { ...recorded.envelope, inverse_ops: recorded.inverseOps };
+  }
+  if (recorded.irreversible !== undefined) {
+    return { ...recorded.envelope, irreversible: recorded.irreversible };
+  }
+  return recorded.envelope;
 }
 
 /**

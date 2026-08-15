@@ -20,6 +20,8 @@ const SCHEMA: &str = "app";
 
 fn ir(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "views".to_string(),
         owner_app: "app_a".to_string(),

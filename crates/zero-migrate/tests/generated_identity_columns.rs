@@ -18,6 +18,8 @@ CREATE INDEX IF NOT EXISTS "line_items_updated_at_idx" ON "line_items" ("updated
 
 fn raw_ir(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "generated_identity_columns".to_string(),
         owner_app: OWNER.to_string(),

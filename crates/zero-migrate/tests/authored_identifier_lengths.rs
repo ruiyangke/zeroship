@@ -56,6 +56,8 @@ const MAX: usize = 63;
 
 fn ir(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 1,
         name: "m".into(),
         owner_app: "app_idents".into(),

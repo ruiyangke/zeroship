@@ -22,6 +22,8 @@ const OWNER: &str = "app_test";
 
 fn ir(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 1,
         name: "comments".into(),
         owner_app: OWNER.into(),

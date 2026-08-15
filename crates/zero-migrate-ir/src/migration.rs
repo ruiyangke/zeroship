@@ -362,6 +362,21 @@ impl<'a> ChecksumInput<'a> {
 /// order-as-given here so the per-migration checksum is a faithful byte image of
 /// the stored vectors and a SET change is always caught). `owner_app` is folded
 /// length-prefixed.
+/// What a migration declared about reversing itself, as the checksum sees it.
+///
+/// A schema migration and a data migration authored before the reverse fields
+/// existed are both [`Self::None`], and fold nothing — see
+/// [`Checksum::of_ir_strings_with_reverse`].
+#[derive(Debug, Clone, Copy)]
+pub enum ReverseDomain<'a> {
+    /// No reverse declared. Folds nothing.
+    None,
+    /// The authored inverse op list.
+    Inverse(&'a crate::ir::CanonicalOpList<'a>),
+    /// The authored reason this migration has no reverse.
+    Irreversible(&'a str),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checksum(String);
 
@@ -462,6 +477,7 @@ impl Checksum {
             &depends_on,
             &supersedes,
             preconditions,
+            &ReverseDomain::None,
         )
     }
 
@@ -474,13 +490,21 @@ impl Checksum {
     /// Keeping the raw strings in the fold also means a malformed reference cannot
     /// disappear from the drift anchor before a later validation error reports it.
     #[must_use]
-    pub(crate) fn of_ir_strings(
+    /// The IR checksum over a migration that may also declare a REVERSE.
+    ///
+    /// The reverse region is folded ONLY when one is declared, so an envelope
+    /// that declares none hashes byte-identically to what this function produced
+    /// before the field existed. That is required, not merely tidy: every
+    /// already-applied migration journaled a digest computed without it, and a
+    /// drift gate compares against those.
+    pub(crate) fn of_ir_strings_with_reverse(
         ops: &crate::ir::CanonicalOpList<'_>,
         flags: &MigrationFlags,
         owner_app: &str,
         depends_on: &[String],
         supersedes: &[String],
         preconditions: &[PreconditionCheck],
+        reverse: &ReverseDomain<'_>,
     ) -> Self {
         let depends_on = depends_on.iter().map(String::as_str).collect::<Vec<_>>();
         let supersedes = supersedes.iter().map(String::as_str).collect::<Vec<_>>();
@@ -491,6 +515,7 @@ impl Checksum {
             &depends_on,
             &supersedes,
             preconditions,
+            reverse,
         )
     }
 
@@ -501,6 +526,7 @@ impl Checksum {
         depends_on: &[&str],
         supersedes: &[&str],
         preconditions: &[PreconditionCheck],
+        reverse: &ReverseDomain<'_>,
     ) -> Self {
         let mut hasher = Sha256::new();
         // Explicit domain tag — an IR migration's checksum is provably
@@ -528,6 +554,30 @@ impl Checksum {
             supersedes,
             preconditions,
         );
+        // The reverse region, folded LAST and only when one is declared. An
+        // absent reverse folds nothing at all, which is what keeps every digest
+        // computed before this field existed byte-identical. A DECLARED but empty
+        // inverse still folds its tag and a zero length, so `Some(vec![])` and
+        // `None` cannot collide — an author who wrote an empty `inverse()` said
+        // something different from an author who wrote no reverse at all.
+        match reverse {
+            ReverseDomain::None => {}
+            ReverseDomain::Inverse(inverse_ops) => {
+                const TAG: &[u8] = b"zero-migrate/of_ir/inverse/v1";
+                hasher.update((TAG.len() as u64).to_be_bytes());
+                hasher.update(TAG);
+                let region = inverse_ops.canonical_bytes();
+                hasher.update((region.len() as u64).to_be_bytes());
+                hasher.update(&region);
+            }
+            ReverseDomain::Irreversible(reason) => {
+                const TAG: &[u8] = b"zero-migrate/of_ir/irreversible/v1";
+                hasher.update((TAG.len() as u64).to_be_bytes());
+                hasher.update(TAG);
+                hasher.update((reason.len() as u64).to_be_bytes());
+                hasher.update(reason.as_bytes());
+            }
+        }
         Self(hex::encode(hasher.finalize()))
     }
 

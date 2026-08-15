@@ -11136,6 +11136,8 @@ mod tests {
     #[test]
     fn postgres_plan_records_uuid_v7_dml_server_requirement() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "seed_events".into(),
             owner_app: "app_a".into(),
@@ -11246,6 +11248,8 @@ mod tests {
     #[test]
     fn postgres_plan_requirements_follow_selected_dialectal_legs() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "dialectal_events".into(),
             owner_app: "app_a".into(),
@@ -11353,6 +11357,8 @@ mod tests {
     /// Build a one-op `createTable` IR for the guard-per-fragment tests.
     fn create_table_ir(table: &str, cols: Vec<TIrColumn>) -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -11653,6 +11659,8 @@ mod tests {
         assert!(!SqlDialect::Sqlite.supports(Capability::NonPkIdentity));
 
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -11964,6 +11972,8 @@ mod tests {
     #[test]
     fn same_resolved_create_table_ir_lowers_identically_across_profiles_pg() {
         let raw = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: crate::model::ir::CURRENT_IR_VERSION,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13355,6 +13365,8 @@ mod tests {
 
         // A UNIQUE-index drop: gated.
         let ir_unique = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13390,6 +13402,8 @@ mod tests {
 
         // A PLAIN (non-unique) index drop: ungated, reversible.
         let ir_plain = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13655,6 +13669,8 @@ columns = [
         use crate::model::validate::Dialect;
 
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13801,6 +13817,8 @@ columns = [
             .collect(),
         );
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13874,6 +13892,8 @@ columns = [
                 .collect(),
         );
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13940,6 +13960,8 @@ columns = [
 
         // createTable with a column whose default is a synth `now()`.
         let ir_create = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -13989,6 +14011,8 @@ columns = [
 
         // addColumn with an exact `uuidV4()` default — same fail-closed.
         let ir_add = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14027,6 +14051,8 @@ columns = [
         // A LITERAL default still lowers fine (the guard is synth-specific, not a
         // blanket default ban).
         let ir_lit = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14064,6 +14090,8 @@ columns = [
         use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14098,6 +14126,8 @@ columns = [
         use crate::model::validate::{validate_ir, Dialect};
 
         let literal_ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14131,6 +14161,8 @@ columns = [
         );
 
         let synth_ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14184,6 +14216,8 @@ columns = [
         // …but the author UNDER-DECLARES it (`unique:false`) on the drop — a
         // hostile/buggy hint that must NOT defeat the gate.
         let ir_understated = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14233,6 +14267,8 @@ columns = [
         // And a live-unique index dropped with an ABSENT hint (the common
         // omit-the-flag case) is ALSO gated by the live fact.
         let ir_absent_hint = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),
@@ -14304,6 +14340,8 @@ columns = [
         // hint, lowering destructive + approval-gated on the SQLite dialect.
         let author = test_ir_author("prj", "app_a", SqlDialect::Sqlite);
         let understated = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "drop_uniq".into(),
             owner_app: "app_a".into(),
@@ -14899,6 +14937,8 @@ columns = [
     #[test]
     fn mysql_on_conflict_target_is_carried_structurally_to_execution() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "upsert_status".into(),
             owner_app: "app_a".into(),
@@ -15328,6 +15368,8 @@ columns = [
     #[test]
     fn repeatable_ir_override_reaches_each_dialect_migration() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "active_users".into(),
             owner_app: "app_a".into(),
@@ -15862,6 +15904,8 @@ columns = [
     /// Build a one-op `renameTable` IR.
     fn rename_table_ir(table: &str, to: &str) -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: "app_a".into(),

@@ -341,6 +341,24 @@ pub struct MigrationIr {
     pub owner_app: String,
     /// The ordered op list — the heart of the migration.
     pub ops: Vec<Op>,
+    /// The recorded REVERSE of a data migration: the ops that undo `ops`, as the
+    /// author wrote them in `inverse()`.
+    ///
+    /// This is an AUTHORED artifact, not a derived one. A data migration's
+    /// forward effect is generally not invertible from the op list alone (an
+    /// `update` overwrites the value it would need to restore), so the reverse is
+    /// recorded in its own pass and carried here rather than inferred later.
+    ///
+    /// Mutually exclusive with [`Self::irreversible`]: a data migration declares
+    /// exactly one of them, and an envelope carrying both is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverse_ops: Option<Vec<Op>>,
+    /// Why this data migration cannot be reversed, in the author's words.
+    ///
+    /// An operator reads this mid-incident, which is why the reason is carried
+    /// rather than a bare flag. Mutually exclusive with [`Self::inverse_ops`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irreversible: Option<String>,
     /// All-`Option` overrides of the migration flags (merged over
     /// the derived defaults).
     #[serde(default)]
@@ -5528,6 +5546,8 @@ mod tests {
     #[test]
     fn current_and_past_ir_version_validate() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "m".into(),
             owner_app: String::new(),
@@ -5592,6 +5612,8 @@ mod tests {
             existence_guard: None,
         }];
         let with_hint = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: String::new(),

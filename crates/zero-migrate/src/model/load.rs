@@ -91,6 +91,25 @@ pub fn load_ir_document_authorized(
     //    over the operator's `EffectivePolicy` before this load.)
     validate_ir_authorized(&ir, target_dialect, &[], schema_scope, authority)?;
 
+    // 3a. the declared reverse. A data migration declares exactly one of
+    //    `inverse_ops` / `irreversible`, and a recorded inverse is validated by
+    //    the SAME gate the forward ops just passed. Validating it here rather
+    //    than at rollback is the whole point: a reverse that cannot apply is
+    //    worthless precisely when it is needed, and by then the author is not
+    //    the one holding it.
+    enforce_ir_single_reverse(&ir)?;
+    if let Some(inverse_ops) = &ir.inverse_ops {
+        let inverse = MigrationIr {
+            ops: inverse_ops.clone(),
+            inverse_ops: None,
+            irreversible: None,
+            checksum: None,
+            ..ir.clone()
+        };
+        validate_ir_authorized(&inverse, target_dialect, &[], schema_scope, authority)
+            .map_err(|source| IrLoadError::InvalidInverse { source })?;
+    }
+
     // 3b. finite timeout budgets -- a `flags.timeout_ms` / `flags.lock_timeout_ms`
     //    of 0 is the engines' "no limit" sentinel, not a zero budget, so it
     //    disables the timeout it claims to set. Refused here so the author sees it
@@ -102,6 +121,19 @@ pub fn load_ir_document_authorized(
     // 4. ownership — over the ARTIFACT's claimed owner is irrelevant; the check is
     //    against the deploying app + the project registry (fail-closed unknown).
     enforce_ir_ownership(&ir, deploying_app, registry)?;
+    // The inverse touches real tables too. Without this an author could reach a
+    // table they do not own by writing it into the reverse, where the forward
+    // gate never looks.
+    if let Some(inverse_ops) = &ir.inverse_ops {
+        let inverse = MigrationIr {
+            ops: inverse_ops.clone(),
+            inverse_ops: None,
+            irreversible: None,
+            checksum: None,
+            ..ir.clone()
+        };
+        enforce_ir_ownership(&inverse, deploying_app, registry)?;
+    }
 
     // 5. advisory checksum-hint compare — recompute + compare, then
     //    DROP the hint (it never folds into the authoritative checksum). Done
@@ -457,6 +489,8 @@ mod tests {
     #[test]
     fn load_confined_resolved_create_table_ownership_is_unchanged() {
         let raw = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: String::new(),
@@ -565,6 +599,8 @@ mod tests {
     #[test]
     fn enforce_ir_ownership_unit_create_then_use() {
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: String::new(),
@@ -638,6 +674,8 @@ mod tests {
             existence_guard: None,
         }];
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "m".into(),
             owner_app: String::new(),

@@ -37,6 +37,8 @@ fn count_of(column: &str) -> Expr {
 
 fn refusal_for(op: Op) -> Option<String> {
     let ir = MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "dml_aggregate".to_string(),
         owner_app: "app_agg".to_string(),

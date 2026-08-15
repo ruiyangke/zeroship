@@ -26,6 +26,23 @@
         "$ref": "#/$defs/Op"
       }
     },
+    "inverse_ops": {
+      "description": "The recorded REVERSE of a data migration: the ops that undo `ops`, as the\nauthor wrote them in `inverse()`.\n\nThis is an AUTHORED artifact, not a derived one. A data migration's\nforward effect is generally not invertible from the op list alone (an\n`update` overwrites the value it would need to restore), so the reverse is\nrecorded in its own pass and carried here rather than inferred later.\n\nMutually exclusive with [`Self::irreversible`]: a data migration declares\nexactly one of them, and an envelope carrying both is refused at load.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/Op"
+      }
+    },
+    "irreversible": {
+      "description": "Why this data migration cannot be reversed, in the author's words.\n\nAn operator reads this mid-incident, which is why the reason is carried\nrather than a bare flag. Mutually exclusive with [`Self::inverse_ops`].",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "flags": {
       "description": "All-`Option` overrides of the migration flags (merged over\nthe derived defaults).",
       "$ref": "#/$defs/IrFlagsOverride",

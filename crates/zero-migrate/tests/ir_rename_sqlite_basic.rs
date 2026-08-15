@@ -118,6 +118,8 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
 /// A one-op `renameColumn` IR.
 fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 1,
         name: format!("rename_{from}_to_{to}"),
         owner_app: APP.into(),
@@ -169,6 +171,8 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             })
             .collect();
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: format!("create_{}", d.name),
             owner_app: APP.into(),
@@ -404,6 +408,8 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
         );
         let engine = MigrationEngine::new();
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: 1,
             name: "create_events".into(),
             owner_app: APP.into(),

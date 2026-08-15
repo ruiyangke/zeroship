@@ -31,6 +31,8 @@ fn col(name: &str, ty: ColType) -> IrColumn {
 
 fn ir(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "enums_domains".to_string(),
         owner_app: OWNER.to_string(),

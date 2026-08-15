@@ -17,6 +17,8 @@ const APP: &str = "app_dialectal";
 
 fn ir(name: &str, ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: name.to_string(),
         owner_app: APP.to_string(),

@@ -50,6 +50,8 @@ fn ir(op: Op) -> MigrationIr {
 
 fn ir_ops(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "partition_render".into(),
         owner_app: "app_partition".into(),

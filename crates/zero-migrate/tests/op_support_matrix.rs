@@ -144,6 +144,8 @@ fn schema_op_tags() -> BTreeSet<String> {
 
 fn one_op_ir(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "support_matrix".into(),
         owner_app: "app_corpus".into(),

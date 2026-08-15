@@ -40,8 +40,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::ir::{IrVersionError, MigrationIr, Op, ViewQuery};
-use crate::migration::{Checksum, MigrationFlags};
+use crate::ir::{CanonicalOpList, IrVersionError, MigrationIr, Op, ViewQuery};
+use crate::migration::{Checksum, MigrationFlags, ReverseDomain};
 use crate::validate::AuthoringError;
 
 /// A failure of the IR envelope load gate. Each variant maps to one ordered
@@ -136,6 +136,31 @@ pub enum IrLoadError {
     IndefiniteTimeoutFlag {
         /// The zero-valued override (`timeout_ms` or `lock_timeout_ms`).
         field: &'static str,
+    },
+    /// The artifact declared a recorded `inverse_ops` AND an `irreversible`
+    /// reason. They are alternatives: one supplies the reverse, the other states
+    /// there is none. Carrying both leaves a rollback with no single answer.
+    #[error(
+        "conflicting reverse: the IR envelope declares inverse_ops AND irreversible \
+         ({reason:?}). A data migration declares exactly one of them - the recorded \
+         reverse, or the reason it has none"
+    )]
+    ReverseDeclaredBothWays {
+        /// The disclaimed-reversibility reason carried alongside the inverse.
+        reason: String,
+    },
+    /// The recorded inverse itself failed the structural validator. Carries the
+    /// underlying authoring error, distinguished from a FORWARD failure so the
+    /// author knows which half of the migration is wrong.
+    #[error(
+        "invalid inverse: the recorded inverse() of this data migration is not a \
+         valid op list for this dialect: {source}. The reverse is validated when \
+         the migration is authored, not when a rollback needs it"
+    )]
+    InvalidInverse {
+        /// The structural failure inside the inverse op list.
+        #[source]
+        source: AuthoringError,
     },
 }
 
@@ -519,13 +544,25 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     flags.lock_timeout_ms = ir.flags.lock_timeout_ms.map(crate::ir::SafeU64::get);
     flags.phase = ir.flags.phase;
 
-    Checksum::of_ir_strings(
+    // The reverse is part of the artifact the author committed, so editing it
+    // moves the drift anchor exactly as editing the forward ops does. A migration
+    // that declares no reverse folds nothing, keeping every already-journaled
+    // digest valid.
+    let inverse = ir.inverse_ops.as_ref().map(|ops| CanonicalOpList(ops));
+    let reverse = match (&inverse, &ir.irreversible) {
+        (Some(ops), _) => ReverseDomain::Inverse(ops),
+        (None, Some(reason)) => ReverseDomain::Irreversible(reason),
+        (None, None) => ReverseDomain::None,
+    };
+
+    Checksum::of_ir_strings_with_reverse(
         &crate::ir::CanonicalOpList(&ir.ops),
         &flags,
         &ir.owner_app,
         &ir.depends_on,
         &ir.supersedes,
         &ir.preconditions,
+        &reverse,
     )
 }
 
@@ -550,7 +587,41 @@ pub fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str,
     if ir.flags != crate::ir::IrFlagsOverride::default() {
         return Some(("flags", format!("{:?}", ir.flags)));
     }
+    // A declared reverse IS folded by the authoritative checksum, but no builder
+    // folds it into the advisory hint yet. Refusing here is the same fail-closed
+    // rule the fields above follow: never compare a hint against a partial domain,
+    // because that both false-rejects a correct hint and false-accepts tampering
+    // of whatever was left out.
+    if let Some(ops) = &ir.inverse_ops {
+        return Some(("inverse_ops", format!("{} op(s)", ops.len())));
+    }
+    if let Some(reason) = &ir.irreversible {
+        return Some(("irreversible", format!("{reason:?}")));
+    }
     None
+}
+
+/// Refuse an IR envelope that declares BOTH a recorded inverse and a reason it
+/// cannot be reversed.
+///
+/// The two are alternatives, not a pair: one says "here is the reverse", the
+/// other says "there is none". An artifact carrying both has no single answer to
+/// the question a rollback asks, and guessing which one wins is how an operator
+/// ends up with a reverse that was explicitly disclaimed.
+///
+/// The TypeScript recorder refuses this at authoring time. This gate exists
+/// because the engine must not depend on its only current caller being honest —
+/// any host can hand it an envelope.
+///
+/// # Errors
+/// [`IrLoadError::ReverseDeclaredBothWays`] naming both fields.
+pub fn enforce_ir_single_reverse(ir: &MigrationIr) -> Result<(), IrLoadError> {
+    if ir.inverse_ops.is_some() && ir.irreversible.is_some() {
+        return Err(IrLoadError::ReverseDeclaredBothWays {
+            reason: ir.irreversible.clone().unwrap_or_default(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -560,6 +631,8 @@ mod tests {
 
     fn partition_ir(op: Op) -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "partition ownership".to_string(),
             owner_app: "untrusted-wire-hint".to_string(),
@@ -696,6 +769,8 @@ mod tests {
 
     fn alter_primary_key_ir() -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "replace orders primary key".to_string(),
             owner_app: "untrusted-wire-hint".to_string(),
@@ -718,6 +793,8 @@ mod tests {
 
     fn synchronize_identity_ir() -> MigrationIr {
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "synchronize imported orders".to_string(),
             owner_app: "untrusted-wire-hint".to_string(),
@@ -783,6 +860,8 @@ mod tests {
             })
             .unwrap_or_default();
         MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "create reporting view".to_string(),
             owner_app: "untrusted-wire-hint".to_string(),

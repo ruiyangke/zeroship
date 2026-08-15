@@ -422,6 +422,8 @@ pub fn render_artifacts(
 ) -> Result<GeneratedArtifacts, GenTypesError> {
     let resolved = crate::resolve_create_table_policy(
         &MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: crate::CURRENT_IR_VERSION,
             name: "gen_types_policy_resolution".to_string(),
             owner_app: String::new(),

@@ -109,6 +109,8 @@ fn people_raw_envelope() -> MigrationIr {
     }))
     .expect("raw createTable envelope deserializes");
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: zero_migrate::model::ir::CURRENT_IR_VERSION,
         name: "create_people".to_string(),
         owner_app: OWNER.to_string(),

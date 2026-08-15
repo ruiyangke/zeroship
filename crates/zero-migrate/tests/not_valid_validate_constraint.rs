@@ -27,6 +27,8 @@ use zero_migrate::{
 
 fn ir(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "not_valid".into(),
         owner_app: "app_nv".into(),

@@ -114,6 +114,8 @@ async fn unique_constraint_names(session: &PgDevSession, schema: &str) -> Vec<St
 
 fn drop_constraint_ir(name: &str) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 2,
         name: format!("drop_constraint_{}", name.len()),
         owner_app: "app_test".into(),

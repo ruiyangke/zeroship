@@ -30,6 +30,8 @@ const OWNER: &str = "app_mysql_storage";
 
 fn ir(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "mysql_storage_shapes".to_string(),
         owner_app: OWNER.to_string(),

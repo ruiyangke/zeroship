@@ -72,6 +72,8 @@ fn confined_guard() -> SqlGuard {
 
 fn vendor_ir(op: zero_migrate_ir::ir::Op) -> zero_migrate_ir::ir::MigrationIr {
     zero_migrate_ir::ir::MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "vendor_guard_probe".into(),
         owner_app: "app_corpus".into(),
@@ -86,6 +88,8 @@ fn vendor_ir(op: zero_migrate_ir::ir::Op) -> zero_migrate_ir::ir::MigrationIr {
 
 fn ir_with(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "data_security_probe".into(),
         owner_app: "app_corpus".into(),

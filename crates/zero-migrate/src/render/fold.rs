@@ -4932,6 +4932,8 @@ pub fn descriptors_to_create_ops(
             existence_guard: None,
         };
         let ir = crate::model::ir::MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: crate::model::ir::CURRENT_IR_VERSION,
             name: format!("produce_{}", d.name),
             owner_app: d.owner_app.clone(),
@@ -5160,6 +5162,8 @@ mod tests {
 
     fn validate_ops(ops: Vec<Op>, dialect: Dialect) -> crate::model::validate::AuthoringError {
         let ir = crate::model::ir::MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: crate::model::ir::CURRENT_IR_VERSION,
             name: "fold_validate".to_string(),
             owner_app: "app_fold".to_string(),
@@ -5175,6 +5179,8 @@ mod tests {
 
     fn assert_validate_ops_ok(ops: Vec<Op>, dialect: Dialect) {
         let ir = crate::model::ir::MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: crate::model::ir::CURRENT_IR_VERSION,
             name: "fold_validate".to_string(),
             owner_app: "app_fold".to_string(),
@@ -5220,6 +5226,8 @@ mod tests {
             existence_guard: None,
         };
         let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "fold_create".to_string(),
             owner_app: "app_fold".to_string(),
@@ -5366,6 +5374,8 @@ columns = [
         let mut id = col("id", ColType::Uuid, true);
         id.id_prefix = Some("event".to_string());
         let raw = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
             ir_version: CURRENT_IR_VERSION,
             name: "scoped_create".to_string(),
             owner_app: "app_fold".to_string(),

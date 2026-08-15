@@ -80,6 +80,8 @@ fn live_with(
 
 fn one_op_ir(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "alter_nickname".to_string(),
         owner_app: APP.to_string(),

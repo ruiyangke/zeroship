@@ -200,6 +200,8 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
 
 fn ir_with(op: Op) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "pg_vendor_fail_closed".to_string(),
         owner_app: "app_test".to_string(),

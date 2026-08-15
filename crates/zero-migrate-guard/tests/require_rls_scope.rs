@@ -50,6 +50,8 @@ fn cfg_for(default_scope: &str, require: &str) -> GuardConfig {
 
 fn ir_with(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "require_rls_scope".into(),
         owner_app: "app_corpus".into(),

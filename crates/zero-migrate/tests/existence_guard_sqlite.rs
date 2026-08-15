@@ -73,6 +73,8 @@ fn lower(op: Op) -> Vec<Migration> {
     // not reuse one name for unrelated setup and guarded operations.
     let migration_name = format!("guard_test_{}", std::panic::Location::caller().line());
     let ir = MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: 2,
         name: migration_name,
         owner_app: "app_test".into(),

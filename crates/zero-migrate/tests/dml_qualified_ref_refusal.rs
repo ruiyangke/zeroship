@@ -30,6 +30,8 @@ use zero_migrate::SchemaScope;
 
 fn refusal_for(op: Op) -> Option<String> {
     let ir = MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
         ir_version: CURRENT_IR_VERSION,
         name: "dml_qualified_ref".to_string(),
         owner_app: "app_qref".to_string(),
