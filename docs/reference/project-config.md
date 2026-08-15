@@ -44,11 +44,10 @@ found, so a search that cannot see a present sentinel cannot pass.
 
 ## Finding the file
 
-The file is located in this order:
-
-1. the `configPath` plugin option, or the `--config=<path>` CLI flag
-2. the `ZEROSHIP_CONFIG` environment variable
-3. auto-discovery of `zeroship.jsonc` in the app root
+An explicit `configPath` plugin option or `--config=<path>` CLI flag has the
+highest precedence, followed by the `ZEROSHIP_CONFIG` environment variable.
+When neither names a file, the tooling auto-discovers `zeroship.jsonc` in the
+app root.
 
 There are no format fallbacks - one filename, one format - and **no upward
 directory walk**. A build or a deploy run in a subdirectory would otherwise pick
@@ -56,9 +55,9 @@ up a sibling app's `app` and `control` in silence, which is the cross-targeting
 hazard the environments rule exists to close, arriving through the
 file-location door.
 
-A file named explicitly by (1) or (2) that does not exist is an error. Only
-auto-discovery is allowed to come up empty, and the two readers then diverge on
-purpose:
+A file named by an explicit option, flag, or environment variable that does not
+exist is an error. Only auto-discovery is allowed to come up empty, and the two
+readers then diverge on purpose:
 
 - **the build proceeds on the schema defaults**, which is what keeps
   `zeroship()` working in a scratch directory with no file at all;

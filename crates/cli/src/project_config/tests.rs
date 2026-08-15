@@ -3,7 +3,7 @@
 //! WHAT THESE DO NOT CATCH, stated so the coverage is not overread:
 //!
 //! - They do not compare this reader against the TypeScript one. Byte-equality
-//!   of the two resolved dumps is `tests/project_config_gate.sh` check 3, and it
+//!   of the two resolved dumps is checked by `tests/project_config_gate.sh` and
 //!   needs both binaries; nothing here can see a divergent TS default.
 //! - They do not exercise `locate` against a real `ZEROSHIP_CONFIG`, because
 //!   setting process environment in a threaded test runner races every other
@@ -91,7 +91,7 @@ fn an_unknown_environment_is_an_error_naming_the_known_ones() {
     assert!(err.contains("staging"), "{err}");
 }
 
-/// The no-Rust-defaults constraint (proposal 7.3), asserted directly: a file
+/// The no-Rust-defaults constraint, asserted directly: a file
 /// that omits a cross-tool key produces an error NAMING the key, never a
 /// value. This is the test that would fail if somebody added a fallback.
 #[test]
@@ -111,7 +111,7 @@ fn an_absent_cross_tool_key_errors_naming_it_rather_than_defaulting() {
 }
 
 /// EVERY field the schema gives a default AND the CLI reads must produce an
-/// error here, not a value. This is 7.3 checked against the generated tables
+/// error here, not a value. This checks the rule against the generated tables
 /// rather than against a list somebody typed: add a `default` to a CLI-read
 /// property in the schema and this test starts failing until the Rust side is
 /// still fallback-free.
@@ -280,8 +280,8 @@ fn precedence_is_flag_then_env_then_file() {
     assert_eq!(from_file.source, Source::File);
 }
 
-/// THE ONE-VARIABLE PAIR for 7.3. Same call, same key, same fallback; the only
-/// difference is whether a config file was found.
+/// THE ONE-VARIABLE PAIR for the no-default rule. Same call, same key, same
+/// fallback; the only difference is whether a config file was found.
 ///
 /// - No file  -> the compiled fallback, exactly today's behaviour.
 /// - A file that does not say -> an error naming the key.

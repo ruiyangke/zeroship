@@ -57,10 +57,9 @@ export interface DevAuthUser {
  *
  * IT IS SMALL ON PURPOSE. `rpcEndpoint`, `serverEntry`, `mode` and
  * `migrations.*` used to live here and are now in `zeroship.jsonc`, because
- * every one of them was a fact the Rust CLI also needed and could not read
- * (`docs/proposals/2026-08-14-project-config.md` 2.1). What is left is what
- * varies per developer machine (`devServerPort`, `devAuth`) plus the three
- * levers that point AT the file rather than duplicating it (`configPath`,
+ * every one of them was a fact the Rust CLI also needed and could not read.
+ * What remains varies per developer machine (`devServerPort`, `devAuth`) plus
+ * three levers that point AT the file rather than duplicating it (`configPath`,
  * `env`, `config`). Cloudflare's Vite plugin converged on the same split.
  */
 export interface ZeroshipOptions {
@@ -69,9 +68,9 @@ export interface ZeroshipOptions {
   /**
    * Path to `zeroship.jsonc`, absolute or relative to the Vite root.
    *
-   * Step 1 of the file-location precedence (proposal 4.4); the other two are
-   * `ZEROSHIP_CONFIG` and auto-discovery in the app root. A path that does not
-   * exist THROWS - only auto-discovery may come up empty.
+   * An explicit `configPath` takes precedence over `ZEROSHIP_CONFIG` and
+   * auto-discovery in the app root. A path that does not exist THROWS - only
+   * auto-discovery may come up empty.
    */
   configPath?: string;
   /**

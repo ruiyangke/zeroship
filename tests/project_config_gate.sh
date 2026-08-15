@@ -7,11 +7,10 @@
 #   `sdks/vite-plugin/src/project-config/` (TypeScript). Both are generated
 #   from `schema/project-v1.json`, which holds every default. The failure mode
 #   that survives generation is DIVERGENT DEFAULTS -- and one layer up, that is
-#   the exact bug `zeroship.jsonc` was built to remove (four independent
-#   derivations of `migrations.out`; see
-#   docs/proposals/2026-08-14-project-config.md 2.1).
+#   the exact bug `zeroship.jsonc` was built to remove: four independent
+#   derivations of `migrations.out`.
 #
-#   One scope invariant (proposal 1.2): the file is read by the CLI and the
+#   One scope invariant: the file is read by the CLI and the
 #   build, NEVER by the runtime, and is NEVER packed into a `.zship`. It holds
 #   today BY CONSTRUCTION -- the packer walks only `distDir` and the file lives
 #   one level above it -- which is exactly why it will erode quietly. A `dist/`
@@ -188,9 +187,9 @@ else
   fi
 fi
 
-# MUTATION B. THE ASYMMETRY, and the one-variable pair for proposal 7.3: an
-# EMPTY directory. Same command, same key, and the only thing that changes is
-# whether a config file exists.
+# MUTATION B. THE ASYMMETRY, and the one-variable pair for the no-default rule:
+# an EMPTY directory. Same command, same key, and the only thing that changes
+# is whether a config file exists.
 #
 #   TypeScript -> the schema defaults, because the plugin must work with
 #                 `zeroship()` and no file at all. That is the scaffold's

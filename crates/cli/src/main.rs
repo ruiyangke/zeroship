@@ -449,7 +449,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
     };
 
     // `app` FALLS BACK TO `name` HERE AND NOWHERE ELSE, and only when the file
-    // is present (proposal 4.2). A brand-new project has no app id: `app` is
+    // is present. A brand-new project has no app id: `app` is
     // deliberately not a required key, `deploy` already resolves-or-creates by
     // name, and the id it mints is reported for the file. Doing this in
     // `migrate` would let a typo'd name migrate a fresh empty app while the
@@ -501,7 +501,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 
 /// Report where to put an id created from the file's `name` fallback.
 ///
-/// WRITEBACK IS DELIBERATELY TINY (proposal 5.2): one field and one code path.
+/// WRITEBACK IS DELIBERATELY TINY: one field and one code path.
 /// Not `control` - a `--control=` typo becoming permanent is worse than typing
 /// it twice. An existing config `app` or an explicit `--app` is never a
 /// writeback target, even if that target is auto-created; only a missing `app`

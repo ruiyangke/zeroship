@@ -1,6 +1,6 @@
 //! `zeroship.jsonc` - the creator project configuration, CLI side.
 //!
-//! SCOPE INVARIANT (proposal 2026-08-14-project-config.md 1.2): this file is
+//! SCOPE INVARIANT: this file is
 //! read by the `zeroship` CLI and by the build toolchain. It is NEVER read by
 //! the runtime, NEVER packed into a `.zship`, and never leaves the creator's
 //! machine. `tests/project_config_gate.sh` enforces all three.
@@ -31,7 +31,7 @@ pub use generated::CONFIG_FILENAME;
 /// A config file that silently supplies a control URL is strictly more
 /// dangerous than a flag that must be typed, because the flag is in the shell
 /// history and the file is not in the command. The provenance line is what
-/// makes the file safe to have (proposal 5.1).
+/// makes the file safe to have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Flag(&'static str),
@@ -71,7 +71,7 @@ impl Source {
 /// Find the config file: `--config=` flag, then `ZEROSHIP_CONFIG`, then
 /// `zeroship.jsonc` in the current directory.
 ///
-/// NO FORMAT FALLBACKS and NO UPWARD WALK (proposal 4.4). Cloudflare searches
+/// NO FORMAT FALLBACKS and NO UPWARD WALK. Cloudflare searches
 /// `.jsonc` then `.json` then `.toml`; that is a back-compat artifact and we
 /// have no legacy files to accept. The walk is refused for a sharper reason: a
 /// `zeroship deploy` run in a subdirectory would silently pick up a sibling
@@ -205,7 +205,7 @@ impl ProjectConfig {
     }
 
     /// A `password` / `token` / `secret` key ANYWHERE in the tree is a parse
-    /// error naming where the value belongs (proposal 8.4). `additionalProperties:
+    /// error naming where the value belongs. `additionalProperties:
     /// false` already rejects these at every level; this exists so the message
     /// is the one the creator needs rather than "unknown key".
     fn reject_forbidden_names(&self, value: &Value, path: &str) -> Result<(), String> {
@@ -309,7 +309,7 @@ impl ProjectConfig {
     /// `PrintInstead` when it did not. Inserting a member into arbitrary JSONC
     /// is where round-trip libraries get ugly - which comment does the new
     /// member sit under, what indentation, before or after the blank line - so
-    /// v1 refuses and hands the creator the exact line (proposal 5.2).
+    /// the CLI refuses and hands the creator the exact line.
     pub fn write_app(&self, app_id: &str) -> Result<WriteOutcome, String> {
         let stripped = jsonc::strip(&self.text);
         let Some((start, end)) = jsonc::top_level_value_span(&stripped, "app") else {
@@ -542,7 +542,7 @@ pub struct Resolved {
 
 impl Resolved {
     /// A dotted-path lookup. `None` when the key is absent - there is no
-    /// fallback on this side (proposal 7.3).
+    /// fallback on this side.
     pub fn get(&self, dotted: &str) -> Option<&Value> {
         let mut cursor = self.value.get(dotted.split('.').next()?)?;
         for seg in dotted.split('.').skip(1) {
@@ -555,8 +555,8 @@ impl Resolved {
         self.get(dotted).and_then(Value::as_str)
     }
 
-    /// The value, or an error NAMING the key. This is the whole of 7.3 in one
-    /// function: the CLI never guesses a cross-tool fact.
+    /// The value, or an error NAMING the key. The CLI never guesses a
+    /// cross-tool fact.
     pub fn require(&self, dotted: &str) -> Result<&str, String> {
         self.str(dotted).ok_or_else(|| {
             format!(
@@ -583,8 +583,7 @@ impl Resolved {
     /// Byte-compared against the TypeScript reader's dump by
     /// `tests/project_config_gate.sh`. That single comparison catches divergent
     /// defaults, silently ignored keys and type-coercion differences at once,
-    /// without a second parser being written to catch the first (proposal 7.2
-    /// check 3).
+    /// without a second parser being written to catch the first.
     pub fn canonical_json(&self) -> String {
         canonical(&Value::Object(self.value.clone()))
     }
@@ -700,7 +699,7 @@ pub fn print_provenance(command: &str, pairs: &[(&str, &Sourced)]) {
 ///   flag precedence are in play;
 /// - `tests/project_config_gate.sh`, which byte-compares this output against
 ///   the TypeScript reader's dump of the same file. That single comparison is
-///   what makes two parsers safe (proposal 7.2 check 3).
+///   what makes two parsers safe.
 pub fn cmd_config(args: &[String]) -> Result<(), String> {
     let sub = args.get(2).map(String::as_str).unwrap_or("");
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;

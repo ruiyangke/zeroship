@@ -79,7 +79,7 @@ function parseArgv(argv: string[]): Argv {
 
   // THE DEFAULTS COME FROM THE FILE, not from two constants written here.
   // This binary was the FOURTH independent derivation of migrations.dir and
-  // migrations.out (proposal 2.1): the build had one, the dev server had one,
+  // migrations.out: the build had one, the dev server had one,
   // the Rust CLI had one, and this had a fourth pair hand-typed into
   // `parseArgv`. The flags survive as overrides; only the fallback moved.
   const { config, path: configPath } = readProjectConfig(root);

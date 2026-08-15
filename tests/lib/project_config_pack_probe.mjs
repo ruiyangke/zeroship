@@ -2,7 +2,7 @@
  * Pack a throwaway app and report whether a sentinel string reaches the
  * `.zship` ARCHIVE BYTES.
  *
- * Used by `tests/project_config_gate.sh` check 1 (the scope invariant: a
+ * Used by the scope-invariant check in `tests/project_config_gate.sh`: a
  * `zeroship.jsonc` is never packed). The three arms differ in exactly one
  * variable each:
  *
@@ -20,8 +20,8 @@
  * sentinel cannot appear in the compressed bytes, so grepping those would be
  * the vacuous check. Decompressing and searching the tar stream sees BOTH the
  * entry names and every blob body, so a future path that carried the file as a
- * content-addressed blob with no `manifest.assets` entry still trips it - which
- * is exactly the failure the proposal asks this check to survive (1.2).
+ * content-addressed blob with no `manifest.assets` entry still trips it. This
+ * keeps the check effective if the archive layout changes.
  *
  *   node --import tsx tests/lib/project_config_pack_probe.mjs \
  *        --sentinel=<s> --plant=none|root|dist

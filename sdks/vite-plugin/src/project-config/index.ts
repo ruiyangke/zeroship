@@ -1,14 +1,14 @@
 /**
  * `zeroship.jsonc` - the creator project configuration, build side.
  *
- * SCOPE INVARIANT (proposal 2026-08-14-project-config.md 1.2): this file is
+ * SCOPE INVARIANT: this file is
  * read by the `zeroship` CLI and by the build toolchain. It is NEVER read by
  * the runtime and NEVER packed into a `.zship`. The packer walks `distDir` and
  * `zeroship.jsonc` lives one level above it, so the invariant holds by
  * construction today - which is exactly why `tests/project_config_gate.sh`
  * asserts it on the ARCHIVE BYTES rather than trusting the construction.
  *
- * THIS IS THE SIDE THAT HAS DEFAULTS (proposal 7.3). The plugin must work with
+ * THIS IS THE SIDE THAT HAS DEFAULTS. The plugin must work with
  * `zeroship()` and no file at all - that is what the scaffold ships - so every
  * schema `default` is applied here. The Rust CLI has none: a key it reads and
  * the file omits is an error naming the key. One default, one holder, no way
@@ -44,7 +44,7 @@ export type { ResolvedProjectConfig };
 type Json = Record<string, unknown>;
 
 /**
- * The `config` escape hatch (proposal 4.5): a partial object shallow-merged
+ * The `config` escape hatch: a partial object shallow-merged
  * over the loaded file, or a function applied after the file loads and after
  * environment selection.
  */
@@ -58,7 +58,7 @@ export type ProjectConfigOverride =
 
 /**
  * `configPath` option, then `ZEROSHIP_CONFIG`, then `zeroship.jsonc` in the app
- * root - and nothing else (proposal 4.4).
+ * root - and nothing else.
  *
  * NO FORMAT FALLBACKS: Cloudflare's `.jsonc` -> `.json` -> `.toml` search is a
  * back-compat artifact and pre-launch has no legacy files to accept.
@@ -406,7 +406,7 @@ export interface ProjectConfigInput {
  * The whole read path in one call, for the plugin and its two scripts.
  *
  * Returns the defaults-only config when no file is found, which is what keeps
- * `zeroship()` working in a scratch directory (proposal 4.4).
+ * `zeroship()` working in a scratch directory.
  */
 export function readProjectConfig(
   root: string,
