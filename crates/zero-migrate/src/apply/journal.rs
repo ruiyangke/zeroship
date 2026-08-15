@@ -345,6 +345,10 @@ pub struct AppliedEntry {
     /// The recorded checksum (hex SHA-256). Empty for an inflight `started`
     /// marker only if the marker predates a checksum (we always write it).
     pub checksum: String,
+    /// Exact reverse SQL persisted with the latest applied event. `None` marks a
+    /// legacy row (or an irreversible migration) and requires compatibility
+    /// reconstruction from the checksummed source before rollback.
+    pub down: Option<String>,
     /// The phase the entry is in.
     pub phase: Phase,
     /// The journaled `kind` of the LATEST `completed` event for this version
@@ -503,6 +507,7 @@ pub async fn ensure_journal<D: SqlSession>(
             \"at\"        TIMESTAMPTZ NOT NULL DEFAULT now(),
             \"by\"        TEXT NOT NULL,
             exec_ms     BIGINT,
+            down        TEXT,
             phase       TEXT CHECK (phase IS NULL OR phase IN ('started','completed')),
             outcome     TEXT,
             kind        TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')),
@@ -514,6 +519,15 @@ pub async fn ensure_journal<D: SqlSession>(
                      AND kind IS NULL AND phase IS NULL AND outcome IS NULL)
             )
         )"
+    ))
+    .await?;
+
+    // Journals created before reverse pinning have no `down` column. Keep it
+    // nullable so those immutable historical rows remain valid; new applied
+    // events store the exact reverse SQL that rollback must replay.
+    conn.batch(&format!(
+        "ALTER TABLE {meta}.schema_migrations
+             ADD COLUMN IF NOT EXISTS down TEXT"
     ))
     .await?;
 
@@ -884,26 +898,26 @@ pub async fn applied<D: SqlSession>(
                 // event_seq and is never net-applied, so it carries 0.
                 "WITH latest AS (
                      SELECT DISTINCT ON (version)
-                            version, checksum, event_kind, kind AS mig_kind, event_seq
+                            version, checksum, down, event_kind, kind AS mig_kind, event_seq
                        FROM {meta}.schema_migrations
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied AS (
-                     SELECT version, checksum, mig_kind, event_seq
+                     SELECT version, checksum, down, mig_kind, event_seq
                        FROM latest WHERE event_kind = '{applied}'
                  ),
                  union_all AS (
-                     SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase
+                     SELECT version, checksum, down, mig_kind, event_seq, 'completed' AS phase
                        FROM net_applied
                      UNION ALL
-                     SELECT version, checksum, NULL AS mig_kind, 0::bigint AS event_seq,
+                     SELECT version, checksum, NULL AS down, NULL AS mig_kind, 0::bigint AS event_seq,
                             'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
                  )
-                 SELECT version, checksum, mig_kind, event_seq, phase FROM union_all
+                 SELECT version, checksum, down, mig_kind, event_seq, phase FROM union_all
                  ORDER BY version COLLATE \"C\"",
                 applied = EventKind::Applied.as_str()
             ),
@@ -928,6 +942,7 @@ pub async fn applied<D: SqlSession>(
         out.push(AppliedEntry {
             version,
             checksum,
+            down: row.try_get("down")?,
             phase,
             kind,
             event_seq,

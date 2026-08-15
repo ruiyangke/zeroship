@@ -106,6 +106,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
             `at`        TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
             `by`        VARCHAR(255) NOT NULL,
             exec_ms     BIGINT,
+            down        LONGTEXT,
             phase       VARCHAR(16),
             outcome     VARCHAR(16),
             kind        VARCHAR(16),
@@ -125,6 +126,26 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
         ) ENGINE=InnoDB"
     ))
     .await?;
+
+    // Additive upgrade for journals created before reverse pinning. Historical
+    // applied rows remain NULL and use the explicitly-advised compatibility
+    // reconstruction path; new rows carry the exact reverse SQL.
+    let down_column = conn
+        .query(
+            "SELECT COLUMN_NAME AS column_name
+               FROM information_schema.COLUMNS
+              WHERE TABLE_SCHEMA = ?
+                AND TABLE_NAME = 'schema_migrations'
+                AND COLUMN_NAME = 'down'",
+            &[cfg.pg.meta_schema.as_str().into()],
+        )
+        .await?;
+    if down_column.is_empty() {
+        conn.batch(&format!(
+            "ALTER TABLE {meta}.schema_migrations ADD COLUMN down LONGTEXT NULL"
+        ))
+        .await?;
+    }
 
     // 2a. The append-only SUPERSESSION edge log (squash). One row per
     // (squash_version → superseded_version) edge; its own AUTO_INCREMENT PK.
@@ -418,28 +439,28 @@ pub(crate) async fn applied<D: SqlSession>(
         .query(
             &format!(
                 "WITH ranked AS (
-                     SELECT version, checksum, event_kind, kind AS mig_kind, event_seq,
+                     SELECT version, checksum, down, event_kind, kind AS mig_kind, event_seq,
                             ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn
                        FROM {meta}.schema_migrations
                  ),
                  latest AS (
-                     SELECT version, checksum, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1
+                     SELECT version, checksum, down, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1
                  ),
                  net_applied AS (
-                     SELECT version, checksum, mig_kind, event_seq
+                     SELECT version, checksum, down, mig_kind, event_seq
                        FROM latest WHERE event_kind = '{applied}'
                  ),
                  union_all AS (
-                     SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase
+                     SELECT version, checksum, down, mig_kind, event_seq, 'completed' AS phase
                        FROM net_applied
                      UNION ALL
-                     SELECT i.version, i.checksum, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase
+                     SELECT i.version, i.checksum, NULL AS down, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase
                        FROM {meta}.schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
                  )
-                 SELECT version, checksum, mig_kind, event_seq, phase FROM union_all
+                 SELECT version, checksum, down, mig_kind, event_seq, phase FROM union_all
                  ORDER BY version COLLATE utf8mb4_bin",
                 applied = EventKind::Applied.as_str()
             ),
@@ -460,6 +481,7 @@ pub(crate) async fn applied<D: SqlSession>(
         out.push(AppliedEntry {
             version,
             checksum,
+            down: row.try_get("down")?,
             phase,
             kind,
             event_seq,

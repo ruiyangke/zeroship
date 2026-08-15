@@ -80,6 +80,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
                 \"at\"       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
                 \"by\"       TEXT NOT NULL, \
                 exec_ms    INTEGER, \
+                down       TEXT, \
                 phase      TEXT CHECK (phase IS NULL OR phase IN ('started','completed')), \
                 outcome    TEXT, \
                 kind       TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')), \
@@ -91,6 +92,19 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
                          AND kind IS NULL AND phase IS NULL AND outcome IS NULL)))",
         )
         .await?;
+    // SQLite has no portable `ADD COLUMN IF NOT EXISTS`, so inspect the attached
+    // journal directly before applying the additive legacy upgrade.
+    let down_column = actor
+        .query(
+            "SELECT name FROM \"_mig\".pragma_table_info('schema_migrations') \
+             WHERE name = 'down'",
+        )
+        .await?;
+    if down_column.is_empty() {
+        actor
+            .exec("ALTER TABLE \"_mig\".schema_migrations ADD COLUMN down TEXT")
+            .await?;
+    }
     // The supersedes edge table — a relation, not part of the event order, so it
     // gets its OWN native AUTOINCREMENT PK (no shared counter).
     actor
@@ -638,15 +652,15 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     let sql = format!(
         "\
         WITH ranked AS ( \
-            SELECT version, checksum, event_kind, kind AS mig_kind, event_seq, \
+            SELECT version, checksum, down, event_kind, kind AS mig_kind, event_seq, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
               FROM \"_mig\".schema_migrations \
         ), \
-        latest AS (SELECT version, checksum, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1), \
-        net_applied AS (SELECT version, checksum, mig_kind, event_seq FROM latest WHERE event_kind = '{applied}') \
-        SELECT version, checksum, mig_kind, event_seq, 'completed' AS phase FROM net_applied \
+        latest AS (SELECT version, checksum, down, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1), \
+        net_applied AS (SELECT version, checksum, down, mig_kind, event_seq FROM latest WHERE event_kind = '{applied}') \
+        SELECT version, checksum, down, mig_kind, event_seq, 'completed' AS phase FROM net_applied \
         UNION ALL \
-        SELECT i.version, i.checksum, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase \
+        SELECT i.version, i.checksum, NULL AS down, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase \
           FROM \"_mig\".schema_migrations_inflight i \
          WHERE NOT EXISTS (SELECT 1 FROM net_applied n WHERE n.version = i.version) \
         ORDER BY version",
@@ -657,12 +671,13 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     for r in rows {
         let version = cell(&r, 0)?;
         let checksum = cell(&r, 1)?;
-        let mig_kind = r.get(2).and_then(|c| c.clone());
-        let event_seq_s = cell(&r, 3)?;
+        let down = r.get(2).and_then(|c| c.clone());
+        let mig_kind = r.get(3).and_then(|c| c.clone());
+        let event_seq_s = cell(&r, 4)?;
         let event_seq: i64 = event_seq_s.parse().map_err(|_| {
             SqliteActorError::Exec(format!("bad journal event_seq '{event_seq_s}'"))
         })?;
-        let phase_s = cell(&r, 4)?;
+        let phase_s = cell(&r, 5)?;
         let phase = Phase::parse(&phase_s)
             .ok_or_else(|| SqliteActorError::Exec(format!("bad journal phase '{phase_s}'")))?;
         let kind = match mig_kind {
@@ -675,6 +690,7 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
         out.push(AppliedEntry {
             version,
             checksum,
+            down,
             phase,
             kind,
             event_seq,

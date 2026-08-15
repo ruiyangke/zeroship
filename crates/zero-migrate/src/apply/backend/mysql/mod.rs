@@ -4365,6 +4365,31 @@ mod render_tests {
                 && all.contains("BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"),
             "the journal PK is BIGINT AUTO_INCREMENT (MySQL native total order): {all}"
         );
+        let create_journal = log
+            .iter()
+            .find(|entry| {
+                entry.contains("CREATE TABLE IF NOT EXISTS")
+                    && entry.contains("schema_migrations (")
+            })
+            .expect("fresh journal table DDL");
+        assert!(
+            create_journal.contains("down") && create_journal.contains("LONGTEXT"),
+            "fresh MySQL journal stores a nullable LONGTEXT reverse: {create_journal}"
+        );
+        assert!(
+            log.iter().any(|entry| {
+                entry.contains("information_schema.COLUMNS")
+                    && entry.contains("COLUMN_NAME = 'down'")
+            }),
+            "bootstrap probes legacy journals for the reverse column: {log:?}"
+        );
+        assert!(
+            log.iter().any(|entry| {
+                entry.contains("ALTER TABLE `proj_x_migrations`.schema_migrations")
+                    && entry.contains("ADD COLUMN down LONGTEXT NULL")
+            }),
+            "a legacy MySQL journal gains nullable reverse SQL: {log:?}"
+        );
         assert!(
             all.contains("TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
             "timestamps are MySQL TIMESTAMP(6)/CURRENT_TIMESTAMP(6): {all}"

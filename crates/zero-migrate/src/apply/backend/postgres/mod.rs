@@ -1552,6 +1552,41 @@ mod recording_session_genericity {
         );
     }
 
+    /// Journal bootstrap must serve both sides of the rollout: fresh tables carry
+    /// the nullable reverse SQL immediately, while an already-existing table from
+    /// an older engine gains the same nullable column without rewriting its rows.
+    #[compio::test]
+    async fn journal_bootstrap_creates_and_upgrades_nullable_down_column() {
+        let rec = RecordingSession::new();
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .expect("journal bootstrap succeeds");
+
+        let log = rec.log.borrow();
+        let create = log
+            .iter()
+            .find(|entry| {
+                entry.contains("CREATE TABLE IF NOT EXISTS")
+                    && entry.contains("schema_migrations (")
+            })
+            .expect("fresh journal table DDL");
+        assert!(
+            create.contains("down") && create.contains("down        TEXT"),
+            "fresh journal stores nullable reverse SQL: {create}"
+        );
+        assert!(
+            log.iter().any(|entry| {
+                entry.contains("ALTER TABLE \"proj_x_migrations\".schema_migrations")
+                    && entry.contains("ADD COLUMN IF NOT EXISTS down TEXT")
+            }),
+            "legacy journal bootstrap must add nullable down idempotently: {log:?}"
+        );
+    }
+
     /// One-in-flight, mechanically-proven: drive a FULL sweep over the whole DDL +
     /// journal-write + journal-read + drift-read + status/history surface against the host-
     /// shaped recording driver **with the `in_flight` guard armed**, and assert it
