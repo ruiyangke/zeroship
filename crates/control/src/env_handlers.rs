@@ -57,8 +57,9 @@ fn env_err_response(e: EnvError) -> web::HttpResponse {
         AppNotFound => web::HttpResponse::NotFound()
             .json(&serde_json::json!({"error":"app not found"})),
         // Db / Crypto messages may contain internal details (SQLSTATEs,
-        // column names, crypto internals). Log the raw error to stderr
-        // but return a generic body to the client.
+        // column names, crypto internals). Log the raw error to stderr but
+        // return a generic body to the client. This direct response does not
+        // use infrastructure_error_response and remains id-less.
         Db(_) | Crypto(_) | SecretDecrypt { .. } | MasterKeyRequired => {
             tracing::error!(error = %e, "control: env_store error");
             web::HttpResponse::InternalServerError()

@@ -134,10 +134,12 @@ try {
 ```
 
 `ControlError` carries `status`, `statusText`, parsed `body`, optional `code`,
-optional `trace_id`, and the original `response`. Quote `trace_id` to an
-operator: the control plane logged the real cause under the same key. It is
-`undefined` when the server did not send one and is never invented by the SDK.
-Branch on status/code, not message text.
+optional `trace_id`, and the original `response`. `trace_id` is present only on
+responses produced by `infrastructure_error_response`. For example,
+`control.env.listVars` failures remain id-less. When present, quote `trace_id`
+to an operator: the producing helper logged the real cause under the same key.
+It is `undefined` when the server did not send one and is never invented by the
+SDK. Branch on status/code, not message text.
 
 ## Design rules
 

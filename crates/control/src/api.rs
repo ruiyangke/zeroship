@@ -141,11 +141,11 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 /// that joins the two.
 ///
 /// The id was already minted and already logged here; it just never left
-/// the function. That made every control-plane infrastructure failure
-/// undiagnosable from the outside: a creator could report "it returned
-/// internal error" and an operator had no key to search the logs by. The
-/// message stays generic on purpose. This is not a message redesign; it is
-/// the difference between undiagnosable and reportable.
+/// this helper. That made failures routed through this helper undiagnosable
+/// from the outside: a creator could report "it returned internal error"
+/// and an operator had no key to search the logs by. The message stays
+/// generic on purpose. This is not a message redesign; it is the difference
+/// between undiagnosable and reportable.
 ///
 /// ## Why `trace_id` and not `request_id`
 ///
@@ -165,6 +165,11 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 /// one name and logged under another correlates nothing.
 ///
 /// ## What this does NOT close
+///
+/// Only responses routed through `infrastructure_error_response` are
+/// correlated. `env_handlers::env_err_response`, used by
+/// `control.env.listVars`, remains id-less. Other direct control-plane 5xx
+/// bodies also remain outside this helper.
 ///
 /// The app-dispatch path remains uncorrelated:
 ///
@@ -2368,8 +2373,8 @@ mod error_response_tests {
         serde_json::from_slice(&buf).expect("body is JSON")
     }
 
-    /// Assert the two properties every infrastructure body must hold, and
-    /// return the correlation id.
+    /// Assert the two properties every body produced by this helper must hold,
+    /// and return the correlation id.
     ///
     /// 1. The message is still generic. Emitting the id is NOT permission
     ///    to emit the cause; `detail` goes to `tracing` and nowhere else.
@@ -2618,6 +2623,72 @@ mod stream_tmp_tests {
             assert!(
                 proposal.contains(required),
                 "the proposal must state the partial Option 1c scope: {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn correlation_claims_are_scoped_to_the_infrastructure_helper_family() {
+        let compact = |text: &str| {
+            text.split_whitespace()
+                .filter(|token| !matches!(*token, "///" | "//" | "*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let api = include_str!("api.rs");
+        let (helper_comment, _) = api
+            .split_once("pub(crate) fn infrastructure_error_response")
+            .expect("infrastructure helper must remain documented");
+        let helper_comment = helper_comment
+            .rsplit_once("/// Log the real cause")
+            .map(|(_, tail)| compact(tail))
+            .expect("infrastructure helper documentation must keep its anchor");
+
+        for required in [
+            "Only responses routed through `infrastructure_error_response` are correlated.",
+            "`env_handlers::env_err_response`, used by `control.env.listVars`, remains id-less.",
+        ] {
+            assert!(
+                helper_comment.contains(required),
+                "infrastructure helper documentation must say {required:?}; got:\n{helper_comment}"
+            );
+        }
+        assert!(
+            !helper_comment.contains("every control-plane infrastructure failure"),
+            "the helper documentation must not claim coverage beyond its callers"
+        );
+
+        let (_, helper_tests) = api
+            .split_once("#[cfg(test)]\nmod error_response_tests")
+            .expect("helper response tests must remain present");
+        let (helper_tests, _) = helper_tests
+            .split_once("#[cfg(test)]\nmod stream_tmp_tests")
+            .expect("helper response test section must remain bounded");
+        assert!(
+            compact(helper_tests)
+                .contains("Assert the two properties every body produced by this helper must hold"),
+            "helper test documentation must scope its body claim to the helper"
+        );
+
+        let sdk = compact(include_str!("../../../sdks/control/src/index.ts"));
+        for required in [
+            "Only responses produced by `infrastructure_error_response` carry this id.",
+            "Failures such as `control.env.listVars` can remain id-less.",
+        ] {
+            assert!(
+                sdk.contains(required),
+                "the control SDK contract must say {required:?}"
+            );
+        }
+
+        let reference = compact(include_str!("../../../docs/reference/control.md"));
+        for required in [
+            "`trace_id` is present only on responses produced by `infrastructure_error_response`.",
+            "For example, `control.env.listVars` failures remain id-less.",
+        ] {
+            assert!(
+                reference.contains(required),
+                "the control reference must say {required:?}"
             );
         }
     }

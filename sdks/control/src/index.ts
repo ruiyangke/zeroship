@@ -31,11 +31,11 @@ export interface ControlErrorBody {
   message?: unknown;
   code?: unknown;
   /**
-   * Server-minted correlation id. Present on control-plane infrastructure
-   * failures, whose body is generic by design (`{"error":"internal
-   * error"}`) -- this is the one field that makes such a response
-   * reportable rather than a dead end. `crates/control/src/api.rs` logs
-   * the real cause under the same key and the same value.
+   * Server-minted correlation id. Only responses produced by
+   * `infrastructure_error_response` carry this id. Failures such as
+   * `control.env.listVars` can remain id-less. The helper's body is generic
+   * by design (`{"error":"internal error"}`), and it logs the real cause
+   * under the same key and the same value.
    */
   trace_id?: unknown;
   [key: string]: unknown;
@@ -47,9 +47,10 @@ export class ControlError extends Error {
   readonly body: unknown;
   readonly code?: string;
   /**
-   * Correlation id lifted off the body. Quote it to an operator: the
-   * control plane logged the real cause under the same key. `undefined`
-   * when the server did not send one -- never invented here.
+   * Correlation id lifted off the body. When present, quote it to an
+   * operator: the producing helper logged the real cause under the same
+   * key. `undefined` when the server did not send one -- never invented
+   * here.
    *
    * Named `trace_id` to match the spelling `@zeroship/rpc` already lifts
    * (`sdks/rpc/src/error.ts`) rather than adding another id concept to a
