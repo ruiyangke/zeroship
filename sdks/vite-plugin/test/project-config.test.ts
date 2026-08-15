@@ -368,6 +368,53 @@ describe("JSONC edge cases the two readers must agree on", () => {
     assert.equal(r.build.serverEntry, 'x"/*y*/,}-café-😀.ts');
   });
 
+  test("CRLF input parses without changing resolved values", () => {
+    const r = resolveProjectConfig(parsed(FULL.replaceAll("\n", "\r\n")));
+    assert.equal(r.name, "demo-app");
+  });
+
+  test("Unicode-escaped keys and values are decoded", () => {
+    const body = FULL
+      .replace('"name": "demo-app"', '"\\u006eame": "demo-app"')
+      .replace(
+        '"mode": "full"',
+        '"mode": "full", "server\\u0045ntry": "caf\\u00e9-\\ud83d\\ude00.ts"',
+      );
+    const r = resolveProjectConfig(parsed(body));
+    assert.equal(r.name, "demo-app");
+    assert.equal(r.build.serverEntry, "caf\u00e9-\ud83d\ude00.ts");
+  });
+
+  test("a leading BOM is rejected", () => {
+    assert.throws(() => parsed(`\uFEFF${FULL}`));
+  });
+
+  test("raw form feed outside a comment is rejected", () => {
+    assert.throws(() => parsed(FULL.replace("{", "{\f")));
+  });
+
+  test("raw form feed inside a comment is accepted", () => {
+    const body = FULL.replace("// a comment", "// a\f comment");
+    assert.equal(resolveProjectConfig(parsed(body)).name, "demo-app");
+  });
+
+  test("loose JSON extensions are rejected", () => {
+    const cases = [
+      FULL.replace('"name":', "name:"),
+      FULL.replace('"name": "demo-app",\n  "app"', '"name": "demo-app"\n  "app"'),
+      FULL.replace('"demo-app"', "'demo-app'"),
+    ];
+    for (const body of cases) assert.throws(() => parsed(body));
+  });
+
+  test("__proto__ remains visible to unknown-key validation", () => {
+    const body = FULL.replace(
+      "{\n",
+      '{\n  "__proto__": { "control": "https://attacker.invalid" },\n',
+    );
+    assert.throws(() => parsed(body), /__proto__/);
+  });
+
   test("the committed fixture parses through the real file reader", () => {
     const fixture = join(
       import.meta.dirname,
