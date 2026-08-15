@@ -18,7 +18,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -260,6 +267,17 @@ describe("validation", () => {
     }
   });
 
+  test("build.output rejects a dangling symlink", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    mkdirSync(join(root, "dist"), { recursive: true });
+    symlinkSync("../creator-source.ts", join(root, "dist/app.zship"));
+    try {
+      assert.throws(() => readProjectConfig(root), /build\.output.*non-artifact/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("migrations.out cannot target the project root or one of its ancestors", () => {
     for (const out of [".", "..", "generated/zeroship/../..", "/tmp"]) {
       const body = FULL.replace(
@@ -346,6 +364,21 @@ describe("the config escape hatch", () => {
       assert.throws(
         () => readProjectConfig(root, {
           override: (config) => ({ build: { ...config.build, dist: "." } }),
+        }),
+        /build\.dist.*zeroship\.jsonc/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the reader rejects a callback that symlinks build.dist over the project", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    symlinkSync(".", join(root, "linked-root"));
+    try {
+      assert.throws(
+        () => readProjectConfig(root, {
+          override: (config) => ({ build: { ...config.build, dist: "linked-root" } }),
         }),
         /build\.dist.*zeroship\.jsonc/,
       );

@@ -117,7 +117,7 @@ fn an_absent_cross_tool_key_errors_naming_it_rather_than_defaulting() {
 /// CLI-read, so a TypeScript-only default there is correct and this test says
 /// nothing about it.
 #[test]
-fn no_cli_read_field_has_a_rust_side_default() {
+fn unsafe_cli_read_defaults_do_not_reach_rust() {
     let stripped: Vec<&str> = generated::SCHEMA_DEFAULTED_FIELDS
         .iter()
         .copied()
@@ -221,6 +221,21 @@ fn build_dist_cannot_be_the_project_root_or_one_of_its_ancestors() {
         assert!(err.contains("ancestor"), "{err}");
         assert!(err.contains("zeroship.jsonc"), "{err}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn build_dist_cannot_symlink_to_the_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let linked_root = dir.path().join("linked-root");
+    std::os::unix::fs::symlink(".", &linked_root).unwrap();
+    let text = FULL.replace("\"dist\": \"dist\"", "\"dist\": \"linked-root\"");
+
+    let err = ProjectConfig::parse_with_root(config_path, text, dir.path())
+        .expect_err("a symlinked dist containing zeroship.jsonc must not parse");
+    assert!(err.contains("build.dist"), "{err}");
+    assert!(err.contains("zeroship.jsonc"), "{err}");
 }
 
 #[test]
