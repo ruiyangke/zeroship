@@ -7691,7 +7691,7 @@ fn direct_connection_sites_do_not_grow() {
         }
     }
 
-    const PINNED: usize = 118;
+    const PINNED: usize = 119;
     assert!(
         files >= 2,
         "expected to scan the whole tests directory, saw {files} file(s) - if this \

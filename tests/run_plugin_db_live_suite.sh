@@ -91,10 +91,10 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #       real debt from that change.
 #   +1  distributed_live, now listed above.
 # Net -2 removed +1 added against the previous 111.
-# The two `missing_role` tests cover `from_pg` classification and the fixed wire
-# message. Counting them in the floor ensures both run in CI rather than only
-# when invoked by hand.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-112}"
+# The three `missing_role` tests cover contextual session setup, generic pool
+# reconnect classification, and the fixed wire message. Counting them in the
+# floor ensures all three run in CI rather than only when invoked by hand.
+PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-113}"
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
