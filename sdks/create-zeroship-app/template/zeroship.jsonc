@@ -15,7 +15,7 @@
   // Where `zeroship deploy` and `zeroship migrate` send things.
   //
   // `app` is ABSENT on purpose: your first `zeroship deploy` creates the app
-  // and prints the id to paste here. After that, `deploy`, `migrate`,
+  // and appends its id here. After that, `deploy`, `migrate`,
   // `secret` and `var` all read it and you never type `--app=` again.
   "control": "https://control.zeroship.ai",
 

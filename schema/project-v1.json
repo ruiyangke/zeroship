@@ -30,7 +30,7 @@
     "app": {
       "type": "string",
       "x-cli-read": true,
-      "description": "The deploy target's app id (uuid) or name. Absent on a fresh project: the first `zeroship deploy` auto-creates and reports the id to paste here."
+      "description": "The deploy target's app id (uuid) or name. Absent on a fresh project: the first `zeroship deploy` auto-creates the app and appends its id here."
     },
     "control": {
       "type": "string",
