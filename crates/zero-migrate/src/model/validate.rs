@@ -4791,6 +4791,28 @@ pub fn validate_op_authorized(
                     .to_string(),
             ),
         }),
+        // The column sibling of the self-rename above. PostgreSQL rejects
+        // `RENAME COLUMN c TO c` with `column "c" of relation "a" already
+        // exists`, which reads as a collision with a DIFFERENT column occupying
+        // the target name. Same exact comparison, same reason.
+        Op::RenameColumn {
+            table, from, to, ..
+        } if from == to => Err(AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "renameColumn names {from:?} as both its source and its target on table \
+                 {table:?}, so it renames the column to itself"
+            ),
+            suggested_fix: Some(
+                "drop the operation if the name is already correct, or name the new \
+                 column in `to`"
+                    .to_string(),
+            ),
+        }),
         Op::RenameColumn { ty, .. } => validate_col_type_position(
             ty,
             "renameColumn.type",

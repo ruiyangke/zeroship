@@ -74,3 +74,64 @@ fn a_rename_that_only_changes_case_is_still_allowed() {
     )
     .expect("a case-only rename is a real rename on PostgreSQL and must pass");
 }
+
+// ---------------------------------------------------------------------------
+// The column sibling. Same defect, same reasoning, different op.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn renaming_a_column_to_its_own_name_is_refused_on_every_dialect() {
+    // PostgreSQL rejects `ALTER TABLE a RENAME COLUMN c TO c` with
+    //
+    //     ERROR: column "c" of relation "a" already exists
+    //
+    // verified against the server - the same misleading shape as the table case.
+    // It reads as a collision with a DIFFERENT column that already occupies the
+    // target name, so the operator goes looking for that column.
+    //
+    // Reaching it needs a live schema carrying `c`, which is the ordinary case on
+    // the CLI path: introspection supplies the column, the rename lowers, and the
+    // server supplies the wrong story. The gate accepted this before the fix.
+    // MySQL is EXCLUDED, not forgotten: it refuses every `renameColumn` with
+    // "renameColumn is render-only for MySQL, not live-rendered", so it cannot
+    // distinguish this mistake from the op itself and a loop over it would be
+    // asserting the wrong refusal.
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let refusal = verdict(
+            r#"{"op":"renameColumn","table":"a","from":"c","to":"c","type":"text"}"#,
+            dialect,
+        )
+        .expect_err(&format!(
+            "{dialect:?}: a column rename to the same name reaches the server, which \
+             reports a collision with an existing column rather than the actual \
+             mistake"
+        ));
+        assert!(
+            refusal.to_lowercase().contains("rename"),
+            "{dialect:?}: the refusal must name the rename as the problem: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn renaming_a_column_to_a_different_name_is_still_allowed() {
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        verdict(
+            r#"{"op":"renameColumn","table":"a","from":"c","to":"d","type":"text"}"#,
+            dialect,
+        )
+        .unwrap_or_else(|e| panic!("{dialect:?}: an ordinary column rename must pass: {e}"));
+    }
+}
+
+#[test]
+fn a_column_rename_that_only_changes_case_is_still_allowed() {
+    // Same reasoning as the table control: quoted identifiers are case-sensitive
+    // on PostgreSQL, so `c` -> `C` renames the column to a genuinely different
+    // name and must not be swept up by an over-eager equality check.
+    verdict(
+        r#"{"op":"renameColumn","table":"a","from":"c","to":"C","type":"text"}"#,
+        Dialect::Postgres,
+    )
+    .expect("a case-only column rename is a real rename on PostgreSQL and must pass");
+}
