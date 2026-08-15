@@ -517,10 +517,9 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 /// writeback target, even if that target is auto-created; only a missing `app`
 /// that fell back to `name` reaches the file.
 ///
-/// When the member is absent the CLI REFUSES to insert it and prints the line
-/// to paste. Inserting into arbitrary JSONC means guessing which comment the
-/// new member belongs under and at what indentation, which is where
-/// round-trip libraries get ugly; a printed line is honest about the edit.
+/// A missing root member is appended through the JSONC CST. Existing values
+/// still use their original source span, but the source guard below means that
+/// replacement is not reachable from an auto-create writeback.
 fn record_created_app(
     config: Option<&project_config::ProjectConfig>,
     environment: Option<&str>,
@@ -548,14 +547,8 @@ fn record_created_app(
         return;
     }
     match config.write_app(id) {
-        Ok(project_config::WriteOutcome::Spliced) => {
+        Ok(()) => {
             eprintln!("  wrote app id into {}", config.path.display());
-        }
-        Ok(project_config::WriteOutcome::PrintInstead) => {
-            eprintln!(
-                "  add this to {} so the next command finds it:\n    \"app\": \"{id}\",",
-                config.path.display()
-            );
         }
         Err(e) => eprintln!("  could not record the app id ({e}); add it by hand: \"app\": \"{id}\","),
     }
@@ -1560,6 +1553,85 @@ mod tests {
             std::fs::read_to_string(&config_path).expect("read project config"),
             original,
             "an auto-created --app target must not replace the committed app",
+        );
+    }
+
+    #[test]
+    fn deploy_file_app_auto_create_preserves_configured_app() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "app": "configured-name",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+        let resolved = config.resolve(None).expect("resolve config");
+        let app = project_config::resolve_value(
+            &s(&["zeroship", "deploy"]),
+            "--app",
+            None,
+            None,
+            Some(&resolved),
+            "app",
+            None,
+        )
+        .expect("resolve file app");
+        assert_eq!(app.source, project_config::Source::File);
+
+        record_created_app(
+            Some(&config),
+            None,
+            &app.source,
+            "33333333-3333-4333-8333-333333333333",
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an auto-created app resolved from the file must not rewrite it",
+        );
+    }
+
+    #[test]
+    fn deploy_environment_auto_create_never_writes_the_root() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": [],
+  "environments": {
+    "staging": {
+      "app": "staging-app",
+      "control": "http://staging-control.test"
+    }
+  }
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+
+        record_created_app(
+            Some(&config),
+            Some("staging"),
+            &project_config::Source::FileMember("name"),
+            "44444444-4444-4444-8444-444444444444",
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an environment app id must never be written at the root",
         );
     }
 

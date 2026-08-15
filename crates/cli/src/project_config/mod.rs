@@ -118,8 +118,8 @@ pub fn locate(args: &[String], cwd: &Path) -> Result<Option<PathBuf>, String> {
 #[derive(Debug, Clone)]
 pub struct ProjectConfig {
     pub path: PathBuf,
-    /// The file's exact bytes. Kept so the writeback can splice rather than
-    /// re-serialise.
+    /// The file's exact bytes. Kept so writeback can edit its CST or original
+    /// value span rather than re-serialise it.
     pub text: String,
     root: Map<String, Value>,
 }
@@ -364,29 +364,31 @@ impl ProjectConfig {
         })
     }
 
-    /// Splice a new `app` value into the file, preserving every other byte.
+    /// Write a new `app` value while preserving the creator's JSONC formatting.
     ///
-    /// Returns `Spliced` when the member existed and was rewritten, or
-    /// `PrintInstead` when it did not. Inserting a member into arbitrary JSONC
-    /// is where round-trip libraries get ugly - which comment does the new
-    /// member sit under, what indentation, before or after the blank line - so
-    /// the CLI refuses and hands the creator the exact line.
-    pub fn write_app(&self, app_id: &str) -> Result<WriteOutcome, String> {
-        let Some((start, end)) = jsonc::top_level_value_span(&self.text, "app") else {
-            return Ok(WriteOutcome::PrintInstead);
+    /// An existing value is replaced at its original byte span. A missing
+    /// member is appended through the CST, which retains comments, key order,
+    /// interior blank lines, trailing commas, newlines, and source text. The
+    /// CST deliberately normalises extra blank lines touching the root braces.
+    pub fn write_app(&self, app_id: &str) -> Result<(), String> {
+        let next = if let Some((start, end)) = jsonc::top_level_value_span(&self.text, "app") {
+            let mut next = String::with_capacity(self.text.len() + app_id.len());
+            next.push_str(&self.text[..start]);
+            next.push_str(&serde_json::to_string(app_id).map_err(|e| e.to_string())?);
+            next.push_str(&self.text[end..]);
+            next
+        } else {
+            jsonc::append_top_level_string(&self.text, "app", app_id)
+                .map_err(|e| format!("failed to append `app`: {e}"))?
         };
-        let mut next = String::with_capacity(self.text.len() + app_id.len());
-        next.push_str(&self.text[..start]);
-        next.push_str(&serde_json::to_string(app_id).map_err(|e| e.to_string())?);
-        next.push_str(&self.text[end..]);
-        // Re-parse before writing: a splice that produced an unreadable file
+        // Re-parse before writing: an edit that produced an unreadable file
         // would be discovered by the NEXT command, in a working tree the
         // creator did not change.
         ProjectConfig::parse(self.path.clone(), next.clone())
             .map_err(|e| format!("refusing to write a file that would not parse: {e}"))?;
         std::fs::write(&self.path, &next)
             .map_err(|e| format!("failed to write {}: {e}", self.path.display()))?;
-        Ok(WriteOutcome::Spliced)
+        Ok(())
     }
 }
 
@@ -423,12 +425,6 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteOutcome {
-    Spliced,
-    PrintInstead,
 }
 
 fn check_object(
