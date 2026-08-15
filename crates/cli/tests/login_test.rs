@@ -153,6 +153,83 @@ fn device_grant_flow_polls_until_approved() {
 }
 
 #[test]
+fn login_honors_project_config_environment_and_prints_provenance() {
+    let server = MockServer::start(vec![
+        (
+            200,
+            r#"{"device_code":"dev-config","user_code":"ABCD-EFGH","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=ABCD-EFGH","interval":1,"expires_in":60}"#,
+        ),
+        (400, r#"{"error":"authorization_pending"}"#),
+        (
+            200,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
+        ),
+    ]);
+    let project = tempfile::tempdir().expect("project tempdir");
+    let token_config = tempfile::tempdir().expect("token tempdir");
+    let common = |name: &str, control: &str, environments: &str| {
+        format!(
+            r#"{{
+  "name": "{name}",
+  "control": "{control}",
+  "runtime_date": "2026-08-14",
+  "build": {{ "mode": "full", "dist": "dist", "output": "dist/app.zship" }},
+  "migrations": {{ "dir": "migrations", "out": "generated/zeroship" }}{environments}
+}}"#
+        )
+    };
+    std::fs::write(
+        project.path().join("zeroship.jsonc"),
+        common("auto-config", &format!("{}/wrong", server.url), ""),
+    )
+    .expect("write auto config");
+    std::fs::write(
+        project.path().join("alternate.jsonc"),
+        common(
+            "selected-config",
+            &format!("{}/alternate-root", server.url),
+            &format!(
+                ",\n  \"environments\": {{\n    \"staging\": {{\n      \"app\": \"11111111-1111-4111-8111-111111111111\",\n      \"control\": \"{}/selected\"\n    }}\n  }}",
+                server.url
+            ),
+        ),
+    )
+    .expect("write selected config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("login")
+        .arg("--config=alternate.jsonc")
+        .arg("--env=staging")
+        .current_dir(project.path())
+        .env("ZEROSHIP_CONFIG_HOME", token_config.path())
+        .env_remove("ZEROSHIP_CONFIG")
+        .env_remove("ZEROSHIP_CONTROL_URL")
+        .output()
+        .expect("run zeroship login with project config environment");
+
+    assert!(
+        output.status.success(),
+        "login failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "zeroship login: control = {}/selected (from zeroship.jsonc environments.staging)",
+            server.url
+        )),
+        "stderr={stderr}"
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].path, "/selected/api/device/auth");
+    assert_eq!(requests[1].path, "/selected/api/device/token");
+    assert_eq!(requests[2].path, "/selected/api/device/token");
+}
+
+#[test]
 fn supabase_device_flow_uses_control_and_stores_platform_token() {
     let server = MockServer::start(vec![
         (

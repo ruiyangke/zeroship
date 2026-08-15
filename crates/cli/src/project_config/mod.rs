@@ -25,6 +25,8 @@ use serde_json::{Map, Value};
 
 pub use generated::CONFIG_FILENAME;
 
+pub const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
+
 /// Where a resolved value came from. Printed before every mutating call.
 ///
 /// A config file that silently supplies a control URL is strictly more
@@ -722,8 +724,7 @@ pub struct Sourced {
 
 /// `flag > env var > file(selected environment) > file(root) > fallback`.
 ///
-/// `fallback` is `None` for `app`, and `Some("http://localhost:9090")` for
-/// `control` - but ONLY when there is no config file. With a file present an
+/// A fallback is used ONLY when there is no config file. With a file present an
 /// absent key is an error naming the key, because a file that says nothing
 /// about the control plane and a CLI that quietly picks localhost is how a
 /// migration lands on the wrong database.
@@ -736,7 +737,7 @@ pub fn resolve_value(
     key: &str,
     fallback: Option<&str>,
 ) -> Result<Sourced, String> {
-    if let Some(v) = crate::flag_str(args, &format!("{flag}=")) {
+    if let Some(v) = crate::parse_flag(args, flag) {
         return Ok(Sourced {
             value: v,
             source: Source::Flag(flag),
@@ -767,6 +768,19 @@ pub fn resolve_value(
              read it from - create one (see docs/reference/project-config.md) or pass the flag."
         )),
     }
+}
+
+/// Resolve the control-plane URL identically for every operational command.
+pub fn resolve_control(args: &[String], cfg: Option<&Resolved>) -> Result<Sourced, String> {
+    resolve_value(
+        args,
+        "--control",
+        Some("ZEROSHIP_CONTROL_URL"),
+        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
+        cfg,
+        "control",
+        Some(DEFAULT_CONTROL_URL),
+    )
 }
 
 /// Print `key = value (source)` on stderr before a mutating call.
