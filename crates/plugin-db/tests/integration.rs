@@ -7627,10 +7627,10 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
     release_pg(pool).await;
 }
 
-/// A new test must not open a pool without going through the teardown helpers.
+/// A new test must not open a pool or raw client without teardown.
 ///
-/// Every pool this file opens today is paired with `release_pg`/`drain_pg`, which
-/// is what keeps the suite from exhausting the server. That pairing is a
+/// Every direct connection in this directory is paired with teardown that
+/// drains its driver while the runtime is alive. That pairing is a
 /// convention, and nothing stops test 108 from calling `Pool::connect` and
 /// forgetting it - the suite would stay green, because two leaked connections are
 /// nowhere near the ceiling, until the count creeps back up and returns as
@@ -7691,7 +7691,7 @@ fn direct_connection_sites_do_not_grow() {
         }
     }
 
-    const PINNED: usize = 116;
+    const PINNED: usize = 119;
     assert!(
         files >= 2,
         "expected to scan the whole tests directory, saw {files} file(s) - if this \

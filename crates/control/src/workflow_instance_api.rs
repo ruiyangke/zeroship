@@ -25,6 +25,7 @@ use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CO
 use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
 
+use crate::api::infrastructure_error_response;
 use crate::cron::workflow_engine;
 use crate::registry::RegistryError;
 use crate::{workflow_limits, AppState};
@@ -278,7 +279,11 @@ impl WorkflowApiError {
             Self::Unavailable(msg) => web::HttpResponse::ServiceUnavailable()
                 .header("retry-after", "30")
                 .json(&json!({ "error": msg })),
-            Self::Database(msg) => infrastructure_error_response("workflow instance API", msg),
+            Self::Database(msg) => infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "workflow instance API",
+                msg,
+            ),
         }
     }
 }
@@ -316,20 +321,6 @@ fn workflow_pg_error_from_parts(code: Option<&SqlState>, message: String) -> Wor
     } else {
         WorkflowApiError::Database(message)
     }
-}
-
-fn infrastructure_error_response(
-    context: &'static str,
-    detail: impl std::fmt::Display,
-) -> web::HttpResponse {
-    let request_id = Uuid::new_v4();
-    tracing::error!(
-        request_id = %request_id,
-        context,
-        error = %detail,
-        "control-plane infrastructure error"
-    );
-    web::HttpResponse::InternalServerError().json(&json!({ "error": "internal error" }))
 }
 
 fn check_app_scoped_auth(
@@ -1896,12 +1887,17 @@ async fn output_row_response(
         let data = match state.workflow_blob_store.get_blob(&hash).await {
             Ok(data) => data,
             Err(e) => {
-                return infrastructure_error_response("workflow output blob read", e);
+                return infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "workflow output blob read",
+                    e,
+                );
             }
         };
         if let Some(expected) = size {
             if expected >= 0 && data.len() as i64 != expected {
                 return infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     "workflow output blob read",
                     format!("blob size mismatch for {hash}"),
                 );
@@ -3353,6 +3349,50 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::infrastructure_error_test_support::{assert_logged_trace_id, capture};
+    use ntex::util::{stream_recv, BytesMut};
+
+    async fn body_json(mut resp: web::HttpResponse) -> Value {
+        let mut body = resp.take_body();
+        let mut buf = BytesMut::new();
+        while let Some(item) = stream_recv(&mut body).await {
+            buf.extend_from_slice(&item.expect("body chunk"));
+        }
+        serde_json::from_slice(&buf).expect("body is JSON")
+    }
+
+    #[compio::test]
+    async fn database_error_response_carries_trace_id() {
+        let (resp, events) = capture(|| {
+            WorkflowApiError::Database(
+                "postgres://operator-secret/workflows is unavailable".to_string(),
+            )
+            .response()
+        });
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = body_json(resp).await;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("internal error")
+        );
+        let trace_id = body
+            .get("trace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("workflow infrastructure body must carry trace_id: {body}"));
+        Uuid::parse_str(trace_id)
+            .unwrap_or_else(|e| panic!("trace_id must be a UUID ({trace_id}): {e}"));
+        assert_logged_trace_id(&events, trace_id);
+        assert_eq!(
+            body.as_object().map(serde_json::Map::len),
+            Some(2),
+            "body must carry only error and trace_id: {body}"
+        );
+        assert!(
+            !body.to_string().contains("operator-secret"),
+            "the database detail must stay out of the body: {body}"
+        );
+    }
 
     #[test]
     fn manifest_workflow_shape_accepts_array_and_map() {

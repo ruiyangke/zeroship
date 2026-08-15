@@ -30,6 +30,14 @@ export interface ControlErrorBody {
   error?: unknown;
   message?: unknown;
   code?: unknown;
+  /**
+   * Server-minted correlation id. Only responses produced by
+   * `infrastructure_error_response` carry this id. Failures such as
+   * `control.env.listVars` can remain id-less. The helper's body is generic
+   * by design (`{"error":"internal error"}`), and it logs the real cause
+   * under the same key and the same value.
+   */
+  trace_id?: unknown;
   [key: string]: unknown;
 }
 
@@ -38,6 +46,17 @@ export class ControlError extends Error {
   readonly statusText: string;
   readonly body: unknown;
   readonly code?: string;
+  /**
+   * Correlation id lifted off the body. When present, quote it to an
+   * operator: the producing helper logged the real cause under the same
+   * key. `undefined` when the server did not send one -- never invented
+   * here.
+   *
+   * Named `trace_id` to match the spelling `@zeroship/rpc` already lifts
+   * (`sdks/rpc/src/error.ts`) rather than adding another id concept to a
+   * system that has several that do not join.
+   */
+  readonly trace_id?: string;
   readonly response: Response;
 
   constructor(response: Response, body: unknown) {
@@ -49,6 +68,8 @@ export class ControlError extends Error {
     this.response = response;
     const code = isRecord(body) ? body.code : undefined;
     this.code = typeof code === "string" ? code : undefined;
+    const traceId = isRecord(body) ? body.trace_id : undefined;
+    this.trace_id = typeof traceId === "string" ? traceId : undefined;
   }
 }
 

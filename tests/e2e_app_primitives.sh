@@ -144,7 +144,13 @@ docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
   -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
   postgres:16 -c max_connections=300 >/dev/null
-for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+for i in $(seq 1 30); do
+  if docker logs "$PG_CONTAINER" 2>&1 | grep -Fq 'PostgreSQL init process complete' \
+    && docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
 docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
 
 if [ -f "$ROOT/deploy/ops/postgres-init.sql" ]; then

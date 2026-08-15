@@ -363,19 +363,20 @@ exposures (VERIFIED by the tracing agent, spot-checked by me):
   `retryable` -- and that the token `hint` appears nowhere in `dispatch.rs`
   except two unrelated comments. **The field is populated and then dropped at
   every status.**
-- **The correlation loop is built and not closed.**
-  `crates/control/src/api.rs:145` mints `Uuid::new_v4()`, logs it at `:146`, and
-  returns `{"error": "internal error"}` at `:151` **without it**. The one thing
-  that would let a creator quote an id to an operator is generated and thrown
-  away.
-- **Three unrelated "request ids" exist.** The gateway mints a UUID as
-  `X-Request-Id` (`crates/gateway/src/proxy.rs:558`); the worker uses it only to
-  bind the `ZeroShip-User` HMAC (`crates/worker/src/handler.rs:96-104`) and never
-  forwards it; the runtime invents its own per-isolate `u64`. **The `"1"` in the
-  user's body cannot be joined to the gateway's trace.**
-- **The SDK discards it anyway.** `sdks/rpc/src/error.ts:158-200` lifts `code`,
-  `message`, `details`, `retryable`, `trace_id`/`traceId` -- `request_id` is not
-  in the list.
+- **The control helper loop is closed; the app-dispatch loop is not.**
+  `infrastructure_error_response` now returns the UUID as `trace_id`, logs the
+  same value under the same key, and `@zeroship/control` lifts it. That statement
+  covers only responses routed through this helper; direct control 5xx bodies
+  still exist outside it and remain id-less.
+- **Three unrelated request-id concepts still exist.** The gateway mints a UUID
+  as `X-Request-Id` (`crates/gateway/src/proxy.rs:558`); the worker uses it only
+  to bind the `ZeroShip-User` HMAC (`crates/worker/src/handler.rs:96-104`) and
+  never forwards it; the runtime invents its own per-isolate `u64`.
+  Generic sanitized app 5xx bodies carry a per-isolate `request_id` that cannot
+  be joined to the gateway trace. Public-code app 5xx bodies carry no id.
+- **`@zeroship/rpc` lifts `trace_id`, but app dispatch emits none.** It does not
+  lift the runtime's local `request_id`, and relabeling that counter would not
+  make it a joinable trace identity.
 
 **The cleanest existing model** is `crates/migrated/src/api.rs:321-345`: stable
 slug in `"error"`, human text in `"detail"`, blanked at 5xx and verbatim at 4xx,
@@ -496,10 +497,10 @@ RFC 9457 problem-details was raised three times in RPC review and deliberately
 deferred (`docs/proposals/rpc.md:2277`). No ADR in `docs/decisions/` ratifies the
 error-code design at all, despite `docs/feature-map.md:421` marking it shipped.
 
-**So the cheapest non-foreclosing step is not "add codes." It is: (a) close the
-correlation loop, and (b) make the code allow-list derived rather than
-hand-mirrored.** Both are small; neither forecloses i18n; both pay off
-immediately without any translation work.
+**So the cheapest non-foreclosing step is not "add codes." It is: (a) finish the
+app-dispatch half of the correlation contract, and (b) make the code allow-list
+derived rather than hand-mirrored.** The control helper half of (a) is already
+closed. Neither step forecloses i18n, and both pay off without translation work.
 
 ---
 
@@ -606,18 +607,29 @@ Cost: an hour. Risk: very low. All three are currently contained by the 5xx rail
 so this is defence in depth rather than an active exposure -- which is also the
 argument for doing it cheaply now rather than scheduling it.
 
-**Option 1c. Close the correlation loop.** Emit the already-minted `request_id`
-in the control-plane body (`crates/control/src/api.rs:151`) and add it to the
-SDK's lifted-field list (`sdks/rpc/src/error.ts:158-200`).
-Cost: hours. Risk: low. Payoff: the highest of any item here -- it is what turns
-"internal error" from undiagnosable into reportable, with no message redesign.
+**Option 1c. Close the correlation loop.** This option contains two distinct
+paths. The control helper half has shipped: `infrastructure_error_response`
+emits its UUID under the wire contract's `trace_id` key, logs the same value,
+and `@zeroship/control` lifts it. Other direct control 5xx bodies remain id-less.
+Option 1c remains open for app dispatch. Generic sanitized app 5xx bodies expose
+only a per-isolate `request_id`, public-code app 5xx bodies expose no id, and
+neither response contains the `trace_id` that `@zeroship/rpc` already lifts.
+Cost for the remaining path: hours plus an identity and propagation decision.
+Risk: low. Payoff: it turns an app's "internal error" into a reportable failure.
 
 ### Tier 2 -- needs a design decision
 
-**Option 2a. Classify the anchor failure properly.** Give
-`DbError::from_pg` an arm for `undefined_object` / role-missing that yields a
-`Configuration`-class error with a public code (say `schema_not_provisioned`) and
-a hint naming `zeroship migrate`. Add that code to the public allow-list.
+**Option 2a. Classify the anchor failure properly.** The measured SQLSTATE is
+part of the contract: `SET LOCAL ROLE` reports `invalid_parameter_value` / `22023`
+for a missing role, not `undefined_object` / `42704`. Classify that failure at
+the per-app session-setup call site as a `Configuration` error with a public
+code (say `schema_not_provisioned`) and a hint naming `zeroship migrate`. Add
+that code to the public allow-list.
+
+Two nearby provisioning failures are deliberately different. A missing schema with a fully-qualified query reports `undefined_table` / `42P01`, not
+`invalid_schema_name` / `3F000`. A present role without required grants reports `insufficient_privilege` / `42501`. `42P01` and `42501` must not be added to the missing-role classifier. In particular, `42501` is also the ordinary
+permission-denied SQLSTATE, so treating it as "run migrate" would prescribe the
+wrong remediation for unrelated authorization failures.
 Cost: a day, including the allow-list and a regression test.
 Payoff: the anchor failure becomes self-diagnosing for the creator, using the
 existing rail with no new machinery. **This is the single highest-value change in
@@ -774,14 +786,14 @@ copy are a deliberate typographic choice, not a defect. A blanket strip would
 degrade them. My scoping recommendation handles this, but it means the headline
 "1642 non-ASCII strings" overstates the actionable population by roughly 3x.
 
-**7.5 Closing the correlation loop has a cost I have not measured.** Emitting
-`request_id` to end users exposes a counter that currently reveals per-isolate
-request volume (`"1"` literally announces a cold isolate). If it is emitted, it
-should probably become an opaque random id, which is a slightly larger change
-than "add the field", and I have not verified what depends on the current format.
-`crates/runtime/src/core/dispatch.rs:117-137` uses the id *format* as evidence for
-which rail served a request, so changing it would invalidate an existing
-diagnostic technique documented in the tree.
+**7.5 Closing app-dispatch correlation has a cost I have not measured.** The
+generic app body currently exposes a per-isolate `request_id` counter (`"1"`
+announces a cold isolate), while the public-code body exposes no id. The new
+contract should carry an opaque, joinable `trace_id`; relabeling the counter
+would overstate what it can correlate. I have not verified what depends on the
+counter's current format. `crates/runtime/src/core/dispatch.rs:117-137` uses the
+format as evidence for which rail served a request, so changing it would also
+invalidate an existing diagnostic technique documented in the tree.
 
 **7.6 My own leak severity arrived before its bounds, and the bounding changed
 the answer.** The anchor string contains a database role name, so the natural
@@ -807,7 +819,8 @@ be wrong.
 
 1. **Option 2a** (classify the role-missing failure; public code plus hint). Fixes
    the actual defect.
-2. **Option 1c** (close the correlation loop). Highest diagnostic payoff per hour.
+2. **Option 1c** (finish app-dispatch correlation; the control helper is closed).
+   Highest diagnostic payoff per hour.
 3. **Option 1b** (delete the four doc-marker strings) and **Option 1d** (the
    three concrete leak sites). Trivial, bounded, an hour each.
 4. **Option 1a** (strip non-ASCII in `crates/` and non-UI SDKs) plus the
