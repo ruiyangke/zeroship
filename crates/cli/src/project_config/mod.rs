@@ -5,11 +5,10 @@
 //! the runtime, NEVER packed into a `.zship`, and never leaves the creator's
 //! machine. `tests/project_config_gate.sh` enforces all three.
 //!
-//! NO DEFAULTS LIVE HERE. `generated.rs` says why at length; the short version
-//! is that a default on this side plus a default on the TypeScript side is the
-//! four-derivation bug the file exists to remove, moved up one layer. When the
-//! file is present and a key the CLI reads is absent, the command errors naming
-//! the key.
+//! NO DEFAULTS FOR CLI-READ FACTS LIVE HERE. When the file is present and a key
+//! the CLI operationally reads is absent, the command errors naming the key.
+//! Optional non-CLI defaults are generated from the schema into both readers so
+//! their resolved JSON stays byte-identical.
 //!
 //! WHEN NO FILE IS PRESENT nothing changes: `--flag`, then the environment
 //! variable, then the compiled fallback each command already had. A creator in
@@ -350,6 +349,13 @@ impl ProjectConfig {
             origin = Source::FileEnvironment(name.to_string());
         }
 
+        for (path, json) in generated::RESOLVED_OPTIONAL_DEFAULTS_JSON {
+            let value = serde_json::from_str(json).map_err(|e| {
+                self.err(format!("generated default for `{path}` is invalid JSON: {e}"))
+            })?;
+            insert_default(&mut out, path, value).map_err(|e| self.err(e))?;
+        }
+
         Ok(Resolved {
             path: self.path.clone(),
             value: out,
@@ -382,6 +388,23 @@ impl ProjectConfig {
             .map_err(|e| format!("failed to write {}: {e}", self.path.display()))?;
         Ok(WriteOutcome::Spliced)
     }
+}
+
+fn insert_default(
+    map: &mut Map<String, Value>,
+    dotted: &str,
+    value: Value,
+) -> Result<(), String> {
+    let Some((head, tail)) = dotted.split_once('.') else {
+        map.entry(dotted.to_string()).or_insert(value);
+        return Ok(());
+    };
+    let block = map
+        .entry(head.to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| format!("generated default `{dotted}` has non-object parent `{head}`"))?;
+    insert_default(block, tail, value)
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {

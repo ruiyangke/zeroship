@@ -21,8 +21,8 @@
 # SIX CHECKS. 1-3 are the two-parser half, 4-6 the invariant half.
 #
 #   1. codegen drift        both generated files match schema/project-v1.json
-#   2. no Rust defaults     every schema `default` is in the TS reader and in
-#                           NO Rust reader; the CLI-read intersection is empty
+#   2. no CLI-read defaults every schema `default` is named in both readers;
+#                           Rust applies only optional non-CLI defaults
 #   3. round trip           both readers dump the same fixture byte-for-byte,
 #                           at the root AND under --env=staging; plus a
 #                           MUTATION showing the asymmetry is real
@@ -63,6 +63,7 @@ cd "$ROOT" || exit 1
 BIN="${ZEROSHIP_BIN:-$ROOT/target/release/zeroship}"
 [ -x "$BIN" ] || BIN="$ROOT/target/debug/zeroship"
 FIXTURE="$ROOT/tests/fixtures/project-config/zeroship.jsonc"
+MINIMAL_FIXTURE="$ROOT/tests/fixtures/project-config/zeroship-minimal.jsonc"
 SCHEMA="$ROOT/schema/project-v1.json"
 TS_DUMP="$ROOT/sdks/vite-plugin/scripts/project-config-dump.ts"
 PROBE="$ROOT/tests/lib/project_config_pack_probe.mjs"
@@ -73,7 +74,7 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
-for f in "$SCHEMA" "$FIXTURE" "$TS_DUMP" "$PROBE"; do
+for f in "$SCHEMA" "$FIXTURE" "$MINIMAL_FIXTURE" "$TS_DUMP" "$PROBE"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 if [ ! -x "$BIN" ]; then
@@ -119,12 +120,9 @@ else
     [ -n "$path" ] || continue
     grep -qF -- "\"$path\": $lit" sdks/vite-plugin/src/project-config/generated.ts \
       || ts_missing="$ts_missing $path"
-    # The Rust reader must NAME every defaulted path and BIND none of them.
-    # Naming is what makes the absence a decision rather than an omission; the
-    # binding is what check 3 tests behaviourally, because a grep for a literal
-    # here cannot tell a default value from an enum member (`"full"`) or a key
-    # name (`"dist"`), and an earlier draft of this check failed on exactly
-    # that confusion.
+    # The Rust reader must NAME every defaulted path. Check 3 tests bindings
+    # behaviorally: CLI-read facts remain fallback-free, while optional
+    # non-CLI defaults must resolve identically on both sides.
     grep -qF -- "\"$path\"" crates/cli/src/project_config/generated.rs \
       || rs_missing="$rs_missing $path"
   done <<< "$DEFAULT_PATHS"
@@ -139,13 +137,13 @@ fi
 
 echo
 echo "== 3. round trip: the two readers agree byte for byte =="
-for ENVSEL in "" "staging"; do
-  label="root"; envflag=()
-  if [ -n "$ENVSEL" ]; then label="--env=$ENVSEL"; envflag=("--env=$ENVSEL"); fi
-  ( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$FIXTURE" "${envflag[@]+"${envflag[@]}"}" ) \
+while IFS='|' read -r fixture ENVSEL label; do
+  envflag=()
+  if [ -n "$ENVSEL" ]; then envflag=("--env=$ENVSEL"); fi
+  ( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$fixture" "${envflag[@]+"${envflag[@]}"}" ) \
     >"$WORK/ts.json" 2>"$WORK/ts.err"
   ts_rc=$?
-  ( cd "$(dirname "$FIXTURE")" && "$BIN" config show "${envflag[@]+"${envflag[@]}"}" ) \
+  ( cd "$(dirname "$fixture")" && "$BIN" config show "--config=$fixture" "${envflag[@]+"${envflag[@]}"}" ) \
     >"$WORK/rs.json" 2>"$WORK/rs.err"
   rs_rc=$?
   if [ "$ts_rc" != 0 ] || [ "$rs_rc" != 0 ]; then
@@ -159,7 +157,11 @@ for ENVSEL in "" "staging"; do
     fail "the two readers DISAGREE at $label"
     diff "$WORK/rs.json" "$WORK/ts.json" | sed 's/^/       /' | head -20
   fi
-done
+done <<EOF
+$FIXTURE||full fixture root
+$FIXTURE|staging|full fixture --env=staging
+$MINIMAL_FIXTURE||all optional fields omitted
+EOF
 
 # MUTATION A. Remove a cross-tool key from a file that exists. NEITHER reader
 # may quietly supply a value: the schema requires it, so both must refuse and

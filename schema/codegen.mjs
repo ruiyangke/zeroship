@@ -142,6 +142,12 @@ const envRequired = envEntry.required ?? [];
 
 const cliReadFields = leaves.filter((l) => l.cliRead).map((l) => l.path);
 const withDefaults = leaves.filter((l) => l.default !== undefined);
+const requiredFields = new Set(
+  objects.flatMap((o) => o.required.map((member) => o.path ? `${o.path}.${member}` : member)),
+);
+const rustResolvedDefaults = withDefaults.filter(
+  (l) => !l.cliRead && !requiredFields.has(l.path),
+);
 
 // ---------------------------------------------------------------------------
 // Emit
@@ -163,9 +169,9 @@ function tsSource() {
   L.push("/**");
   for (const line of BANNER_LINES) L.push(line ? ` * ${line}` : " *");
   L.push(" *");
-  L.push(" * This is the side that HAS defaults. The Rust reader has none, on purpose:");
-  L.push(" * the plugin must work with `zeroship()` and no file at all, while a CLI that");
-  L.push(" * guessed a control URL would deploy to the wrong place in silence.");
+  L.push(" * The plugin applies every default when there is no file. For a present file,");
+  L.push(" * optional non-CLI defaults are also generated into Rust so the readers agree.");
+  L.push(" * Defaults for CLI-read facts never reach Rust: silence there is an error.");
   L.push(" */");
   L.push("");
   L.push(`export const CONFIG_FILENAME = ${jsonLit(schema["x-config-filename"])};`);
@@ -222,14 +228,10 @@ function rsSource() {
   const L = [];
   for (const line of BANNER_LINES) L.push(line ? `//! ${line}` : "//!");
   L.push("//!");
-  L.push("//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point.");
-  L.push("//! Every default lives in `schema/project-v1.json` and reaches exactly one");
-  L.push("//! reader, the TypeScript one. A key the CLI reads and the file omits is an");
-  L.push("//! error naming the key -- so the two readers cannot hold different values for");
-  L.push("//! the same fact, which is the bug `zeroship.jsonc` exists to remove.");
-  L.push("//!");
-  L.push("//! `tests/project_config_gate.sh` asserts the absence: a `default` literal");
-  L.push("//! appearing here fails the gate.");
+  L.push("//! THERE ARE NO DEFAULTS FOR CLI-READ FACTS IN THIS FILE.");
+  L.push("//! A key the CLI operationally reads and the file omits is an error naming the");
+  L.push("//! key. Optional non-CLI defaults are generated below from the same schema so");
+  L.push("//! both readers still produce byte-identical resolved JSON.");
   L.push("");
   L.push(`pub const CONFIG_FILENAME: &str = ${jsonLit(schema["x-config-filename"])};`);
   L.push(`pub const CONFIG_ENV_VAR: &str = ${jsonLit(schema["x-config-env-var"])};`);
@@ -267,12 +269,16 @@ function rsSource() {
   }
   L.push("];");
   L.push("");
-  L.push("/// Dotted paths the schema gives a default and this reader deliberately does NOT.");
+  L.push("/// Every dotted path carrying a schema default.");
   L.push("///");
   L.push("/// Named rather than merely absent so the gate can assert the list is the exact");
-  L.push("/// complement of the schema's `default` set -- an omission here would read as");
-  L.push("/// \"no default exists\" instead of \"we chose not to have one\".");
+  L.push("/// complete schema `default` set -- an omission here would read as \"no default");
+  L.push("/// exists\" instead of a deliberate resolution rule.");
   L.push(`pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &[${withDefaults.map((l) => jsonLit(l.path)).join(", ")}];`);
+  L.push("");
+  L.push("/// Optional, non-CLI-read defaults applied to a present file's resolved view.");
+  L.push("/// Values are JSON so arrays and future object defaults stay schema-generated.");
+  L.push(`pub const RESOLVED_OPTIONAL_DEFAULTS_JSON: &[(&str, &str)] = &[${rustResolvedDefaults.map((l) => `(${jsonLit(l.path)}, ${jsonLit(JSON.stringify(l.default))})`).join(", ")}];`);
   L.push("");
   return L.join("\n");
 }
