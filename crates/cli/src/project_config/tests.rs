@@ -8,8 +8,7 @@
 //! - They do not exercise `locate` against a real `ZEROSHIP_CONFIG`, because
 //!   setting process environment in a threaded test runner races every other
 //!   test in the binary. The env arm is covered by the shell gate.
-//! - `write_app` is tested on a temp file; it does not prove the splice is safe
-//!   under a concurrent editor.
+//! - `write_app` is tested on temp files, including a real disk edit after load.
 
 use super::*;
 
@@ -615,6 +614,34 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
             .str("app"),
         Some("44444444-4444-4444-8444-444444444444"),
         "the Rust reader must accept the written file"
+    );
+}
+
+#[test]
+fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
+    let original = FULL.replace(
+        "  \"app\": \"11111111-1111-4111-8111-111111111111\",\n",
+        "",
+    );
+    let creator_edit = original.replace(
+        "// A comment, which is the whole reason the format is JSONC.",
+        "// A concurrent creator edit that must survive.",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILENAME);
+    std::fs::write(&path, &original).unwrap();
+
+    let config = ProjectConfig::load(&path).unwrap();
+    std::fs::write(&path, &creator_edit).unwrap();
+    let error = config
+        .write_app("99999999-9999-4999-8999-999999999999")
+        .expect_err("writeback must refuse a file edited after load");
+
+    assert!(error.contains("changed since it was loaded"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        creator_edit,
+        "the concurrent creator edit must remain byte-for-byte intact"
     );
 }
 
