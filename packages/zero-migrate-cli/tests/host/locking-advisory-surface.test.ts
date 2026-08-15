@@ -237,3 +237,34 @@ test("CONTROL: PostgreSQL still evaluates rules rather than announcing it cannot
   assert.doesNotMatch(result.text, /analyzer_dialect_unsupported/);
   assert.match(result.text, /ACCESS\s+EXCLUSIVE/i);
 });
+
+test("F659: --json carries the advisories too, not only the human rendering", () => {
+  // The advisory surface was added to the human output of `lint --explain` and
+  // `plan`. Both verbs also have a `--json` shape, and that is what a CI gate
+  // reads - which is precisely where a warning about a table-wide lock has to
+  // land. A payload that omits them looks clean to the consumer least able to
+  // notice it is missing.
+  const work = baseProject();
+  try {
+    addColumnMigration(work, true);
+    const result = runCli(work, ["lint", "--explain", "--json", "--dialect", "postgres"], {
+      schema: "lint_locksurface_json",
+    });
+    assert.equal(result.code, 0, `an advisory must not gate; ${result.text}`);
+    // CliResult folds stdout and stderr into one string, so slice out the JSON
+    // document rather than parsing whatever the devShell banner printed first.
+    const body = result.text.slice(result.text.indexOf("{"), result.text.lastIndexOf("}") + 1);
+    const payload: unknown = JSON.parse(body);
+    assert.ok(
+      typeof payload === "object" && payload !== null && "advisories" in payload,
+      `the JSON shape must carry advisories; got ${result.text}`,
+    );
+    const { advisories } = payload as { advisories: Array<{ message: string }> };
+    assert.ok(
+      advisories.some((advisory) => /ACCESS\s+EXCLUSIVE/i.test(advisory.message)),
+      `and the lock must be among them; got ${JSON.stringify(advisories)}`,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

@@ -1015,8 +1015,22 @@ async function runLint(args: Args): Promise<number> {
     };
   });
 
+  // Same reason as plan: an advisory that only exists in the human rendering is
+  // invisible to the gate that reads this output.
+  const advisories = args.explain
+    ? addon.advisoriesFor({
+        envelopes: envelopeJson,
+        dialect: selectedDialects[0],
+        defaultSchema: args.projectSchema,
+        ownerApp: args.ownerApp,
+        charterLayers,
+      })
+    : [];
+
   if (args.json) {
-    process.stdout.write(JSON.stringify(reports, null, 2) + "\n");
+    process.stdout.write(
+      JSON.stringify(args.explain ? { reports, advisories } : reports, null, 2) + "\n",
+    );
   } else {
     for (const report of reports) {
       process.stdout.write(
@@ -1029,19 +1043,9 @@ async function runLint(args: Args): Promise<number> {
         if (args.explain) process.stdout.write(`${result.sql ?? ""}\n`);
       }
     }
-    if (args.explain) {
-      // Under --explain the operator is asking what this deploy will actually
-      // do, which is exactly when a table-wide lock is worth knowing about.
-      writeAdvisories(
-        addon.advisoriesFor({
-          envelopes: envelopeJson,
-          dialect: selectedDialects[0],
-          defaultSchema: args.projectSchema,
-          ownerApp: args.ownerApp,
-          charterLayers,
-        }),
-      );
-    }
+    // Under --explain the operator is asking what this deploy will actually do,
+    // which is exactly when a table-wide lock is worth knowing about.
+    if (args.explain) writeAdvisories(advisories);
   }
   return reports.every((report) => report.ok) ? 0 : 1;
 }
@@ -1125,6 +1129,17 @@ async function runLivePlan(args: Args): Promise<number> {
     charterLayers,
   });
 
+  // Computed ONCE, for both output shapes. Surfacing advisories only in the
+  // human branch would leave the machine consumer - CI, which is precisely where
+  // a table-wide lock warning has to land - reading a payload that looks clean.
+  const advisories = loadAddon().advisoriesFor({
+    envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
+    dialect: driver.kind,
+    defaultSchema: args.projectSchema,
+    ownerApp: args.ownerApp,
+    charterLayers,
+  });
+
   if (args.json) {
     process.stdout.write(
       JSON.stringify(
@@ -1135,6 +1150,7 @@ async function runLivePlan(args: Args): Promise<number> {
             name,
             sql: rendered[index],
           })),
+          advisories,
         },
         null,
         2,
@@ -1144,15 +1160,7 @@ async function runLivePlan(args: Args): Promise<number> {
     const noun = pending.length === 1 ? "migration" : "migrations";
     process.stdout.write(`would apply ${pending.length} ${noun}\n`);
     for (const sql of rendered) process.stdout.write(`${sql}\n`);
-    writeAdvisories(
-      loadAddon().advisoriesFor({
-        envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
-        dialect: driver.kind,
-        defaultSchema: args.projectSchema,
-        ownerApp: args.ownerApp,
-        charterLayers,
-      }),
-    );
+    writeAdvisories(advisories);
   }
   return 0;
 }
