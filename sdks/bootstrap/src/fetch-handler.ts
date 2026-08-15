@@ -332,8 +332,9 @@ function errorBodyFromThrown(e: unknown, status: number): Record<string, unknown
         retryable: err?.retryable,
       },
     );
+    const keepMessage = isMissingRoleCode(err?.code) && typeof err?.message === "string";
     const body: Record<string, unknown> = {
-      message: "internal error",
+      message: keepMessage ? err.message : "internal error",
       name: "Error",
       request_id: requestId,
     };
@@ -350,6 +351,10 @@ function errorBodyFromThrown(e: unknown, status: number): Record<string, unknown
   if (typeof err?.retryable === "boolean") body.retryable = err.retryable;
   if (typeof err?.request_id === "string") body.request_id = err.request_id;
   return body;
+}
+
+function isMissingRoleCode(code: unknown): boolean {
+  return code === "schema_not_provisioned" || code === "SCHEMA_NOT_PROVISIONED";
 }
 
 function newRequestId(): string {
