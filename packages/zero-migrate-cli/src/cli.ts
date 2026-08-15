@@ -1379,6 +1379,10 @@ export function statusIsDirty(reply: StatusReply): boolean {
     reply.pendingContracts.length > 0 ||
     reply.blocked.length > 0 ||
     reply.unexpectedJournal.length > 0 ||
+    // An unresolved unwind BLOCKS the next verb: apply refuses over it. A strict
+    // gate that passed here would hand the pipeline to an apply that fails, which
+    // is the opposite of what strict is for (F661).
+    (reply.interruptedUnwinds ?? []).length > 0 ||
     (reply.plans ?? []).some(
       (plan) =>
         plan.state === "drifted" || plan.steps.some((step) => step.state === "drifted"),
@@ -1414,6 +1418,15 @@ export function formatStatusHuman(reply: StatusReply): string {
   ];
   for (const entry of reply.unexpectedJournal) {
     lines.push(`drift: unexpected journal entry ${entry.version} (${entry.state})`);
+  }
+  // Reported, never cleared - status is a read. The wording matches what apply
+  // and rollback print for the same state, so an operator meets one vocabulary
+  // rather than three.
+  for (const version of reply.interruptedUnwinds ?? []) {
+    lines.push(
+      `interrupted unwind: ${version} has a rollback marker from an interrupted ` +
+        `unwind; apply and rollback both refuse until it is resolved`,
+    );
   }
   for (const plan of reply.plans ?? []) {
     const driftedSteps = plan.steps.filter((step) => step.state === "drifted");

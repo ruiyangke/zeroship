@@ -54,11 +54,16 @@ scope = { include = [${JSON.stringify(schema)}] }
   return work;
 }
 
-function cli(work: string, schema: string, databaseUrl: string) {
+function cli(
+  work: string,
+  schema: string,
+  databaseUrl: string,
+  verb: readonly string[] = ["apply", "--approve"],
+) {
   const child = spawn(
     process.execPath,
     [
-      "--import", "tsx", CLI_BIN, "apply", "--approve",
+      "--import", "tsx", CLI_BIN, ...verb,
       "--dir", join(work, "migrations"),
       "--database-url", databaseUrl,
       "--policy", join(work, "policy.toml"),
@@ -196,6 +201,68 @@ test("PostgreSQL re-apply is unaffected by MySQL rollback markers", async (ctx) 
       )
       .catch(() => {});
     await client.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("status reports the interrupted unwind that apply refuses over", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; status marker coverage skipped");
+    return;
+  }
+  // F661. apply and rollback both refuse over this marker. status said
+  // "1 applied, 0 pending", exit 0 - so the two verbs contradicted each other on
+  // the same database, and the verb an operator reaches for FIRST was the one
+  // telling them nothing was wrong.
+  const mysql = (await import("mysql2/promise")).default;
+  const connection = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
+  const database = `f661_${Date.now().toString(36)}`;
+  const meta = `${database}_migrations`;
+  const work = project(database);
+  const url = `${MYSQL_URL.slice(0, MYSQL_URL.lastIndexOf("/"))}/${database}`;
+  try {
+    await connection.query(`CREATE DATABASE \`${database}\``);
+    const applied = await cli(work, database, url);
+    assert.equal(applied.code, 0, `apply: ${applied.text}`);
+
+    // CONTROL FIRST, in the same database, so the marker is the only variable.
+    const clean = await cli(work, database, url, ["status", "--strict"]);
+    assert.equal(clean.code, 0, `a marker-free strict status must pass; ${clean.text}`);
+    assert.doesNotMatch(clean.text, /interrupted unwind/);
+
+    await connection.query(
+      `INSERT INTO \`${meta}\`.schema_migrations_rollback_inflight
+         (version, name, checksum, started_at, applied_by)
+       SELECT version, name, checksum, \`at\`, \`by\`
+         FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq DESC LIMIT 1`,
+    );
+
+    const marked = await cli(work, database, url, ["status"]);
+    assert.equal(marked.code, 0, `plain status still reports rather than gates; ${marked.text}`);
+    assert.match(
+      marked.text,
+      /interrupted unwind: mig_\w+ has a rollback marker/,
+      `status must name the version and the state; ${marked.text}`,
+    );
+
+    // A strict gate that passed here would hand the pipeline to an apply that
+    // refuses, which is the opposite of what strict is for.
+    const strict = await cli(work, database, url, ["status", "--strict"]);
+    assert.equal(strict.code, 1, `strict status must fail closed; ${strict.text}`);
+
+    // F659's lesson: the JSON shape is what a CI gate reads.
+    const json = await cli(work, database, url, ["status", "--json"]);
+    const body = json.text.slice(json.text.indexOf("{"), json.text.lastIndexOf("}") + 1);
+    const payload = JSON.parse(body) as { interruptedUnwinds?: string[] };
+    assert.ok(
+      (payload.interruptedUnwinds ?? []).length === 1,
+      `--json must carry it too; got ${json.text}`,
+    );
+  } finally {
+    await connection.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+    await connection.query(`DROP DATABASE IF EXISTS \`${meta}\``).catch(() => {});
+    await connection.end().catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
 });

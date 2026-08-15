@@ -110,6 +110,7 @@ pub fn apply_reply(
 /// branch on; the holders are what the operator message names.
 fn project_lock_busy_reply(holders: &[ProjectLockHolder]) -> StatusReply {
     StatusReply {
+        interrupted_unwinds: Vec::new(),
         current_version: None,
         applied: Vec::new(),
         pending: Vec::new(),
@@ -136,6 +137,9 @@ fn project_lock_busy_reply(holders: &[ProjectLockHolder]) -> StatusReply {
 /// fields: current version + applied/pending/rolled-back version ids).
 pub fn status_reply(s: &MigrationStatus) -> StatusReply {
     StatusReply {
+        // Filled by the caller that holds the backend; the projection itself
+        // has no connection to read the marker table with.
+        interrupted_unwinds: Vec::new(),
         current_version: s.current_version.as_ref().map(|v| v.as_str().to_string()),
         applied: s.applied.iter().map(|e| e.version.clone()).collect(),
         pending: s.pending.iter().map(|v| v.as_str().to_string()).collect(),
@@ -198,6 +202,7 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
         })
         .collect();
     StatusReply {
+        interrupted_unwinds: Vec::new(),
         current_version: status
             .current_version
             .as_ref()
@@ -932,7 +937,17 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
                 .await
         }
         .map_err(|error| error.to_string())?;
-        Ok::<StatusReply, String>(plan_status_reply(&status))
+        // The state apply and rollback both refuse over. Status reporting a clean
+        // project while they refuse leaves the operator with a contradiction and
+        // nothing to act on, so it is read here and carried in the reply (F661).
+        // The hook returns nothing on the dialects that cannot leave the marker.
+        let interrupted_unwinds = backend
+            .unresolved_rollback_markers(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut reply = plan_status_reply(&status);
+        reply.interrupted_unwinds = interrupted_unwinds;
+        Ok::<StatusReply, String>(reply)
     }
     .await;
 

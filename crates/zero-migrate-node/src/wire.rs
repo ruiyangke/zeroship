@@ -487,6 +487,12 @@ pub struct ApplyPendingContractDto {
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct StatusReply {
+    /// Versions whose UNWIND was interrupted and never resolved (MySQL only).
+    ///
+    /// `apply` and `rollback` both refuse over this state. Status reporting a
+    /// clean project while they refuse is a contradiction the operator has to
+    /// resolve with no information, so the versions travel here (F661).
+    pub interrupted_unwinds: Vec<String>,
     /// The highest net-applied LOGICAL PLAN id (`mig_…`), or `None` when nothing is
     /// applied. NOT the journal version - see the type doc.
     pub current_version: Option<String>,
