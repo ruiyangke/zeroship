@@ -29,25 +29,25 @@ export const AllStates: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All switch states">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Off</span>
+    <div className="zeroship-story-row" role="group" aria-label="All switch states">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Off</span>
         <Switch label="Off" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">On</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">On</span>
         <Switch label="On" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — off</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — off</span>
         <Switch label="Disabled" disabled />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — on</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — on</span>
         <Switch label="Disabled, on" disabled defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Read only</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Read only</span>
         <Switch label="Read only" readOnly defaultChecked />
       </div>
     </div>
@@ -81,17 +81,17 @@ export const AllStates: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All switch sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+    <div className="zeroship-story-row" role="group" aria-label="All switch sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Switch size="sm" label="Small" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Switch size="md" label="Medium" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Switch size="lg" label="Large" defaultChecked />
       </div>
     </div>
@@ -115,8 +115,8 @@ export const AllSizes: Story = {
 export const WithExternalLabel: Story = {
   name: "With external label",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Switch with external label">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Switch with external label">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>Notifications</Field.Label>
           <Switch data-testid="switch-with-label" name="notifications" />
@@ -148,11 +148,11 @@ export const Inline: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Switch inline label">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Switch inline label">
+      <div className="zeroship-story-cell">
         <Switch label="Notifications" name="notifications-inline" defaultChecked />
       </div>
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         {/* The aria-wiring assertion (`Switch inline label click toggles
          * track + hidden input`) targets this row. The `data-testid` on
          * the track lets the assertion grab the host span, walk to its
@@ -178,8 +178,8 @@ export const Inline: Story = {
 export const WithDescription: Story = {
   name: "With description",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Switch with description">
-      <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Switch with description">
+      <div className="zeroship-story-cell" style={{ maxWidth: "24rem" }}>
         <Field>
           <Field.Label>Auto-renew</Field.Label>
           <Switch name="auto-renew" defaultChecked />
@@ -211,9 +211,9 @@ export const ImmediateEffect: Story = {
   render: function ImmediateEffectRender() {
     const [on, setOn] = useState(false);
     return (
-      <div className="zs-story-row" role="group" aria-label="Switch immediate effect">
+      <div className="zeroship-story-row" role="group" aria-label="Switch immediate effect">
         <div
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}
         >
           <Switch
@@ -250,9 +250,9 @@ export const InsideForm: Story = {
   render: function InsideFormRender() {
     const [submitted, setSubmitted] = useState<string>("(not submitted)");
     return (
-      <div className="zs-story-row" role="group" aria-label="Switch inside form">
+      <div className="zeroship-story-row" role="group" aria-label="Switch inside form">
         <form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             e.preventDefault();
@@ -297,13 +297,13 @@ export const InsideForm: Story = {
 /* ─── 7. Disabled (Field cascade) ──────────────────────────────────── */
 export const Disabled: Story = {
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Switch disabled cascade">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">disabled prop</span>
+    <div className="zeroship-story-row" role="group" aria-label="Switch disabled cascade">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">disabled prop</span>
         <Switch label="Locked off" disabled />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Field disabled — switch inherits</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Field disabled — switch inherits</span>
         <Field disabled>
           <Field.Label>Billing alerts</Field.Label>
           <Switch name="billing-alerts" defaultChecked />
@@ -342,14 +342,14 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL switch row">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL switch row">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>התראות</Field.Label>
           <Switch defaultChecked name="notifications-rtl" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>מצב כהה</Field.Label>
           <Switch name="darkmode-rtl" />

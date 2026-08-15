@@ -12,9 +12,9 @@
  * constrains + centers + pads.
  *
  * Design guarantees:
- *   - `size` maps to the `--zs-container-*` foundation tokens; `full`
+ *   - `size` maps to the `--zeroship-container-*` foundation tokens; `full`
  *     opts out of any max-width (`none`).
- *   - `padX` is the closed `Pad` union → `--zs-space-*` via `spaceVar`;
+ *   - `padX` is the closed `Pad` union → `--zeroship-space-*` via `spaceVar`;
  *     applied as `padding-inline` (logical) so RTL is automatic.
  *   - `center` toggles `margin-inline: auto`. Default `true` — the
  *     overwhelmingly common case.
@@ -35,11 +35,11 @@ export type ContainerSize =
 
 export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
   /**
-   * Max content width, from the `--zs-container-*` tokens. `full` opts
+   * Max content width, from the `--zeroship-container-*` tokens. `full` opts
    * out of any max-width. Default `lg`.
    */
   size?: ContainerSize;
-  /** Symmetric inline padding, from the `--zs-space-*` scale. Default `4`. */
+  /** Symmetric inline padding, from the `--zeroship-space-*` scale. Default `4`. */
   padX?: Pad;
   /** Center the column with `margin-inline: auto`. Default `true`. */
   center?: boolean;
@@ -56,12 +56,12 @@ export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
 // `full` resolves to `none`; every other size resolves to its width
 // token. Kept as a map so the resolution is total over ContainerSize.
 const CONTAINER_MAX_WIDTH: Record<ContainerSize, string> = {
-  sm: "var(--zs-container-sm)",
-  md: "var(--zs-container-md)",
-  lg: "var(--zs-container-lg)",
-  xl: "var(--zs-container-xl)",
-  product: "var(--zs-container-product)",
-  wide: "var(--zs-container-wide)",
+  sm: "var(--zeroship-container-sm)",
+  md: "var(--zeroship-container-md)",
+  lg: "var(--zeroship-container-lg)",
+  xl: "var(--zeroship-container-xl)",
+  product: "var(--zeroship-container-product)",
+  wide: "var(--zeroship-container-wide)",
   full: "none",
 };
 

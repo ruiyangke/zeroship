@@ -4,7 +4,7 @@
  * Anatomy:
  *   .zs-menu-backdrop          optional scrim (opt-in only).
  *   .zs-menu-positioner        Base UI's Floating UI anchored layer.
- *     └─ .zs-menu-popup        opaque sheet with --zs-shadow-dialog.
+ *     └─ .zs-menu-popup        opaque sheet with --zeroship-shadow-dialog.
  *           ├─ .zs-menu-arrow              16x8 triangle (currentColor).
  *           ├─ .zs-menu-group + .zs-menu-group-label
  *           ├─ .zs-menu-item               grid: indicator | text | tail
@@ -39,10 +39,10 @@
 [data-slot="menu-backdrop"] {
   position: fixed;
   inset: 0;
-  z-index: var(--zs-z-modal);
-  background-color: var(--zs-scrim);
+  z-index: var(--zeroship-z-modal);
+  background-color: var(--zeroship-scrim);
   opacity: 1;
-  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="menu-backdrop"][data-starting-style],
 [data-slot="menu-backdrop"][data-ending-style] {
@@ -53,41 +53,41 @@
  *
  * Base UI's Positioner is the Floating UI anchored layer; we don't
  * paint it (it carries inline transform / x / y styles). Stack above
- * dialogs via `--zs-z-modal + 10` so menus float over an open dialog
+ * dialogs via `--zeroship-z-modal + 10` so menus float over an open dialog
  * when both are mounted. Same z-token Popover uses. */
 [data-slot="menu-positioner"] {
-  z-index: calc(var(--zs-z-modal) + 10);
+  z-index: calc(var(--zeroship-z-modal) + 10);
   outline: none;
 }
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
 :is([data-slot="menu-popup"], [data-slot="menu-popup-submenu"]) {
   /* Computable background-color + active material/rim tokens. */
-  background-color: var(--zs-surface);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  background-color: var(--zeroship-surface);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   /* Logical sizing so RTL flows naturally. */
   min-inline-size: 12rem;
-  max-inline-size: min(20rem, calc(100dvw - var(--zs-space-6) * 2));
+  max-inline-size: min(20rem, calc(100dvw - var(--zeroship-space-6) * 2));
   /* Brief contingency: cap height so long menus scroll cleanly. */
   max-block-size: min(50dvb, 24rem);
-  padding: var(--zs-space-1);
+  padding: var(--zeroship-space-1);
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-half);
-  border-radius: var(--zs-radius-5);
+  gap: var(--zeroship-space-half);
+  border-radius: var(--zeroship-radius-5);
   box-shadow:
-    var(--zs-shadow-dialog),
+    var(--zeroship-shadow-dialog),
     var(
-      --zs-popup-surface-edge,
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+      --zeroship-popup-surface-edge,
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator)
     );
-  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-dialog-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-dialog-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-dialog-backdrop-filter,
+    var(--zeroship-material-regular)
   );
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -95,8 +95,8 @@
   isolation: isolate;
   opacity: 1;
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 
 /* Submenu popup uses a slightly smaller minimum inline-size so nested
@@ -171,7 +171,7 @@
  * Double drop-shadow: the first emits a hairline at the separator edge
  * so the triangle's outline reads against the popup hairline; the
  * second is a soft label-shadow that anchors the arrow to the surface
- * underneath. The arrow's body inherits --zs-surface so it carries the
+ * underneath. The arrow's body inherits --zeroship-surface so it carries the
  * popup's opaque colour onto the triangle. */
 [data-slot="menu-arrow"] {
   display: inline-flex;
@@ -179,12 +179,12 @@
   justify-content: center;
   inline-size: 1rem;
   block-size: 0.5rem;
-  color: var(--zs-surface);
+  color: var(--zeroship-surface);
   filter:
-    drop-shadow(0 0 var(--zs-selection-hairline) var(--zs-separator))
+    drop-shadow(0 0 var(--zeroship-selection-hairline) var(--zeroship-separator))
     drop-shadow(
-      0 var(--zs-space-half) var(--zs-space-2)
-        color-mix(in oklch, var(--zs-label) 14%, transparent)
+      0 var(--zeroship-space-half) var(--zeroship-space-2)
+        color-mix(in oklch, var(--zeroship-label) 14%, transparent)
     );
 }
 [data-slot="menu-arrow"] > svg {
@@ -205,14 +205,14 @@
 :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
   position: relative;
   display: grid;
-  grid-template-columns: var(--zs-space-4) minmax(0, 1fr) auto;
-  column-gap: var(--zs-space-2);
+  grid-template-columns: var(--zeroship-space-4) minmax(0, 1fr) auto;
+  column-gap: var(--zeroship-space-2);
   align-items: center;
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
   min-block-size: 1.75rem;
-  border-radius: var(--zs-radius-2);
-  color: var(--zs-label);
+  border-radius: var(--zeroship-radius-2);
+  color: var(--zeroship-label);
   background-color: transparent;
   font: inherit;
   text-align: start;
@@ -222,17 +222,17 @@
   -webkit-user-select: none;
   outline: none;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* Highlight (keyboard roving / pointer hover via Base UI). */
 :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) {
-  background-color: var(--zs-fill-tertiary);
-  color: var(--zs-label);
+  background-color: var(--zeroship-fill-tertiary);
+  color: var(--zeroship-label);
 }
 :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   cursor: not-allowed;
 }
 
@@ -246,9 +246,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-space-4);
-  block-size: var(--zs-space-4);
-  color: var(--zs-accent);
+  inline-size: var(--zeroship-space-4);
+  block-size: var(--zeroship-space-4);
+  color: var(--zeroship-accent);
 }
 [data-slot="menu-item-indicator-glyph"] {
   display: inline-flex;
@@ -257,7 +257,7 @@
   inline-size: 100%;
   block-size: 100%;
   opacity: 0;
-  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="menu-item-indicator-glyph"] > svg {
   display: block;
@@ -275,16 +275,16 @@
  * inset hairline mirrors the accent border so the chip edge stays
  * crisp against the popup hover tint. */
 [data-slot="menu-checkbox-item"][data-checked] [data-slot="menu-item-indicator"] {
-  background-color: var(--zs-accent);
-  color: var(--zs-accent-ink);
-  border-radius: var(--zs-radius-1);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent);
+  background-color: var(--zeroship-accent);
+  color: var(--zeroship-accent-ink);
+  border-radius: var(--zeroship-radius-1);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent);
 }
 
 /* RadioItem visual reuse: filled dot (the CSS just paints accent via
  * the glyph's `currentColor` — same dot Radio renders). */
 [data-slot="menu-radio-item"][data-checked] [data-slot="menu-item-indicator"] {
-  color: var(--zs-accent-active);
+  color: var(--zeroship-accent-active);
 }
 
 [data-slot="menu-item-text"] {
@@ -302,17 +302,17 @@
  * the text lane. */
 [data-slot="menu-item-shortcut"] {
   justify-self: end;
-  margin-inline-start: var(--zs-space-6);
-  font-family: var(--zs-font-mono);
-  font-size: var(--zs-text-caption-1-size);
-  line-height: var(--zs-text-caption-1-line);
-  color: var(--zs-label-tertiary);
+  margin-inline-start: var(--zeroship-space-6);
+  font-family: var(--zeroship-font-mono);
+  font-size: var(--zeroship-text-caption-1-size);
+  line-height: var(--zeroship-text-caption-1-line);
+  color: var(--zeroship-label-tertiary);
   white-space: nowrap;
   /* The shortcut tail follows the row's disabled/highlighted tint so it
    * reads consistently in every state. */
 }
 :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-highlighted]:not([data-disabled]) [data-slot="menu-item-shortcut"] {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"])[data-disabled] [data-slot="menu-item-shortcut"] {
   color: inherit;
@@ -339,9 +339,9 @@
   align-items: center;
   justify-content: center;
   justify-self: end;
-  inline-size: var(--zs-space-3);
-  block-size: var(--zs-space-3);
-  color: var(--zs-label-secondary);
+  inline-size: var(--zeroship-space-3);
+  block-size: var(--zeroship-space-3);
+  color: var(--zeroship-label-secondary);
   /* RTL: flip the chevron so it points away from the submenu in LTR
    * and toward the submenu in RTL. Floating UI flips the popup side
    * automatically; the chevron tail follows. */
@@ -359,10 +359,10 @@
 [data-slot="menu-group"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-half);
+  gap: var(--zeroship-space-half);
 }
 [data-slot="menu-group"] + [data-slot="menu-group"] {
-  margin-block-start: var(--zs-space-1);
+  margin-block-start: var(--zeroship-space-1);
 }
 /* GroupLabel — caption-2 size + tertiary ink so cluster headers read
  * as quiet metadata instead of competing with the item rows beneath.
@@ -370,15 +370,15 @@
  * padding + space-4 gutter + space-2 column gap) so the label aligns
  * to the text lane of the items it labels. */
 [data-slot="menu-group-label"] {
-  padding-block: var(--zs-space-half) 0;
+  padding-block: var(--zeroship-space-half) 0;
   padding-inline-start: calc(
-    var(--zs-space-2) + var(--zs-space-4) + var(--zs-space-2)
+    var(--zeroship-space-2) + var(--zeroship-space-4) + var(--zeroship-space-2)
   );
-  padding-inline-end: var(--zs-space-2);
-  font-size: var(--zs-text-caption-2-size);
-  line-height: var(--zs-text-caption-2-line);
-  font-weight: var(--zs-text-caption-2-weight);
-  color: var(--zs-label-tertiary);
+  padding-inline-end: var(--zeroship-space-2);
+  font-size: var(--zeroship-text-caption-2-size);
+  line-height: var(--zeroship-text-caption-2-line);
+  font-weight: var(--zeroship-text-caption-2-weight);
+  color: var(--zeroship-label-tertiary);
   text-transform: none;
   letter-spacing: 0;
 }
@@ -386,16 +386,16 @@
 /* ─── Separator ────────────────────────────────────────────────────── */
 [data-slot="menu-separator"] {
   block-size: 0.0625rem;
-  background-color: var(--zs-separator);
-  margin-block: var(--zs-space-half);
-  margin-inline: var(--zs-space-1);
+  background-color: var(--zeroship-separator);
+  margin-block: var(--zeroship-space-half);
+  margin-inline: var(--zeroship-space-1);
   border: 0;
 }
 
 /* ─── Coarse pointer — bump hit-target floor ───────────────────────── */
 @media (pointer: coarse) {
   :is([data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]) {
-    min-block-size: var(--zs-hit-min);
+    min-block-size: var(--zeroship-hit-min);
   }
 }
 

@@ -11,7 +11,7 @@
  *   - Horizontal toolbars sit on a translucent fill so the cluster reads
  *     as one element. Vertical toolbars use the same paint with the
  *     flow rotated.
- *   - Gap rhythm = --zs-space-1 between adjacent items so segmented
+ *   - Gap rhythm = --zeroship-space-1 between adjacent items so segmented
  *     groups don't feel crowded next to plain buttons.
  *   - Hit-target minimum lives on the children (Toolbar.Button + Toggle
  *     min 1.75rem intrinsic). Toolbar itself adds no extra padding
@@ -30,14 +30,14 @@
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: var(--zs-space-1);
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
-  border-radius: var(--zs-radius-3);
-  background-color: var(--zs-fill-quaternary);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  gap: var(--zeroship-space-1);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
+  border-radius: var(--zeroship-radius-3);
+  background-color: var(--zeroship-fill-quaternary);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   outline: none;
 }
 
@@ -56,38 +56,38 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   block-size: 1.75rem;
   min-inline-size: 1.75rem;
-  padding-inline: var(--zs-space-3);
+  padding-inline: var(--zeroship-space-3);
   border: 0;
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zeroship-radius-2);
   background-color: transparent;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   font: inherit;
-  font-weight: var(--zs-text-body-weight);
-  letter-spacing: var(--zs-text-body-tracking);
+  font-weight: var(--zeroship-text-body-weight);
+  letter-spacing: var(--zeroship-text-body-tracking);
   cursor: default;
   user-select: none;
   text-decoration: none;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="toolbar-button"]:hover:not([data-disabled]) {
-  background-color: var(--zs-fill-tertiary);
+  background-color: var(--zeroship-fill-tertiary);
 }
 
 [data-slot="toolbar-button"]:active:not([data-disabled]) {
-  background-color: var(--zs-fill-secondary);
+  background-color: var(--zeroship-fill-secondary);
 }
 
 [data-slot="toolbar-button"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 [data-slot="toolbar-button"][data-disabled] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   cursor: not-allowed;
 }
 
@@ -96,18 +96,18 @@
   appearance: none;
   block-size: 1.75rem;
   padding-block: 0;
-  padding-inline: var(--zs-space-2);
+  padding-inline: var(--zeroship-space-2);
   border: 0;
-  border-radius: var(--zs-radius-2);
-  background-color: var(--zs-surface);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
-  color: var(--zs-label);
+  border-radius: var(--zeroship-radius-2);
+  background-color: var(--zeroship-surface);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator);
+  color: var(--zeroship-label);
   font: inherit;
 }
 
 [data-slot="toolbar-input"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── Separator ─────────────────────────────────────────────────────── *
@@ -117,11 +117,11 @@
  * (vertical line inside a horizontal toolbar). We size off that
  * attribute so authors don't need a wrapping class. */
 [data-slot="toolbar-separator"] {
-  background-color: var(--zs-separator);
+  background-color: var(--zeroship-separator);
   /* The default is "vertical inside a horizontal toolbar". */
-  inline-size: var(--zs-selection-hairline);
+  inline-size: var(--zeroship-selection-hairline);
   block-size: 1.25rem;
-  margin-inline: var(--zs-space-1);
+  margin-inline: var(--zeroship-space-1);
   align-self: center;
   flex: 0 0 auto;
 }
@@ -129,8 +129,8 @@
 [data-slot="toolbar-separator"][aria-orientation="horizontal"] {
   /* Flip dimensions for separators inside a vertical toolbar. */
   inline-size: 1.25rem;
-  block-size: var(--zs-selection-hairline);
-  margin-block: var(--zs-space-1);
+  block-size: var(--zeroship-selection-hairline);
+  margin-block: var(--zeroship-space-1);
   margin-inline: 0;
 }
 

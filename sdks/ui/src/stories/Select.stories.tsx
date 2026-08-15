@@ -34,13 +34,13 @@ export const Basic: Story = {
   render: function BasicRender() {
     const [value, setValue] = useState<string | null>(null);
     return (
-      <div className="zs-story-row" role="group" aria-label="Basic">
-        <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Basic">
+        <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
           <Select
             value={value}
             onValueChange={(v) => setValue(v)}
             placeholder="Pick a fruit"
-            className="zs-select-basic"
+            className="zeroship-select-basic"
             data-testid="select-basic"
           >
             {FRUITS.map((f) => (
@@ -82,8 +82,8 @@ export const WithGroups: Story = {
   render: function WithGroupsRender() {
     const [value, setValue] = useState<string | null>(null);
     return (
-      <div className="zs-story-row" role="group" aria-label="With groups">
-        <div className="zs-story-cell" style={{ minWidth: "14rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="With groups">
+        <div className="zeroship-story-cell" style={{ minWidth: "14rem" }}>
           <Select
             value={value}
             onValueChange={(v) => setValue(v)}
@@ -133,14 +133,14 @@ export const AllSizes: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
       {(["sm", "md", "lg"] as const).map((size) => (
-        <div className="zs-story-cell" key={size} style={{ minWidth: "12rem" }}>
-          <span className="zs-story-label">{size.toUpperCase()}</span>
+        <div className="zeroship-story-cell" key={size} style={{ minWidth: "12rem" }}>
+          <span className="zeroship-story-label">{size.toUpperCase()}</span>
           <Select
             size={size}
             placeholder="Pick"
@@ -173,13 +173,13 @@ export const AllVariants: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All variants"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
-      <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
-        <span className="zs-story-label">Default</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Default</span>
         <Select
           variant="default"
           placeholder="Default"
@@ -192,8 +192,8 @@ export const AllVariants: Story = {
           ))}
         </Select>
       </div>
-      <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
-        <span className="zs-story-label">Outline</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Outline</span>
         <Select
           variant="outline"
           placeholder="Outline"
@@ -225,8 +225,8 @@ export const Multiple: Story = {
   render: function MultipleRender() {
     const [value, setValue] = useState<string[]>([]);
     return (
-      <div className="zs-story-row" role="group" aria-label="Multiple">
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Multiple">
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Select
             multiple
             value={value}
@@ -283,13 +283,13 @@ export const Disabled: Story = {
         story:
           "`disabled` cascades to the trigger AND prevents the popup " +
           "from opening. Cursor flips to `not-allowed`; the trigger " +
-          "background drops to `--zs-input-bg-disabled`.",
+          "background drops to `--zeroship-input-bg-disabled`.",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
         <Select disabled placeholder="Disabled" data-testid="select-disabled">
           {FRUITS.map((f) => (
             <Select.Item key={f} value={f}>
@@ -325,8 +325,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Field>
           <Field.Label>Favorite fruit</Field.Label>
           <Select placeholder="Pick one" data-testid="select-withlabel">
@@ -358,8 +358,8 @@ export const Required: Story = {
   },
   render: function RequiredRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Required">
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required">
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Form
             onSubmit={(e) => {
               e.preventDefault();
@@ -426,8 +426,8 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required select (invalid)">
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required select (invalid)">
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Form
             onSubmit={(e) => {
               e.preventDefault();
@@ -481,8 +481,8 @@ export const LongList: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Long list">
-      <div className="zs-story-cell" style={{ minWidth: "14rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Long list">
+      <div className="zeroship-story-cell" style={{ minWidth: "14rem" }}>
         <Select placeholder="Pick a number" data-testid="select-long-list">
           {Array.from({ length: 50 }, (_, i) => (
             <Select.Item key={i} value={`opt-${i + 1}`}>
@@ -511,14 +511,14 @@ export const AlignStartCenterEnd: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Align"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
       {(["start", "center", "end"] as const).map((align) => (
-        <div className="zs-story-cell" key={align} style={{ minWidth: "12rem" }}>
-          <span className="zs-story-label">{align}</span>
+        <div className="zeroship-story-cell" key={align} style={{ minWidth: "12rem" }}>
+          <span className="zeroship-story-label">{align}</span>
           <Select
             align={align}
             placeholder={align}
@@ -550,13 +550,13 @@ export const Placement: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placement"
       style={{ alignItems: "flex-end", minHeight: "20rem" }}
     >
-      <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
-        <span className="zs-story-label">Top</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Top</span>
         <Select
           placement="top"
           placeholder="Top"
@@ -569,8 +569,8 @@ export const Placement: Story = {
           ))}
         </Select>
       </div>
-      <div className="zs-story-cell" style={{ minWidth: "12rem" }}>
-        <span className="zs-story-label">Bottom</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Bottom</span>
         <Select
           placement="bottom"
           placeholder="Bottom"
@@ -615,11 +615,11 @@ export const RTL: Story = {
       <div
         dir="rtl"
         lang="he"
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL"
       >
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Select placeholder="בחר פרי" data-testid="select-rtl">
             <Select.Item value="mango" data-testid="select-rtl-item-mango">
               מנגו
@@ -693,11 +693,11 @@ export const FieldAriaAutowiring: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field aria autowiring"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Favorite fruit (field-wired)</Field.Label>
           <Select
@@ -742,11 +742,11 @@ export const AriaDescribedByMerge: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="aria-describedby merge"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <span
           id="select-external-help"
           data-testid="select-described-by-merge-external"
@@ -842,11 +842,11 @@ export const InvalidFocusRing: Story = {
     }, []);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Invalid focus ring"
       >
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Form
             onSubmit={(e) => {
               e.preventDefault();

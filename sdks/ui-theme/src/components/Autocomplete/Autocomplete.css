@@ -29,10 +29,10 @@
 [data-slot="autocomplete-popup"] {
   max-block-size: min(50dvb, 24rem);
   box-shadow:
-    var(--zs-shadow-dialog),
+    var(--zeroship-shadow-dialog),
     var(
-      --zs-popup-surface-edge,
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+      --zeroship-popup-surface-edge,
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator)
     );
 }
 

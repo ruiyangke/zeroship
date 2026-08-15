@@ -30,8 +30,8 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic number field">
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Basic number field">
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
         <NumberField
           defaultValue={42}
           data-testid="numberfield-basic"
@@ -67,12 +67,12 @@ export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All number field sizes"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "12rem" }}>
-        <span className="zs-story-label">Small</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "12rem" }}>
+        <span className="zeroship-story-label">Small</span>
         <NumberField
           size="sm"
           defaultValue={5}
@@ -80,8 +80,8 @@ export const AllSizes: Story = {
           data-testid="numberfield-size-sm"
         />
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "12rem" }}>
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "12rem" }}>
+        <span className="zeroship-story-label">Medium</span>
         <NumberField
           size="md"
           defaultValue={10}
@@ -89,8 +89,8 @@ export const AllSizes: Story = {
           data-testid="numberfield-size-md"
         />
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "12rem" }}>
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "12rem" }}>
+        <span className="zeroship-story-label">Large</span>
         <NumberField
           size="lg"
           defaultValue={20}
@@ -107,20 +107,20 @@ export const AllVariants: Story = {
   name: "All variants",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All number field variants"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "12rem" }}>
-        <span className="zs-story-label">Default</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "12rem" }}>
+        <span className="zeroship-story-label">Default</span>
         <NumberField
           variant="default"
           defaultValue={42}
           aria-label="Default variant"
         />
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "12rem" }}>
-        <span className="zs-story-label">Outline</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "12rem" }}>
+        <span className="zeroship-story-label">Outline</span>
         <NumberField
           variant="outline"
           defaultValue={42}
@@ -147,11 +147,11 @@ export const MinMaxStep: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Min max step number field"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
         <NumberField
           defaultValue={50}
           min={1}
@@ -197,11 +197,11 @@ export const Currency: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Currency number field"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
         <NumberField
           defaultValue={9.99}
           min={0}
@@ -234,9 +234,9 @@ export const ScrubArea: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Scrub area">
+    <div className="zeroship-story-row" role="group" aria-label="Scrub area">
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ maxWidth: "16rem", paddingInlineStart: "3rem" }}
       >
         <NumberField
@@ -257,17 +257,17 @@ export const ScrubArea: Story = {
 export const Disabled: Story = {
   name: "Disabled",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled cascade">
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
-        <span className="zs-story-label">disabled prop</span>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled cascade">
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zeroship-story-label">disabled prop</span>
         <NumberField
           disabled
           defaultValue={42}
           aria-label="Locked quantity"
         />
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
-        <span className="zs-story-label">Field disabled — inherits</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zeroship-story-label">Field disabled — inherits</span>
         <Field disabled>
           <Field.Label>Servings</Field.Label>
           <NumberField defaultValue={4} aria-label="Servings" />
@@ -292,8 +292,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Field cascade">
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Field cascade">
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
         <Field size="sm">
           <Field.Label>Servings</Field.Label>
           <NumberField defaultValue={2} min={1} max={20} step={1} />
@@ -325,12 +325,12 @@ export const Required: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Required + invalid number field"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
-        <span className="zs-story-label">Required — rest</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
+        <span className="zeroship-story-label">Required — rest</span>
         <Field required>
           <Field.Label>
             Quantity <Field.Required />
@@ -343,8 +343,8 @@ export const Required: Story = {
           <Field.Description>Required — must be ≥ 1.</Field.Description>
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
-        <span className="zs-story-label">Required — invalid (auto-submitted)</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
+        <span className="zeroship-story-label">Required — invalid (auto-submitted)</span>
         <RequiredInvalidInline />
       </div>
     </div>
@@ -433,12 +433,12 @@ export const AriaPropagation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Aria propagation"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
-        <span id="numberfield-aria-help" className="zs-story-label">
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
+        <span id="numberfield-aria-help" className="zeroship-story-label">
           Min 0, max 100, step 1.
         </span>
         <NumberField
@@ -464,8 +464,8 @@ export const BareFocus: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Bare focus">
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Bare focus">
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
         <NumberField
           defaultValue={42}
           aria-label="Quantity"
@@ -500,13 +500,13 @@ export const ForcedColorsHover: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Forced-colors hover"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
-        <span className="zs-story-label">Default variant</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zeroship-story-label">Default variant</span>
         <NumberField
           variant="default"
           defaultValue={50}
@@ -514,8 +514,8 @@ export const ForcedColorsHover: Story = {
           data-testid="numberfield-forced-default"
         />
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
-        <span className="zs-story-label">Outline variant</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zeroship-story-label">Outline variant</span>
         <NumberField
           variant="outline"
           defaultValue={50}
@@ -536,15 +536,15 @@ export const CoarsePointer: Story = {
         story:
           "Under `pointer: coarse` the stepper buttons grow to the " +
           "coarse-pointer minimum target (44 device-units ≈ " +
-          "`--zs-hit-min`) on BOTH axes so a finger lands. The " +
+          "`--zeroship-hit-min`) on BOTH axes so a finger lands. The " +
           "aria-wiring suite emulates a coarse pointer and asserts " +
           "the button's bounding rect ≥ 2.75rem in inline and block.",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Coarse pointer">
-      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Coarse pointer">
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem" }}>
         <NumberField
           defaultValue={42}
           aria-label="Coarse quantity"
@@ -573,11 +573,11 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL number field"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
         <Field>
           <Field.Label>כמות</Field.Label>
           <NumberField
@@ -623,11 +623,11 @@ export const FieldAutoAria: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field aria preservation"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
         <Field>
           <Field.Label>Quantity</Field.Label>
           <NumberField
@@ -688,11 +688,11 @@ function ConsumerFocusInline() {
   const [blurCount, setBlurCount] = useState(0);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Consumer focus handlers"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
         <NumberField
           defaultValue={1}
           aria-label="Counted focus"
@@ -701,7 +701,7 @@ function ConsumerFocusInline() {
           onBlur={() => setBlurCount((n) => n + 1)}
         />
         <span
-          className="zs-story-label"
+          className="zeroship-story-label"
           data-testid="numberfield-focus-counter"
         >
           {`focus=${focusCount} blur=${blurCount}`}

@@ -34,52 +34,52 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-card-gap-md);
-  padding: var(--zs-card-padding-md);
-  border-radius: var(--zs-card-radius-md);
-  background-color: var(--zs-surface);
+  gap: var(--zeroship-card-gap-md);
+  padding: var(--zeroship-card-padding-md);
+  border-radius: var(--zeroship-card-radius-md);
+  background-color: var(--zeroship-surface);
   background-clip: padding-box;
-  backdrop-filter: var(--zs-card-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-card-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-card-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-card-backdrop-filter,
+    var(--zeroship-material-regular)
   );
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   overflow: hidden; /* clips Card.Media to the border-radius. */
   text-decoration: none; /* asChild → <a> shouldn't underline. */
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
 [data-slot="card"][data-size="sm"] {
-  padding: var(--zs-card-padding-sm);
-  gap: var(--zs-card-gap-sm);
-  border-radius: var(--zs-card-radius-sm);
+  padding: var(--zeroship-card-padding-sm);
+  gap: var(--zeroship-card-gap-sm);
+  border-radius: var(--zeroship-card-radius-sm);
 }
 [data-slot="card"][data-size="lg"] {
-  padding: var(--zs-card-padding-lg);
-  gap: var(--zs-card-gap-lg);
-  border-radius: var(--zs-card-radius-lg);
+  padding: var(--zeroship-card-padding-lg);
+  gap: var(--zeroship-card-gap-lg);
+  border-radius: var(--zeroship-card-radius-lg);
 }
 
 /* ─── variants ─────────────────────────────────────────────────────────── */
 /* `.zs-card--surface` gets a subtle inset hairline so it doesn't collapse
  * visually when sat on a same-color parent surface. Token-driven so a
- * theme can opt out by setting --zs-card-surface-edge: none. Visual-
+ * theme can opt out by setting --zeroship-card-surface-edge: none. Visual-
  * polish item 1. */
 [data-slot="card"][data-variant="surface"] {
-  box-shadow: var(--zs-card-surface-edge);
+  box-shadow: var(--zeroship-card-surface-edge);
 }
 [data-slot="card"][data-variant="elevated"] {
   box-shadow:
-    var(--zs-shadow-2),
-    var(--zs-card-surface-edge);
+    var(--zeroship-shadow-2),
+    var(--zeroship-card-surface-edge);
 }
 [data-slot="card"][data-variant="outline"] {
   box-shadow:
     var(
-      --zs-card-outline-edge,
-      0 0 0 0.0625rem var(--zs-separator) inset
+      --zeroship-card-outline-edge,
+      0 0 0 0.0625rem var(--zeroship-separator) inset
     );
 }
 [data-slot="card"][data-variant="ghost"] {
@@ -92,9 +92,9 @@
 [data-slot="card"][data-interactive] {
   cursor: pointer;
   transition:
-    transform var(--zs-motion-fast) var(--zs-motion-spring),
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    transform var(--zeroship-motion-fast) var(--zeroship-motion-spring),
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
   [data-slot="card"][data-interactive]:hover {
@@ -116,39 +116,39 @@
      * opaque base and finds the contrast. Visually identical to the
      * gradient tint (macOS list-row hover signal). Slice-3 review-
      * fix item 2 + verification step 6. */
-    box-shadow: inset 0 0 0 100rem var(--zs-card-hover-tint);
+    box-shadow: inset 0 0 0 100rem var(--zeroship-card-hover-tint);
   }
   /* Surface variant carries its subtle inset hairline as a box-shadow;
    * combine with the hover tint so the edge survives hover.
    * Visual-polish item 1. */
   [data-slot="card"][data-variant="surface"][data-interactive]:hover {
     box-shadow:
-      inset 0 0 0 100rem var(--zs-card-hover-tint),
-      var(--zs-card-surface-edge);
+      inset 0 0 0 100rem var(--zeroship-card-hover-tint),
+      var(--zeroship-card-surface-edge);
   }
   /* Elevated has an existing box-shadow — combine the hover tint
    * inset with the deeper drop-shadow so neither overrides the
    * other. */
   [data-slot="card"][data-variant="elevated"][data-interactive]:hover {
     box-shadow:
-      inset 0 0 0 100rem var(--zs-card-hover-tint),
-      var(--zs-shadow-3),
-      var(--zs-card-surface-edge);
+      inset 0 0 0 100rem var(--zeroship-card-hover-tint),
+      var(--zeroship-shadow-3),
+      var(--zeroship-card-surface-edge);
   }
   /* Outline variant carries the inset hairline as a box-shadow; combine
    * with the hover tint so the outline survives hover. */
   [data-slot="card"][data-variant="outline"][data-interactive]:hover {
     box-shadow:
-      inset 0 0 0 100rem var(--zs-card-hover-tint),
+      inset 0 0 0 100rem var(--zeroship-card-hover-tint),
       var(
-        --zs-card-outline-edge,
-        0 0 0 0.0625rem var(--zs-separator) inset
+        --zeroship-card-outline-edge,
+        0 0 0 0.0625rem var(--zeroship-separator) inset
       );
   }
 }
 [data-slot="card"][data-interactive]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 [data-slot="card"][data-interactive]:active {
   transform: scale(0.99);
@@ -191,8 +191,8 @@
 [data-slot="card-header"] {
   display: grid;
   grid-template-columns: 1fr;
-  column-gap: var(--zs-space-3);
-  row-gap: var(--zs-space-half);
+  column-gap: var(--zeroship-space-3);
+  row-gap: var(--zeroship-space-half);
   align-items: start;
 }
 [data-slot="card-header"]:has() {
@@ -217,46 +217,46 @@
 /* Title — size scales with the Card size. */
 [data-slot="card-title"] {
   margin: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-title-3-weight);
-  letter-spacing: var(--zs-text-title-3-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-title-3-weight);
+  letter-spacing: var(--zeroship-text-title-3-tracking);
+  color: var(--zeroship-label);
 }
 [data-slot="card"][data-size="sm"] [data-slot="card-title"] {
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-headline-tracking);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-headline-tracking);
 }
 [data-slot="card"][data-size="lg"] [data-slot="card-title"] {
-  font-size: var(--zs-text-title-2-size);
-  line-height: var(--zs-text-title-2-line);
-  font-weight: var(--zs-text-title-2-weight);
-  letter-spacing: var(--zs-text-title-2-tracking);
+  font-size: var(--zeroship-text-title-2-size);
+  line-height: var(--zeroship-text-title-2-line);
+  font-weight: var(--zeroship-text-title-2-weight);
+  letter-spacing: var(--zeroship-text-title-2-tracking);
 }
 
 [data-slot="card-description"] {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   /* Color-based hierarchy: description sits one step BELOW Title.
    *
-   * Visual-polish item 6 originally proposed --zs-label-tertiary for
+   * Visual-polish item 6 originally proposed --zeroship-label-tertiary for
    * a further visual recede; measured contrast against the crystal
-   * --zs-surface clocked 4.46 at the subheadline size, JUST below the
+   * --zeroship-surface clocked 4.46 at the subheadline size, JUST below the
    * 4.5:1 WCAG-AA threshold. The brief's documented fallback applies:
    * keep on label-secondary (font-weight is already 400 so the
    * hierarchy still reads visually under Title — Title is 600/700,
    * Description is 400). A11y bar protected. */
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 [data-slot="card"][data-disabled] [data-slot="card-description"] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 [data-slot="card"][data-size="sm"] [data-slot="card-description"] {
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
 }
 
 /* The Title → Description half-space gap is now expressed as the
@@ -270,13 +270,13 @@
 [data-slot="card-action"] {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
 
 /* ─── Media ────────────────────────────────────────────────────────────── */
 [data-slot="card-media"] {
   display: block;
-  background-color: var(--zs-fill-tertiary);
+  background-color: var(--zeroship-fill-tertiary);
 }
 /* Normalise the common embedded media elements so consumers get a
  * sensible default without dropping into bespoke CSS. */
@@ -287,8 +287,8 @@
   object-fit: cover;
 }
 [data-slot="card-media"][data-side="top"] {
-  margin-inline: calc(var(--zs-card-padding-md) * -1);
-  margin-block-start: calc(var(--zs-card-padding-md) * -1);
+  margin-inline: calc(var(--zeroship-card-padding-md) * -1);
+  margin-block-start: calc(var(--zeroship-card-padding-md) * -1);
   margin-block-end: 0;
   /* Inherit the Card's border-radius on the matching corners so the
    * media's rounded edge LITERALLY matches the card's rounded edge
@@ -299,8 +299,8 @@
   border-start-end-radius: inherit;
 }
 [data-slot="card-media"][data-side="bottom"] {
-  margin-inline: calc(var(--zs-card-padding-md) * -1);
-  margin-block-end: calc(var(--zs-card-padding-md) * -1);
+  margin-inline: calc(var(--zeroship-card-padding-md) * -1);
+  margin-block-end: calc(var(--zeroship-card-padding-md) * -1);
   margin-block-start: 0;
   /* Mirror item-2 cause B on the trailing edge. */
   border-end-start-radius: inherit;
@@ -319,25 +319,25 @@
  * margin tops it up to the desired total.
  * Visual-polish item 2 (cause A). */
 [data-slot="card"] > [data-slot="card-media"][data-side="top"] + * {
-  margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
+  margin-block-start: calc(var(--zeroship-card-padding-md) - var(--zeroship-card-gap-md));
 }
 [data-slot="card"][data-size="sm"] > [data-slot="card-media"][data-side="top"] + * {
-  margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
+  margin-block-start: calc(var(--zeroship-card-padding-sm) - var(--zeroship-card-gap-sm));
 }
 [data-slot="card"][data-size="lg"] > [data-slot="card-media"][data-side="top"] + * {
-  margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
+  margin-block-start: calc(var(--zeroship-card-padding-lg) - var(--zeroship-card-gap-lg));
 }
 /* Mirror the same correction on the bottom-bleed media so the
  * preceding Header/Body has a full padding worth of room above the
  * media instead of just the gap. */
 [data-slot="card"] > * + [data-slot="card-media"][data-side="bottom"] {
-  margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
+  margin-block-start: calc(var(--zeroship-card-padding-md) - var(--zeroship-card-gap-md));
 }
 [data-slot="card"][data-size="sm"] > * + [data-slot="card-media"][data-side="bottom"] {
-  margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
+  margin-block-start: calc(var(--zeroship-card-padding-sm) - var(--zeroship-card-gap-sm));
 }
 [data-slot="card"][data-size="lg"] > * + [data-slot="card-media"][data-side="bottom"] {
-  margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
+  margin-block-start: calc(var(--zeroship-card-padding-lg) - var(--zeroship-card-gap-lg));
 }
 [data-slot="card-media"][data-side="fill"] {
   position: absolute;
@@ -352,23 +352,23 @@
 /* Edge-bleed margins scale with the card size token. */
 [data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="top"],
 [data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="bottom"] {
-  margin-inline: calc(var(--zs-card-padding-sm) * -1);
+  margin-inline: calc(var(--zeroship-card-padding-sm) * -1);
 }
 [data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="top"] {
-  margin-block-start: calc(var(--zs-card-padding-sm) * -1);
+  margin-block-start: calc(var(--zeroship-card-padding-sm) * -1);
 }
 [data-slot="card"][data-size="sm"] [data-slot="card-media"][data-side="bottom"] {
-  margin-block-end: calc(var(--zs-card-padding-sm) * -1);
+  margin-block-end: calc(var(--zeroship-card-padding-sm) * -1);
 }
 [data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="top"],
 [data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="bottom"] {
-  margin-inline: calc(var(--zs-card-padding-lg) * -1);
+  margin-inline: calc(var(--zeroship-card-padding-lg) * -1);
 }
 [data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="top"] {
-  margin-block-start: calc(var(--zs-card-padding-lg) * -1);
+  margin-block-start: calc(var(--zeroship-card-padding-lg) * -1);
 }
 [data-slot="card"][data-size="lg"] [data-slot="card-media"][data-side="bottom"] {
-  margin-block-end: calc(var(--zs-card-padding-lg) * -1);
+  margin-block-end: calc(var(--zeroship-card-padding-lg) * -1);
 }
 
 /* ─── Content ──────────────────────────────────────────────────────────── */
@@ -377,8 +377,8 @@
 [data-slot="card-content"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-3);
-  color: var(--zs-label);
+  gap: var(--zeroship-space-3);
+  color: var(--zeroship-label);
 }
 /* Normalise direct-child prose margins so a single `<p>` slotted into
  * Content doesn't double-up with the card padding (review-fix item 14). */
@@ -401,8 +401,8 @@
    * justify-content: flex-end the wrapped buttons still trail the
    * footer row. */
   flex-wrap: wrap;
-  gap: var(--zs-space-2);
-  row-gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
+  row-gap: var(--zeroship-space-2);
   align-items: center;
   justify-content: flex-end;
 }
@@ -416,9 +416,9 @@
   justify-content: flex-end;
 }
 [data-slot="card-footer"][data-divider="top"] {
-  padding-block-start: var(--zs-space-4);
-  border-block-start: 0.0625rem solid var(--zs-separator);
-  margin-block-start: var(--zs-space-2);
+  padding-block-start: var(--zeroship-space-4);
+  border-block-start: 0.0625rem solid var(--zeroship-separator);
+  margin-block-start: var(--zeroship-space-2);
 }
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */
@@ -426,7 +426,7 @@
  * above (wave-7 🟡 3). Without these per-variant overrides, the
  * `.zs-card--surface[data-interactive]:hover` selector (and the
  * elevated/outline siblings) win the cascade and re-apply
- * `box-shadow: inset 0 0 0 100rem var(--zs-card-hover-tint), …` —
+ * `box-shadow: inset 0 0 0 100rem var(--zeroship-card-hover-tint), …` —
  * which paints a color in forced-colors mode. Each variant's hover
  * state under forced-colors gets a system-color outline instead, so
  * the interactive affordance still reads without using a custom tint

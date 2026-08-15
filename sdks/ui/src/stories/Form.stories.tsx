@@ -32,10 +32,10 @@ export const BasicSubmit: Story = {
   render: function BasicSubmitRender() {
     const [submitted, setSubmitted] = useState<string>("(not submitted)");
     return (
-      <div className="zs-story-row" role="group" aria-label="Basic form submit">
+      <div className="zeroship-story-row" role="group" aria-label="Basic form submit">
         <Form
           data-testid="form-basic"
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "26rem", display: "grid", gap: "0.75rem" }}
           onFormSubmit={(values) => {
             const entries = Object.entries(values)
@@ -93,10 +93,10 @@ export const WithValidation: Story = {
       undefined,
     );
     return (
-      <div className="zs-story-row" role="group" aria-label="Form server errors">
+      <div className="zeroship-story-row" role="group" aria-label="Form server errors">
         <Form
           data-testid="form-server-errors"
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "26rem", display: "grid", gap: "0.75rem" }}
           errors={errors}
           onFormSubmit={() => {
@@ -147,15 +147,15 @@ export const ValidationModes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Form validation modes">
+    <div className="zeroship-story-row" role="group" aria-label="Form validation modes">
       {(["onSubmit", "onBlur", "onChange"] as const).map((mode) => (
         <Form
           key={mode}
           validationMode={mode}
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "18rem", display: "grid", gap: "0.5rem" }}
         >
-          <span className="zs-story-label">{mode}</span>
+          <span className="zeroship-story-label">{mode}</span>
           <Field name={`email-${mode}`}>
             <Field.Label>Email</Field.Label>
             <Input type="email" required />
@@ -215,9 +215,9 @@ export const Variants: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Form variants">
-      <div className="zs-story-cell" style={{ maxWidth: "26rem" }}>
-        <span className="zs-story-label">default</span>
+    <div className="zeroship-story-row" role="group" aria-label="Form variants">
+      <div className="zeroship-story-cell" style={{ maxWidth: "26rem" }}>
+        <span className="zeroship-story-label">default</span>
         <Form style={{ display: "grid", gap: "0.75rem" }}>
           <Field name="name">
             <Field.Label>Name</Field.Label>
@@ -228,8 +228,8 @@ export const Variants: Story = {
           </Button>
         </Form>
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "26rem" }}>
-        <span className="zs-story-label">card</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "26rem" }}>
+        <span className="zeroship-story-label">card</span>
         <Form
           variant="card"
           data-testid="form-card"
@@ -264,7 +264,7 @@ export const WithFields: Story = {
   },
   render: () => (
     <Form
-      className="zs-story-cell"
+      className="zeroship-story-cell"
       style={{ maxWidth: "28rem", display: "grid", gap: "0.75rem" }}
     >
       <Field name="name" required>
@@ -325,14 +325,14 @@ export const ActionsRefValidate: Story = {
     const [didValidate, setDidValidate] = useState(false);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Form actionsRef validate"
       >
         <Form
           actionsRef={actionsRef}
           data-testid="form-actions-ref"
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "26rem", display: "grid", gap: "0.75rem" }}
         >
           <Field name="email">
@@ -392,7 +392,7 @@ export const Disabled: Story = {
   },
   render: () => (
     <Form
-      className="zs-story-cell"
+      className="zeroship-story-cell"
       style={{ maxWidth: "26rem", display: "grid", gap: "0.75rem" }}
     >
       <Field name="email" disabled>
@@ -436,10 +436,10 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL form">
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL form">
       <Form
         variant="card"
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ maxWidth: "28rem", display: "grid", gap: "0.75rem" }}
       >
         <Field name="name-rtl" required>

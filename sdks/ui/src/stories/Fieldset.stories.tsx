@@ -37,7 +37,7 @@ export const BasicWithLegend: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic fieldset">
+    <div className="zeroship-story-row" role="group" aria-label="Basic fieldset">
       <Fieldset
         data-testid="fieldset-basic"
         style={{ maxWidth: "26rem", width: "100%" }}
@@ -65,7 +65,7 @@ export const BasicWithLegend: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Fieldset sizes">
+    <div className="zeroship-story-row" role="group" aria-label="Fieldset sizes">
       {(["sm", "md", "lg"] as const).map((size) => (
         <Fieldset
           key={size}
@@ -104,7 +104,7 @@ export const NestedFields: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Fieldset nested fields">
+    <div className="zeroship-story-row" role="group" aria-label="Fieldset nested fields">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
         <Fieldset.Legend>Shipping address</Fieldset.Legend>
         <Field name="street">
@@ -142,7 +142,7 @@ export const DisabledCascade: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Fieldset disabled cascade">
+    <div className="zeroship-story-row" role="group" aria-label="Fieldset disabled cascade">
       <Fieldset
         disabled
         data-testid="fieldset-disabled"
@@ -215,7 +215,7 @@ export const WithFormIntegration: Story = {
   render: () => (
     <Form
       variant="card"
-      className="zs-story-cell"
+      className="zeroship-story-cell"
       style={{ maxWidth: "28rem", display: "grid", gap: "0.75rem" }}
     >
       <Fieldset>
@@ -292,7 +292,7 @@ export const NestedFieldset: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Nested fieldset">
+    <div className="zeroship-story-row" role="group" aria-label="Nested fieldset">
       <Fieldset style={{ maxWidth: "30rem", width: "100%" }}>
         <Fieldset.Legend>Payment method</Fieldset.Legend>
         <Field name="cardholder">
@@ -302,8 +302,8 @@ export const NestedFieldset: Story = {
         <Fieldset
           size="sm"
           style={{
-            background: "var(--zs-fill-quaternary)",
-            borderRadius: "var(--zs-radius-3)",
+            background: "var(--zeroship-fill-quaternary)",
+            borderRadius: "var(--zeroship-radius-3)",
           }}
         >
           <Fieldset.Legend>Card details</Fieldset.Legend>
@@ -353,7 +353,7 @@ export const CustomLegendPosition: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Custom legend position">
+    <div className="zeroship-story-row" role="group" aria-label="Custom legend position">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
         <Field name="email">
           <Field.Label>Email</Field.Label>
@@ -366,10 +366,10 @@ export const CustomLegendPosition: Story = {
         <Fieldset.Legend
           style={{
             order: 999,
-            color: "var(--zs-label-secondary)",
+            color: "var(--zeroship-label-secondary)",
             fontWeight: 400,
-            fontSize: "var(--zs-text-footnote-size)",
-            lineHeight: "var(--zs-text-footnote-line)",
+            fontSize: "var(--zeroship-text-footnote-size)",
+            lineHeight: "var(--zeroship-text-footnote-line)",
           }}
         >
           Contact details
@@ -404,7 +404,7 @@ export const AriaLabelledByUndefined: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Fieldset aria-labelledby undefined"
     >
@@ -466,7 +466,7 @@ export const NestedFieldsetDisabledCascade: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Nested fieldset disabled cascade"
     >
@@ -484,8 +484,8 @@ export const NestedFieldsetDisabledCascade: Story = {
           size="sm"
           data-testid="fieldset-nested-disabled-inner"
           style={{
-            background: "var(--zs-fill-quaternary)",
-            borderRadius: "var(--zs-radius-3)",
+            background: "var(--zeroship-fill-quaternary)",
+            borderRadius: "var(--zeroship-radius-3)",
           }}
         >
           <Fieldset.Legend>Inner (inherits disabled)</Fieldset.Legend>
@@ -544,7 +544,7 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL fieldset">
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL fieldset">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
         <Fieldset.Legend>פרטי התקשרות</Fieldset.Legend>
         <Field name="name-rtl">

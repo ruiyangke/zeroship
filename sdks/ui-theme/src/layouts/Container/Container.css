@@ -5,8 +5,8 @@
  *   .zs-container   — the constrained, centered content column
  *
  * Driven by inline custom properties set from props:
- *   --container-max-width       --zs-container-* | none  (default lg token)
- *   --container-pad-x           --zs-space-*             (default --zs-space-4)
+ *   --container-max-width       --zeroship-container-* | none  (default lg token)
+ *   --container-pad-x           --zeroship-space-*             (default --zeroship-space-4)
  *   --container-margin-inline   auto | 0                 (default auto)
  *
  * Layout discipline:
@@ -22,7 +22,7 @@
   inline-size: 100%;
   min-inline-size: 0;
   box-sizing: border-box;
-  max-width: var(--container-max-width, var(--zs-container-lg));
+  max-width: var(--container-max-width, var(--zeroship-container-lg));
   margin-inline: var(--container-margin-inline, auto);
-  padding-inline: var(--container-pad-x, var(--zs-space-4));
+  padding-inline: var(--container-pad-x, var(--zeroship-space-4));
 }

@@ -82,7 +82,7 @@ function hoverToClose(el: Element) {
 /* Token-driven placeholder thumbnail used in the Basic / LinkPreview
  * stories. Previous revisions used SVG data URIs that contained URL-
  * encoded hex literals which bypassed the literal-hash token-purity
- * grep but still violated the `--zs-*`-only rule. The placeholder now
+ * grep but still violated the `--zeroship-*`-only rule. The placeholder now
  * paints with token-driven gradients so the rule holds end-to-end
  * (token-purity hex = 0 inclusive of URL-encoded forms). */
 function ThumbnailPlaceholder({
@@ -94,8 +94,8 @@ function ThumbnailPlaceholder({
 }) {
   const background =
     tone === "accent"
-      ? "linear-gradient(135deg, var(--zs-accent), var(--zs-system-orange))"
-      : "linear-gradient(135deg, var(--zs-fill-quaternary), var(--zs-fill-tertiary))";
+      ? "linear-gradient(135deg, var(--zeroship-accent), var(--zeroship-system-orange))"
+      : "linear-gradient(135deg, var(--zeroship-fill-quaternary), var(--zeroship-fill-tertiary))";
   return (
     <div
       role="img"
@@ -103,7 +103,7 @@ function ThumbnailPlaceholder({
       style={{
         inlineSize: "100%",
         blockSize: "6.25rem",
-        borderRadius: "var(--zs-radius-2)",
+        borderRadius: "var(--zeroship-radius-2)",
         background,
       }}
     />
@@ -144,7 +144,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic">
+    <div className="zeroship-story-row" role="group" aria-label="Basic">
       <PreviewCard delay={50}>
         <PreviewCard.Trigger
           asChild
@@ -201,7 +201,7 @@ export const UserHandle: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="User handle">
+    <div className="zeroship-story-row" role="group" aria-label="User handle">
       <p>
         Co-authored by{" "}
         <PreviewCard delay={50}>
@@ -227,7 +227,7 @@ export const UserHandle: Story = {
                     blockSize: "2.5rem",
                     borderRadius: "9999rem",
                     background:
-                      "conic-gradient(from 220deg, var(--zs-accent), var(--zs-system-orange))",
+                      "conic-gradient(from 220deg, var(--zeroship-accent), var(--zeroship-system-orange))",
                     display: "inline-block",
                   }}
                 />
@@ -277,7 +277,7 @@ export const LinkPreview: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Link preview">
+    <div className="zeroship-story-row" role="group" aria-label="Link preview">
       <p>
         Learn more about{" "}
         <PreviewCard delay={50}>
@@ -294,7 +294,7 @@ export const LinkPreview: Story = {
                 tone="subtle"
               />
               <h3>io_uring runtime</h3>
-              <p style={{ color: "var(--zs-label-tertiary)" }}>
+              <p style={{ color: "var(--zeroship-label-tertiary)" }}>
                 en.wikipedia.org
               </p>
               <p>
@@ -340,7 +340,7 @@ export const LongContent: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Long content">
+    <div className="zeroship-story-row" role="group" aria-label="Long content">
       <PreviewCard delay={50}>
         <PreviewCard.Trigger
           asChild
@@ -408,21 +408,21 @@ export const AsChild: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AsChild">
+    <div className="zeroship-story-row" role="group" aria-label="AsChild">
       <PreviewCard delay={50}>
-        {/* `className="zs-aschild-wrapper-class"` on the wrapper
+        {/* `className="zeroship-aschild-wrapper-class"` on the wrapper
             Trigger MUST flow through onto the consumer's `<a>` — the
             asChild branch routes the prop through the shared Slot
             helper so the rendered element ends up with both the
             consumer's own className AND the wrapper's. An earlier
             revision destructured `className` but never re-passed it,
             silently dropping it (codex review fix 2). */}
-        <PreviewCard.Trigger asChild className="zs-aschild-wrapper-class">
+        <PreviewCard.Trigger asChild className="zeroship-aschild-wrapper-class">
           <a
             data-testid="previewcard-aschild-trigger"
             href="https://example.com/post/42"
-            className="zs-aschild-consumer-class"
-            style={{ color: "var(--zs-accent)" }}
+            className="zeroship-aschild-consumer-class"
+            style={{ color: "var(--zeroship-accent)" }}
           >
             Read the announcement post →
           </a>
@@ -448,8 +448,8 @@ export const AsChild: Story = {
     await expect(trigger).toHaveAttribute("href", "https://example.com/post/42");
     // The wrapper's className flows through the Slot onto the
     // consumer's element alongside the consumer's own className.
-    await expect(trigger).toHaveClass("zs-aschild-wrapper-class");
-    await expect(trigger).toHaveClass("zs-aschild-consumer-class");
+    await expect(trigger).toHaveClass("zeroship-aschild-wrapper-class");
+    await expect(trigger).toHaveClass("zeroship-aschild-consumer-class");
     await hoverToOpen(trigger, '[data-testid="previewcard-aschild-popup"]');
     await body.findByTestId(
       "previewcard-aschild-popup",
@@ -473,7 +473,7 @@ export const WithArrow: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With arrow">
+    <div className="zeroship-story-row" role="group" aria-label="With arrow">
       <PreviewCard delay={50}>
         <PreviewCard.Trigger
           asChild
@@ -520,7 +520,7 @@ export const PlacementSide: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placement side"
       style={{
@@ -591,7 +591,7 @@ export const Rtl: Story = {
     // in `Menu.stories.tsx:566-571`; Slice 19 mirrors it.
     <DirectionProvider direction="rtl">
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL"
         lang="he"
@@ -672,7 +672,7 @@ export const DetachedHandle: Story = {
       const handle = useMemo(() => createPreviewCardHandle(), []);
       return (
         <div
-          className="zs-story-row"
+          className="zeroship-story-row"
           role="group"
           aria-label="Detached handle"
           style={{

@@ -15,7 +15,7 @@
  *   sizes:    --small | --medium | --large
  *   variants: --filled | --tinted | --gray | --plain
  *   intent:   --destructive  (additive — overrides accent palette with
- *                              --zs-system-red; for gray, only the label
+ *                              --zeroship-system-red; for gray, only the label
  *                              receives the red signal)
  */
 
@@ -25,14 +25,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Slot↔label gap tightened from --zs-space-2 → --zs-space-1 so icons
+  /* Slot↔label gap tightened from --zeroship-space-2 → --zeroship-space-1 so icons
      no longer feel mechanically spaced from the label (button-polish
      item 9). Slot sizing is capped on .zs-button__start / __end below. */
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   border: 0;
   cursor: pointer;
   user-select: none;
-  font-family: var(--zs-font-system);
+  font-family: var(--zeroship-font-system);
   white-space: nowrap;
   letter-spacing: 0;
   text-decoration: none;
@@ -47,10 +47,10 @@
      The ::before lives on the button (not the inner), so the active-state
      scale below does not scale the hit area. */
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
-    filter var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    filter var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 @media (pointer: coarse) {
@@ -60,8 +60,8 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    inline-size: max(100%, var(--zs-hit-min));
-    block-size: max(100%, var(--zs-hit-min));
+    inline-size: max(100%, var(--zeroship-hit-min));
+    block-size: max(100%, var(--zeroship-hit-min));
     pointer-events: auto;
   }
 }
@@ -71,7 +71,7 @@
   align-items: center;
   justify-content: center;
   /* Mirrors .zs-button's tightened slot↔label gap (button-polish item 9). */
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   /* Allow the label child to shrink and ellipsize inside this flex
      container — without min-width:0 the inner asserts its content's
      intrinsic size and the label's overflow: hidden never engages. */
@@ -80,7 +80,7 @@
   /* Position ensures the inner sits above the ::before hit-area overlay. */
   position: relative;
   z-index: 1;
-  transition: transform var(--zs-motion-fast) var(--zs-motion-spring);
+  transition: transform var(--zeroship-motion-fast) var(--zeroship-motion-spring);
 }
 
 [data-slot="button-label"] {
@@ -118,16 +118,16 @@
 
 [data-slot="button"]:focus-visible {
   /* Button-polish item 3. Narrower outline (0.125rem vs the foundation
-     --zs-focus-ring-width 0.1875rem) + Button-specific quieter alpha
-     (--zs-button-focus-ring-color, 0.28 vs the foundation 0.35) so the
+     --zeroship-focus-ring-width 0.1875rem) + Button-specific quieter alpha
+     (--zeroship-button-focus-ring-color, 0.28 vs the foundation 0.35) so the
      ring no longer reads as a chunky decoration. Offset stays on the
      foundation token. */
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 [data-slot="button"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) [data-slot="button-inner"] {
-  transform: scale(var(--zs-button-active-scale, 0.97));
+  transform: scale(var(--zeroship-button-active-scale, 0.97));
 }
 
 [data-slot="button"]:disabled,
@@ -149,229 +149,229 @@
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
 [data-slot="button"][data-size="small"] {
-  height: var(--zs-button-height-sm, 2rem);    /* 32 */
-  padding-inline: var(--zs-button-padding-sm, var(--zs-space-3));
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-button-line-height-sm, var(--zs-text-subheadline-line));
-  font-weight: var(--zs-button-font-weight, 600);
-  border-radius: var(--zs-button-radius-sm, var(--zs-radius-2));
+  height: var(--zeroship-button-height-sm, 2rem);    /* 32 */
+  padding-inline: var(--zeroship-button-padding-sm, var(--zeroship-space-3));
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-button-line-height-sm, var(--zeroship-text-subheadline-line));
+  font-weight: var(--zeroship-button-font-weight, 600);
+  border-radius: var(--zeroship-button-radius-sm, var(--zeroship-radius-2));
 }
 
 [data-slot="button"][data-size="medium"] {
-  height: var(--zs-button-height-md, 2.5rem);  /* 40 */
-  padding-inline: var(--zs-button-padding-md, var(--zs-space-4));
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-button-line-height-md, var(--zs-text-body-line));
-  font-weight: var(--zs-button-font-weight, 600);
-  border-radius: var(--zs-button-radius-md, var(--zs-radius-3));
+  height: var(--zeroship-button-height-md, 2.5rem);  /* 40 */
+  padding-inline: var(--zeroship-button-padding-md, var(--zeroship-space-4));
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-button-line-height-md, var(--zeroship-text-body-line));
+  font-weight: var(--zeroship-button-font-weight, 600);
+  border-radius: var(--zeroship-button-radius-md, var(--zeroship-radius-3));
 }
 
 [data-slot="button"][data-size="large"] {
-  height: var(--zs-button-height-lg, 3rem);    /* 48 */
-  padding-inline: var(--zs-button-padding-lg, var(--zs-space-5));
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-button-line-height-lg, var(--zs-text-headline-line));
-  font-weight: var(--zs-button-font-weight, 600);
-  border-radius: var(--zs-button-radius-lg, var(--zs-radius-4));
+  height: var(--zeroship-button-height-lg, 3rem);    /* 48 */
+  padding-inline: var(--zeroship-button-padding-lg, var(--zeroship-space-5));
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-button-line-height-lg, var(--zeroship-text-headline-line));
+  font-weight: var(--zeroship-button-font-weight, 600);
+  border-radius: var(--zeroship-button-radius-lg, var(--zeroship-radius-4));
 }
 
 /* ─── variants × accent (Style) ────────────────────────────────────────── */
 [data-slot="button"][data-variant="filled"] {
-  background-color: var(--zs-button-filled-bg, var(--zs-accent));
-  color: var(--zs-button-filled-ink, var(--zs-accent-ink));
-  box-shadow: var(--zs-button-filled-shadow, none);
+  background-color: var(--zeroship-button-filled-bg, var(--zeroship-accent));
+  color: var(--zeroship-button-filled-ink, var(--zeroship-accent-ink));
+  box-shadow: var(--zeroship-button-filled-shadow, none);
 }
 @media (hover: hover) {
   [data-slot="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background-color: var(--zs-button-filled-bg-hover, var(--zs-accent-hover));
+    background-color: var(--zeroship-button-filled-bg-hover, var(--zeroship-accent-hover));
     filter: brightness(1.015);
   }
 }
 [data-slot="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background-color: var(--zs-button-filled-bg-active, var(--zs-accent-active));
+  background-color: var(--zeroship-button-filled-bg-active, var(--zeroship-accent-active));
   filter: brightness(0.985);
 }
 [data-slot="button"][data-variant="filled"]:disabled,
 [data-slot="button"][data-variant="filled"][aria-disabled="true"],
 [data-slot="button"][data-variant="filled"][aria-busy="true"] {
   background-color: var(
-    --zs-button-filled-bg-disabled,
-    color-mix(in oklch, var(--zs-accent) 38%, transparent)
+    --zeroship-button-filled-bg-disabled,
+    color-mix(in oklch, var(--zeroship-accent) 38%, transparent)
   );
-  color: var(--zs-button-filled-ink-disabled, var(--zs-accent-ink));
-  box-shadow: var(--zs-button-disabled-shadow, none);
+  color: var(--zeroship-button-filled-ink-disabled, var(--zeroship-accent-ink));
+  box-shadow: var(--zeroship-button-disabled-shadow, none);
   filter: none;
 }
 
 [data-slot="button"][data-variant="tinted"] {
   background-color: var(
-    --zs-button-tinted-bg,
-    color-mix(in oklch, var(--zs-accent) 14%, transparent)
+    --zeroship-button-tinted-bg,
+    color-mix(in oklch, var(--zeroship-accent) 14%, transparent)
   );
-  color: var(--zs-button-tinted-ink, var(--zs-accent-active));
-  backdrop-filter: var(--zs-control-backdrop-filter, none);
-  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
-  box-shadow: var(--zs-button-tinted-shadow, none);
+  color: var(--zeroship-button-tinted-ink, var(--zeroship-accent-active));
+  backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  box-shadow: var(--zeroship-button-tinted-shadow, none);
 }
 @media (hover: hover) {
   [data-slot="button"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
-      --zs-button-tinted-bg-hover,
-      color-mix(in oklch, var(--zs-accent) 22%, transparent)
+      --zeroship-button-tinted-bg-hover,
+      color-mix(in oklch, var(--zeroship-accent) 22%, transparent)
     );
   }
 }
 [data-slot="button"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
-    --zs-button-tinted-bg-active,
-    color-mix(in oklch, var(--zs-accent) 30%, transparent)
+    --zeroship-button-tinted-bg-active,
+    color-mix(in oklch, var(--zeroship-accent) 30%, transparent)
   );
 }
 [data-slot="button"][data-variant="tinted"]:disabled,
 [data-slot="button"][data-variant="tinted"][aria-disabled="true"],
 [data-slot="button"][data-variant="tinted"][aria-busy="true"] {
   background-color: var(
-    --zs-button-tinted-bg-disabled,
-    color-mix(in oklch, var(--zs-accent) 8%, transparent)
+    --zeroship-button-tinted-bg-disabled,
+    color-mix(in oklch, var(--zeroship-accent) 8%, transparent)
   );
   color: var(
-    --zs-button-tinted-ink-disabled,
-    color-mix(in oklch, var(--zs-accent) 55%, var(--zs-label-tertiary))
+    --zeroship-button-tinted-ink-disabled,
+    color-mix(in oklch, var(--zeroship-accent) 55%, var(--zeroship-label-tertiary))
   );
-  box-shadow: var(--zs-button-disabled-shadow, none);
+  box-shadow: var(--zeroship-button-disabled-shadow, none);
 }
 
 [data-slot="button"][data-variant="gray"] {
   background-color: var(
-    --zs-button-gray-bg,
-    color-mix(in oklch, var(--zs-label) 8%, transparent)
+    --zeroship-button-gray-bg,
+    color-mix(in oklch, var(--zeroship-label) 8%, transparent)
   );
-  color: var(--zs-label);
-  backdrop-filter: var(--zs-control-backdrop-filter, none);
-  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
-  box-shadow: var(--zs-button-gray-shadow, none);
+  color: var(--zeroship-label);
+  backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  box-shadow: var(--zeroship-button-gray-shadow, none);
 }
 @media (hover: hover) {
   [data-slot="button"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
-      --zs-button-gray-bg-hover,
-      color-mix(in oklch, var(--zs-label) 12%, transparent)
+      --zeroship-button-gray-bg-hover,
+      color-mix(in oklch, var(--zeroship-label) 12%, transparent)
     );
   }
 }
 [data-slot="button"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
-    --zs-button-gray-bg-active,
-    color-mix(in oklch, var(--zs-label) 16%, transparent)
+    --zeroship-button-gray-bg-active,
+    color-mix(in oklch, var(--zeroship-label) 16%, transparent)
   );
 }
 [data-slot="button"][data-variant="gray"]:disabled,
 [data-slot="button"][data-variant="gray"][aria-disabled="true"],
 [data-slot="button"][data-variant="gray"][aria-busy="true"] {
   background-color: var(
-    --zs-button-gray-bg-disabled,
-    color-mix(in oklch, var(--zs-label) 4%, transparent)
+    --zeroship-button-gray-bg-disabled,
+    color-mix(in oklch, var(--zeroship-label) 4%, transparent)
   );
-  color: var(--zs-button-gray-ink-disabled, var(--zs-label-tertiary));
-  box-shadow: var(--zs-button-disabled-shadow, none);
+  color: var(--zeroship-button-gray-ink-disabled, var(--zeroship-label-tertiary));
+  box-shadow: var(--zeroship-button-disabled-shadow, none);
 }
 
 [data-slot="button"][data-variant="plain"] {
   background-color: transparent;
-  color: var(--zs-button-plain-ink, var(--zs-accent));
+  color: var(--zeroship-button-plain-ink, var(--zeroship-accent));
   box-shadow: none;
 }
 @media (hover: hover) {
   [data-slot="button"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background-color: var(--zs-button-plain-bg-hover, var(--zs-fill-tertiary));
+    background-color: var(--zeroship-button-plain-bg-hover, var(--zeroship-fill-tertiary));
   }
 }
 [data-slot="button"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background-color: var(--zs-button-plain-bg-active, var(--zs-fill));
+  background-color: var(--zeroship-button-plain-bg-active, var(--zeroship-fill));
 }
 [data-slot="button"][data-variant="plain"]:disabled,
 [data-slot="button"][data-variant="plain"][aria-disabled="true"],
 [data-slot="button"][data-variant="plain"][aria-busy="true"] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   background-color: transparent;
 }
 
 /* ─── destructive override (intent; works across variants) ────────────── */
 [data-slot="button"][data-intent="destructive"][data-variant="filled"] {
-  background-color: var(--zs-button-destructive-filled-bg, var(--zs-system-red));
-  color: var(--zs-button-destructive-filled-ink, var(--zs-button-filled-ink, var(--zs-accent-ink)));
-  box-shadow: var(--zs-button-destructive-filled-shadow, var(--zs-button-filled-shadow, none));
+  background-color: var(--zeroship-button-destructive-filled-bg, var(--zeroship-system-red));
+  color: var(--zeroship-button-destructive-filled-ink, var(--zeroship-button-filled-ink, var(--zeroship-accent-ink)));
+  box-shadow: var(--zeroship-button-destructive-filled-shadow, var(--zeroship-button-filled-shadow, none));
 }
 @media (hover: hover) {
   [data-slot="button"][data-intent="destructive"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    background-color: var(--zs-button-destructive-filled-bg-hover, var(--zs-system-red-hover));
+    background-color: var(--zeroship-button-destructive-filled-bg-hover, var(--zeroship-system-red-hover));
   }
 }
 [data-slot="button"][data-intent="destructive"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background-color: var(--zs-button-destructive-filled-bg-active, var(--zs-system-red-active));
+  background-color: var(--zeroship-button-destructive-filled-bg-active, var(--zeroship-system-red-active));
 }
 [data-slot="button"][data-intent="destructive"][data-variant="filled"]:disabled,
 [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-disabled="true"],
 [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-busy="true"] {
   background-color: var(
-    --zs-button-destructive-filled-bg-disabled,
-    color-mix(in oklch, var(--zs-system-red) 22%, var(--zs-fill-secondary))
+    --zeroship-button-destructive-filled-bg-disabled,
+    color-mix(in oklch, var(--zeroship-system-red) 22%, var(--zeroship-fill-secondary))
   );
-  color: var(--zs-label-tertiary);
-  box-shadow: var(--zs-button-disabled-shadow, none);
+  color: var(--zeroship-label-tertiary);
+  box-shadow: var(--zeroship-button-disabled-shadow, none);
 }
 
 [data-slot="button"][data-intent="destructive"][data-variant="tinted"] {
   background-color: var(
-    --zs-button-destructive-tinted-bg,
-    color-mix(in oklch, var(--zs-system-red-active) 18%, transparent)
+    --zeroship-button-destructive-tinted-bg,
+    color-mix(in oklch, var(--zeroship-system-red-active) 18%, transparent)
   );
-  color: var(--zs-button-destructive-tinted-ink, var(--zs-system-red-active));
-  box-shadow: var(--zs-button-destructive-tinted-shadow, var(--zs-button-tinted-shadow, none));
+  color: var(--zeroship-button-destructive-tinted-ink, var(--zeroship-system-red-active));
+  box-shadow: var(--zeroship-button-destructive-tinted-shadow, var(--zeroship-button-tinted-shadow, none));
 }
 @media (hover: hover) {
   [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
-      --zs-button-destructive-tinted-bg-hover,
-      color-mix(in oklch, var(--zs-system-red-active) 28%, transparent)
+      --zeroship-button-destructive-tinted-bg-hover,
+      color-mix(in oklch, var(--zeroship-system-red-active) 28%, transparent)
     );
   }
 }
 [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
-    --zs-button-destructive-tinted-bg-active,
-    color-mix(in oklch, var(--zs-system-red-active) 36%, transparent)
+    --zeroship-button-destructive-tinted-bg-active,
+    color-mix(in oklch, var(--zeroship-system-red-active) 36%, transparent)
   );
 }
 [data-slot="button"][data-intent="destructive"][data-variant="tinted"]:disabled,
 [data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-disabled="true"],
 [data-slot="button"][data-intent="destructive"][data-variant="tinted"][aria-busy="true"] {
   background-color: var(
-    --zs-button-destructive-tinted-bg-disabled,
-    color-mix(in oklch, var(--zs-system-red-active) 8%, var(--zs-fill-secondary))
+    --zeroship-button-destructive-tinted-bg-disabled,
+    color-mix(in oklch, var(--zeroship-system-red-active) 8%, var(--zeroship-fill-secondary))
   );
   color: var(
-    --zs-button-destructive-tinted-ink-disabled,
-    color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary))
+    --zeroship-button-destructive-tinted-ink-disabled,
+    color-mix(in oklch, var(--zeroship-system-red) 55%, var(--zeroship-label-tertiary))
   );
-  box-shadow: var(--zs-button-disabled-shadow, none);
+  box-shadow: var(--zeroship-button-disabled-shadow, none);
 }
 
 [data-slot="button"][data-intent="destructive"][data-variant="plain"] {
-  color: var(--zs-button-destructive-plain-ink, var(--zs-system-red));
+  color: var(--zeroship-button-destructive-plain-ink, var(--zeroship-system-red));
 }
 @media (hover: hover) {
   [data-slot="button"][data-intent="destructive"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background-color: var(
-      --zs-button-destructive-plain-bg-hover,
-      color-mix(in oklch, var(--zs-system-red) 12%, transparent)
+      --zeroship-button-destructive-plain-bg-hover,
+      color-mix(in oklch, var(--zeroship-system-red) 12%, transparent)
     );
   }
 }
 [data-slot="button"][data-intent="destructive"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background-color: var(
-    --zs-button-destructive-plain-bg-active,
-    color-mix(in oklch, var(--zs-system-red) 18%, transparent)
+    --zeroship-button-destructive-plain-bg-active,
+    color-mix(in oklch, var(--zeroship-system-red) 18%, transparent)
   );
 }
 [data-slot="button"][data-intent="destructive"][data-variant="plain"]:disabled,
@@ -380,7 +380,7 @@
   /* Without this, the destructive-plain disabled state keeps system-red
      text — wrong signal for a disabled control. Defer to the neutral
      disabled label color. */
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   background-color: transparent;
 }
 
@@ -388,20 +388,20 @@
    exists for this pairing), but signal destructive intent through the
    LABEL color so the cell isn't silently neutral. */
 [data-slot="button"][data-intent="destructive"][data-variant="gray"] {
-  color: var(--zs-system-red);
+  color: var(--zeroship-system-red);
 }
 @media (hover: hover) {
   [data-slot="button"][data-intent="destructive"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-    color: var(--zs-system-red-hover);
+    color: var(--zeroship-system-red-hover);
   }
 }
 [data-slot="button"][data-intent="destructive"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  color: var(--zs-system-red-active);
+  color: var(--zeroship-system-red-active);
 }
 [data-slot="button"][data-intent="destructive"][data-variant="gray"]:disabled,
 [data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-disabled="true"],
 [data-slot="button"][data-intent="destructive"][data-variant="gray"][aria-busy="true"] {
-  color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
+  color: color-mix(in oklch, var(--zeroship-system-red) 55%, var(--zeroship-label-tertiary));
 }
 
 /* ─── loading ──────────────────────────────────────────────────────────── */
@@ -444,7 +444,7 @@
 [data-slot="button-spinner"] svg {
   width: 1rem;
   height: 1rem;
-  animation: zs-button-spin 1s linear infinite;
+  animation: zeroship-button-spin 1s linear infinite;
 }
 
 [data-slot="button-spinner"] circle {
@@ -460,20 +460,20 @@
    `stroke: currentColor` on the circle follows the spinner's `color`
    (inherited from the button's text color), which is correct for
    filled (white-on-red stays white) but drifts purple/mauve on
-   destructive-tinted (tinted text is --zs-system-red-active) and on
+   destructive-tinted (tinted text is --zeroship-system-red-active) and on
    destructive-gray (gray label color has no red signal). Override the
    spinner's `color` (not the circle's stroke directly) so the existing
    `stroke: currentColor` rule keeps composing — destructive-non-filled
-   spinners pick up --zs-system-red; filled destructive re-pins to the
+   spinners pick up --zeroship-system-red; filled destructive re-pins to the
    accent-ink so white-on-red doesn't get a red spinner over a red fill. */
 [data-slot="button"][data-intent="destructive"] [data-slot="button-spinner"] {
-  color: var(--zs-system-red);
+  color: var(--zeroship-system-red);
 }
 [data-slot="button"][data-intent="destructive"][data-variant="filled"] [data-slot="button-spinner"] {
-  color: var(--zs-accent-ink);
+  color: var(--zeroship-accent-ink);
 }
 
-@keyframes zs-button-spin {
+@keyframes zeroship-button-spin {
   to { transform: rotate(360deg); }
 }
 
@@ -506,7 +506,7 @@
  * colors at paint time for `color` / `background-color` / `border-
  * color` IF the matched rule uses a system-color keyword. If a more
  * specific normal-mode rule wins the cascade (e.g. the destructive-
- * tinted hover rule that paints `color-mix(in oklch, var(--zs-system-
+ * tinted hover rule that paints `color-mix(in oklch, var(--zeroship-system-
  * red-active) 28%, transparent)`), the painted value is whatever the
  * UA does with the OKLCH mix — which on Chromium today is the actual
  * token color, not a system color. The mirror restores parity.

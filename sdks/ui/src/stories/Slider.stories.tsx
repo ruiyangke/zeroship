@@ -32,8 +32,8 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic slider">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Basic slider">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           defaultValue={50}
           min={0}
@@ -73,8 +73,8 @@ export const Range: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Range slider">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Range slider">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           defaultValue={[20, 60]}
           min={0}
@@ -112,29 +112,29 @@ export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All slider sizes"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Small (track 0.25rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Small (track 0.25rem)</span>
         <Slider
           size="sm"
           defaultValue={30}
           aria-label="Small slider"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Medium (track 0.375rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Medium (track 0.375rem)</span>
         <Slider
           size="md"
           defaultValue={50}
           aria-label="Medium slider"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Large (track 0.5rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Large (track 0.5rem)</span>
         <Slider
           size="lg"
           defaultValue={75}
@@ -150,21 +150,21 @@ export const AllVariants: Story = {
   name: "All variants",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All slider variants"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Default (solid accent)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Default (solid accent)</span>
         <Slider
           variant="default"
           defaultValue={50}
           aria-label="Default variant"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Outline (accent rim)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Outline (accent rim)</span>
         <Slider
           variant="outline"
           defaultValue={50}
@@ -193,8 +193,8 @@ export const Steps: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Stepped slider">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Stepped slider">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           defaultValue={50}
           min={0}
@@ -223,8 +223,8 @@ export const WithValue: Story = {
   render: function WithValueRender() {
     const [value, setValue] = useState<number>(60);
     return (
-      <div className="zs-story-row" role="group" aria-label="Slider with value">
-        <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Slider with value">
+        <div className="zeroship-story-cell" style={{ inlineSize: "22rem" }}>
           <Slider
             showValue
             value={value}
@@ -261,16 +261,16 @@ export const WithValue: Story = {
 export const Disabled: Story = {
   name: "Disabled",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled slider">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">disabled prop</span>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled slider">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">disabled prop</span>
         <Slider disabled defaultValue={40} aria-label="Locked slider" />
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ inlineSize: "20rem", marginInlineStart: "2rem" }}
       >
-        <span className="zs-story-label">Field disabled — inherits</span>
+        <span className="zeroship-story-label">Field disabled — inherits</span>
         <Field disabled>
           <Field.Label>Speed</Field.Label>
           <Slider defaultValue={60} aria-label="Speed" />
@@ -304,8 +304,8 @@ export const WithLabel: Story = {
   render: function WithLabelRender() {
     const [value, setValue] = useState<number>(70);
     return (
-      <div className="zs-story-row" role="group" aria-label="Slider with label">
-        <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Slider with label">
+        <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
           <Field size="sm">
             <Field.Label>Volume — {value}%</Field.Label>
             <Slider
@@ -341,13 +341,13 @@ export const Vertical: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical slider"
       style={{ alignItems: "center", gap: "2rem" }}
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ blockSize: "10rem", inlineSize: "2.5rem" }}
       >
         <Slider
@@ -361,7 +361,7 @@ export const Vertical: Story = {
         />
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ blockSize: "10rem", inlineSize: "2.5rem" }}
       >
         <Slider
@@ -400,13 +400,13 @@ export const AriaPropagation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Aria propagation"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
-        <span id="slider-aria-help-single" className="zs-story-label">
+      <div className="zeroship-story-cell" style={{ inlineSize: "22rem" }}>
+        <span id="slider-aria-help-single" className="zeroship-story-label">
           0–100, drag or arrow.
         </span>
         <Slider
@@ -419,8 +419,8 @@ export const AriaPropagation: Story = {
           data-testid="slider-aria-prop-single"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
-        <span id="slider-aria-help-range" className="zs-story-label">
+      <div className="zeroship-story-cell" style={{ inlineSize: "22rem" }}>
+        <span id="slider-aria-help-range" className="zeroship-story-label">
           0–100, two thumbs.
         </span>
         <Slider
@@ -450,11 +450,11 @@ export const ForcedColorsOutline: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Forced-colors outline"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           variant="outline"
           defaultValue={50}
@@ -477,7 +477,7 @@ export const CoarsePointer: Story = {
       description: {
         story:
           "Under `pointer: coarse` the thumb's transparent ::after halo " +
-          "expands to the Apple HIG floor (`--zs-hit-min` 44 device-" +
+          "expands to the Apple HIG floor (`--zeroship-hit-min` 44 device-" +
           "units) on BOTH axes so a finger lands. The aria-wiring suite " +
           "emulates a coarse pointer and asserts the thumb's bounding " +
           "rect ≥ 2.75rem in inline and block.",
@@ -485,8 +485,8 @@ export const CoarsePointer: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Coarse pointer">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Coarse pointer">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           defaultValue={50}
           min={0}
@@ -527,11 +527,11 @@ export const RTL: Story = {
     <DirectionProvider direction="rtl">
       <div
         dir="rtl"
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL slider"
       >
-        <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
           <Field>
             <Field.Label>עוצמת קול</Field.Label>
             <Slider
@@ -575,17 +575,17 @@ export const ConsumerStylePreserved: Story = {
       description: {
         story:
           "Caller-passed `style` must reach the slider root, alongside " +
-          "the wrapper's `--zs-slider-value-position` custom property.",
+          "the wrapper's `--zeroship-slider-value-position` custom property.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Slider consumer style"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Slider
           defaultValue={40}
           min={0}
@@ -638,13 +638,13 @@ export const RequiredCascade: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Slider required cascade"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Field required — cascades</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Field required — cascades</span>
         <Field required>
           <Field.Label>Volume</Field.Label>
           <Slider
@@ -656,8 +656,8 @@ export const RequiredCascade: Story = {
           />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Explicit required prop</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Explicit required prop</span>
         <Slider
           required
           defaultValue={50}
@@ -668,8 +668,8 @@ export const RequiredCascade: Story = {
           data-testid="slider-required-explicit"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">No required — control</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">No required — control</span>
         <Slider
           defaultValue={50}
           min={0}
@@ -725,12 +725,12 @@ export const RangeLabelledBy: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Range slider labelledby"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span id="zs-slider-range-label" className="zs-story-label">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span id="zeroship-slider-range-label" className="zeroship-story-label">
           Price range
         </span>
         <Slider
@@ -738,7 +738,7 @@ export const RangeLabelledBy: Story = {
           min={0}
           max={100}
           step={1}
-          aria-labelledby="zs-slider-range-label"
+          aria-labelledby="zeroship-slider-range-label"
           data-testid="slider-range-labelledby"
         />
       </div>

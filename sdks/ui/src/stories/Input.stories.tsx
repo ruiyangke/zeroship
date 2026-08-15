@@ -49,23 +49,23 @@ function IconX() {
 export const AllVariants: Story = {
   name: "All variants",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All input variants">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Outline (default)</span>
+    <div className="zeroship-story-row" role="group" aria-label="All input variants">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Outline (default)</span>
         <Field>
           <Field.Label>Email</Field.Label>
           <Input type="email" variant="outline" placeholder="you@example.com" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Filled</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Filled</span>
         <Field>
           <Field.Label>Email</Field.Label>
           <Input type="email" variant="filled" placeholder="you@example.com" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Plain</span>
         <Field>
           <Field.Label>Email</Field.Label>
           <Input type="email" variant="plain" placeholder="you@example.com" />
@@ -79,23 +79,23 @@ export const AllVariants: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All input sizes">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Small (32)</span>
+    <div className="zeroship-story-row" role="group" aria-label="All input sizes">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Small (32)</span>
         <Field>
           <Field.Label>Project</Field.Label>
           <Input size="sm" placeholder="acme-prod" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Medium (40)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Medium (40)</span>
         <Field>
           <Field.Label>Project</Field.Label>
           <Input size="md" placeholder="acme-prod" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Large (48)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Large (48)</span>
         <Field>
           <Field.Label>Project</Field.Label>
           <Input size="lg" placeholder="acme-prod" />
@@ -109,38 +109,38 @@ export const AllSizes: Story = {
 export const AllStates: Story = {
   name: "All states",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All input states">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Default</span>
+    <div className="zeroship-story-row" role="group" aria-label="All input states">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Default</span>
         <Field>
           <Field.Label>Name</Field.Label>
           <Input placeholder="Ada Lovelace" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Focused (autofocus)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Focused (autofocus)</span>
         <Field>
           <Field.Label>Name</Field.Label>
           {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
           <Input autoFocus placeholder="Ada Lovelace" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Disabled</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Disabled</span>
         <Field disabled>
           <Field.Label>Name</Field.Label>
           <Input defaultValue="Ada Lovelace" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Read only</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Read only</span>
         <Field>
           <Field.Label>Slug</Field.Label>
           <Input readOnly defaultValue="acme-prod" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Invalid</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Invalid</span>
         <Field invalid>
           <Field.Label>Name</Field.Label>
           <Input defaultValue="x" />
@@ -155,9 +155,9 @@ export const AllStates: Story = {
 export const WithSlots: Story = {
   name: "With slots",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Inputs with slots">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Start slot (search icon)</span>
+    <div className="zeroship-story-row" role="group" aria-label="Inputs with slots">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Start slot (search icon)</span>
         <Field>
           <Field.Label>Search</Field.Label>
           <Input
@@ -167,8 +167,8 @@ export const WithSlots: Story = {
           />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">End slot (clear button)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">End slot (clear button)</span>
         <Field>
           <Field.Label>Filter</Field.Label>
           {/* Visual-polish item 11: the clear button now uses
@@ -187,8 +187,8 @@ export const WithSlots: Story = {
           />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Both (currency + unit)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Both (currency + unit)</span>
         <Field>
           <Field.Label>Budget</Field.Label>
           {/* Currency / unit slots carry semantic meaning, so the AT tree
@@ -222,9 +222,9 @@ export const Decomposed: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Decomposed Field + Input">
-      <div className="zs-story-cell" style={{ flex: "1 1 24rem", minWidth: "16rem" }}>
-        <span className="zs-story-label">Field.* subparts</span>
+    <div className="zeroship-story-row" role="group" aria-label="Decomposed Field + Input">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 24rem", minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Field.* subparts</span>
         <Field required validationMode="onBlur">
           <Field.Label>
             Email <Field.Required />
@@ -265,25 +265,25 @@ export const Combined: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Combined Input shorthand">
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Label + description</span>
+    <div className="zeroship-story-row" role="group" aria-label="Combined Input shorthand">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Label + description</span>
         <Input
           label="Project name"
           description="Lowercase letters, numbers, and hyphens."
           placeholder="acme-prod"
         />
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Label + error</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Label + error</span>
         <Input
           label="Project name"
           error="Already taken. Try another."
           defaultValue="acme-prod"
         />
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">All three</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">All three</span>
         <Input
           label="API key"
           description="Generate one from Settings → Tokens."
@@ -301,12 +301,12 @@ export const ControlledRoundTrip: Story = {
     const [value, setValue] = useState("ada");
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Controlled Input round trip"
       >
         <div
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ flex: "1 1 18rem", minWidth: "14rem" }}
         >
           <Field>
@@ -341,9 +341,9 @@ export const ControlledRoundTrip: Story = {
 /* ─── 7. Required ────────────────────────────────────────────────────── */
 export const Required: Story = {
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Required indicator">
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Required (star indicator)</span>
+    <div className="zeroship-story-row" role="group" aria-label="Required indicator">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Required (star indicator)</span>
         <Field required>
           <Field.Label>
             Email <Field.Required />
@@ -351,8 +351,8 @@ export const Required: Story = {
           <Input type="email" placeholder="you@example.com" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Optional (fallback label)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Optional (fallback label)</span>
         <Field>
           <Field.Label>
             Bio <Field.Required fallback="(optional)" />
@@ -360,8 +360,8 @@ export const Required: Story = {
           <Input placeholder="A short blurb…" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Combined shorthand (auto-marker)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Combined shorthand (auto-marker)</span>
         {/* The combined shorthand auto-inserts <Field.Required /> when
             both `label` and `required` are set — item 10. */}
         <Input
@@ -390,51 +390,51 @@ export const InputTypes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Input types">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Email</span>
+    <div className="zeroship-story-row" role="group" aria-label="Input types">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Email</span>
         <Field>
           <Field.Label>Email</Field.Label>
           <Input type="email" inputMode="email" autoComplete="email" placeholder="you@example.com" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Tel</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Tel</span>
         <Field>
           <Field.Label>Phone</Field.Label>
           <Input type="tel" inputMode="tel" autoComplete="tel" placeholder="+1 555 0100" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">URL</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">URL</span>
         <Field>
           <Field.Label>Website</Field.Label>
           <Input type="url" inputMode="url" autoComplete="url" placeholder="https://…" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Search</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Search</span>
         <Field>
           <Field.Label>Search</Field.Label>
           <Input type="search" inputMode="search" placeholder="Query…" startSlot={<IconSearch />} />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Number</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Number</span>
         <Field>
           <Field.Label>Seats</Field.Label>
           <Input type="number" inputMode="numeric" defaultValue={4} />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Date</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Date</span>
         <Field>
           <Field.Label>Starts</Field.Label>
           <Input type="date" defaultValue="2026-06-01" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Password</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Password</span>
         <Field>
           <Field.Label>Password</Field.Label>
           <Input type="password" autoComplete="current-password" defaultValue="hunter2hunter2" />
@@ -457,9 +457,9 @@ export const HorizontalLayout: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Horizontal Field rows">
+    <div className="zeroship-story-row" role="group" aria-label="Horizontal Field rows">
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 100%", minWidth: "20rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
       >
         <Field orientation="horizontal">
@@ -497,9 +497,9 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL input row">
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">חיפוש (search)</span>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL input row">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">חיפוש (search)</span>
         <Field>
           <Field.Label>חיפוש</Field.Label>
           <Input
@@ -509,8 +509,8 @@ export const RTL: Story = {
           />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">תקציב (budget)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">תקציב (budget)</span>
         <Field>
           <Field.Label>תקציב</Field.Label>
           <Input
@@ -539,9 +539,9 @@ export const LongLabelAndDescription: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Long label and description">
-      <div className="zs-story-cell" style={{ flex: "0 0 auto", maxWidth: "16rem" }}>
-        <span className="zs-story-label">Narrow column (16rem)</span>
+    <div className="zeroship-story-row" role="group" aria-label="Long label and description">
+      <div className="zeroship-story-cell" style={{ flex: "0 0 auto", maxWidth: "16rem" }}>
+        <span className="zeroship-story-label">Narrow column (16rem)</span>
         <Field>
           <Field.Label>
             A genuinely lengthy label that ought to wrap across multiple lines
@@ -576,15 +576,15 @@ export const InsideForm: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Form composition">
+    <div className="zeroship-story-row" role="group" aria-label="Form composition">
       <form
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 24rem", minWidth: "16rem", display: "flex", flexDirection: "column", gap: "1rem" }}
         onSubmit={(e) => {
           e.preventDefault();
         }}
       >
-        <span className="zs-story-label">Sign in</span>
+        <span className="zeroship-story-label">Sign in</span>
         <Field required>
           <Field.Label>
             Email <Field.Required />
@@ -626,23 +626,23 @@ export const FieldSizeInheritance: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Field size inheritance">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Field size=sm → Input inherits</span>
+    <div className="zeroship-story-row" role="group" aria-label="Field size inheritance">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Field size=sm → Input inherits</span>
         <Field size="sm">
           <Field.Label>Slug</Field.Label>
           <Input placeholder="acme-prod" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Field size=lg → Input inherits</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Field size=lg → Input inherits</span>
         <Field size="lg">
           <Field.Label>Title</Field.Label>
           <Input placeholder="My great project" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">Field=sm + Input size=lg → override wins</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">Field=sm + Input size=lg → override wins</span>
         <Field size="sm">
           <Field.Label>Override</Field.Label>
           <Input size="lg" placeholder="explicit lg" />
@@ -667,20 +667,20 @@ export const ErrorBooleanOnly: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Invalid without message">
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">invalid (decomposed)</span>
+    <div className="zeroship-story-row" role="group" aria-label="Invalid without message">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">invalid (decomposed)</span>
         <Field>
           <Field.Label>Token</Field.Label>
           <Input invalid defaultValue="bad-token" />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">error={"{true}"} (combined)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">error={"{true}"} (combined)</span>
         <Input label="Token" error={true} defaultValue="bad-token" />
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
-        <span className="zs-story-label">error={"{false}"} → no wrap</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zeroship-story-label">error={"{false}"} → no wrap</span>
         {/* error={false} should NOT trigger combined wrapping. Item 9 of
             the slice-2 review fix brief. The Input renders bare here. */}
         <Input
@@ -719,9 +719,9 @@ export const WithExternalDescription: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="External aria-describedby">
-      <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem" }}>
-        <span className="zs-story-label">Field description + external hint</span>
+    <div className="zeroship-story-row" role="group" aria-label="External aria-describedby">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem" }}>
+        <span className="zeroship-story-label">Field description + external hint</span>
         <p id="external-help" style={{ margin: 0, fontSize: "0.8125rem" }}>
           External help: paste your API key from the dashboard.
         </p>
@@ -763,17 +763,17 @@ export const FieldDisabledPropagation: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Field disabled propagation">
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Field disabled</span>
+    <div className="zeroship-story-row" role="group" aria-label="Field disabled propagation">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Field disabled</span>
         <Field disabled>
           <Field.Label>Region</Field.Label>
           <Input defaultValue="us-east-1" />
           <Field.Description>Cannot be changed after deploy.</Field.Description>
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
-        <span className="zs-story-label">Field NOT disabled (control)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zeroship-story-label">Field NOT disabled (control)</span>
         <Field>
           <Field.Label>Region</Field.Label>
           <Input defaultValue="us-east-1" />
@@ -828,15 +828,15 @@ export const CombinedDisabledPropagation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Combined shorthand disabled propagation"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
-        <span className="zs-story-label">Combined: label + disabled</span>
+        <span className="zeroship-story-label">Combined: label + disabled</span>
         <div data-testid="input-combined-disabled-wrapper">
           <Input
             label="Region"
@@ -847,10 +847,10 @@ export const CombinedDisabledPropagation: Story = {
         </div>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
-        <span className="zs-story-label">Combined: label only (control)</span>
+        <span className="zeroship-story-label">Combined: label only (control)</span>
         <div data-testid="input-combined-enabled-wrapper">
           <Input
             label="Region"
@@ -906,7 +906,7 @@ export const CombinedDisabledPropagation: Story = {
  * disabled but DROPPED hover and readonly. The token-coloured hover
  * rules (lines 117 / 123 / 129) outrank the forced-colors base reset
  * on specificity, so hovering an input in Windows High Contrast mode
- * painted the `--zs-input-bg-hover` token over the system `Field`
+ * painted the `--zeroship-input-bg-hover` token over the system `Field`
  * swatch and lost the user's contrast theme. Readonly had no
  * forced-colors entry at all.
  *
@@ -927,15 +927,15 @@ export const ForcedColorsHoverReadonly: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Forced-colors hover and readonly"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 14rem", minWidth: "12rem" }}
       >
-        <span className="zs-story-label">Outline hover target</span>
+        <span className="zeroship-story-label">Outline hover target</span>
         <Field>
           <Field.Label>Outline</Field.Label>
           <Input
@@ -946,10 +946,10 @@ export const ForcedColorsHoverReadonly: Story = {
         </Field>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 14rem", minWidth: "12rem" }}
       >
-        <span className="zs-story-label">Filled hover target</span>
+        <span className="zeroship-story-label">Filled hover target</span>
         <Field>
           <Field.Label>Filled</Field.Label>
           <Input
@@ -960,10 +960,10 @@ export const ForcedColorsHoverReadonly: Story = {
         </Field>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 14rem", minWidth: "12rem" }}
       >
-        <span className="zs-story-label">Plain hover target</span>
+        <span className="zeroship-story-label">Plain hover target</span>
         <Field>
           <Field.Label>Plain</Field.Label>
           <Input
@@ -974,10 +974,10 @@ export const ForcedColorsHoverReadonly: Story = {
         </Field>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 14rem", minWidth: "12rem" }}
       >
-        <span className="zs-story-label">Readonly cell</span>
+        <span className="zeroship-story-label">Readonly cell</span>
         <Field>
           <Field.Label>Slug</Field.Label>
           <Input
@@ -1006,9 +1006,9 @@ export const HorizontalLayoutWithError: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Horizontal with error">
+    <div className="zeroship-story-row" role="group" aria-label="Horizontal with error">
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 100%", minWidth: "20rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
       >
         <Field orientation="horizontal" invalid>
@@ -1049,9 +1049,9 @@ export const InputRefIntegration: Story = {
     const inputRef = useRef<HTMLInputElement | null>(null);
     const [status, setStatus] = useState<string>("idle");
     return (
-      <div className="zs-story-row" role="group" aria-label="Ref integration">
-        <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem", gap: "0.5rem" }}>
-          <span className="zs-story-label">Consumer ref → input.focus()</span>
+      <div className="zeroship-story-row" role="group" aria-label="Ref integration">
+        <div className="zeroship-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem", gap: "0.5rem" }}>
+          <span className="zeroship-story-label">Consumer ref → input.focus()</span>
           <Field>
             <Field.Label>Search query</Field.Label>
             <Input
@@ -1120,9 +1120,9 @@ export const Autofill: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Autofill demo">
+    <div className="zeroship-story-row" role="group" aria-label="Autofill demo">
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 22rem", minWidth: "18rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
       >
         <Field>
@@ -1173,9 +1173,9 @@ export const CustomValidate: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Custom validate">
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
-        <span className="zs-story-label">Empty (no validation fired)</span>
+    <div className="zeroship-story-row" role="group" aria-label="Custom validate">
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Empty (no validation fired)</span>
         <Field
           validationMode="onBlur"
           validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}
@@ -1186,8 +1186,8 @@ export const CustomValidate: Story = {
           <Field.Error />
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
-        <span className="zs-story-label">Invalid on mount (defaultValue=admin)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Invalid on mount (defaultValue=admin)</span>
         {/* Base UI's validate runs on the configured trigger (here
             onBlur) — there's no built-in onMount mode. To make the
             invalid state visible in a static screenshot we drive it
@@ -1206,8 +1206,8 @@ export const CustomValidate: Story = {
           <Field.Error match>‘admin’ is reserved.</Field.Error>
         </Field>
       </div>
-      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
-        <span className="zs-story-label">Valid (defaultValue=ada)</span>
+      <div className="zeroship-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Valid (defaultValue=ada)</span>
         <Field
           validationMode="onBlur"
           validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}

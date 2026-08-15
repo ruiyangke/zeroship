@@ -4,7 +4,7 @@
  * Anatomy:
  *   .zs-popover-backdrop      optional scrim layer (opt-in only).
  *   .zs-popover-positioner    Base UI's Floating UI anchored layer
- *     └─ .zs-popover-popup    opaque sheet with --zs-shadow-dialog
+ *     └─ .zs-popover-popup    opaque sheet with --zeroship-shadow-dialog
  *           ├─ .zs-popover-arrow         optional 16x8 SVG triangle
  *           ├─ .zs-popover__title        Title heading
  *           ├─ .zs-popover__description  Description paragraph
@@ -16,7 +16,7 @@
  * reduced-motion respectful.
  *
  * Crystal material pattern: the Popup declares a computable
- * `background-color` (--zs-surface) so axe-core's color-contrast walk
+ * `background-color` (--zeroship-surface) so axe-core's color-contrast walk
  * terminates inside the popup. Material, rim, and shadow tokens augment
  * that readable base.
  *
@@ -42,10 +42,10 @@
 [data-slot="popover-backdrop"] {
   position: fixed;
   inset: 0;
-  z-index: var(--zs-z-modal);
-  background-color: var(--zs-scrim);
+  z-index: var(--zeroship-z-modal);
+  background-color: var(--zeroship-scrim);
   opacity: 1;
-  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="popover-backdrop"][data-starting-style],
 [data-slot="popover-backdrop"][data-ending-style] {
@@ -56,47 +56,47 @@
  *
  * Base UI's Positioner is the Floating UI anchored layer — we don't
  * paint it; it carries Floating UI's transform / x / y inline styles.
- * Stack above modal sheets via the same `--zs-z-modal` token plus a
+ * Stack above modal sheets via the same `--zeroship-z-modal` token plus a
  * small bump so popovers float over an open dialog when both mount. */
 [data-slot="popover-positioner"] {
-  z-index: calc(var(--zs-z-modal) + 10);
+  z-index: calc(var(--zeroship-z-modal) + 10);
   outline: none;
 }
 
 /* ─── Popup ─────────────────────────────────────────────────────────── */
 [data-slot="popover-popup"] {
   /* Computable background-color + active material/rim tokens. */
-  background-color: var(--zs-surface);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  background-color: var(--zeroship-surface);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   /* Callout type by default — popovers carry helper copy, not body
    * prose. Body-size was reading as dialog-weight (Slice-10 visual
    * review item 3). */
-  font-size: var(--zs-text-callout-size);
-  line-height: var(--zs-text-callout-line);
+  font-size: var(--zeroship-text-callout-size);
+  line-height: var(--zeroship-text-callout-line);
   /* Logical sizing so RTL flows naturally. */
   min-inline-size: 12rem;
-  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
-  padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-3);
+  max-inline-size: min(22rem, calc(100dvw - var(--zeroship-space-6) * 2));
+  padding-block: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
-  border-radius: var(--zs-radius-5);
+  gap: var(--zeroship-space-2);
+  border-radius: var(--zeroship-radius-5);
   /* Popover-specific elevation (lighter than dialog). The arrow drop-
    * shadow extends past the popup rect, so `overflow: visible` keeps
    * the triangle visible when it sits half outside the popup. */
   box-shadow:
-    var(--zs-shadow-popover),
+    var(--zeroship-shadow-popover),
     var(
-      --zs-popup-surface-edge,
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+      --zeroship-popup-surface-edge,
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator)
     );
   overflow: visible;
-  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-dialog-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-dialog-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-dialog-backdrop-filter,
+    var(--zeroship-material-regular)
   );
   /* Explicit baseline opacity so the open/close transition origin is
    * portable across reduced-motion + animation library overrides. */
@@ -104,8 +104,8 @@
   outline: none;
   isolation: isolate;
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 
 /* ─── Close ─────────────────────────────────────────────────────────── *
@@ -118,7 +118,7 @@
 [data-slot="popover-close"] {
   align-self: flex-end;
   min-inline-size: 6rem;
-  margin-block-start: var(--zs-space-1);
+  margin-block-start: var(--zeroship-space-1);
 }
 
 /* ─── enter/leave transitions ──────────────────────────────────────── *
@@ -157,17 +157,17 @@
 /* ─── Title / Description ──────────────────────────────────────────── */
 [data-slot="popover-title"] {
   margin: 0;
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-headline-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-headline-tracking);
+  color: var(--zeroship-label);
 }
 [data-slot="popover-description"] {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── Arrow ────────────────────────────────────────────────────────── *
@@ -186,7 +186,7 @@
   justify-content: center;
   inline-size: 1rem;
   block-size: 0.5rem;
-  color: var(--zs-surface);
+  color: var(--zeroship-surface);
   /* Sit behind the popup chrome. Without this the arrow rectangle
    * (Floating UI positions it inside the popup bounding box) overlaps
    * the title text and reads as a triangle stamped onto the content
@@ -202,8 +202,8 @@
    * Bumped to the popup's own label-mix 24% / space-half blur so the
    * shadow reads at the same weight as the popup edge. */
   filter: drop-shadow(
-    0 var(--zs-selection-hairline) var(--zs-space-half)
-      color-mix(in oklch, var(--zs-label) 24%, transparent)
+    0 var(--zeroship-selection-hairline) var(--zeroship-space-half)
+      color-mix(in oklch, var(--zeroship-label) 24%, transparent)
   );
 }
 [data-slot="popover-arrow"] > svg {

@@ -18,17 +18,17 @@
  *
  * ── Layout ────────────────────────────────────────────────────────────
  * stacked (default): a single grid column — header, then body, then
- *   footer, separated by --zs-space tokens.
+ *   footer, separated by --zeroship-space tokens.
  *
  * aside: a two-column grid (settings-page style). The header sits in the
  *   start column, the body in the end column, and the footer SPANS both
  *   columns under the header/body row (a full-width action band). Below
- *   --zs-bp-md (48rem) of the SECTION'S OWN width the grid collapses back
+ *   --zeroship-bp-md (48rem) of the SECTION'S OWN width the grid collapses back
  *   to a single column (stacked) — a fixed two-column split is unreadable
  *   narrow. The collapse is a @container query (the section establishes an
  *   inline-size containment context) keyed off the section's width, not
  *   the viewport, since FormSection is a container-sized region. The
- *   condition uses the literal rem value of --zs-bp-md (custom properties
+ *   condition uses the literal rem value of --zeroship-bp-md (custom properties
  *   cannot appear in a container query condition).
  *
  * ── Motion ──────────────────────────────────────────────────────────── *
@@ -38,17 +38,17 @@
 [data-slot="form-section"] {
   /* Token knobs a consumer can retune per-section via inline custom
      properties without forking the CSS. */
-  --zs-form-section-gap: var(--zs-space-6);
-  --zs-form-section-header-gap: var(--zs-space-1);
-  --zs-form-section-body-gap: var(--zs-space-5);
-  --zs-form-section-aside-col: 16rem;
-  --zs-form-section-aside-gap: var(--zs-space-8);
+  --zeroship-form-section-gap: var(--zeroship-space-6);
+  --zeroship-form-section-header-gap: var(--zeroship-space-1);
+  --zeroship-form-section-body-gap: var(--zeroship-space-5);
+  --zeroship-form-section-aside-col: 16rem;
+  --zeroship-form-section-aside-gap: var(--zeroship-space-8);
 
   display: grid;
   inline-size: 100%;
   min-inline-size: 0;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
   /* Establish an inline-size containment context so the aside→stacked
      collapse below keys off THIS section's own width (it is a
      container-sized region inside an arbitrary panel), not the viewport.
@@ -62,22 +62,22 @@
 [data-slot="form-section-header"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-form-section-header-gap);
+  gap: var(--zeroship-form-section-header-gap);
 }
 
 [data-slot="form-section-title"] {
   margin: 0;
-  color: var(--zs-label);
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
   font-weight: 600;
 }
 
 [data-slot="form-section-description"] {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 400;
 }
 
@@ -87,7 +87,7 @@
 [data-slot="form-section-body"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-form-section-body-gap);
+  gap: var(--zeroship-form-section-body-gap);
   /* Logical min-size so an overflowing field (e.g. a wide Input) shrinks
      instead of blowing out the aside end column. */
   min-inline-size: 0;
@@ -100,14 +100,14 @@
 [data-slot="form-section-footer"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
 }
 
 [data-slot="form-section-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
   /* Default alignment is `end` — actions on the trailing inline edge.
      justify-content is writing-direction-aware via flex-end. */
   justify-content: flex-end;
@@ -129,7 +129,7 @@
  * Single column: header / body / footer, separated by the section gap. */
 [data-slot="form-section"][data-orientation="stacked"] {
   grid-template-columns: 1fr;
-  row-gap: var(--zs-form-section-gap);
+  row-gap: var(--zeroship-form-section-gap);
 }
 
 /* ─── aside ───────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@
  * order: the root emits header → body → footer, and the areas re-place
  * them into the two-column arrangement. */
 [data-slot="form-section"][data-orientation="aside"] {
-  grid-template-columns: var(--zs-form-section-aside-col) 1fr;
+  grid-template-columns: var(--zeroship-form-section-aside-col) 1fr;
   /* The footer SPANS both columns (full-width action band under the
      two-column header/body), matching the file-header contract. The
      prior `". footer"` indented it under the body track — reconciled
@@ -148,8 +148,8 @@
   grid-template-areas:
     "header body"
     "footer footer";
-  column-gap: var(--zs-form-section-aside-gap);
-  row-gap: var(--zs-form-section-gap);
+  column-gap: var(--zeroship-form-section-aside-gap);
+  row-gap: var(--zeroship-form-section-gap);
 }
 
 [data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-header"] {
@@ -164,14 +164,14 @@
   grid-area: footer;
 }
 
-/* Below --zs-bp-md (48rem) of the SECTION'S OWN inline-size: collapse the
+/* Below --zeroship-bp-md (48rem) of the SECTION'S OWN inline-size: collapse the
  * two-column aside back to a single stacked column. A fixed two-column
  * split is unreadable narrow. This is a CONTAINER query (the section sets
  * container-type: inline-size above), not a viewport @media — FormSection
  * is a container-sized region, so a viewport query would collapse the
  * wrong axis when the section is narrow inside a wide viewport (a settings
  * panel) or wide inside a narrow one. Custom properties can't appear in
- * the @container condition, so the literal 48rem mirrors --zs-bp-md. */
+ * the @container condition, so the literal 48rem mirrors --zeroship-bp-md. */
 @media (max-width: 47.999rem) {
   [data-slot="form-section"][data-orientation="aside"] {
     grid-template-columns: 1fr;

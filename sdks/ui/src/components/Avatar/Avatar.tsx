@@ -37,7 +37,7 @@
  *      pass `alt=""` explicitly (Base UI then keeps the empty string
  *      and AT skips the node). The dev-warn fires once per signature.
  *
- *   4. Fallback initials inherit the parent's color via `--zs-label`
+ *   4. Fallback initials inherit the parent's color via `--zeroship-label`
  *      and tint over a translucent accent surface so the avatar reads
  *      as identity-tinted glass against any background — not as a
  *      flat solid swatch that fights the canvas underneath.

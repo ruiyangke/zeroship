@@ -30,14 +30,14 @@ export const Sizes: Story = {
       description: {
         story:
           "The same icon at the three token sizes. Each maps to a " +
-          "`--zs-icon-{sm,md,lg}` foundation token via CSS — no px prop " +
+          "`--zeroship-icon-{sm,md,lg}` foundation token via CSS — no px prop " +
           "is forwarded to Lucide, so sizing stays token-pure.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Icon sizes"
       style={{ alignItems: "center", gap: "1.5rem" }}
@@ -82,7 +82,7 @@ export const InlineWithText: Story = {
         display: "inline-flex",
         alignItems: "center",
         gap: "0.5rem",
-        color: "var(--zs-system-green)",
+        color: "var(--zeroship-system-green)",
       }}
     >
       <Icon as={Check} data-testid="icon-inline" />
@@ -112,7 +112,7 @@ export const InAButton: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Icons in buttons"
       style={{ alignItems: "center", gap: "0.75rem" }}
@@ -160,7 +160,7 @@ export const Labelled: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Labelled vs decorative"
       style={{ alignItems: "center", gap: "1.5rem" }}

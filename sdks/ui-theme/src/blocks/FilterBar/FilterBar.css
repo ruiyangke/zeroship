@@ -27,7 +27,7 @@
   inline-size: 100%;
 }
 
-.zs-filter-bar__search {
+.zeroship-filter-bar__search {
   /* Grow to fill leading space, but keep a usable floor so the field
      stays legible as the bar narrows and eventually wraps. */
   flex: 1 1 auto;

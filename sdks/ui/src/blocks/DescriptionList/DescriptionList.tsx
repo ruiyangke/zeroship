@@ -27,7 +27,7 @@
  *   - `vertical`: term stacks above detail (the term reads as a small
  *     caption over a larger value).
  *
- * `divider` draws a `--zs-separator` hairline between items (a logical
+ * `divider` draws a `--zeroship-separator` hairline between items (a logical
  * block-start border on every item after the first) so a long list reads
  * as discrete rows.
  *
@@ -48,7 +48,7 @@ export interface DescriptionListProps extends ComponentPropsWithoutRef<"dl"> {
    */
   orientation?: DescriptionListOrientation;
 
-  /** Draw a `--zs-separator` hairline between items. Default `false`. */
+  /** Draw a `--zeroship-separator` hairline between items. Default `false`. */
   divider?: boolean;
 }
 

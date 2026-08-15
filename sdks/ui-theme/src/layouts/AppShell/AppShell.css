@@ -24,10 +24,10 @@
  *     explicitly permits dvh/%). The body Split gets `flex: 1` (and
  *     `min-block-size: 0`) so it absorbs the remaining height between
  *     Header/Footer and its scrollable Main can shrink to fit.
- *   - Surface hierarchy: the Header paints `--zs-surface-raised` (a step
+ *   - Surface hierarchy: the Header paints `--zeroship-surface-raised` (a step
  *     ABOVE the canvas) with a bottom hairline; the Sidebar rail paints
- *     `--zs-surface-sunken` (a step BELOW the canvas) with a hairline on
- *     the edge facing Main; Main stays the bare canvas (`--zs-surface`),
+ *     `--zeroship-surface-sunken` (a step BELOW the canvas) with a hairline on
+ *     the edge facing Main; Main stays the bare canvas (`--zeroship-surface`),
  *     arrange-only with NO forced padding (consumers may want full-bleed
  *     content — wrap Main content in a `Container` or your own padded
  *     region). The Footer paints a top hairline. Raised header > canvas
@@ -66,8 +66,8 @@
    * no-raw-px rule (dvh/% are allowed). The @supports fallback uses 100vh
    * for engines without dvh support. */
   block-size: 100dvh;
-  background: var(--zs-app-shell-bg, var(--zs-surface));
-  color: var(--zs-label);
+  background: var(--zeroship-app-shell-bg, var(--zeroship-surface));
+  color: var(--zeroship-label);
 }
 
 /* Fallback for engines without dynamic-viewport-unit support: a definite
@@ -88,14 +88,14 @@
    * the row. */
   display: flex;
   align-items: center;
-  min-block-size: var(--zs-space-9);
-  background: var(--zs-shell-header-bg, var(--zs-surface-raised));
-  backdrop-filter: var(--zs-material-ultra-thin);
-  -webkit-backdrop-filter: var(--zs-material-ultra-thin);
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
-  box-shadow: inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark, transparent);
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-4);
+  min-block-size: var(--zeroship-space-9);
+  background: var(--zeroship-shell-header-bg, var(--zeroship-surface-raised));
+  backdrop-filter: var(--zeroship-material-ultra-thin);
+  -webkit-backdrop-filter: var(--zeroship-material-ultra-thin);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
+  box-shadow: inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark, transparent);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-4);
 }
 
 /* ─── Body — the Split row fills the remaining block-size ─────────────── */
@@ -106,7 +106,7 @@
 
 /* ─── Sidebar rail — sunken material, hairline on the edge facing Main ───
  *
- * The rail reads as a distinct SUNKEN surface (`--zs-surface-sunken`),
+ * The rail reads as a distinct SUNKEN surface (`--zeroship-surface-sunken`),
  * one step below the canvas Main, so the navigation column is visually
  * differentiated from the page content instead of sharing Main's plane.
  * A single hairline divides the rail from Main; it sits on the rail's
@@ -119,14 +119,14 @@
  * the divider, padding, overflow, and the collapse transition. */
 [data-slot="app-shell-sidebar"] {
   overflow: hidden auto;
-  background: var(--zs-shell-sidebar-bg, var(--zs-surface-sunken));
-  backdrop-filter: var(--zs-material-thin);
-  -webkit-backdrop-filter: var(--zs-material-thin);
-  padding-block: var(--zs-space-4);
-  padding-inline: var(--zs-space-3);
-  transition: flex-basis var(--zs-motion-base) var(--zs-motion-ease),
-    inline-size var(--zs-motion-base) var(--zs-motion-ease),
-    padding-inline var(--zs-motion-base) var(--zs-motion-ease);
+  background: var(--zeroship-shell-sidebar-bg, var(--zeroship-surface-sunken));
+  backdrop-filter: var(--zeroship-material-thin);
+  -webkit-backdrop-filter: var(--zeroship-material-thin);
+  padding-block: var(--zeroship-space-4);
+  padding-inline: var(--zeroship-space-3);
+  transition: flex-basis var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    inline-size var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    padding-inline var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 
 /* Divider hairline on the rail edge facing Main. Default (start side, the
@@ -135,10 +135,10 @@
  * (the side attr the root always carries) rather than the rail element,
  * which does not. */
 [data-slot="app-shell"][data-sidebar-side="start"] [data-slot="app-shell-sidebar"] {
-  border-inline-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-inline-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 [data-slot="app-shell"][data-sidebar-side="end"] [data-slot="app-shell-sidebar"] {
-  border-inline-start: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-inline-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
 /* Closed — the rail collapses to zero inline-size. The collapse is keyed
@@ -174,13 +174,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
-  padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-4);
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  font-weight: var(--zs-text-footnote-weight);
+  border-block-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
+  padding-block: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-4);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  font-weight: var(--zeroship-text-footnote-weight);
 }
 
 /* ─── prefers-reduced-motion — drop the rail collapse transition ──────── */

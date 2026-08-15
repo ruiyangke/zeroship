@@ -19,7 +19,7 @@ type Story = StoryObj<typeof AlertDialog>;
 export const OneButton: Story = {
   name: "One button",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlertDialog one button">
+    <div className="zeroship-story-row" role="group" aria-label="AlertDialog one button">
       <AlertDialog>
         <AlertDialog.Trigger
           render={<Button data-testid="alertdialog-trigger">Show confirmation</Button>}
@@ -47,7 +47,7 @@ export const OneButton: Story = {
 export const TwoButtons: Story = {
   name: "Two buttons",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlertDialog two buttons">
+    <div className="zeroship-story-row" role="group" aria-label="AlertDialog two buttons">
       <AlertDialog>
         <AlertDialog.Trigger
           render={<Button data-testid="alertdialog-trigger">Discard changes</Button>}
@@ -89,7 +89,7 @@ export const TwoButtons: Story = {
 export const Destructive: Story = {
   name: "Destructive",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Destructive AlertDialog">
+    <div className="zeroship-story-row" role="group" aria-label="Destructive AlertDialog">
       <AlertDialog>
         <AlertDialog.Trigger
           render={
@@ -125,7 +125,7 @@ export const Destructive: Story = {
 export const ThreeButtons: Story = {
   name: "Three buttons",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlertDialog three buttons">
+    <div className="zeroship-story-row" role="group" aria-label="AlertDialog three buttons">
       <AlertDialog>
         <AlertDialog.Trigger
           render={<Button data-testid="alertdialog-trigger">Review unsaved changes</Button>}
@@ -158,7 +158,7 @@ export const ThreeButtons: Story = {
 export const WithBody: Story = {
   name: "With body",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlertDialog with body input">
+    <div className="zeroship-story-row" role="group" aria-label="AlertDialog with body input">
       <AlertDialog>
         <AlertDialog.Trigger
           render={
@@ -224,7 +224,7 @@ export const OutsideClickIgnored: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlertDialog outside click ignored">
+    <div className="zeroship-story-row" role="group" aria-label="AlertDialog outside click ignored">
       <AlertDialog>
         <AlertDialog.Trigger
           render={<Button data-testid="alertdialog-trigger">Confirm exit</Button>}
@@ -271,7 +271,7 @@ function EscClosesCancelStory() {
   const [clicked, setClicked] = useState<string>("not-clicked");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog ESC closes via Cancel"
     >
@@ -338,7 +338,7 @@ export const EscNoOpsWithoutCancel: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog ESC no-ops without Cancel"
     >
@@ -396,7 +396,7 @@ export const EscIgnoresDisabledCancel: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog ESC ignores disabled Cancel"
     >
@@ -452,7 +452,7 @@ function CancelWithCleanupOnClickStory() {
   const [cleanup, setCleanup] = useState<string>("not-run");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog Cancel onClick composes with close"
     >
@@ -517,7 +517,7 @@ function CancelAsChildStory() {
   const [clicked, setClicked] = useState<string>("not-clicked");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog Cancel asChild"
     >
@@ -588,7 +588,7 @@ function ActionPreventCloseStory() {
   const [status, setStatus] = useState("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog action preventClose"
     >
@@ -650,7 +650,7 @@ function ActionPreventDefaultStory() {
   const [status, setStatus] = useState("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog action preventDefault"
     >
@@ -714,7 +714,7 @@ export const FragmentFooterButtons: Story = {
   name: "Fragment footer buttons (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog fragment footer buttons"
     >
@@ -770,7 +770,7 @@ export const ThreeButtonsDestructiveBottom: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog three buttons destructive bottom"
     >
@@ -822,7 +822,7 @@ export const ThreeButtonsDestructiveMisplaced: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog three buttons destructive misplaced"
     >
@@ -871,7 +871,7 @@ export const DestructiveWithoutCancelWarns: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog destructive without cancel"
     >
@@ -917,7 +917,7 @@ function CancelAsChildSingleFireStory() {
   const [count, setCount] = useState(0);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog Cancel asChild single-fire"
     >
@@ -986,7 +986,7 @@ export const CancelAsChildSingleFire: Story = {
 /* ─── ForcedColors — wave-7 focused-review 🔴 #2 ───────────────────────── *
  *
  * Regression for the wave-7 focused-review 🔴: `.zs-alertdialog-popup`
- * sets `box-shadow: var(--zs-shadow-4)` and is imported AFTER
+ * sets `box-shadow: var(--zeroship-shadow-4)` and is imported AFTER
  * Dialog.css, so it equals-specificity-wins against Dialog's
  * `@media (forced-colors: active)` mirror that paints the popup with
  * a `CanvasText` system ring. The result was a popup with no system
@@ -1002,7 +1002,7 @@ export const ForcedColors: Story = {
   name: "Forced-colors popup shadow mirror",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="AlertDialog forced-colors popup"
     >

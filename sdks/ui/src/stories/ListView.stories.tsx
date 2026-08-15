@@ -22,7 +22,7 @@ type Story = StoryObj<typeof ListView>;
    panel rather than a full-bleed band. */
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ maxInlineSize: "32rem", margin: "var(--zs-space-6) auto" }}>
+    <div style={{ maxInlineSize: "32rem", margin: "var(--zeroship-space-6) auto" }}>
       {children}
     </div>
   );
@@ -372,7 +372,7 @@ export const DuplicateIds: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
       <ListView
         items={[
           { id: "dup", title: "Ada Lovelace" },

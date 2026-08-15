@@ -20,9 +20,9 @@
  *   - The section sets only its vertical rhythm (block padding) and lets
  *     the composed `Container` own the inline width + padding. The body is
  *     a single column by default; with media it is a CSS grid of two
- *     columns that collapses to one below the --zs-bp-md breakpoint.
+ *     columns that collapses to one below the --zeroship-bp-md breakpoint.
  *   - `data-align="center"` centers the text column on a readable measure
- *     (`--zs-hero-measure`); `data-align="start"` start-aligns it. The
+ *     (`--zeroship-hero-measure`); `data-align="start"` start-aligns it. The
  *     measure keeps headline + description from running edge-to-edge on
  *     wide viewports (the classic over-long line-length readability trap).
  *   - The composed Stack / Cluster own the intra-column gaps and the CTA
@@ -39,10 +39,10 @@
      the hero reads as a distinct top-of-page band. No background: the hero
      is composable, the consumer paints the page backdrop. */
   display: block;
-  padding-block: var(--zs-space-10);
+  padding-block: var(--zeroship-space-10);
   /* Inline padding is owned by the composed Container; the section itself
      adds none so the Container's measure is the single inline authority. */
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 
 /* ─── Optional accent backdrop — a subtle depth wash behind the hero ──────
@@ -58,7 +58,7 @@
 [data-slot="hero"][data-backdrop] {
   background-image: radial-gradient(
     120% 80% at 50% 0%,
-    color-mix(in oklch, var(--zs-accent) 10%, transparent),
+    color-mix(in oklch, var(--zeroship-accent) 10%, transparent),
     transparent 60%
   );
   background-repeat: no-repeat;
@@ -77,7 +77,7 @@
   display: grid;
   /* Single-column default: one track. The split layout overrides below. */
   grid-template-columns: 1fr;
-  gap: var(--zs-space-9);
+  gap: var(--zeroship-space-9);
   align-items: center;
 }
 
@@ -109,8 +109,8 @@
   text-align: start;
 }
 
-/* Collapse the split to a single stacked column below the --zs-bp-md
-   breakpoint (48rem — see --zs-bp-md). The media drops below the text. The
+/* Collapse the split to a single stacked column below the --zeroship-bp-md
+   breakpoint (48rem — see --zeroship-bp-md). The media drops below the text. The
    literal rem is written here because custom properties cannot appear in
    an @media condition; the token name is the documented source. */
 @media (max-width: 47.999rem) {
@@ -124,11 +124,11 @@
   /* Reading-measure cap so headline + copy never run edge-to-edge on wide
      viewports. Only applies to the single-column layouts; in a split each
      grid track already constrains the column. */
-  --zs-hero-measure: 46rem;
+  --zeroship-hero-measure: 46rem;
 }
 
 [data-slot="hero-body"][data-layout="single"] [data-slot="hero-text"] {
-  max-inline-size: var(--zs-hero-measure);
+  max-inline-size: var(--zeroship-hero-measure);
   inline-size: 100%;
 }
 
@@ -151,11 +151,11 @@
      reads the top step of the marketing display scale (above large-title)
      rather than the product large-title. Confident, dense, with tight
      line-height + negative tracking. */
-  font-size: var(--zs-text-display-1-size);
-  line-height: var(--zs-text-display-1-line);
-  font-weight: var(--zs-text-display-1-weight);
-  letter-spacing: var(--zs-text-display-1-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-display-1-size);
+  line-height: var(--zeroship-text-display-1-line);
+  font-weight: var(--zeroship-text-display-1-weight);
+  letter-spacing: var(--zeroship-text-display-1-tracking);
+  color: var(--zeroship-label);
   /* Balance the headline across its lines for a tidy ragged edge on the
      short multi-line headlines heroes typically carry. */
   text-wrap: balance;
@@ -164,10 +164,10 @@
 /* ─── Description — muted supporting copy ─────────────────────────────────── */
 [data-slot="hero-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-body-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-body-weight);
+  color: var(--zeroship-label-secondary);
   /* Pretty wrapping avoids orphans on the supporting paragraph. */
   text-wrap: pretty;
 }
@@ -176,7 +176,7 @@
 [data-slot="hero-actions"] {
   /* Cluster owns the gap + wrap; the band only adds a touch of top rhythm
      beyond the Stack gap so the CTAs read as a distinct action band. */
-  margin-block-start: var(--zs-space-1);
+  margin-block-start: var(--zeroship-space-1);
 }
 
 /* ─── Media — optional image / illustration column ───────────────────────── */
@@ -186,7 +186,7 @@
 [data-slot="hero-media-column"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-5);
+  gap: var(--zeroship-space-5);
   inline-size: 100%;
 }
 
@@ -201,11 +201,11 @@
      placeholder content then sits inside a deliberate frame. The wrapper
      rounds + clips its content so consumer images / illustrations adopt the
      band's corner rhythm without each caller re-specifying it. */
-  border-radius: var(--zs-radius-6);
+  border-radius: var(--zeroship-radius-6);
   overflow: hidden;
-  border: var(--zs-selection-hairline) solid var(--zs-separator);
-  background: var(--zs-surface-raised);
-  box-shadow: var(--zs-shadow-3);
+  border: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
+  background: var(--zeroship-surface-raised);
+  box-shadow: var(--zeroship-shadow-3);
 }
 
 /* Media content fills the column responsively without distorting. The

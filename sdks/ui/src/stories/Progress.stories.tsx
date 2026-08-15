@@ -27,8 +27,8 @@ export const Determinate: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Determinate progress">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Determinate progress">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={42}
           aria-label="Upload progress"
@@ -73,8 +73,8 @@ export const Indeterminate: Story = {
   // but never forwarded the prop, so the assertion fell through to Base
   // UI's default and the play() failed in test-storybook.)
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Indeterminate progress">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Indeterminate progress">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={null}
           aria-label="Loading"
@@ -99,13 +99,13 @@ export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
-        <span className="zs-story-label">Small (track 0.25rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
+        <span className="zeroship-story-label">Small (track 0.25rem)</span>
         <Progress
           size="sm"
           value={55}
@@ -113,8 +113,8 @@ export const AllSizes: Story = {
           data-testid="progress-sm"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
-        <span className="zs-story-label">Medium (track 0.375rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
+        <span className="zeroship-story-label">Medium (track 0.375rem)</span>
         <Progress
           size="md"
           value={55}
@@ -122,8 +122,8 @@ export const AllSizes: Story = {
           data-testid="progress-md"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
-        <span className="zs-story-label">Large (track 0.5rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
+        <span className="zeroship-story-label">Large (track 0.5rem)</span>
         <Progress
           size="lg"
           value={55}
@@ -171,8 +171,8 @@ export const WithValue: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With value">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With value">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={68}
           showValue
@@ -210,8 +210,8 @@ export const CompletionCelebrate: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Completion">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Completion">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={100}
           label="Backup"
@@ -253,9 +253,9 @@ export const ExternalAriaLabelling: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Progress external aria">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
-        <span id="progress-import-label" className="zs-story-label">
+    <div className="zeroship-story-row" role="group" aria-label="Progress external aria">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
+        <span id="progress-import-label" className="zeroship-story-label">
           Import progress
         </span>
         <span id="progress-import-description" style={{ fontSize: "0.8125rem" }}>
@@ -312,8 +312,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={33}
           label="Uploading photo.jpg"
@@ -329,7 +329,7 @@ export const WithLabel: Story = {
  *
  * A `data-disabled + data-status="indeterminate"` row under
  * `prefers-reduced-motion: reduce` must keep its disabled paint
- * (`var(--zs-label-quaternary)` on the indicator, `var(--zs-fill-
+ * (`var(--zeroship-label-quaternary)` on the indicator, `var(--zeroship-fill-
  * quaternary)` on the track) — not the reduced-motion indeterminate
  * placeholder color-mix.
  *
@@ -359,11 +359,11 @@ export const DisabledIndeterminate: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Disabled indeterminate"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={null}
           aria-label="Paused upload"
@@ -401,8 +401,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL progress">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL progress">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={42}
           label="جاري التحميل"

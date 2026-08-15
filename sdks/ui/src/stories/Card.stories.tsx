@@ -40,20 +40,20 @@ function MediaPlaceholder({
       style={{
         blockSize: fill ? "100%" : "8rem",
         inlineSize: fill ? "100%" : undefined,
-        backgroundColor: "var(--zs-accent)",
+        backgroundColor: "var(--zeroship-accent)",
         display: "grid",
         placeItems: "center",
-        fontFamily: "var(--zs-font-system)",
+        fontFamily: "var(--zeroship-font-system)",
       }}
     >
       <span
         style={{
-          backgroundColor: "var(--zs-surface)",
-          color: "var(--zs-label)",
-          paddingInline: "var(--zs-space-3)",
-          paddingBlock: "var(--zs-space-1)",
-          borderRadius: "var(--zs-radius-2)",
-          fontSize: "var(--zs-text-footnote-size)",
+          backgroundColor: "var(--zeroship-surface)",
+          color: "var(--zeroship-label)",
+          paddingInline: "var(--zeroship-space-3)",
+          paddingBlock: "var(--zeroship-space-1)",
+          borderRadius: "var(--zeroship-radius-2)",
+          fontSize: "var(--zeroship-text-footnote-size)",
         }}
       >
         {label}
@@ -66,7 +66,7 @@ function MediaPlaceholder({
 export const AllVariants: Story = {
   name: "All variants",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All card variants">
+    <div className="zeroship-story-row" role="group" aria-label="All card variants">
       {(["surface", "elevated", "outline", "ghost"] as const).map((variant) => (
         <Card
           key={variant}
@@ -88,7 +88,7 @@ export const AllVariants: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All card sizes">
+    <div className="zeroship-story-row" role="group" aria-label="All card sizes">
       {(["sm", "md", "lg"] as const).map((size) => (
         <Card
           key={size}
@@ -115,7 +115,7 @@ export const AllSizes: Story = {
 export const Decomposed: Story = {
   name: "Decomposed",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Decomposed card">
+    <div className="zeroship-story-row" role="group" aria-label="Decomposed card">
       <Card style={{ inlineSize: "32rem", maxInlineSize: "100%" }}>
         <Card.Header>
           <Card.Title>Project settings</Card.Title>
@@ -148,7 +148,7 @@ export const Decomposed: Story = {
 export const WithMedia: Story = {
   name: "With media",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Card with media slot">
+    <div className="zeroship-story-row" role="group" aria-label="Card with media slot">
       <Card style={{ inlineSize: "20rem" }}>
         <Card.Media side="top">
           <MediaPlaceholder label="cover image" />
@@ -172,7 +172,7 @@ export const WithMedia: Story = {
 export const MediaSides: Story = {
   name: "Media sides",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Card media sides">
+    <div className="zeroship-story-row" role="group" aria-label="Card media sides">
       <Card style={{ inlineSize: "16rem" }}>
         <Card.Media side="top">
           <MediaPlaceholder label="side=top" />
@@ -195,16 +195,16 @@ export const MediaSides: Story = {
       </Card>
       <Card
         variant="elevated"
-        style={{ inlineSize: "16rem", color: "var(--zs-accent-ink)" }}
+        style={{ inlineSize: "16rem", color: "var(--zeroship-accent-ink)" }}
       >
         <Card.Media side="fill">
           <MediaPlaceholder label="side=fill (decorative)" fill />
         </Card.Media>
         <Card.Header>
-          <Card.Title style={{ color: "var(--zs-accent-ink)" }}>
+          <Card.Title style={{ color: "var(--zeroship-accent-ink)" }}>
             Fill
           </Card.Title>
-          <Card.Description style={{ color: "var(--zs-accent-ink)" }}>
+          <Card.Description style={{ color: "var(--zeroship-accent-ink)" }}>
             aria-hidden by default.
           </Card.Description>
         </Card.Header>
@@ -224,7 +224,7 @@ export const MediaSides: Story = {
 export const Interactive: Story = {
   name: "Interactive",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Interactive card (asChild anchor)">
+    <div className="zeroship-story-row" role="group" aria-label="Interactive card (asChild anchor)">
       <Card
         asChild
         interactive
@@ -256,7 +256,7 @@ export const Interactive: Story = {
 function InteractiveWithKeyboardImpl() {
   const [count, setCount] = useState(0);
   return (
-    <div className="zs-story-row" role="group" aria-label="Interactive card with keyboard">
+    <div className="zeroship-story-row" role="group" aria-label="Interactive card with keyboard">
       <Card
         interactive
         variant="elevated"
@@ -317,7 +317,7 @@ export const InteractiveWithKeyboard: Story = {
 function InteractiveWithoutOnClickImpl() {
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Interactive card without onClick (caution)"
     >
@@ -371,7 +371,7 @@ function InteractiveAriaDisabledImpl() {
   const [count, setCount] = useState(0);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Interactive card aria-disabled"
     >
@@ -434,7 +434,7 @@ export const InteractiveAriaDisabled: Story = {
 export const AsChild: Story = {
   name: "asChild",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Card asChild">
+    <div className="zeroship-story-row" role="group" aria-label="Card asChild">
       <Card
         asChild
         interactive
@@ -483,7 +483,7 @@ function AsChildRefCompositionImpl() {
   const [status, setStatus] = useState("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Card asChild ref composition"
     >
@@ -530,9 +530,9 @@ function AsChildRefCompositionImpl() {
             data-testid="card-aschild-ref-status"
             style={
               {
-                fontFamily: "var(--zs-font-system)",
-                fontSize: "var(--zs-text-footnote-size)",
-                color: "var(--zs-label-secondary)",
+                fontFamily: "var(--zeroship-font-system)",
+                fontSize: "var(--zeroship-text-footnote-size)",
+                color: "var(--zeroship-label-secondary)",
               } satisfies CSSProperties
             }
           >
@@ -561,7 +561,7 @@ function KeyboardPreventDefaultImpl() {
   const [status, setStatus] = useState("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Interactive card keyboard prevent default"
     >
@@ -655,7 +655,7 @@ function TitleAsChildSingleAttachImpl() {
   }, []);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Card title asChild single attach"
     >
@@ -714,7 +714,7 @@ export const TitleAsChildAndMediaOverride: Story = {
   name: "Title asChild and media override (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Card asChild subparts"
     >
@@ -765,7 +765,7 @@ export const TitleAsChildAndMediaOverride: Story = {
 export const Ghost: Story = {
   name: "Ghost",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Ghost card nesting">
+    <div className="zeroship-story-row" role="group" aria-label="Ghost card nesting">
       <Card variant="surface" style={{ inlineSize: "30rem" }}>
         <Card.Header>
           <Card.Title>Outer surface</Card.Title>
@@ -797,7 +797,7 @@ export const Ghost: Story = {
 export const WithFormInside: Story = {
   name: "With form inside",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Card with form">
+    <div className="zeroship-story-row" role="group" aria-label="Card with form">
       <Card style={{ inlineSize: "26rem" }}>
         <Card.Header>
           <Card.Title>Invite a teammate</Card.Title>

@@ -36,7 +36,7 @@
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
 }
 
 /* The text column grows to take the row's free space so a long title +
@@ -55,20 +55,20 @@
 /* ─── Title — page heading ────────────────────────────────────────────── */
 [data-slot="page-header-title"] {
   margin-block: 0;
-  font-size: var(--zs-text-title-1-size);
-  line-height: var(--zs-text-title-1-line);
-  font-weight: var(--zs-text-title-1-weight);
-  letter-spacing: var(--zs-text-title-1-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-title-1-size);
+  line-height: var(--zeroship-text-title-1-line);
+  font-weight: var(--zeroship-text-title-1-weight);
+  letter-spacing: var(--zeroship-text-title-1-tracking);
+  color: var(--zeroship-label);
 }
 
 /* ─── Description — muted supporting copy ─────────────────────────────── */
 [data-slot="page-header-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: var(--zs-text-subheadline-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  font-weight: var(--zeroship-text-subheadline-weight);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── Actions — end-aligned; do not grow (the text column takes slack) ─── */

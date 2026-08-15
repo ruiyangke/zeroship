@@ -47,8 +47,8 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic OTP">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Basic OTP">
+      <div className="zeroship-story-cell">
         <Field>
           <Field.Label style={srOnly}>Verification code</Field.Label>
           <OtpField data-testid="otp-basic" />
@@ -86,8 +86,8 @@ export const CustomLength: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="4-digit PIN">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="4-digit PIN">
+      <div className="zeroship-story-cell">
         <Field>
           <Field.Label style={srOnly}>PIN</Field.Label>
           <OtpField length={4} data-testid="otp-pin" />
@@ -114,27 +114,27 @@ export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Field>
           <Field.Label style={srOnly}>Small code</Field.Label>
           <OtpField size="sm" data-testid="otp-sm" />
         </Field>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium (default)</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium (default)</span>
         <Field>
           <Field.Label style={srOnly}>Medium code</Field.Label>
           <OtpField size="md" data-testid="otp-md" />
         </Field>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Field>
           <Field.Label style={srOnly}>Large code</Field.Label>
           <OtpField size="lg" data-testid="otp-lg" />
@@ -161,20 +161,20 @@ export const AllVariants: Story = {
   name: "All variants",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All variants"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default (filled)</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default (filled)</span>
         <Field>
           <Field.Label style={srOnly}>Default variant</Field.Label>
           <OtpField variant="default" data-testid="otp-default" />
         </Field>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Outline</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Outline</span>
         <Field>
           <Field.Label style={srOnly}>Outline variant</Field.Label>
           <OtpField variant="outline" data-testid="otp-outline" />
@@ -198,8 +198,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Field>
           <Field.Label>Verification code</Field.Label>
           <OtpField data-testid="otp-with-label" />
@@ -241,8 +241,8 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required invalid">
-        <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required invalid">
+        <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
           <Form
             onSubmit={(e) => {
               e.preventDefault();
@@ -291,8 +291,8 @@ export const RequiredInvalid: Story = {
 export const Disabled: Story = {
   name: "Disabled",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell">
         <Field>
           <Field.Label style={srOnly}>Disabled code</Field.Label>
           <OtpField
@@ -331,8 +331,8 @@ export const Readonly: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Readonly">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Readonly">
+      <div className="zeroship-story-cell">
         <Field>
           <Field.Label style={srOnly}>Readonly code</Field.Label>
           <OtpField
@@ -391,17 +391,17 @@ export const StandaloneAriaPaths: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Standalone OTP aria paths"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Hidden-label fallback</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Hidden-label fallback</span>
         <OtpField length={3} />
       </div>
-      <div className="zs-story-cell">
-        <span id="otp-explicit-description" className="zs-story-label">
+      <div className="zeroship-story-cell">
+        <span id="otp-explicit-description" className="zeroship-story-label">
           Backup code is three digits.
         </span>
         <OtpField
@@ -410,8 +410,8 @@ export const StandaloneAriaPaths: Story = {
           aria-describedby="otp-explicit-description"
         />
       </div>
-      <div className="zs-story-cell">
-        <span id="otp-labelledby" className="zs-story-label">
+      <div className="zeroship-story-cell">
+        <span id="otp-labelledby" className="zeroship-story-label">
           Recovery code
         </span>
         <OtpField length={3} aria-labelledby="otp-labelledby" />
@@ -458,8 +458,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL OTP">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL OTP">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Field>
           <Field.Label>رمز التحقق</Field.Label>
           <OtpField data-testid="otp-rtl" />

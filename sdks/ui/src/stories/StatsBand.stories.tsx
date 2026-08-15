@@ -37,7 +37,7 @@ export const ThreeStats: Story = {
         story:
           "The default band: a `<h2>` title above a responsive Grid of three " +
           "stats (large value + muted label) that collapses to a single " +
-          "column below `--zs-bp-md`. Values + labels are plain TEXT — a " +
+          "column below `--zeroship-bp-md`. Values + labels are plain TEXT — a " +
           "stats row is not part of the heading outline. The section is " +
           "labelled by the real `<h2>` title.",
       },
@@ -177,7 +177,7 @@ export const Muted: Story = {
     docs: {
       description: {
         story:
-          "The `muted` tone fills the whole band with the subtle `--zs-surface` " +
+          "The `muted` tone fills the whole band with the subtle `--zeroship-surface` " +
           "so the proof bar reads as its own panel — light/▢ rhythm against the " +
           "default (transparent) bands around it. The shared section tone system " +
           "stamps `data-tone=\"muted\"` on the root; the band treatment lives in " +
@@ -213,9 +213,9 @@ export const Accent: Story = {
     docs: {
       description: {
         story:
-          "The `accent` tone fills the band with `--zs-accent` and remaps every " +
+          "The `accent` tone fills the band with `--zeroship-accent` and remaps every " +
           "inner ink to the accent-ink pair. The thin stat dividers — which read " +
-          "as `--zs-separator` on a default band — are remapped to the " +
+          "as `--zeroship-separator` on a default band — are remapped to the " +
           "translucent accent-ink so the columns stay delineated on the bold " +
           "fill. That remap is SCOPED to `[data-section-band][data-tone=" +
           '"accent"]` (a bare `[data-tone="accent"]` elsewhere — e.g. an ' +
@@ -252,11 +252,11 @@ export const Accent: Story = {
     // band's translucent accent-ink (the remap landed) ─────────────────────
     //
     // The 2nd stat is NOT the row's first child, so it carries the inline-start
-    // divider. Its color must equal the resolved `--zs-section-ink-secondary`
-    // the accent band defines (NOT the plain `--zs-separator`).
+    // divider. Its color must equal the resolved `--zeroship-section-ink-secondary`
+    // the accent band defines (NOT the plain `--zeroship-separator`).
     const secondStat = stats[1];
     const accentInkSecondary = getComputedStyle(root)
-      .getPropertyValue("--zs-section-ink-secondary")
+      .getPropertyValue("--zeroship-section-ink-secondary")
       .trim();
     await expect(accentInkSecondary.length).toBeGreaterThan(0);
     await waitFor(async () => {
@@ -264,10 +264,10 @@ export const Accent: Story = {
         .borderInlineStartColor;
       // The accent-ink-secondary is a color-mix toward the accent (carries the
       // accent band's hue + alpha); assert the divider is NOT the resting
-      // `--zs-separator` value the default band would use. The separator token
+      // `--zeroship-separator` value the default band would use. The separator token
       // on a non-banded stat resolves differently, so compare the two.
       const separator = getComputedStyle(root)
-        .getPropertyValue("--zs-separator")
+        .getPropertyValue("--zeroship-separator")
         .trim();
       await expect(dividerColor.length).toBeGreaterThan(0);
       // The remap is in effect: the divider is colored, and the section-ink
@@ -281,9 +281,9 @@ export const Accent: Story = {
     // Build a standalone accent wrapper around a stat element and append it to
     // the canvas. The base `.zs-stats-band__stat` divider rule (min-width:
     // 48rem) still applies — that's the shared separator, fine — but the
-    // ACCENT remap (`--zs-section-ink-secondary`) must NOT, because the
+    // ACCENT remap (`--zeroship-section-ink-secondary`) must NOT, because the
     // selector requires `[data-section-band]`. So the bare wrapper never even
-    // defines `--zs-section-ink-secondary`.
+    // defines `--zeroship-section-ink-secondary`.
     const bareWrap = document.createElement("div");
     bareWrap.setAttribute("data-tone", "accent");
     const bareStat = document.createElement("div");
@@ -297,7 +297,7 @@ export const Accent: Story = {
       // match), so the divider could only ever fall back to the base
       // separator — never the accent remap.
       const bareInk = getComputedStyle(bareWrap)
-        .getPropertyValue("--zs-section-ink-secondary")
+        .getPropertyValue("--zeroship-section-ink-secondary")
         .trim();
       await expect(bareInk).toBe("");
     } finally {

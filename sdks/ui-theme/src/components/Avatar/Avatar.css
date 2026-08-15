@@ -37,76 +37,76 @@
 
 [data-slot="avatar"] {
   /* Default token-driven sizing — overridden per `--<size>` modifier. */
-  --zs-avatar-size: 2.5rem;
-  --zs-avatar-text-size: var(--zs-text-headline-size);
-  --zs-avatar-text-line: var(--zs-text-headline-line);
-  --zs-avatar-text-weight: var(--zs-text-headline-weight);
-  --zs-avatar-radius: var(--zs-radius-full);
+  --zeroship-avatar-size: 2.5rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-headline-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-headline-line);
+  --zeroship-avatar-text-weight: var(--zeroship-text-headline-weight);
+  --zeroship-avatar-radius: var(--zeroship-radius-full);
 
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  inline-size: var(--zs-avatar-size);
-  block-size: var(--zs-avatar-size);
-  border-radius: var(--zs-avatar-radius);
+  inline-size: var(--zeroship-avatar-size);
+  block-size: var(--zeroship-avatar-size);
+  border-radius: var(--zeroship-avatar-radius);
   overflow: hidden;
   user-select: none;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
   /* Fallback surface — translucent accent so the initials read tinted
      against any background, not as a flat solid swatch. */
-  background: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  background: color-mix(in oklch, var(--zeroship-accent) 14%, transparent);
   /* Subtle inset hairline so the lockup reads cut-out from the canvas
      under it. Same token Card edges use. */
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline)
-    color-mix(in oklch, var(--zs-label) 8%, transparent);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline)
+    color-mix(in oklch, var(--zeroship-label) 8%, transparent);
 }
 
 /* ─── Size scale ────────────────────────────────────────────────────── */
 
 [data-slot="avatar"][data-size="xs"] {
-  --zs-avatar-size: 1.5rem;
-  --zs-avatar-text-size: var(--zs-text-caption-2-size);
-  --zs-avatar-text-line: var(--zs-text-caption-2-line);
-  --zs-avatar-text-weight: 600;
+  --zeroship-avatar-size: 1.5rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-caption-2-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-caption-2-line);
+  --zeroship-avatar-text-weight: 600;
 }
 [data-slot="avatar"][data-size="sm"] {
-  --zs-avatar-size: 2rem;
-  --zs-avatar-text-size: var(--zs-text-caption-1-size);
-  --zs-avatar-text-line: var(--zs-text-caption-1-line);
-  --zs-avatar-text-weight: 600;
+  --zeroship-avatar-size: 2rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-caption-1-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-caption-1-line);
+  --zeroship-avatar-text-weight: 600;
 }
 [data-slot="avatar"][data-size="md"] {
-  --zs-avatar-size: 2.5rem;
-  --zs-avatar-text-size: var(--zs-text-footnote-size);
-  --zs-avatar-text-line: var(--zs-text-footnote-line);
-  --zs-avatar-text-weight: 600;
+  --zeroship-avatar-size: 2.5rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-footnote-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-footnote-line);
+  --zeroship-avatar-text-weight: 600;
 }
 [data-slot="avatar"][data-size="lg"] {
-  --zs-avatar-size: 3rem;
-  --zs-avatar-text-size: var(--zs-text-callout-size);
-  --zs-avatar-text-line: var(--zs-text-callout-line);
-  --zs-avatar-text-weight: 600;
+  --zeroship-avatar-size: 3rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-callout-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-callout-line);
+  --zeroship-avatar-text-weight: 600;
 }
 [data-slot="avatar"][data-size="xl"] {
-  --zs-avatar-size: 4rem;
-  --zs-avatar-text-size: var(--zs-text-headline-size);
-  --zs-avatar-text-line: var(--zs-text-headline-line);
-  --zs-avatar-text-weight: 700;
+  --zeroship-avatar-size: 4rem;
+  --zeroship-avatar-text-size: var(--zeroship-text-headline-size);
+  --zeroship-avatar-text-line: var(--zeroship-text-headline-line);
+  --zeroship-avatar-text-weight: 700;
 }
 
 /* ─── Shape scale ───────────────────────────────────────────────────── */
 
 [data-slot="avatar"][data-shape="circle"] {
-  --zs-avatar-radius: var(--zs-radius-full);
+  --zeroship-avatar-radius: var(--zeroship-radius-full);
 }
 [data-slot="avatar"][data-shape="square"] {
-  --zs-avatar-radius: 0;
+  --zeroship-avatar-radius: 0;
 }
 [data-slot="avatar"][data-shape="rounded"] {
-  --zs-avatar-radius: var(--zs-radius-2);
+  --zeroship-avatar-radius: var(--zeroship-radius-2);
 }
 
 /* ─── Image ─────────────────────────────────────────────────────────── */
@@ -119,7 +119,7 @@
   /* Inherit the Root's radius so a non-overflow-clipped image still
      reads as the right shape under print / when overflow:hidden is
      overridden by a consumer. */
-  border-radius: var(--zs-avatar-radius);
+  border-radius: var(--zeroship-avatar-radius);
 }
 
 /* ─── Fallback ──────────────────────────────────────────────────────── */
@@ -130,12 +130,12 @@
   justify-content: center;
   inline-size: 100%;
   block-size: 100%;
-  font-size: var(--zs-avatar-text-size);
-  line-height: var(--zs-avatar-text-line);
-  font-weight: var(--zs-avatar-text-weight);
+  font-size: var(--zeroship-avatar-text-size);
+  line-height: var(--zeroship-avatar-text-line);
+  font-weight: var(--zeroship-avatar-text-weight);
   letter-spacing: 0;
   text-transform: uppercase;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 
 /* ─── Group overlap ─────────────────────────────────────────────────── *
@@ -147,11 +147,11 @@
  * the lockup below — uses the canvas-mix so it inherits the parent
  * surface color (light theme on dark surface still reads). */
 [data-slot="avatar"][data-position="overlap"] {
-  margin-inline-start: calc(-1 * var(--zs-avatar-size) / 3);
+  margin-inline-start: calc(-1 * var(--zeroship-avatar-size) / 3);
   box-shadow:
-    inset 0 0 0 var(--zs-selection-hairline)
-      color-mix(in oklch, var(--zs-label) 8%, transparent),
-    0 0 0 0.125rem var(--zs-surface);
+    inset 0 0 0 var(--zeroship-selection-hairline)
+      color-mix(in oklch, var(--zeroship-label) 8%, transparent),
+    0 0 0 0.125rem var(--zeroship-surface);
 }
 
 /* ─── forced-colors / Windows High Contrast ──────────────────────────

@@ -7,7 +7,7 @@
  *   - `text`   (default): a text-line bar. `lines > 1` renders N stacked
  *                          bars with the last bar shortened so the block
  *                          reads as a paragraph.
- *   - `rect`   : a rectangle (cards, thumbnails, media). `--zs-radius-2`.
+ *   - `rect`   : a rectangle (cards, thumbnails, media). `--zeroship-radius-2`.
  *   - `circle` : a square forced to a full-radius circle (avatars).
  *
  * `width` / `height` are free CSS lengths applied as logical sizes.

@@ -180,7 +180,7 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
             // an app: a 480px control inside a 1392px field, which pushed a
             // three-control toolbar onto two lines.
             data-slot="filter-bar-search"
-            wrapperClassName="zs-filter-bar__search"
+            wrapperClassName="zeroship-filter-bar__search"
             value={search}
             onChange={(event) => onSearchChange?.(event.target.value)}
             placeholder={searchPlaceholder}

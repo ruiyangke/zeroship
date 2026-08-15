@@ -40,46 +40,46 @@
 /* ─── component-local tokens ────────────────────────────────────────── *
  *
  * Heights mirror the Button / Input / Toggle rhythm via the foundation
- * --zs-control-h-* tokens. Tab inline padding tracks Button's padding
+ * --zeroship-control-h-* tokens. Tab inline padding tracks Button's padding
  * scale so tab labels share the same rhythm as button labels. */
 [data-slot="tabs"] {
-  --zs-tabs-h-sm: var(--zs-control-h-sm);              /* 2rem */
-  --zs-tabs-h-md: var(--zs-control-h-md);              /* 2.5rem (default) */
-  --zs-tabs-h-lg: var(--zs-control-h-lg);              /* 3rem */
+  --zeroship-tabs-h-sm: var(--zeroship-control-h-sm);              /* 2rem */
+  --zeroship-tabs-h-md: var(--zeroship-control-h-md);              /* 2.5rem (default) */
+  --zeroship-tabs-h-lg: var(--zeroship-control-h-lg);              /* 3rem */
 
-  --zs-tabs-px-sm: var(--zs-control-px-sm);            /* 12 */
-  --zs-tabs-px-md: var(--zs-control-px-md);            /* 16 */
-  --zs-tabs-px-lg: var(--zs-control-px-lg);            /* 20 */
+  --zeroship-tabs-px-sm: var(--zeroship-control-px-sm);            /* 12 */
+  --zeroship-tabs-px-md: var(--zeroship-control-px-md);            /* 16 */
+  --zeroship-tabs-px-lg: var(--zeroship-control-px-lg);            /* 20 */
 
-  --zs-tabs-radius-sm: var(--zs-control-radius-sm);    /* 6 */
-  --zs-tabs-radius-md: var(--zs-control-radius-md);    /* 8 */
-  --zs-tabs-radius-lg: var(--zs-control-radius-lg);    /* 10 */
+  --zeroship-tabs-radius-sm: var(--zeroship-control-radius-sm);    /* 6 */
+  --zeroship-tabs-radius-md: var(--zeroship-control-radius-md);    /* 8 */
+  --zeroship-tabs-radius-lg: var(--zeroship-control-radius-lg);    /* 10 */
 
   /* Match Button's per-size type rhythm so a Tabs row next to a Button
      reads coherent. Same scale Toggle uses. Line-height is pinned to 1
      by the .zs-tabs-tab rule (the button uses fixed block-size for
      rhythm), so we only carry the per-size font-size tokens. */
-  --zs-tabs-font-sm: var(--zs-text-subheadline-size);
-  --zs-tabs-font-md: var(--zs-text-body-size);
-  --zs-tabs-font-lg: var(--zs-text-headline-size);
+  --zeroship-tabs-font-sm: var(--zeroship-text-subheadline-size);
+  --zeroship-tabs-font-md: var(--zeroship-text-body-size);
+  --zeroship-tabs-font-lg: var(--zeroship-text-headline-size);
 
-  --zs-tabs-gap-sm: var(--zs-space-1);                 /* 4 */
-  --zs-tabs-gap-md: var(--zs-space-2);                 /* 8 */
-  --zs-tabs-gap-lg: var(--zs-space-2);                 /* 8 */
+  --zeroship-tabs-gap-sm: var(--zeroship-space-1);                 /* 4 */
+  --zeroship-tabs-gap-md: var(--zeroship-space-2);                 /* 8 */
+  --zeroship-tabs-gap-lg: var(--zeroship-space-2);                 /* 8 */
 
   /* Underline thickness for the default variant indicator. Same hairline
      family Slice 4 uses for selection edges; a touch heavier so the
      underline reads through the focus ring. */
-  --zs-tabs-underline-thickness: 0.125rem;             /* 2 */
+  --zeroship-tabs-underline-thickness: 0.125rem;             /* 2 */
 
   /* Panel rhythm — gap between list and panel. */
-  --zs-tabs-panel-gap: var(--zs-space-4);              /* 16 */
+  --zeroship-tabs-panel-gap: var(--zeroship-space-4);              /* 16 */
 }
 
 [data-slot="tabs"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-tabs-panel-gap);
+  gap: var(--zeroship-tabs-panel-gap);
   min-inline-size: 0;
 }
 
@@ -97,7 +97,7 @@
   /* Gap between tabs — pill / card use a tighter gap because the active
      surface needs room around it; default's underline lets neighbors
      sit closer. Per-variant overrides below. */
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   /* Horizontal default — the list scrolls horizontally if it overflows
      so ManyTabs stays usable without wrapping. */
   overflow-x: auto;
@@ -120,7 +120,7 @@
   inset-inline: 0;
   inset-block-end: 0;
   block-size: 0.0625rem;
-  background-color: var(--zs-separator);
+  background-color: var(--zeroship-separator);
   pointer-events: none;
 }
 
@@ -128,26 +128,26 @@
    list paints the rail surface, individual tabs are transparent over
    it, and the active pill (the indicator) reads as a lit rectangle. */
 [data-slot="tabs-list"][data-variant="pill"] {
-  padding: var(--zs-space-1);
-  border-radius: var(--zs-tabs-radius-md);
-  background-color: var(--zs-fill-secondary);
-  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+  padding: var(--zeroship-space-1);
+  border-radius: var(--zeroship-tabs-radius-md);
+  background-color: var(--zeroship-fill-secondary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zeroship-separator);
   overflow: visible;
   gap: 0;
 }
 [data-slot="tabs-list"][data-variant="pill"][data-size="sm"] {
-  border-radius: var(--zs-tabs-radius-sm);
+  border-radius: var(--zeroship-tabs-radius-sm);
 }
 [data-slot="tabs-list"][data-variant="pill"][data-size="lg"] {
-  border-radius: var(--zs-tabs-radius-lg);
+  border-radius: var(--zeroship-tabs-radius-lg);
 }
 
 /* Card variant: each tab is its own surface; no list rail. The
    underline-style rule from `default` is suppressed for card. */
 [data-slot="tabs-list"][data-variant="card"] {
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   padding-block-end: 0;
-  border-block-end: 0.0625rem solid var(--zs-separator);
+  border-block-end: 0.0625rem solid var(--zeroship-separator);
 }
 
 /* Vertical orientation: stack the rail along the inline axis. The list
@@ -171,7 +171,7 @@
 }
 [data-slot="tabs-list"][data-orientation="vertical"][data-variant="card"] {
   border-block-end: 0;
-  border-inline-end: 0.0625rem solid var(--zs-separator);
+  border-inline-end: 0.0625rem solid var(--zeroship-separator);
 }
 
 /* ─── tab buttons ───────────────────────────────────────────────────── */
@@ -181,16 +181,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-tabs-gap-md);
-  block-size: var(--zs-tabs-h-md);
+  gap: var(--zeroship-tabs-gap-md);
+  block-size: var(--zeroship-tabs-h-md);
   padding-block: 0;
-  padding-inline: var(--zs-tabs-px-md);
+  padding-inline: var(--zeroship-tabs-px-md);
   border: 0;
-  border-radius: var(--zs-tabs-radius-md);
+  border-radius: var(--zeroship-tabs-radius-md);
   background-color: transparent;
-  color: var(--zs-label-secondary);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-tabs-font-md);
+  color: var(--zeroship-label-secondary);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-tabs-font-md);
   line-height: 1;
   font-weight: 500;
   cursor: pointer;
@@ -199,9 +199,9 @@
   white-space: nowrap;
   flex: 0 0 auto;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* Icons inside tabs scale to 1em (currentColor) — same rule Toggle uses
@@ -214,18 +214,18 @@
 
 /* Sizes — block-size + padding + font-size + radius. */
 [data-slot="tabs-tab"][data-size="sm"] {
-  block-size: var(--zs-tabs-h-sm);
-  padding-inline: var(--zs-tabs-px-sm);
-  border-radius: var(--zs-tabs-radius-sm);
-  font-size: var(--zs-tabs-font-sm);
-  gap: var(--zs-tabs-gap-sm);
+  block-size: var(--zeroship-tabs-h-sm);
+  padding-inline: var(--zeroship-tabs-px-sm);
+  border-radius: var(--zeroship-tabs-radius-sm);
+  font-size: var(--zeroship-tabs-font-sm);
+  gap: var(--zeroship-tabs-gap-sm);
 }
 [data-slot="tabs-tab"][data-size="lg"] {
-  block-size: var(--zs-tabs-h-lg);
-  padding-inline: var(--zs-tabs-px-lg);
-  border-radius: var(--zs-tabs-radius-lg);
-  font-size: var(--zs-tabs-font-lg);
-  gap: var(--zs-tabs-gap-lg);
+  block-size: var(--zeroship-tabs-h-lg);
+  padding-inline: var(--zeroship-tabs-px-lg);
+  border-radius: var(--zeroship-tabs-radius-lg);
+  font-size: var(--zeroship-tabs-font-lg);
+  gap: var(--zeroship-tabs-gap-lg);
 }
 
 /* Hover — quiet label tint so the cursor-target reads without claiming
@@ -233,13 +233,13 @@
    styling already paints stronger). */
 @media (hover: hover) {
   [data-slot="tabs-tab"]:not([data-disabled]):not([data-active]):hover {
-    color: var(--zs-label);
-    background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
+    color: var(--zeroship-label);
+    background-color: color-mix(in oklch, var(--zeroship-label) 4%, transparent);
   }
 }
 
 [data-slot="tabs-tab"]:not([data-disabled]):not([data-active]):active {
-  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
 }
 
 /* Selected — variant-specific. Default deepens the ink to the
@@ -247,7 +247,7 @@
    Pill paints the accent fill on the tab itself. Card raises the tab
    into the panel surface. */
 [data-slot="tabs-tab"][data-active] {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   font-weight: 600;
 }
 
@@ -255,17 +255,17 @@
    treatment Toggle pressed uses. The indicator sits BEHIND the tab
    button via z-index so the label paints over the colored pill. */
 [data-slot="tabs-tab"][data-variant="pill"][data-active] {
-  color: var(--zs-accent-ink);
-  background-color: var(--zs-accent);
+  color: var(--zeroship-accent-ink);
+  background-color: var(--zeroship-accent);
   z-index: 1;
 }
 @media (hover: hover) {
   [data-slot="tabs-tab"][data-variant="pill"][data-active]:not([data-disabled]):hover {
-    background-color: var(--zs-accent-hover);
+    background-color: var(--zeroship-accent-hover);
   }
 }
 [data-slot="tabs-tab"][data-variant="pill"][data-active]:not([data-disabled]):active {
-  background-color: var(--zs-accent-active);
+  background-color: var(--zeroship-accent-active);
 }
 
 /* Card variant: every tab gets a card-shape surface; the active one
@@ -273,11 +273,11 @@
    subtle fill; active tabs paint the surface color and pull the
    bottom edge under the panel. */
 [data-slot="tabs-tab"][data-variant="card"] {
-  background-color: var(--zs-fill-quaternary);
-  border: 0.0625rem solid var(--zs-separator);
+  background-color: var(--zeroship-fill-quaternary);
+  border: 0.0625rem solid var(--zeroship-separator);
   border-block-end: 0;
-  border-start-start-radius: var(--zs-tabs-radius-md);
-  border-start-end-radius: var(--zs-tabs-radius-md);
+  border-start-start-radius: var(--zeroship-tabs-radius-md);
+  border-start-end-radius: var(--zeroship-tabs-radius-md);
   border-end-start-radius: 0;
   border-end-end-radius: 0;
   /* Pull each card tab down one hairline so the bottom rule of the list
@@ -286,15 +286,15 @@
   margin-block-end: -0.0625rem;
 }
 [data-slot="tabs-tab"][data-variant="card"][data-size="sm"] {
-  border-start-start-radius: var(--zs-tabs-radius-sm);
-  border-start-end-radius: var(--zs-tabs-radius-sm);
+  border-start-start-radius: var(--zeroship-tabs-radius-sm);
+  border-start-end-radius: var(--zeroship-tabs-radius-sm);
 }
 [data-slot="tabs-tab"][data-variant="card"][data-size="lg"] {
-  border-start-start-radius: var(--zs-tabs-radius-lg);
-  border-start-end-radius: var(--zs-tabs-radius-lg);
+  border-start-start-radius: var(--zeroship-tabs-radius-lg);
+  border-start-end-radius: var(--zeroship-tabs-radius-lg);
 }
 [data-slot="tabs-tab"][data-variant="card"][data-active] {
-  background-color: var(--zs-surface);
+  background-color: var(--zeroship-surface);
   /* Selected card aligns its bottom edge to the panel surface — the
      hairline negative margin above already does that; here we just lift
      the z-index so the surface paints over the list's bottom rule. */
@@ -304,22 +304,22 @@
 /* Vertical card tabs: rotate the border-side trick — strip the inline-
    end border and pull margin-inline-end instead. */
 [data-slot="tabs-tab"][data-variant="card"][data-orientation="vertical"] {
-  border-block-end: 0.0625rem solid var(--zs-separator);
+  border-block-end: 0.0625rem solid var(--zeroship-separator);
   border-inline-end: 0;
-  border-start-start-radius: var(--zs-tabs-radius-md);
+  border-start-start-radius: var(--zeroship-tabs-radius-md);
   border-start-end-radius: 0;
-  border-end-start-radius: var(--zs-tabs-radius-md);
+  border-end-start-radius: var(--zeroship-tabs-radius-md);
   border-end-end-radius: 0;
   margin-block-end: 0;
   margin-inline-end: -0.0625rem;
 }
 [data-slot="tabs-tab"][data-variant="card"][data-orientation="vertical"][data-size="sm"] {
-  border-start-start-radius: var(--zs-tabs-radius-sm);
-  border-end-start-radius: var(--zs-tabs-radius-sm);
+  border-start-start-radius: var(--zeroship-tabs-radius-sm);
+  border-end-start-radius: var(--zeroship-tabs-radius-sm);
 }
 [data-slot="tabs-tab"][data-variant="card"][data-orientation="vertical"][data-size="lg"] {
-  border-start-start-radius: var(--zs-tabs-radius-lg);
-  border-end-start-radius: var(--zs-tabs-radius-lg);
+  border-start-start-radius: var(--zeroship-tabs-radius-lg);
+  border-end-start-radius: var(--zeroship-tabs-radius-lg);
 }
 
 /* Focus ring uses outline (not box-shadow) so it matches the Toggle /
@@ -331,15 +331,15 @@
    overflow on the list + a separate scroll wrapper) trades a worse
    layout for a marginal focus-ring win. */
 [data-slot="tabs-tab"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* Disabled — quiet. The tab still occupies its slot in the list but
    reads inactive. Roving focus skips it (Base UI handles that). */
 [data-slot="tabs-tab"][data-disabled] {
   cursor: not-allowed;
-  color: var(--zs-label-quaternary);
+  color: var(--zeroship-label-quaternary);
   background-color: transparent;
 }
 
@@ -360,11 +360,11 @@
      story. Transition the same physical properties so the slide
      animation tracks the actual moving values. */
   transition:
-    left var(--zs-motion-base) var(--zs-motion-ease),
-    top var(--zs-motion-base) var(--zs-motion-ease),
-    inline-size var(--zs-motion-base) var(--zs-motion-ease),
-    block-size var(--zs-motion-base) var(--zs-motion-ease),
-    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+    left var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    top var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    inline-size var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    block-size var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* Default variant indicator — underline under the active tab. */
@@ -372,9 +372,9 @@
   left: var(--active-tab-left);
   inset-block-end: 0;
   inline-size: var(--active-tab-width);
-  block-size: var(--zs-tabs-underline-thickness);
-  background-color: var(--zs-accent);
-  border-radius: var(--zs-tabs-underline-thickness);
+  block-size: var(--zeroship-tabs-underline-thickness);
+  background-color: var(--zeroship-accent);
+  border-radius: var(--zeroship-tabs-underline-thickness);
 }
 
 /* Vertical default indicator — vertical bar along the inline-end edge
@@ -387,7 +387,7 @@
   inset-inline-end: 0;
   top: var(--active-tab-top);
   inset-block-end: auto;
-  inline-size: var(--zs-tabs-underline-thickness);
+  inline-size: var(--zeroship-tabs-underline-thickness);
   block-size: var(--active-tab-height);
 }
 
@@ -407,15 +407,15 @@
   top: var(--active-tab-top);
   inline-size: var(--active-tab-width);
   block-size: var(--active-tab-height);
-  background-color: var(--zs-accent);
-  border-radius: var(--zs-tabs-radius-md);
+  background-color: var(--zeroship-accent);
+  border-radius: var(--zeroship-tabs-radius-md);
   z-index: 0;
 }
 [data-slot="tabs-indicator"][data-variant="pill"][data-size="sm"] {
-  border-radius: calc(var(--zs-tabs-radius-sm) - 0.0625rem);
+  border-radius: calc(var(--zeroship-tabs-radius-sm) - 0.0625rem);
 }
 [data-slot="tabs-indicator"][data-variant="pill"][data-size="lg"] {
-  border-radius: var(--zs-tabs-radius-lg);
+  border-radius: var(--zeroship-tabs-radius-lg);
 }
 
 /* Card variant: no separate indicator (the card tab's own surface IS
@@ -430,17 +430,17 @@
 [data-slot="tabs-panel"] {
   flex: 1 1 auto;
   min-inline-size: 0;
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
 }
 
 [data-slot="tabs-panel"][data-variant="card"] {
-  padding: var(--zs-space-5);
-  background-color: var(--zs-surface);
-  border: 0.0625rem solid var(--zs-separator);
-  border-radius: var(--zs-radius-5);
+  padding: var(--zeroship-space-5);
+  background-color: var(--zeroship-surface);
+  border: 0.0625rem solid var(--zeroship-separator);
+  border-radius: var(--zeroship-radius-5);
   /* Card panel meets the active tab — strip the top radius so the
      active tab merges into it. */
   border-start-start-radius: 0;
@@ -448,9 +448,9 @@
 }
 [data-slot="tabs-panel"][data-variant="card"][data-orientation="vertical"] {
   border-start-start-radius: 0;
-  border-start-end-radius: var(--zs-radius-5);
+  border-start-end-radius: var(--zeroship-radius-5);
   border-end-start-radius: 0;
-  border-end-end-radius: var(--zs-radius-5);
+  border-end-end-radius: var(--zeroship-radius-5);
 }
 
 /* Hidden panels — Base UI sets `hidden` on the panel element when its
@@ -539,7 +539,7 @@
     border-color: CanvasText;
     background-color: Canvas;
   }
-  /* Pill-variant list rail paints `var(--zs-fill-secondary)` at higher
+  /* Pill-variant list rail paints `var(--zeroship-fill-secondary)` at higher
      specificity than the base reset; surface it on Canvas in HC. */
   [data-slot="tabs-list"][data-variant="pill"] {
     background-color: Canvas;

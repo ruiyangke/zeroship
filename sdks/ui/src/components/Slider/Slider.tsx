@@ -312,9 +312,9 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
     // Value-label thumb-tracking (Slice 7 visual-polish item 1).
     //
     // Compute the active thumb's percentage and emit it as the
-    // `--zs-slider-value-position` custom property on the Root. The
+    // `--zeroship-slider-value-position` custom property on the Root. The
     // value badge (`[data-slot="slider-value"]`) consumes it via
-    // `inset-inline-start: var(--zs-slider-value-position, 50%)` so the
+    // `inset-inline-start: var(--zeroship-slider-value-position, 50%)` so the
     // "60%" output floats above the thumb instead of pinning to the
     // top-right corner of the grid row.
     //
@@ -346,11 +346,11 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
       const clamped = Math.max(0, Math.min(1, ratio));
       const percent = clamped * 100;
       valuePositionStyle = {
-        ["--zs-slider-value-position" as string]: `${percent}%`,
+        ["--zeroship-slider-value-position" as string]: `${percent}%`,
       };
     }
 
-    // Merge the caller's `style` with our `--zs-slider-value-position`
+    // Merge the caller's `style` with our `--zeroship-slider-value-position`
     // custom property. Spreading `rest` after destructuring would
     // re-introduce the caller's style and clobber the custom property;
     // explicitly destructure here and rebuild the style attr so both

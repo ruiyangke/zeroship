@@ -88,27 +88,27 @@ button { font-family: inherit; font-size: 0.88rem; }
    dual-edge bug above happened; there is only ever one edge here. */
 .app-field-shell {
   border: none;
-  border-radius: var(--zs-control-radius-md);
-  background: var(--zs-input-bg);
-  color: var(--zs-input-ink);
+  border-radius: var(--zeroship-control-radius-md);
+  background: var(--zeroship-input-bg);
+  color: var(--zeroship-input-ink);
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border),
     0 0 0 0 transparent;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 /* `:focus-within`, not `:focus-visible`. The editor's focus lands on a
    contenteditable child, so a rule keyed on the shell itself never fires --
    which is exactly why the comment box, the most-used control on the bug
    page, measured byte-identical at rest and focused. */
 .app-field-shell:focus-within {
-  background: var(--zs-input-bg-focus);
+  background: var(--zeroship-input-bg-focus);
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-focus),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 .app-textarea {
   font: inherit;
@@ -1334,8 +1334,8 @@ fieldset.issue-detail-extras { display: grid; }
    ==========================================================
    [data-slot="input"][data-focused] sets TWO shadow layers on the wrapper:
 
-     inset 0 0 0 0.0625rem var(--zs-input-border-focus)   <- accent hairline
-     0 0 0 0.1875rem var(--zs-input-focus-ring-color)     <- soft 16% halo
+     inset 0 0 0 0.0625rem var(--zeroship-input-border-focus)   <- accent hairline
+     0 0 0 0.1875rem var(--zeroship-input-focus-ring-color)     <- soft 16% halo
 
    and [data-slot="input-control"] sets outline:none deliberately, so the wrapper
    owns the ring and the slots and the control share it.

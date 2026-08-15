@@ -140,8 +140,8 @@ export const Accent: Story = {
     docs: {
       description: {
         story:
-          "The `accent` tone fills the WHOLE band with `--zs-accent` and remaps " +
-          "every inner ink (eyebrow / title / description) to `--zs-accent-ink` " +
+          "The `accent` tone fills the WHOLE band with `--zeroship-accent` and remaps " +
+          "every inner ink (eyebrow / title / description) to `--zeroship-accent-ink` " +
           "for the bold closing statement — the same accent-ink-on-accent " +
           "pairing Button.filled ships axe-clean. The default (`filled`) CTA " +
           "Button INVERTS on the accent band — it becomes a solid accent-ink " +

@@ -64,7 +64,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic avatar">
+    <div className="zeroship-story-row" role="group" aria-label="Basic avatar">
       <Avatar
         src={AVATAR_DATA_URL}
         alt="Ada Lovelace"
@@ -98,7 +98,7 @@ export const Fallback: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Fallback only">
+    <div className="zeroship-story-row" role="group" aria-label="Fallback only">
       <Avatar fallback="AL" data-testid="avatar-fallback-only" />
     </div>
   ),
@@ -139,7 +139,7 @@ export const FallbackOnError: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Fallback on error">
+    <div className="zeroship-story-row" role="group" aria-label="Fallback on error">
       <Avatar
         src={BROKEN_SRC}
         alt="Broken portrait"
@@ -192,7 +192,7 @@ export const DecorativeFallback: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Decorative fallback"
     >
@@ -242,7 +242,7 @@ export const FallbackDelay: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Fallback delay non-zero"
     >
@@ -290,7 +290,7 @@ export const Sizes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Sizes">
+    <div className="zeroship-story-row" role="group" aria-label="Sizes">
       <Avatar size="xs" fallback="XS" data-testid="avatar-size-xs" />
       <Avatar size="sm" fallback="SM" data-testid="avatar-size-sm" />
       <Avatar size="md" fallback="MD" data-testid="avatar-size-md" />
@@ -321,7 +321,7 @@ export const Shapes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Shapes">
+    <div className="zeroship-story-row" role="group" aria-label="Shapes">
       <Avatar shape="circle" fallback="CI" data-testid="avatar-shape-circle" />
       <Avatar shape="square" fallback="SQ" data-testid="avatar-shape-square" />
       <Avatar
@@ -361,7 +361,7 @@ export const WithIcon: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Icon fallback">
+    <div className="zeroship-story-row" role="group" aria-label="Icon fallback">
       <Avatar
         size="lg"
         fallback={<UserGlyph />}
@@ -392,7 +392,7 @@ export const Group: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Avatar group">
+    <div className="zeroship-story-row" role="group" aria-label="Avatar group">
       <div
         style={{ display: "inline-flex" }}
         data-testid="avatar-group"
@@ -440,7 +440,7 @@ export const RTL: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL avatars"
       dir="rtl"

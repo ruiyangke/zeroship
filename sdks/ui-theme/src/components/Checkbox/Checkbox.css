@@ -22,7 +22,7 @@
  *      user does.
  *
  *   2. Checked is the SYSTEM accent — we don't recolor it by default.
- *      Overriding via --zs-checkbox-fill-checked is the consumer's
+ *      Overriding via --zeroship-checkbox-fill-checked is the consumer's
  *      escape hatch; the default keeps the system-control affordance.
  *
  *   3. Hit target ≥ 1.75rem no matter how small the visible chip is.
@@ -63,29 +63,29 @@
      Earlier the chip sizes were hand-tuned constants that read nearly
      identical across sm/md/lg — codex flagged the family as visually
      indistinguishable from the size capture. */
-  --zs-checkbox-size-sm: calc(var(--zs-control-h-sm) / 2);   /* 1rem    — half of 2rem */
-  --zs-checkbox-size-md: calc(var(--zs-control-h-md) / 2);   /* 1.25rem — half of 2.5rem (default) */
-  --zs-checkbox-size-lg: calc(var(--zs-control-h-lg) / 2);   /* 1.5rem  — half of 3rem */
+  --zeroship-checkbox-size-sm: calc(var(--zeroship-control-h-sm) / 2);   /* 1rem    — half of 2rem */
+  --zeroship-checkbox-size-md: calc(var(--zeroship-control-h-md) / 2);   /* 1.25rem — half of 2.5rem (default) */
+  --zeroship-checkbox-size-lg: calc(var(--zeroship-control-h-lg) / 2);   /* 1.5rem  — half of 3rem */
 
   /* Default palette: accent fill when checked, label-mix border when
-     unchecked. Override --zs-checkbox-fill-checked to recolor (rare). */
-  --zs-checkbox-bg: var(--zs-input-bg);
-  --zs-checkbox-bg-hover: var(--zs-input-bg-hover);
-  --zs-checkbox-border: var(--zs-input-border);
-  --zs-checkbox-border-hover: var(--zs-input-border-hover);
-  --zs-checkbox-fill-checked: var(--zs-accent);
-  --zs-checkbox-ink-checked: var(--zs-accent-ink);
-  --zs-checkbox-border-checked: var(--zs-accent);
+     unchecked. Override --zeroship-checkbox-fill-checked to recolor (rare). */
+  --zeroship-checkbox-bg: var(--zeroship-input-bg);
+  --zeroship-checkbox-bg-hover: var(--zeroship-input-bg-hover);
+  --zeroship-checkbox-border: var(--zeroship-input-border);
+  --zeroship-checkbox-border-hover: var(--zeroship-input-border-hover);
+  --zeroship-checkbox-fill-checked: var(--zeroship-accent);
+  --zeroship-checkbox-ink-checked: var(--zeroship-accent-ink);
+  --zeroship-checkbox-border-checked: var(--zeroship-accent);
 
   /* Tinted variant softens the unchecked surface so it reads as
      "secondary affordance" on loud parents. Border tokens (slice-4
      visual-polish item 3) restore a hairline edge — earlier the tinted
      unchecked chip dropped its border entirely and on the crystal
      surface read close to disabled. */
-  --zs-checkbox-bg-tinted: var(--zs-fill-tertiary);
-  --zs-checkbox-bg-tinted-hover: var(--zs-fill-secondary);
-  --zs-checkbox-border-tinted: var(--zs-fill-secondary);
-  --zs-checkbox-border-tinted-hover: var(--zs-fill);
+  --zeroship-checkbox-bg-tinted: var(--zeroship-fill-tertiary);
+  --zeroship-checkbox-bg-tinted-hover: var(--zeroship-fill-secondary);
+  --zeroship-checkbox-border-tinted: var(--zeroship-fill-secondary);
+  --zeroship-checkbox-border-tinted-hover: var(--zeroship-fill);
 }
 
 /* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
@@ -95,18 +95,18 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-checkbox-size-md);
-  block-size: var(--zs-checkbox-size-md);
-  border-radius: var(--zs-radius-1);
-  background-color: var(--zs-checkbox-bg);
-  color: var(--zs-checkbox-ink-checked);
+  inline-size: var(--zeroship-checkbox-size-md);
+  block-size: var(--zeroship-checkbox-size-md);
+  border-radius: var(--zeroship-radius-1);
+  background-color: var(--zeroship-checkbox-bg);
+  color: var(--zeroship-checkbox-ink-checked);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
+    inset 0 0 0 0.0625rem var(--zeroship-checkbox-border),
     0 0 0 0 transparent;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   cursor: pointer;
 }
 
@@ -135,27 +135,27 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  min-inline-size: var(--zs-hit-target, 1.75rem);
-  min-block-size: var(--zs-hit-target, 1.75rem);
+  min-inline-size: var(--zeroship-hit-target, 1.75rem);
+  min-block-size: var(--zeroship-hit-target, 1.75rem);
   inline-size: 100%;
   block-size: 100%;
   pointer-events: auto;
 }
 @media (pointer: coarse) {
   [data-slot="checkbox"]::before {
-    --zs-hit-target: var(--zs-hit-min);
+    --zeroship-hit-target: var(--zeroship-hit-min);
   }
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
 [data-slot="checkbox"][data-size="sm"] {
-  inline-size: var(--zs-checkbox-size-sm);
-  block-size: var(--zs-checkbox-size-sm);
+  inline-size: var(--zeroship-checkbox-size-sm);
+  block-size: var(--zeroship-checkbox-size-sm);
 }
 [data-slot="checkbox"][data-size="lg"] {
-  inline-size: var(--zs-checkbox-size-lg);
-  block-size: var(--zs-checkbox-size-lg);
-  border-radius: var(--zs-radius-2);
+  inline-size: var(--zeroship-checkbox-size-lg);
+  block-size: var(--zeroship-checkbox-size-lg);
+  border-radius: var(--zeroship-radius-2);
 }
 
 /* ─── variants ──────────────────────────────────────────────────────── *
@@ -167,24 +167,24 @@
  * default unchecked (with hairline) and the disabled state on crystal,
  * making it unclear which affordance the user was looking at. */
 [data-slot="checkbox"][data-variant="tinted"] {
-  background-color: var(--zs-checkbox-bg-tinted);
+  background-color: var(--zeroship-checkbox-bg-tinted);
   box-shadow:
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted),
+    inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-checkbox-border-tinted),
     0 0 0 0 transparent;
 }
 
 /* ─── hover (hover-capable pointers only) ──────────────────────────── */
 @media (hover: hover) {
   [data-slot="checkbox"]:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
-    background-color: var(--zs-checkbox-bg-hover);
+    background-color: var(--zeroship-checkbox-bg-hover);
     box-shadow:
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-hover),
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-checkbox-border-hover),
       0 0 0 0 transparent;
   }
   [data-slot="checkbox"][data-variant="tinted"]:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
-    background-color: var(--zs-checkbox-bg-tinted-hover);
+    background-color: var(--zeroship-checkbox-bg-tinted-hover);
     box-shadow:
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted-hover),
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-checkbox-border-tinted-hover),
       0 0 0 0 transparent;
   }
 }
@@ -192,9 +192,9 @@
 /* ─── checked + indeterminate share the accent fill ─────────────────── */
 [data-slot="checkbox"][data-checked],
 [data-slot="checkbox"][data-indeterminate] {
-  background-color: var(--zs-checkbox-fill-checked);
+  background-color: var(--zeroship-checkbox-fill-checked);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-checkbox-border-checked),
+    inset 0 0 0 0.0625rem var(--zeroship-checkbox-border-checked),
     0 0 0 0 transparent;
 }
 
@@ -206,23 +206,23 @@
  * when checked/indeterminate already use box-shadow for the inner
  * border. The forced-colors fallback inherits this. */
 [data-slot="checkbox"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
 [data-slot="checkbox"][data-disabled] {
-  background-color: var(--zs-input-bg-disabled);
-  color: var(--zs-label-tertiary);
+  background-color: var(--zeroship-input-bg-disabled);
+  color: var(--zeroship-label-tertiary);
   cursor: not-allowed;
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
+    inset 0 0 0 0.0625rem var(--zeroship-checkbox-border),
     0 0 0 0 transparent;
 }
 [data-slot="checkbox"][data-disabled][data-checked],
 [data-slot="checkbox"][data-disabled][data-indeterminate] {
-  background-color: var(--zs-fill-secondary);
-  color: var(--zs-label-tertiary);
+  background-color: var(--zeroship-fill-secondary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* ─── readonly — distinct from disabled: the value is presented but
@@ -243,15 +243,15 @@
   cursor: default;
 }
 [data-slot="checkbox"][data-readonly]:not([data-checked]):not([data-indeterminate]) {
-  background-color: var(--zs-selection-bg-readonly);
-  color: var(--zs-selection-ink-readonly);
+  background-color: var(--zeroship-selection-bg-readonly);
+  color: var(--zeroship-selection-ink-readonly);
 }
 [data-slot="checkbox"][data-readonly][data-checked],
 [data-slot="checkbox"][data-readonly][data-indeterminate] {
-  background-color: var(--zs-selection-bg-readonly);
-  color: var(--zs-accent);
+  background-color: var(--zeroship-selection-bg-readonly);
+  color: var(--zeroship-accent);
   box-shadow:
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent),
+    inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent),
     0 0 0 0 transparent;
 }
 
@@ -287,7 +287,7 @@
   block-size: 75%;
   display: block;
   opacity: 0;
-  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="checkbox"][data-checked]:not([data-indeterminate]) [data-slot="checkbox-indicator"] [data-glyph="check"] {
   opacity: 1;
@@ -319,13 +319,13 @@
  * chip stays legible and the checked state stays announced visually.
  *
  * SPECIFICITY MIRROR: every normal-mode state selector that paints
- * --zs-* tokens has a forced-colors counterpart at equal or greater
+ * --zeroship-* tokens has a forced-colors counterpart at equal or greater
  * specificity. Earlier the block only carried the base/checked/
  * indeterminate/disabled selectors at (0,1,1) and (0,2,1) — but the
  * normal-mode rules for `data-disabled + data-checked`,
  * `data-disabled + data-indeterminate`, and the readonly variants sit
  * at the SAME or higher specificity, so they kept painting accent
- * tokens (var(--zs-fill-secondary), var(--zs-accent)) under high
+ * tokens (var(--zeroship-fill-secondary), var(--zeroship-accent)) under high
  * contrast, defeating the system-color contract. Wave-7 review
  * regression: a disabled-checked chip in HC mode still read as the
  * normal accent fill instead of the GrayText border + Canvas fill the

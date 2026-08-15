@@ -26,17 +26,17 @@ export const Sizes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Spinner sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">sm</span>
+    <div className="zeroship-story-row" role="group" aria-label="Spinner sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">sm</span>
         <Spinner size="sm" label="Loading small" data-testid="spinner-sm" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">md</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">md</span>
         <Spinner size="md" label="Loading medium" data-testid="spinner-md" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">lg</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">lg</span>
         <Spinner size="lg" label="Loading large" data-testid="spinner-lg" />
       </div>
     </div>
@@ -74,8 +74,8 @@ export const DefaultLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Default spinner">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Default spinner">
+      <div className="zeroship-story-cell">
         <Spinner data-testid="spinner-default" />
       </div>
     </div>
@@ -107,8 +107,8 @@ export const ConsumerAriaLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Named spinner">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Named spinner">
+      <div className="zeroship-story-cell">
         <Spinner aria-label="Saving changes" data-testid="spinner-named" />
       </div>
     </div>
@@ -143,8 +143,8 @@ export const ReducedMotion: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Reduced-motion spinner">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Reduced-motion spinner">
+      <div className="zeroship-story-cell">
         <Spinner label="Loading content" data-testid="spinner-rm" />
       </div>
     </div>

@@ -61,7 +61,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-basic"
         caption="Team members"
@@ -92,7 +92,7 @@ export const Sortable: Story = {
   render: function SortableRender(args) {
     const [sort, setSort] = useState<DataTableSort | null>(null);
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-sortable"
           caption="Sort by clicking a header"
@@ -154,7 +154,7 @@ export const SelectableMultiple: Story = {
   render: function SelectableRender(args) {
     const [selected, setSelected] = useState<string[]>(["u_offpage", "u_ada"]);
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-selectable"
           caption="Select rows"
@@ -220,7 +220,7 @@ export const Empty: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-empty"
         caption="No members yet"
@@ -249,7 +249,7 @@ export const Loading: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-loading"
         caption="Loading members"
@@ -292,7 +292,7 @@ export const StickyHeader: Story = {
     }));
     return (
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{
           padding: "1rem",
           maxInlineSize: "48rem",
@@ -341,7 +341,7 @@ export const DensityCompact: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-compact"
         caption="Compact density"
@@ -380,7 +380,7 @@ export const Managed: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-managed"
         caption="25 members — searchable, sortable, paginated"
@@ -517,7 +517,7 @@ export const RichColumns: Story = {
       },
     ];
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "52rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "52rem" }}>
         <DataTable<Invoice>
           data-testid="dt-rich"
           caption="Invoices"
@@ -592,7 +592,7 @@ export const ManualServerSide: Story = {
       { id: "s_2", name: "Server Row B", role: "Analyst", commits: 22 },
     ];
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-manual"
           caption="Server-side paged data"
@@ -681,7 +681,7 @@ export const GlobalFilterEmpty: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-filter-empty"
         caption="Searchable team"
@@ -721,7 +721,7 @@ export const ColumnFilters: Story = {
   render: function ColumnFiltersRender() {
     const [filters, setFilters] = useState<DataTableColumnFilters>({});
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-colfilter"
           caption="Filter by column"
@@ -762,7 +762,7 @@ export const PageClamp: Story = {
     // 25 rows, pageSize 10 → 3 pages. Controlled page 9 is out of range.
     const [page] = useState(9);
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-pageclamp"
           caption="Controlled page beyond the last page"
@@ -820,7 +820,7 @@ export const NonFilterableIgnored: Story = {
       role: "Engineer",
     });
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Person>
           data-testid="dt-nonfilterable"
           caption="Filter on a non-filterable column is ignored"
@@ -882,7 +882,7 @@ export const GlobalSearchNonString: Story = {
       { key: "ends", header: "Ends", type: "date" },
     ];
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
         <DataTable<Event>
           data-testid="dt-globalsearch-nonstring"
           caption="Search a non-string column"
@@ -930,7 +930,7 @@ export const FractionalPageSize: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-fractional-pagesize"
         caption="25 members — fractional pageSize (12.5)"
@@ -966,7 +966,7 @@ export const FractionalPageSize: Story = {
 /* ─── 18. BooleanAndDangerInk (🔴 1 regression) ─────────────────────────
  * The "true" boolean glyph must paint system-green and the destructive
  * row-action must paint system-red. Pre-fix the CSS referenced
- * `--zs-success` / `--zs-danger` — tokens defined NOWHERE — so both
+ * `--zeroship-success` / `--zeroship-danger` — tokens defined NOWHERE — so both
  * silently fell back to the inherited ink (grey), losing the colour cue.
  * The play() resolves each system token via a probe element (getComputedStyle
  * normalises the token to the same rgb() the browser computes for the
@@ -1005,16 +1005,16 @@ export const BooleanAndDangerInk: Story = {
       },
     ];
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
         {/* Probes resolve each system token to the rgb() the browser computes
             so the assertion never hardcodes an oklch→rgb conversion. */}
         <span
           data-testid="probe-green"
-          style={{ color: "var(--zs-system-green)" }}
+          style={{ color: "var(--zeroship-system-green)" }}
         />
         <span
           data-testid="probe-red"
-          style={{ color: "var(--zs-system-red)" }}
+          style={{ color: "var(--zeroship-system-red)" }}
         />
         <DataTable<InkRow>
           data-testid="dt-ink"
@@ -1086,7 +1086,7 @@ export const BooleanAndDangerInk: Story = {
  * flush beneath the header band — even when a header label WRAPS to two
  * lines (taller than the old hardcoded 2.5rem fallback). Pre-fix the filter
  * row's `inset-block-start` was stuck at 2.5rem (the
- * `--zs-data-table-header-offset` custom property was never set), so a
+ * `--zeroship-data-table-header-offset` custom property was never set), so a
  * wrapping header left a gap/overlap. Post-fix a ResizeObserver measures the
  * header height and publishes it as the offset on the scroll container. */
 const STICKY_OFFSET_ROWS: Person[] = Array.from({ length: 24 }, (_, i) => ({
@@ -1120,7 +1120,7 @@ export const StickyTwoRowHeaderOffset: Story = {
     ];
     return (
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{
           padding: "1rem",
           maxInlineSize: "32rem",
@@ -1213,7 +1213,7 @@ export const TruncateClamps: Story = {
       },
     ];
     return (
-      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "20rem" }}>
         <DataTable<DocRow>
           data-testid="dt-truncate"
           caption="Truncating column"
@@ -1267,7 +1267,7 @@ export const ManualFilteringWithoutPagination: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+    <div className="zeroship-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
       <DataTable<Person>
         data-testid="dt-manualfilter-nopag"
         caption="manualFiltering without manualPagination"

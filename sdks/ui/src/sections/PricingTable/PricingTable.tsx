@@ -47,7 +47,7 @@
  *     holding a `Grid` of tier cards. The Grid carries N columns at wide
  *     widths (N = tier count, capped at 4 so 5+ tiers wrap rather than
  *     shrink to slivers); the `Grid` primitive itself owns the collapse to
- *     a SINGLE stacked column below `--zs-bp-md` (its responsive base count
+ *     a SINGLE stacked column below `--zeroship-bp-md` (its responsive base count
  *     is 1; `columns={{ md }}` only promotes at ≥ the breakpoint), so this
  *     band adds no local collapse override.
  *   - Every tier `Card` is `align-items: stretch` in its track so the
@@ -207,7 +207,7 @@ export interface PricingTableProps
   description?: ReactNode;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `lg`.
    */
   size?: ContainerSize;
@@ -224,8 +224,8 @@ export interface PricingTableProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel behind the tier cards.
-   * - `accent`: an `--zs-accent` fill with the lead-in ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band.
+   * - `accent`: an `--zeroship-accent` fill with the lead-in ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band.
    */
   tone?: SectionTone;
 
@@ -570,7 +570,7 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
 
     // Responsive column count: one column per tier, capped at MAX_COLUMNS so
     // 5+ tiers wrap rather than shrink to slivers. The Grid promotes to this
-    // count at the --zs-bp-md breakpoint and up; below it the Grid primitive
+    // count at the --zeroship-bp-md breakpoint and up; below it the Grid primitive
     // itself collapses to a single stacked column (its responsive base count
     // is 1), so no local override is needed.
     const columnCount = Math.min(Math.max(allTiers.length, 1), MAX_COLUMNS);

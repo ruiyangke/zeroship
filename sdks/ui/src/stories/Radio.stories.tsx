@@ -33,8 +33,8 @@ export const TwoOptions: Story = {
   },
   render: function TwoOptionsRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Two options">
-        <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Two options">
+        <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
           <Radio.Group
             defaultValue="email"
             name="contact-method"
@@ -77,8 +77,8 @@ export const FiveOptions: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Five options">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Five options">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>Plan</Field.Label>
           <Radio.Group defaultValue="pro" name="plan">
@@ -107,8 +107,8 @@ export const Horizontal: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Horizontal layout">
-      <div className="zs-story-cell" style={{ maxWidth: "32rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Horizontal layout">
+      <div className="zeroship-story-cell" style={{ maxWidth: "32rem" }}>
         <Field>
           <Field.Label>Workspace visibility</Field.Label>
           <Radio.Group
@@ -130,23 +130,23 @@ export const Horizontal: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All radio sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+    <div className="zeroship-story-row" role="group" aria-label="All radio sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Radio.Group size="sm" defaultValue="a" name="sizes-sm">
           <Radio value="a" label="Alpha" />
           <Radio value="b" label="Bravo" />
         </Radio.Group>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Radio.Group size="md" defaultValue="a" name="sizes-md">
           <Radio value="a" label="Alpha" />
           <Radio value="b" label="Bravo" />
         </Radio.Group>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Radio.Group size="lg" defaultValue="a" name="sizes-lg">
           <Radio value="a" label="Alpha" />
           <Radio value="b" label="Bravo" />
@@ -170,8 +170,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ maxWidth: "24rem" }}>
         <Field>
           <Field.Label>Theme</Field.Label>
           <Radio.Group defaultValue="system" name="theme">
@@ -189,8 +189,8 @@ export const WithLabel: Story = {
 export const WithDescription: Story = {
   name: "With description",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With description">
-      <div className="zs-story-cell" style={{ maxWidth: "26rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With description">
+      <div className="zeroship-story-cell" style={{ maxWidth: "26rem" }}>
         <Field>
           <Field.Label>Deploy target</Field.Label>
           <Radio.Group defaultValue="prod" name="deploy-target">
@@ -223,9 +223,9 @@ export const Required: Story = {
   },
   render: function RequiredRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Required radio">
+      <div className="zeroship-story-row" role="group" aria-label="Required radio">
         <Form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             e.preventDefault();
@@ -308,9 +308,9 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required radio (invalid)">
+      <div className="zeroship-story-row" role="group" aria-label="Required radio (invalid)">
         <Form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             e.preventDefault();
@@ -359,8 +359,8 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled group">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled group">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>Plan</Field.Label>
           <Radio.Group disabled defaultValue="pro" name="disabled-group">
@@ -402,8 +402,8 @@ export const DisabledItem: Story = {
   render: function DisabledItemRender() {
     const [value, setValue] = useState("pro");
     return (
-      <div className="zs-story-row" role="group" aria-label="Disabled item">
-        <div className="zs-story-cell" style={{ maxWidth: "26rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Disabled item">
+        <div className="zeroship-story-cell" style={{ maxWidth: "26rem" }}>
           <Field>
             <Field.Label>Plan</Field.Label>
             <Radio.Group
@@ -450,8 +450,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL radio group">
-      <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL radio group">
+      <div className="zeroship-story-cell" style={{ maxWidth: "24rem" }}>
         <Field>
           <Field.Label>שפת ממשק</Field.Label>
           <Radio.Group defaultValue="he" name="language-rtl">

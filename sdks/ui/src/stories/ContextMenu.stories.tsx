@@ -30,7 +30,7 @@ export const BasicRightClickArea: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic context menu">
+    <div className="zeroship-story-row" role="group" aria-label="Basic context menu">
       <ContextMenu>
         <ContextMenu.Trigger
           data-testid="contextmenu-basic-trigger"
@@ -40,10 +40,10 @@ export const BasicRightClickArea: Story = {
             justifyContent: "center",
             inlineSize: "16rem",
             blockSize: "8rem",
-            border: "0.0625rem dashed var(--zs-separator)",
-            borderRadius: "var(--zs-radius-3)",
-            padding: "var(--zs-space-4)",
-            color: "var(--zs-label-secondary)",
+            border: "0.0625rem dashed var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-3)",
+            padding: "var(--zeroship-space-4)",
+            color: "var(--zeroship-label-secondary)",
             textAlign: "center",
           }}
         >
@@ -96,7 +96,7 @@ export const WithCheckboxItem: Story = {
     const [favorited, setFavorited] = useState(true);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Checkbox context menu"
       >
@@ -109,9 +109,9 @@ export const WithCheckboxItem: Story = {
               justifyContent: "center",
               inlineSize: "16rem",
               blockSize: "8rem",
-              border: "0.0625rem dashed var(--zs-separator)",
-              borderRadius: "var(--zs-radius-3)",
-              color: "var(--zs-label-secondary)",
+              border: "0.0625rem dashed var(--zeroship-separator)",
+              borderRadius: "var(--zeroship-radius-3)",
+              color: "var(--zeroship-label-secondary)",
             }}
           >
             Right-click for options
@@ -176,7 +176,7 @@ export const NestedSubmenu: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Submenu context menu"
     >
@@ -189,9 +189,9 @@ export const NestedSubmenu: Story = {
             justifyContent: "center",
             inlineSize: "16rem",
             blockSize: "8rem",
-            border: "0.0625rem dashed var(--zs-separator)",
-            borderRadius: "var(--zs-radius-3)",
-            color: "var(--zs-label-secondary)",
+            border: "0.0625rem dashed var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-3)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Right-click for nested
@@ -243,7 +243,7 @@ export const WithDisabledItem: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Disabled context menu"
     >
@@ -256,9 +256,9 @@ export const WithDisabledItem: Story = {
             justifyContent: "center",
             inlineSize: "16rem",
             blockSize: "8rem",
-            border: "0.0625rem dashed var(--zs-separator)",
-            borderRadius: "var(--zs-radius-3)",
-            color: "var(--zs-label-secondary)",
+            border: "0.0625rem dashed var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-3)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Right-click for actions
@@ -314,7 +314,7 @@ export const CustomAnchor: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Custom anchor context menu"
     >
@@ -362,7 +362,7 @@ export const Rtl: Story = {
     // portal-rendered popup; see Menu Rtl story for the rationale.
     <DirectionProvider direction="rtl">
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL context menu"
       dir="rtl"
@@ -377,9 +377,9 @@ export const Rtl: Story = {
             justifyContent: "center",
             inlineSize: "16rem",
             blockSize: "8rem",
-            border: "0.0625rem dashed var(--zs-separator)",
-            borderRadius: "var(--zs-radius-3)",
-            color: "var(--zs-label-secondary)",
+            border: "0.0625rem dashed var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-3)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           انقر بالزر الأيمن هنا
@@ -403,7 +403,7 @@ export const PositionedPopup: Story = {
   name: "Positioned popup override",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Positioned context menu"
     >
@@ -417,9 +417,9 @@ export const PositionedPopup: Story = {
             justifyContent: "center",
             inlineSize: "16rem",
             blockSize: "8rem",
-            border: "0.0625rem dashed var(--zs-separator)",
-            borderRadius: "var(--zs-radius-3)",
-            color: "var(--zs-label-secondary)",
+            border: "0.0625rem dashed var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-3)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Right-click for positioned actions
@@ -476,7 +476,7 @@ export const DisabledTrigger: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Disabled context menu trigger"
     >
@@ -534,7 +534,7 @@ export const AsChild: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="asChild context menu"
     >

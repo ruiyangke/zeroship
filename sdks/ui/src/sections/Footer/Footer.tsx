@@ -44,7 +44,7 @@
  *     padding and NO heavy background (composable).
  *   - Inside sits a `Container` holding: a top row = the brand+description
  *     block beside the link-group columns (a Grid that collapses to stacked
- *     below `--zs-bp-md` — the Grid owns the collapse); a `Separator`; then a
+ *     below `--zeroship-bp-md` — the Grid owns the collapse); a `Separator`; then a
  *     bottom bar (copyright at the inline-start, actions at the inline-end,
  *     wraps on narrow widths).
  *   - Each column: a `<h3>` title + a `<ul>` of real `<a href>` links.
@@ -138,7 +138,7 @@ export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
   actions?: ReactNode;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `product`, matching dense product/legal page footers.
    */
   size?: ContainerSize;
@@ -149,8 +149,8 @@ export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the footer reads as its own
    *   panel — the common "the footer sits on a tinted slab" treatment.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast footer.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast footer.
    */
   tone?: SectionTone;
 
@@ -332,7 +332,7 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
         ) : null}
 
         {/* Top row: the brand+blurb block beside the link-group columns. The
-            Grid owns the collapse to stacked below --zs-bp-md (its responsive
+            Grid owns the collapse to stacked below --zeroship-bp-md (its responsive
             base count is 1; columns={{ md }} only promotes at ≥ the bp). */}
         {(hasBrandBlock || hasColumns) && (
           <div data-slot="footer-top">

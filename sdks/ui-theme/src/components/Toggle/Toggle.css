@@ -25,7 +25,7 @@
  *      "in".
  *
  *   2. Group track + segment seam: the group carries a unified track
- *      via `--zs-fill-secondary` (default variant). Unpressed segments
+ *      via `--zeroship-fill-secondary` (default variant). Unpressed segments
  *      are transparent over that track so the pressed pill reads as a
  *      lit-up rectangle within the rail.
  *
@@ -62,35 +62,35 @@
 /* ─── component-local tokens ────────────────────────────────────────── *
  *
  * Heights mirror the Button/Input rhythm via the foundation
- * --zs-control-h-* tokens so a Toggle next to either reads coherent.
+ * --zeroship-control-h-* tokens so a Toggle next to either reads coherent.
  * Inline padding matches the Button equivalents so icon-only toggles
  * end up square (h == padded-w with a 1em glyph). */
 [data-slot="toggle"] {
-  --zs-toggle-h-sm: var(--zs-control-h-sm);          /* 2rem */
-  --zs-toggle-h-md: var(--zs-control-h-md);          /* 2.5rem (default) */
-  --zs-toggle-h-lg: var(--zs-control-h-lg);          /* 3rem */
+  --zeroship-toggle-h-sm: var(--zeroship-control-h-sm);          /* 2rem */
+  --zeroship-toggle-h-md: var(--zeroship-control-h-md);          /* 2.5rem (default) */
+  --zeroship-toggle-h-lg: var(--zeroship-control-h-lg);          /* 3rem */
 
-  --zs-toggle-px-sm: var(--zs-control-px-sm);        /* 12 */
-  --zs-toggle-px-md: var(--zs-control-px-md);        /* 16 */
-  --zs-toggle-px-lg: var(--zs-control-px-lg);        /* 20 */
+  --zeroship-toggle-px-sm: var(--zeroship-control-px-sm);        /* 12 */
+  --zeroship-toggle-px-md: var(--zeroship-control-px-md);        /* 16 */
+  --zeroship-toggle-px-lg: var(--zeroship-control-px-lg);        /* 20 */
 
-  --zs-toggle-radius-sm: var(--zs-control-radius-sm);  /* 6 */
-  --zs-toggle-radius-md: var(--zs-control-radius-md);  /* 8 */
-  --zs-toggle-radius-lg: var(--zs-control-radius-lg);  /* 10 */
+  --zeroship-toggle-radius-sm: var(--zeroship-control-radius-sm);  /* 6 */
+  --zeroship-toggle-radius-md: var(--zeroship-control-radius-md);  /* 8 */
+  --zeroship-toggle-radius-lg: var(--zeroship-control-radius-lg);  /* 10 */
 
   /* Match Button's per-size type rhythm so a Toggle next to a Button
    * reads coherent. Button uses subheadline-size on sm, body-size on
    * md, headline-size on lg. */
-  --zs-toggle-font-sm: var(--zs-text-subheadline-size);
-  --zs-toggle-line-sm: var(--zs-text-subheadline-line);
-  --zs-toggle-font-md: var(--zs-text-body-size);
-  --zs-toggle-line-md: var(--zs-text-body-line);
-  --zs-toggle-font-lg: var(--zs-text-headline-size);
-  --zs-toggle-line-lg: var(--zs-text-headline-line);
+  --zeroship-toggle-font-sm: var(--zeroship-text-subheadline-size);
+  --zeroship-toggle-line-sm: var(--zeroship-text-subheadline-line);
+  --zeroship-toggle-font-md: var(--zeroship-text-body-size);
+  --zeroship-toggle-line-md: var(--zeroship-text-body-line);
+  --zeroship-toggle-font-lg: var(--zeroship-text-headline-size);
+  --zeroship-toggle-line-lg: var(--zeroship-text-headline-line);
 
-  --zs-toggle-gap-sm: var(--zs-space-1);             /* 4 */
-  --zs-toggle-gap-md: var(--zs-space-2);             /* 8 */
-  --zs-toggle-gap-lg: var(--zs-space-2);             /* 8 */
+  --zeroship-toggle-gap-sm: var(--zeroship-space-1);             /* 4 */
+  --zeroship-toggle-gap-md: var(--zeroship-space-2);             /* 8 */
+  --zeroship-toggle-gap-lg: var(--zeroship-space-2);             /* 8 */
 
   /* ─── per-variant pressed tokens (polish item 1) ────────────────────
    *
@@ -104,15 +104,15 @@
    *   tinted  → loudest — accent-hover fill + accent-active inset edge
    *
    * Plain-pressed uses the same 14% accent mix Slice 4 readonly uses;
-   * paired with `--zs-accent-active` ink that combination measured AA at
+   * paired with `--zeroship-accent-active` ink that combination measured AA at
    * all three sizes (4.5:1+) — verified via axe-core. If a future palette
    * push lowers contrast, deepen 14% → 18% (the tinted-rest mix). */
-  --zs-toggle-pressed-bg: var(--zs-accent);
-  --zs-toggle-pressed-ink: var(--zs-accent-ink);
-  --zs-toggle-plain-pressed-bg: color-mix(in oklch, var(--zs-accent) 14%, transparent);
-  --zs-toggle-plain-pressed-ink: var(--zs-accent-active);
-  --zs-toggle-tinted-pressed-bg: var(--zs-accent-hover);
-  --zs-toggle-tinted-pressed-edge: var(--zs-accent-active);
+  --zeroship-toggle-pressed-bg: var(--zeroship-accent);
+  --zeroship-toggle-pressed-ink: var(--zeroship-accent-ink);
+  --zeroship-toggle-plain-pressed-bg: color-mix(in oklch, var(--zeroship-accent) 14%, transparent);
+  --zeroship-toggle-plain-pressed-ink: var(--zeroship-accent-active);
+  --zeroship-toggle-tinted-pressed-bg: var(--zeroship-accent-hover);
+  --zeroship-toggle-tinted-pressed-edge: var(--zeroship-accent-active);
 }
 
 /* ─── the standalone toggle ─────────────────────────────────────────── */
@@ -121,25 +121,25 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-toggle-gap-md);
-  block-size: var(--zs-toggle-h-md);
+  gap: var(--zeroship-toggle-gap-md);
+  block-size: var(--zeroship-toggle-h-md);
   padding-block: 0;
-  padding-inline: var(--zs-toggle-px-md);
+  padding-inline: var(--zeroship-toggle-px-md);
   border: 0;
-  border-radius: var(--zs-toggle-radius-md);
-  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-toggle-font-md);
+  border-radius: var(--zeroship-toggle-radius-md);
+  background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-toggle-font-md);
   line-height: 1;
   font-weight: 600;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* Icon sizing — force consumer-supplied SVG to a 1em square so glyphs
@@ -171,14 +171,14 @@
  * — all modern. Older browsers fall back to the text-button padding
  * (acceptable). */
 [data-slot="toggle"][aria-label]:has(> svg:only-child) {
-  inline-size: var(--zs-toggle-h-md);
-  padding-inline: var(--zs-space-0);
+  inline-size: var(--zeroship-toggle-h-md);
+  padding-inline: var(--zeroship-space-0);
 }
 [data-slot="toggle"][data-size="sm"][aria-label]:has(> svg:only-child) {
-  inline-size: var(--zs-toggle-h-sm);
+  inline-size: var(--zeroship-toggle-h-sm);
 }
 [data-slot="toggle"][data-size="lg"][aria-label]:has(> svg:only-child) {
-  inline-size: var(--zs-toggle-h-lg);
+  inline-size: var(--zeroship-toggle-h-lg);
 }
 
 /* Icon+text gap (polish item 3) — tighten to match Button's
@@ -187,25 +187,25 @@
  * 8-unit gap reads mechanically separated. Scope via `:has(> svg)` so
  * text-only segments keep the roomier rhythm. */
 [data-slot="toggle"]:has(> svg) {
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
 [data-slot="toggle"][data-size="sm"] {
-  block-size: var(--zs-toggle-h-sm);
-  padding-inline: var(--zs-toggle-px-sm);
-  border-radius: var(--zs-toggle-radius-sm);
-  font-size: var(--zs-toggle-font-sm);
+  block-size: var(--zeroship-toggle-h-sm);
+  padding-inline: var(--zeroship-toggle-px-sm);
+  border-radius: var(--zeroship-toggle-radius-sm);
+  font-size: var(--zeroship-toggle-font-sm);
   line-height: 1;
-  gap: var(--zs-toggle-gap-sm);
+  gap: var(--zeroship-toggle-gap-sm);
 }
 [data-slot="toggle"][data-size="lg"] {
-  block-size: var(--zs-toggle-h-lg);
-  padding-inline: var(--zs-toggle-px-lg);
-  border-radius: var(--zs-toggle-radius-lg);
-  font-size: var(--zs-toggle-font-lg);
+  block-size: var(--zeroship-toggle-h-lg);
+  padding-inline: var(--zeroship-toggle-px-lg);
+  border-radius: var(--zeroship-toggle-radius-lg);
+  font-size: var(--zeroship-toggle-font-lg);
   line-height: 1;
-  gap: var(--zs-toggle-gap-lg);
+  gap: var(--zeroship-toggle-gap-lg);
 }
 
 /* ─── default variant (standalone) ──────────────────────────────────── *
@@ -213,16 +213,16 @@
  * Matches Button's `--gray` rest surface (8% label-tinted mix). Hover
  * deepens to 12%, active to 16%. */
 [data-slot="toggle"][data-variant="default"] {
-  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
-  color: var(--zs-label);
+  background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
+  color: var(--zeroship-label);
 }
 @media (hover: hover) {
   [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover {
-    background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-label) 12%, transparent);
   }
 }
 [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active {
-  background-color: color-mix(in oklch, var(--zs-label) 16%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 16%, transparent);
 }
 
 /* ─── plain variant ─────────────────────────────────────────────────── *
@@ -232,15 +232,15 @@
  * on press. */
 [data-slot="toggle"][data-variant="plain"] {
   background-color: transparent;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 @media (hover: hover) {
   [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover {
-    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   }
 }
 [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active {
-  background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 12%, transparent);
 }
 
 /* ─── tinted variant ────────────────────────────────────────────────── *
@@ -248,26 +248,26 @@
  * Translucent accent tint at rest — loud, signals interactivity. Mirrors
  * Button's `--tinted` rest tone, slightly deepened (18% accent mix) so
  * the rest-state text-on-tint contrast lands ≥ 4.5:1 against the
- * accent-active ink. Button's 14% mix paired with `--zs-accent` text
+ * accent-active ink. Button's 14% mix paired with `--zeroship-accent` text
  * landed at 4.08:1 — just under AA for the 1.0625rem label size (axe-core
- * confirmed during slice-5 review). `--zs-accent-active` is the deeper
+ * confirmed during slice-5 review). `--zeroship-accent-active` is the deeper
  * accent step on the same hue ladder; using it as the rest-state ink
  * preserves the variant's "loud accent" read while satisfying AA.
  *
  * Hover / active deepen the surface in step with Button's hover/active
  * mix (22% / 30%); the pressed state inherits the standalone pressed
- * pill above (solid `--zs-accent` + `--zs-accent-ink`). */
+ * pill above (solid `--zeroship-accent` + `--zeroship-accent-ink`). */
 [data-slot="toggle"][data-variant="tinted"] {
-  background-color: color-mix(in oklch, var(--zs-accent) 18%, transparent);
-  color: var(--zs-accent-active);
+  background-color: color-mix(in oklch, var(--zeroship-accent) 18%, transparent);
+  color: var(--zeroship-accent-active);
 }
 @media (hover: hover) {
   [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
-    background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-accent) 22%, transparent);
   }
 }
 [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
-  background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-accent) 30%, transparent);
 }
 
 /* ─── pressed state — per-variant treatments (polish item 1) ───────── *
@@ -275,54 +275,54 @@
  * Three distinct treatments so the variant ladder (quiet → loud) survives
  * the most important state:
  *
- *   default → solid `--zs-accent` + `--zs-accent-ink` (a "lit-up
+ *   default → solid `--zeroship-accent` + `--zeroship-accent-ink` (a "lit-up
  *             rectangle" matching Button's filled variant).
- *   plain   → ghost wash: 14% accent mix + `--zs-accent-active` ink.
+ *   plain   → ghost wash: 14% accent mix + `--zeroship-accent-active` ink.
  *             Stays restrained — plain rests as transparent, presses as
  *             a tinted echo, never as a solid fill. AA verified.
- *   tinted  → loudest: `--zs-accent-hover` fill + `--zs-accent-ink` ink
- *             with an `--zs-accent-active` hairline inset edge. The edge
+ *   tinted  → loudest: `--zeroship-accent-hover` fill + `--zeroship-accent-ink` ink
+ *             with an `--zeroship-accent-active` hairline inset edge. The edge
  *             is the variant-marker — tinted goes deeper than default.
  *
- * Hover/active continue to step toward `--zs-accent-hover` /
- * `--zs-accent-active`. For tinted, hover is the rest tone so the inset
+ * Hover/active continue to step toward `--zeroship-accent-hover` /
+ * `--zeroship-accent-active`. For tinted, hover is the rest tone so the inset
  * edge plus tonal continuity carries the affordance.
  *
  * `forced-colors` block below mirrors per-variant pressed → `Highlight`/
  * `HighlightText`; tinted retains the inset edge so the variant cue
  * survives high-contrast emulation. */
 [data-slot="toggle"][data-pressed] {
-  background-color: var(--zs-toggle-pressed-bg);
-  color: var(--zs-toggle-pressed-ink);
+  background-color: var(--zeroship-toggle-pressed-bg);
+  color: var(--zeroship-toggle-pressed-ink);
 }
 [data-slot="toggle"][data-variant="plain"][data-pressed] {
-  background-color: var(--zs-toggle-plain-pressed-bg);
-  color: var(--zs-toggle-plain-pressed-ink);
+  background-color: var(--zeroship-toggle-plain-pressed-bg);
+  color: var(--zeroship-toggle-plain-pressed-ink);
 }
 [data-slot="toggle"][data-variant="tinted"][data-pressed] {
-  background-color: var(--zs-toggle-tinted-pressed-bg);
-  color: var(--zs-accent-ink);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-toggle-tinted-pressed-edge);
+  background-color: var(--zeroship-toggle-tinted-pressed-bg);
+  color: var(--zeroship-accent-ink);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-toggle-tinted-pressed-edge);
 }
 @media (hover: hover) {
   [data-slot="toggle"][data-pressed]:not([data-disabled]):hover {
-    background-color: var(--zs-accent-hover);
+    background-color: var(--zeroship-accent-hover);
   }
   [data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):hover {
-    background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-accent) 22%, transparent);
   }
   [data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):hover {
-    background-color: var(--zs-accent-active);
+    background-color: var(--zeroship-accent-active);
   }
 }
 [data-slot="toggle"][data-pressed]:not([data-disabled]):active {
-  background-color: var(--zs-accent-active);
+  background-color: var(--zeroship-accent-active);
 }
 [data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):active {
-  background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-accent) 30%, transparent);
 }
 [data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):active {
-  background-color: var(--zs-accent-active);
+  background-color: var(--zeroship-accent-active);
 }
 
 /* ─── focus ring (outline, not box-shadow) ──────────────────────────── *
@@ -331,15 +331,15 @@
  * surrounding overflow. `outline` does that for free; `box-shadow`
  * would clip. */
 [data-slot="toggle"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
 [data-slot="toggle"][data-disabled] {
   cursor: not-allowed;
-  color: var(--zs-label-tertiary);
-  background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
+  color: var(--zeroship-label-tertiary);
+  background-color: color-mix(in oklch, var(--zeroship-label) 4%, transparent);
 }
 [data-slot="toggle"][data-disabled][data-pressed] {
   /* Polish item 4: desaturated lavender fill + hairline inset edge.
@@ -348,13 +348,13 @@
    * control to be ambiguous. Drop saturation (22% mix) so the fill steps
    * meaningfully back, then carry the "was selected" history via a subtle
    * inset edge (30% accent + separator mix). The edge stays just visible
-   * on Crystal's light surface — `--zs-selection-hairline` is 0.0625rem,
+   * on Crystal's light surface — `--zeroship-selection-hairline` is 0.0625rem,
    * the same hairline the group rim uses. */
-  --zs-toggle-disabled-pressed-bg: color-mix(in oklch, var(--zs-accent) 22%, var(--zs-fill-secondary));
-  --zs-toggle-disabled-pressed-edge: color-mix(in oklch, var(--zs-accent) 30%, var(--zs-separator));
-  background-color: var(--zs-toggle-disabled-pressed-bg);
-  color: var(--zs-label-tertiary);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-toggle-disabled-pressed-edge);
+  --zeroship-toggle-disabled-pressed-bg: color-mix(in oklch, var(--zeroship-accent) 22%, var(--zeroship-fill-secondary));
+  --zeroship-toggle-disabled-pressed-edge: color-mix(in oklch, var(--zeroship-accent) 30%, var(--zeroship-separator));
+  background-color: var(--zeroship-toggle-disabled-pressed-bg);
+  color: var(--zeroship-label-tertiary);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-toggle-disabled-pressed-edge);
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
@@ -364,12 +364,12 @@
   /* Equal-width default — the children fill the grid track. */
   grid-auto-columns: 1fr;
   align-items: stretch;
-  padding: var(--zs-space-1);
-  border-radius: var(--zs-toggle-radius-md);
-  background-color: var(--zs-fill-secondary);
+  padding: var(--zeroship-space-1);
+  border-radius: var(--zeroship-toggle-radius-md);
+  background-color: var(--zeroship-fill-secondary);
   /* Inset hairline rim — sits inside the group, no bleed past the
    * outer radius. */
-  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+  box-shadow: inset 0 0 0 0.0625rem var(--zeroship-separator);
   isolation: isolate;
   min-inline-size: 0;
 }
@@ -381,10 +381,10 @@
 }
 
 [data-slot="toggle-group"][data-size="sm"] {
-  border-radius: var(--zs-toggle-radius-sm);
+  border-radius: var(--zeroship-toggle-radius-sm);
 }
 [data-slot="toggle-group"][data-size="lg"] {
-  border-radius: var(--zs-toggle-radius-lg);
+  border-radius: var(--zeroship-toggle-radius-lg);
 }
 
 /* equalWidth=false → intrinsic-width columns / rows. Useful in
@@ -432,28 +432,28 @@
  * The radius is slightly tighter than the standalone so the pressed pill
  * nests inside the group's rim with a small breathing margin. */
 [data-slot="toggle-group"] [data-slot="toggle"][data-size="sm"] {
-  border-radius: calc(var(--zs-toggle-radius-sm) - 0.0625rem);
+  border-radius: calc(var(--zeroship-toggle-radius-sm) - 0.0625rem);
 }
 [data-slot="toggle-group"] [data-slot="toggle"][data-size="md"] {
-  border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
+  border-radius: calc(var(--zeroship-toggle-radius-md) - 0.125rem);
 }
 [data-slot="toggle-group"] [data-slot="toggle"][data-size="lg"] {
   /* Polish item 5: keep the full lg radius — subtracting 0.125rem made the
    * pressed pill read tab-like (sharp shoulders at the larger size). The
-   * group's `--zs-space-1` padding already insets the pill from the rim;
+   * group's `--zeroship-space-1` padding already insets the pill from the rim;
    * no extra radius compensation needed at lg. sm / md keep the
    * subtraction because their radii are tight enough that even
    * 0.0625–0.125rem makes a visible nesting gap. */
-  border-radius: var(--zs-toggle-radius-lg);
+  border-radius: var(--zeroship-toggle-radius-lg);
 }
 
 @media (hover: hover) {
   [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
-    background-color: color-mix(in oklch, var(--zs-label) 6%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-label) 6%, transparent);
   }
 }
 [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):active {
-  background-color: color-mix(in oklch, var(--zs-label) 10%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 10%, transparent);
 }
 
 /* Plain group: drop the track surface; segments become a row of
@@ -462,14 +462,14 @@
   background-color: transparent;
   box-shadow: none;
   padding: 0;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
 }
 [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-pressed]) {
   background-color: transparent;
 }
 @media (hover: hover) {
   [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
-    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   }
 }
 
@@ -482,10 +482,10 @@
  * an explicit `<Toggle variant="plain">` child would still get the
  * accent-tinted text from the group, breaking the prop-wins cascade. */
 [data-slot="toggle-group"][data-variant="tinted"] {
-  background-color: color-mix(in oklch, var(--zs-accent) 10%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-accent) 10%, transparent);
 }
 [data-slot="toggle-group"][data-variant="tinted"] [data-slot="toggle"][data-variant="tinted"]:not([data-pressed]) {
-  color: var(--zs-accent);
+  color: var(--zeroship-accent);
 }
 
 /* Pressed segments inside a group keep the accent fill (the standalone
@@ -501,7 +501,7 @@
  * but the group root also paints a faded surface so the rail itself
  * reads inactive. */
 [data-slot="toggle-group"][data-disabled] {
-  background-color: color-mix(in oklch, var(--zs-fill-secondary) 60%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-fill-secondary) 60%, transparent);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
@@ -551,7 +551,7 @@
     /* Item-C fix: re-stamp `background-color: Canvas` inside the
      * forced-colors disabled mirror. The base oklch rule
      * `.zs-toggle[data-disabled]` paints a token-derived
-     * `color-mix(in oklch, var(--zs-label) 4%, transparent)` background
+     * `color-mix(in oklch, var(--zeroship-label) 4%, transparent)` background
      * with higher specificity than the bare `.zs-toggle { background:
      * Canvas }` reset at the top of this @media block. Without the
      * explicit Canvas paint here, a disabled unpressed Toggle under

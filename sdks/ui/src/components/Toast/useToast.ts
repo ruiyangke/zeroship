@@ -66,8 +66,8 @@ export interface ToastOptions {
   duration?: number;
   /**
    * Visual variant. Drives:
-   *   - the leading-icon tint (`--zs-system-{red,green,orange}` /
-   *     `--zs-accent`),
+   *   - the leading-icon tint (`--zeroship-system-{red,green,orange}` /
+   *     `--zeroship-accent`),
    *   - the `role` on Toast.Root (`status` for default/info/success/
    *     warning, `alert` for error),
    *   - the `aria-live` on Toast.Root (`polite` for default/info/
@@ -139,7 +139,7 @@ function priorityForVariant(variant: ToastVariant): "low" | "high" {
 let toastIdCounter = 0;
 function generateToastId(): string {
   toastIdCounter += 1;
-  return `zs-toast-${toastIdCounter}`;
+  return `zeroship-toast-${toastIdCounter}`;
 }
 
 /**

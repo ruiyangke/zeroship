@@ -8,23 +8,23 @@
  *           ├─ .zs-toast-action    inline action button
  *           └─ .zs-toast-close     dismiss button
  *
- * Surface — raised translucent panel (`--zs-surface-raised`) over a
- * `--zs-shadow-popover` elevation. A `box-shadow inset` hairline carries
+ * Surface — raised translucent panel (`--zeroship-surface-raised`) over a
+ * `--zeroship-shadow-popover` elevation. A `box-shadow inset` hairline carries
  * the surface-on-surface edge. The surface is OPAQUE-enough that axe's
  * color-contrast walk terminates inside the toast (Crystal surface is
  * 55% alpha over an opaque page background; that's the same posture
  * Popover/Tooltip take).
  *
  * Variants — leading-icon tint only. The body text always stays on
- * `--zs-label` so a colored variant doesn't degrade legibility. The
+ * `--zeroship-label` so a colored variant doesn't degrade legibility. The
  * `[data-variant="..."]` selector lives on Toast.Root and cascades to
  * the leading icon via the `::before` pseudo on the root grid.
  *
- *   default → no tint (uses --zs-label-secondary so the dot blends).
- *   success → --zs-system-green
- *   error   → --zs-system-red
- *   warning → --zs-system-orange
- *   info    → --zs-accent
+ *   default → no tint (uses --zeroship-label-secondary so the dot blends).
+ *   success → --zeroship-system-green
+ *   error   → --zeroship-system-red
+ *   warning → --zeroship-system-orange
+ *   info    → --zeroship-accent
  *
  * Enter/exit — Base UI emits `data-starting-style` (entering) +
  * `data-ending-style` (leaving) on the root. The enter slides in from
@@ -58,20 +58,20 @@
 [data-slot="toast-viewport"] {
   position: fixed;
   /* Toasts stack above dialogs but below tooltips (matches
-   * .zs-tooltip-positioner's `--zs-z-modal + 20` ceiling). */
-  z-index: calc(var(--zs-z-modal) + 10);
+   * .zs-tooltip-positioner's `--zeroship-z-modal + 20` ceiling). */
+  z-index: calc(var(--zeroship-z-modal) + 10);
   outline: none;
   /* The container is a passive label region — clicks fall through to
    * the underlying app unless they hit a real toast. */
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   /* Logical-end-aligned padding so the stack hugs the anchored corner
    * with the same breathing room on all sides. */
-  padding: var(--zs-space-4);
+  padding: var(--zeroship-space-4);
   /* Constrain the stack so toasts don't spill across half the viewport. */
-  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
+  inline-size: min(24rem, calc(100% - 2 * var(--zeroship-space-4)));
 }
 
 /* Position anchors — bottom-end is the default per the brief. */
@@ -105,13 +105,13 @@
   inset-block-start: 0;
   inset-inline: 0;
   margin-inline: auto;
-  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
+  inline-size: min(24rem, calc(100% - 2 * var(--zeroship-space-4)));
 }
 [data-slot="toast-viewport"][data-position="bottom"] {
   inset-block-end: 0;
   inset-inline: 0;
   margin-inline: auto;
-  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
+  inline-size: min(24rem, calc(100% - 2 * var(--zeroship-space-4)));
   flex-direction: column-reverse;
 }
 
@@ -128,7 +128,7 @@
   pointer-events: auto;
   display: grid;
   grid-template-columns: auto 1fr auto;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
   align-items: start;
   /* Base UI sets `--toast-height` to the measured content height after
    * layout. Reading it back as `min-block-size` keeps the natural row
@@ -137,35 +137,35 @@
    * mount). Without this, an empty Root collapses to 0 rows × 0 px
    * and Playwright / Testing Library see it as `not visible` even
    * though it carries the correct role + aria-live + classes. The
-   * `--zs-space-10` fallback (4rem = 64px) covers the very first paint
+   * `--zeroship-space-10` fallback (4rem = 64px) covers the very first paint
    * before Base UI's measurement runs. */
-  min-block-size: var(--toast-height, var(--zs-space-10));
+  min-block-size: var(--toast-height, var(--zeroship-space-10));
   /* Logical padding so RTL flips for free. */
-  padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-4);
-  background-color: var(--zs-surface-raised);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  border-radius: var(--zs-radius-4);
+  padding-block: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-4);
+  background-color: var(--zeroship-surface-raised);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  border-radius: var(--zeroship-radius-4);
   /* Popover elevation + inset hairline edge. The inset shadow is the
    * surface-on-surface delineation; the popover shadow is the lift. */
   box-shadow:
-    var(--zs-shadow-popover),
+    var(--zeroship-shadow-popover),
     var(
-      --zs-popup-surface-edge,
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+      --zeroship-popup-surface-edge,
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator)
     );
   isolation: isolate;
   outline: none;
   /* Toasts sit above page chrome, so they keep the active material blur
    * even when the readable surface base remains contrast-safe. */
-  backdrop-filter: var(--zs-material-regular);
-  -webkit-backdrop-filter: var(--zs-material-regular);
+  backdrop-filter: var(--zeroship-material-regular);
+  -webkit-backdrop-filter: var(--zeroship-material-regular);
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
   /* Swipe follow: Base UI emits --toast-swipe-movement-x/y. The fallback
    * 0 keeps the transform identity when not swiping. */
   transform: translate(
@@ -180,28 +180,28 @@
  * color resolves from a per-variant CSS custom property so a single
  * selector covers all five variants. */
 [data-slot="toast-root"] {
-  --zs-toast-leading-color: var(--zs-label-secondary);
+  --zeroship-toast-leading-color: var(--zeroship-label-secondary);
 }
 [data-slot="toast-root"][data-variant="success"] {
-  --zs-toast-leading-color: var(--zs-system-green);
+  --zeroship-toast-leading-color: var(--zeroship-system-green);
 }
 [data-slot="toast-root"][data-variant="error"] {
-  --zs-toast-leading-color: var(--zs-system-red);
+  --zeroship-toast-leading-color: var(--zeroship-system-red);
 }
 [data-slot="toast-root"][data-variant="warning"] {
-  --zs-toast-leading-color: var(--zs-system-orange);
+  --zeroship-toast-leading-color: var(--zeroship-system-orange);
 }
 [data-slot="toast-root"][data-variant="info"] {
-  --zs-toast-leading-color: var(--zs-accent);
+  --zeroship-toast-leading-color: var(--zeroship-accent);
 }
 [data-slot="toast-root"]::before {
   content: "";
   display: block;
-  inline-size: var(--zs-space-2);
-  block-size: var(--zs-space-2);
-  margin-block-start: var(--zs-space-half);
-  border-radius: var(--zs-radius-full);
-  background-color: var(--zs-toast-leading-color);
+  inline-size: var(--zeroship-space-2);
+  block-size: var(--zeroship-space-2);
+  margin-block-start: var(--zeroship-space-half);
+  border-radius: var(--zeroship-radius-full);
+  background-color: var(--zeroship-toast-leading-color);
   /* The leading dot is a visual cue; the role/aria-live on the root
    * carries the real semantics. */
 }
@@ -220,17 +220,17 @@
 /* ─── Title / description ───────────────────────────────────────────── */
 [data-slot="toast-title"] {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: var(--zs-text-subheadline-weight);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  font-weight: var(--zeroship-text-subheadline-weight);
+  color: var(--zeroship-label);
 }
 [data-slot="toast-description"] {
   margin: 0;
-  margin-block-start: var(--zs-space-half);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  color: var(--zs-label-secondary);
+  margin-block-start: var(--zeroship-space-half);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── Action button ─────────────────────────────────────────────────── *
@@ -238,35 +238,35 @@
  * Inline text button reusing the accent token. Sits below the
  * description (or directly under the title when no description). */
 [data-slot="toast-action"] {
-  margin-block-start: var(--zs-space-2);
+  margin-block-start: var(--zeroship-space-2);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-3);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-3);
   background-color: transparent;
-  color: var(--zs-toast-leading-color);
-  border: var(--zs-selection-hairline) solid var(--zs-separator-strong);
-  border-radius: var(--zs-radius-2);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  font-weight: var(--zs-text-footnote-weight);
+  color: var(--zeroship-toast-leading-color);
+  border: var(--zeroship-selection-hairline) solid var(--zeroship-separator-strong);
+  border-radius: var(--zeroship-radius-2);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  font-weight: var(--zeroship-text-footnote-weight);
   cursor: pointer;
   outline: none;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    border-color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    border-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="toast-action"]:hover {
   background-color: color-mix(
     in oklch,
-    var(--zs-toast-leading-color) 12%,
+    var(--zeroship-toast-leading-color) 12%,
     transparent
   );
 }
 [data-slot="toast-action"]:focus-visible {
-  outline: var(--zs-selection-hairline) solid var(--zs-focus);
-  outline-offset: var(--zs-selection-hairline);
+  outline: var(--zeroship-selection-hairline) solid var(--zeroship-focus);
+  outline-offset: var(--zeroship-selection-hairline);
 }
 
 /* ─── Close button ──────────────────────────────────────────────────── *
@@ -278,31 +278,31 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-space-5);
-  block-size: var(--zs-space-5);
+  inline-size: var(--zeroship-space-5);
+  block-size: var(--zeroship-space-5);
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--zs-label-tertiary);
-  border-radius: var(--zs-radius-1);
+  color: var(--zeroship-label-tertiary);
+  border-radius: var(--zeroship-radius-1);
   cursor: pointer;
   outline: none;
   transition:
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-/* The dismiss glyph is an Icon at `size="sm"` (1rem, via --zs-icon-sm).
+/* The dismiss glyph is an Icon at `size="sm"` (1rem, via --zeroship-icon-sm).
  * We let the Icon's own size token govern rather than overriding the
- * glyph with the --zs-space-3 SPACING token (a spacing token sized an
+ * glyph with the --zeroship-space-3 SPACING token (a spacing token sized an
  * icon — wrong axis of meaning). The 1rem glyph still reads quiet inside
- * the --zs-space-5 close box. */
+ * the --zeroship-space-5 close box. */
 [data-slot="toast-close"]:hover {
-  color: var(--zs-label);
-  background-color: var(--zs-fill-quaternary);
+  color: var(--zeroship-label);
+  background-color: var(--zeroship-fill-quaternary);
 }
 [data-slot="toast-close"]:focus-visible {
-  outline: var(--zs-selection-hairline) solid var(--zs-focus);
-  outline-offset: var(--zs-selection-hairline);
+  outline: var(--zeroship-selection-hairline) solid var(--zeroship-focus);
+  outline-offset: var(--zeroship-selection-hairline);
 }
 
 /* ─── Root focus ring ───────────────────────────────────────────────── *
@@ -316,8 +316,8 @@
  * Mirror the action/close pattern — quiet hairline accent at equal
  * specificity. Forced-colors mirrored below. */
 [data-slot="toast-root"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── Enter / exit transitions ──────────────────────────────────────── *
@@ -334,7 +334,7 @@
 [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-root"][data-ending-style] {
   opacity: 0;
-  transform: translateX(calc(var(--zs-toast-inline-sign, 1) * 100%));
+  transform: translateX(calc(var(--zeroship-toast-inline-sign, 1) * 100%));
 }
 
 /* Position-aware enter — read the data-position the Viewport stamps so
@@ -342,24 +342,24 @@
  * attribute to the Viewport; here we scope by descendant selector at
  * EQUAL specificity to the base transform rule above.
  *
- * `--zs-toast-inline-sign` mirrors the slide axis under RTL so the
+ * `--zeroship-toast-inline-sign` mirrors the slide axis under RTL so the
  * end-anchored toast still slides in from its visually-anchored edge
  * (logical inline-end resolves to LEFT under RTL, so translateX must
  * flip to a negative offset). Foundation default is `1`; the `[dir]`
  * override below flips it to `-1` and the CSS variable propagates
  * through every selector that consumes it. */
 [data-slot="toast-root"] {
-  --zs-toast-inline-sign: 1;
+  --zeroship-toast-inline-sign: 1;
 }
 [dir="rtl"] [data-slot="toast-root"] {
-  --zs-toast-inline-sign: -1;
+  --zeroship-toast-inline-sign: -1;
 }
 [data-slot="toast-viewport"][data-position="top-end"] [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-viewport"][data-position="top-end"] [data-slot="toast-root"][data-ending-style],
 [data-slot="toast-viewport"][data-position="bottom-end"] [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-viewport"][data-position="bottom-end"] [data-slot="toast-root"][data-ending-style] {
   transform: translateX(
-    calc(var(--zs-toast-inline-sign) * (100% + var(--zs-space-4)))
+    calc(var(--zeroship-toast-inline-sign) * (100% + var(--zeroship-space-4)))
   );
 }
 [data-slot="toast-viewport"][data-position="top-start"] [data-slot="toast-root"][data-starting-style],
@@ -367,16 +367,16 @@
 [data-slot="toast-viewport"][data-position="bottom-start"] [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-viewport"][data-position="bottom-start"] [data-slot="toast-root"][data-ending-style] {
   transform: translateX(
-    calc(var(--zs-toast-inline-sign) * (-100% - var(--zs-space-4)))
+    calc(var(--zeroship-toast-inline-sign) * (-100% - var(--zeroship-space-4)))
   );
 }
 [data-slot="toast-viewport"][data-position="top"] [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-viewport"][data-position="top"] [data-slot="toast-root"][data-ending-style] {
-  transform: translateY(calc(-100% - var(--zs-space-4)));
+  transform: translateY(calc(-100% - var(--zeroship-space-4)));
 }
 [data-slot="toast-viewport"][data-position="bottom"] [data-slot="toast-root"][data-starting-style],
 [data-slot="toast-viewport"][data-position="bottom"] [data-slot="toast-root"][data-ending-style] {
-  transform: translateY(calc(100% + var(--zs-space-4)));
+  transform: translateY(calc(100% + var(--zeroship-space-4)));
 }
 
 /* Active swipe pauses the transform-driven slide so the gesture wins. */
@@ -406,7 +406,7 @@
   [data-slot="toast-viewport"][data-position="bottom"] [data-slot="toast-root"][data-starting-style],
   [data-slot="toast-viewport"][data-position="bottom"] [data-slot="toast-root"][data-ending-style] {
     transform: none;
-    transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+    transition: opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   }
 }
 
@@ -425,19 +425,19 @@
   [data-slot="toast-root"] {
     background-color: Canvas;
     color: CanvasText;
-    box-shadow: inset 0 0 0 var(--zs-selection-hairline) CanvasText;
+    box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) CanvasText;
     forced-color-adjust: none;
   }
   [data-slot="toast-root"][data-variant="default"] {
-    --zs-toast-leading-color: CanvasText;
+    --zeroship-toast-leading-color: CanvasText;
   }
   [data-slot="toast-root"][data-variant="success"],
   [data-slot="toast-root"][data-variant="info"] {
-    --zs-toast-leading-color: LinkText;
+    --zeroship-toast-leading-color: LinkText;
   }
   [data-slot="toast-root"][data-variant="error"],
   [data-slot="toast-root"][data-variant="warning"] {
-    --zs-toast-leading-color: Mark;
+    --zeroship-toast-leading-color: Mark;
   }
   [data-slot="toast-title"],
   [data-slot="toast-description"] {
@@ -461,7 +461,7 @@
   [data-slot="toast-root"]:focus-visible,
   [data-slot="toast-action"]:focus-visible,
   [data-slot="toast-close"]:focus-visible {
-    outline: var(--zs-focus-ring-width) solid Highlight;
-    outline-offset: var(--zs-focus-ring-offset);
+    outline: var(--zeroship-focus-ring-width) solid Highlight;
+    outline-offset: var(--zeroship-focus-ring-offset);
   }
 }

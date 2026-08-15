@@ -152,23 +152,23 @@
 [data-slot="skip-link"]:focus,
 [data-slot="skip-link"]:focus-visible {
   position: fixed;
-  inset-block-start: var(--zs-space-2);
-  inset-inline-start: var(--zs-space-2);
-  z-index: var(--zs-z-modal);
+  inset-block-start: var(--zeroship-space-2);
+  inset-inline-start: var(--zeroship-space-2);
+  z-index: var(--zeroship-z-modal);
   width: auto;
   height: auto;
   margin: 0;
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-4);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-4);
   overflow: visible;
   clip: auto;
-  background: var(--zs-surface-raised);
-  color: var(--zs-label);
-  border: 0.0625rem solid var(--zs-separator);
-  border-radius: var(--zs-radius-3);
-  box-shadow: var(--zs-shadow-2);
+  background: var(--zeroship-surface-raised);
+  color: var(--zeroship-label);
+  border: 0.0625rem solid var(--zeroship-separator);
+  border-radius: var(--zeroship-radius-3);
+  box-shadow: var(--zeroship-shadow-2);
   text-decoration: none;
-  outline-color: var(--zs-focus);
+  outline-color: var(--zeroship-focus);
 }
 
 @media (forced-colors: active) {
@@ -182,10 +182,10 @@
 
 :root {
   /* ─── Font stack — system-ui first; Inter as the web-friendly fallback. */
-  --zs-font-system:
+  --zeroship-font-system:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
     "Segoe UI", system-ui, sans-serif;
-  --zs-font-mono:
+  --zeroship-font-mono:
     ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
   /* ─── Type scale — sizes in rem so user font-size preference (the
@@ -198,174 +198,174 @@
      Tight line-heights + negative tracking give the confident, dense
      display feel; sections pair these with `text-wrap: balance`. rem-only,
      theme-invariant — same values across every theme. */
-  --zs-text-display-1-size: 3.5rem;            /* 56 — hero <h1> */
-  --zs-text-display-1-line: 3.75rem;           /* 60 — tight */
-  --zs-text-display-1-weight: 700;
-  --zs-text-display-1-tracking: -0.03em;
+  --zeroship-text-display-1-size: 3.5rem;            /* 56 — hero <h1> */
+  --zeroship-text-display-1-line: 3.75rem;           /* 60 — tight */
+  --zeroship-text-display-1-weight: 700;
+  --zeroship-text-display-1-tracking: -0.03em;
 
-  --zs-text-display-2-size: 2.75rem;           /* 44 — billboard stats / big */
-  --zs-text-display-2-line: 3rem;              /* 48 */
-  --zs-text-display-2-weight: 700;
-  --zs-text-display-2-tracking: -0.026em;
+  --zeroship-text-display-2-size: 2.75rem;           /* 44 — billboard stats / big */
+  --zeroship-text-display-2-line: 3rem;              /* 48 */
+  --zeroship-text-display-2-weight: 700;
+  --zeroship-text-display-2-tracking: -0.026em;
 
-  --zs-text-display-3-size: 2.25rem;           /* 36 — confident section <h2> */
-  --zs-text-display-3-line: 2.5rem;            /* 40 */
-  --zs-text-display-3-weight: 700;
-  --zs-text-display-3-tracking: -0.022em;
+  --zeroship-text-display-3-size: 2.25rem;           /* 36 — confident section <h2> */
+  --zeroship-text-display-3-line: 2.5rem;            /* 40 */
+  --zeroship-text-display-3-weight: 700;
+  --zeroship-text-display-3-tracking: -0.022em;
 
-  --zs-text-large-title-size: 2.125rem;        /* 34 */
-  --zs-text-large-title-line: 2.5rem;          /* 40 */
-  --zs-text-large-title-weight: 700;
-  --zs-text-large-title-tracking: -0.022em;
+  --zeroship-text-large-title-size: 2.125rem;        /* 34 */
+  --zeroship-text-large-title-line: 2.5rem;          /* 40 */
+  --zeroship-text-large-title-weight: 700;
+  --zeroship-text-large-title-tracking: -0.022em;
 
-  --zs-text-title-1-size: 1.75rem;             /* 28 */
-  --zs-text-title-1-line: 2.125rem;            /* 34 */
-  --zs-text-title-1-weight: 700;
-  --zs-text-title-1-tracking: -0.018em;
+  --zeroship-text-title-1-size: 1.75rem;             /* 28 */
+  --zeroship-text-title-1-line: 2.125rem;            /* 34 */
+  --zeroship-text-title-1-weight: 700;
+  --zeroship-text-title-1-tracking: -0.018em;
 
-  --zs-text-title-2-size: 1.375rem;            /* 22 */
-  --zs-text-title-2-line: 1.625rem;            /* 26 */
-  --zs-text-title-2-weight: 700;
-  --zs-text-title-2-tracking: -0.012em;
+  --zeroship-text-title-2-size: 1.375rem;            /* 22 */
+  --zeroship-text-title-2-line: 1.625rem;            /* 26 */
+  --zeroship-text-title-2-weight: 700;
+  --zeroship-text-title-2-tracking: -0.012em;
 
-  --zs-text-title-3-size: 1.25rem;             /* 20 */
-  --zs-text-title-3-line: 1.5rem;              /* 24 */
-  --zs-text-title-3-weight: 600;
-  --zs-text-title-3-tracking: -0.008em;
+  --zeroship-text-title-3-size: 1.25rem;             /* 20 */
+  --zeroship-text-title-3-line: 1.5rem;              /* 24 */
+  --zeroship-text-title-3-weight: 600;
+  --zeroship-text-title-3-tracking: -0.008em;
 
-  --zs-text-headline-size: 1.0625rem;          /* 17 — semibold body */
-  --zs-text-headline-line: 1.375rem;           /* 22 */
-  --zs-text-headline-weight: 600;
-  --zs-text-headline-tracking: -0.004em;
+  --zeroship-text-headline-size: 1.0625rem;          /* 17 — semibold body */
+  --zeroship-text-headline-line: 1.375rem;           /* 22 */
+  --zeroship-text-headline-weight: 600;
+  --zeroship-text-headline-tracking: -0.004em;
 
-  --zs-text-body-size: 1.0625rem;              /* 17 — regular body */
-  --zs-text-body-line: 1.375rem;               /* 22 */
-  --zs-text-body-weight: 400;
-  --zs-text-body-tracking: -0.004em;
+  --zeroship-text-body-size: 1.0625rem;              /* 17 — regular body */
+  --zeroship-text-body-line: 1.375rem;               /* 22 */
+  --zeroship-text-body-weight: 400;
+  --zeroship-text-body-tracking: -0.004em;
 
-  --zs-text-callout-size: 1rem;                /* 16 */
-  --zs-text-callout-line: 1.3125rem;           /* 21 */
-  --zs-text-callout-weight: 400;
+  --zeroship-text-callout-size: 1rem;                /* 16 */
+  --zeroship-text-callout-line: 1.3125rem;           /* 21 */
+  --zeroship-text-callout-weight: 400;
 
-  --zs-text-subheadline-size: 0.9375rem;       /* 15 */
-  --zs-text-subheadline-line: 1.25rem;         /* 20 */
-  --zs-text-subheadline-weight: 400;
+  --zeroship-text-subheadline-size: 0.9375rem;       /* 15 */
+  --zeroship-text-subheadline-line: 1.25rem;         /* 20 */
+  --zeroship-text-subheadline-weight: 400;
 
-  --zs-text-footnote-size: 0.8125rem;          /* 13 */
-  --zs-text-footnote-line: 1.125rem;           /* 18 */
-  --zs-text-footnote-weight: 400;
+  --zeroship-text-footnote-size: 0.8125rem;          /* 13 */
+  --zeroship-text-footnote-line: 1.125rem;           /* 18 */
+  --zeroship-text-footnote-weight: 400;
 
-  --zs-text-caption-1-size: 0.75rem;           /* 12 */
-  --zs-text-caption-1-line: 1rem;              /* 16 */
-  --zs-text-caption-1-weight: 400;
+  --zeroship-text-caption-1-size: 0.75rem;           /* 12 */
+  --zeroship-text-caption-1-line: 1rem;              /* 16 */
+  --zeroship-text-caption-1-weight: 400;
 
-  --zs-text-caption-2-size: 0.6875rem;         /* 11 */
-  --zs-text-caption-2-line: 0.8125rem;         /* 13 */
-  --zs-text-caption-2-weight: 400;
+  --zeroship-text-caption-2-size: 0.6875rem;         /* 11 */
+  --zeroship-text-caption-2-line: 0.8125rem;         /* 13 */
+  --zeroship-text-caption-2-weight: 400;
 
   /* ─── 4pt spacing grid */
-  --zs-space-0: 0;
-  --zs-space-half: 0.125rem;                   /* 2 */
-  --zs-space-1: 0.25rem;                       /* 4 */
-  --zs-space-2: 0.5rem;                        /* 8 */
-  --zs-space-3: 0.75rem;                       /* 12 */
-  --zs-space-4: 1rem;                          /* 16 */
-  --zs-space-5: 1.25rem;                       /* 20 */
-  --zs-space-6: 1.5rem;                        /* 24 */
-  --zs-space-7: 2rem;                          /* 32 */
-  --zs-space-8: 2.5rem;                        /* 40 */
-  --zs-space-9: 3rem;                          /* 48 */
-  --zs-space-10: 4rem;                         /* 64 */
+  --zeroship-space-0: 0;
+  --zeroship-space-half: 0.125rem;                   /* 2 */
+  --zeroship-space-1: 0.25rem;                       /* 4 */
+  --zeroship-space-2: 0.5rem;                        /* 8 */
+  --zeroship-space-3: 0.75rem;                       /* 12 */
+  --zeroship-space-4: 1rem;                          /* 16 */
+  --zeroship-space-5: 1.25rem;                       /* 20 */
+  --zeroship-space-6: 1.5rem;                        /* 24 */
+  --zeroship-space-7: 2rem;                          /* 32 */
+  --zeroship-space-8: 2.5rem;                        /* 40 */
+  --zeroship-space-9: 3rem;                          /* 48 */
+  --zeroship-space-10: 4rem;                         /* 64 */
 
   /* ─── Icon sizes — theme-invariant, aligned to the type/space scale.
      Consumed by the Icon primitive's zs-icon--{size} classes. */
-  --zs-icon-sm: 1rem;                          /* 16 */
-  --zs-icon-md: 1.25rem;                       /* 20 */
-  --zs-icon-lg: 1.5rem;                        /* 24 */
+  --zeroship-icon-sm: 1rem;                          /* 16 */
+  --zeroship-icon-md: 1.25rem;                       /* 20 */
+  --zeroship-icon-lg: 1.5rem;                        /* 24 */
 
   /* ─── Radii — circular border-radius approximating continuous corners.
      (True continuous-corner squircles aren't natively expressible on web;
      these radii look correct to the eye.) */
-  --zs-radius-1: 0.25rem;                      /* 4 — chip */
-  --zs-radius-2: 0.375rem;                     /* 6 — small button */
-  --zs-radius-3: 0.5rem;                       /* 8 — medium button, input */
-  --zs-radius-4: 0.625rem;                     /* 10 — large button */
-  --zs-radius-5: 0.75rem;                      /* 12 — card, popover */
-  --zs-radius-6: 1rem;                         /* 16 — large card */
-  --zs-radius-7: 1.375rem;                     /* 22 — sheet */
-  --zs-radius-full: 9999rem;                   /* pill */
+  --zeroship-radius-1: 0.25rem;                      /* 4 — chip */
+  --zeroship-radius-2: 0.375rem;                     /* 6 — small button */
+  --zeroship-radius-3: 0.5rem;                       /* 8 — medium button, input */
+  --zeroship-radius-4: 0.625rem;                     /* 10 — large button */
+  --zeroship-radius-5: 0.75rem;                      /* 12 — card, popover */
+  --zeroship-radius-6: 1rem;                         /* 16 — large card */
+  --zeroship-radius-7: 1.375rem;                     /* 22 — sheet */
+  --zeroship-radius-full: 9999rem;                   /* pill */
 
   /* ─── Motion — spring for press feedback, ease for color/opacity. */
-  --zs-motion-spring: cubic-bezier(0.5, 1.25, 0.3, 1);   /* gentle overshoot */
-  --zs-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);       /* standard ease-out */
-  --zs-motion-fast: 150ms;
-  --zs-motion-base: 250ms;
-  --zs-motion-slow: 400ms;
+  --zeroship-motion-spring: cubic-bezier(0.5, 1.25, 0.3, 1);   /* gentle overshoot */
+  --zeroship-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);       /* standard ease-out */
+  --zeroship-motion-fast: 150ms;
+  --zeroship-motion-base: 250ms;
+  --zeroship-motion-slow: 400ms;
 
   /* ─── Focus ring */
-  --zs-focus-ring-width: 0.1875rem;            /* 3 */
-  --zs-focus-ring-offset: 0.125rem;            /* 2 */
+  --zeroship-focus-ring-width: 0.1875rem;            /* 3 */
+  --zeroship-focus-ring-offset: 0.125rem;            /* 2 */
 
   /* ─── 44pt minimum tappable */
-  --zs-hit-min: 2.75rem;                       /* 44 */
+  --zeroship-hit-min: 2.75rem;                       /* 44 */
 
   /* ─── Control sizing — Input today; Select / Textarea / etc. follow.
      Sizes mirror Button so an Input next to a Button reads coherent
      (controls share a visual rhythm). The 44pt minimum hit target
      is honored by Input via the same invisible ::before trick Button
      uses on coarse pointers. */
-  --zs-control-h-sm: 2rem;                     /* 32 — matches Button.small */
-  --zs-control-h-md: 2.5rem;                   /* 40 — matches Button.medium */
-  --zs-control-h-lg: 3rem;                     /* 48 — matches Button.large */
-  --zs-control-px-sm: var(--zs-space-3);       /* 12 */
-  --zs-control-px-md: var(--zs-space-4);       /* 16 */
-  --zs-control-px-lg: var(--zs-space-5);       /* 20 */
-  --zs-control-radius-sm: var(--zs-radius-2);  /* 6 */
-  --zs-control-radius-md: var(--zs-radius-3);  /* 8 */
-  --zs-control-radius-lg: var(--zs-radius-4);  /* 10 */
+  --zeroship-control-h-sm: 2rem;                     /* 32 — matches Button.small */
+  --zeroship-control-h-md: 2.5rem;                   /* 40 — matches Button.medium */
+  --zeroship-control-h-lg: 3rem;                     /* 48 — matches Button.large */
+  --zeroship-control-px-sm: var(--zeroship-space-3);       /* 12 */
+  --zeroship-control-px-md: var(--zeroship-space-4);       /* 16 */
+  --zeroship-control-px-lg: var(--zeroship-space-5);       /* 20 */
+  --zeroship-control-radius-sm: var(--zeroship-radius-2);  /* 6 */
+  --zeroship-control-radius-md: var(--zeroship-radius-3);  /* 8 */
+  --zeroship-control-radius-lg: var(--zeroship-radius-4);  /* 10 */
 
   /* ─── Field layout — vertical and horizontal Field shells lean on
      these gaps so consumers can sub-theme spacing in one place. */
-  --zs-field-gap: var(--zs-space-2);           /* 8 — label/control/desc/err stack gap */
-  --zs-field-label-gap: var(--zs-space-1);     /* 4 — inline label↔required indicator gap */
+  --zeroship-field-gap: var(--zeroship-space-2);           /* 8 — label/control/desc/err stack gap */
+  --zeroship-field-label-gap: var(--zeroship-space-1);     /* 4 — inline label↔required indicator gap */
 
   /* ─── Selection primitives — readonly + hairline. The selection family
      (Checkbox / Switch / Radio) needed a quiet "presented, not editable"
      treatment so readonly states stop reading as enabled (slice-4 visual-
      polish item 2). The hairline width is shared with Input's inset
      border so the three primitives align with the form-control rhythm.
-     `--zs-selection-bg-readonly` / `--zs-selection-ink-readonly` re-use
+     `--zeroship-selection-bg-readonly` / `--zeroship-selection-ink-readonly` re-use
      the per-theme Input readonly tokens via composition — themes that
-     override `--zs-input-bg-readonly` automatically restyle the
+     override `--zeroship-input-bg-readonly` automatically restyle the
      selection primitives' readonly chips too. */
-  --zs-selection-hairline: 0.0625rem;          /* 1 — same as input edge */
-  --zs-selection-bg-readonly: var(--zs-input-bg-readonly);
-  --zs-selection-ink-readonly: var(--zs-input-ink-readonly);
+  --zeroship-selection-hairline: 0.0625rem;          /* 1 — same as input edge */
+  --zeroship-selection-bg-readonly: var(--zeroship-input-bg-readonly);
+  --zeroship-selection-ink-readonly: var(--zeroship-input-ink-readonly);
   /* Horizontal Field label cell width. Promoted to a foundation token
      (rather than only an inline `var(...)` fallback) so per-form-section
-     overrides via CSS or inline `--zs-field-horizontal-label-w: …` are
+     overrides via CSS or inline `--zeroship-field-horizontal-label-w: …` are
      discoverable. Item 17 of the slice-2 review fix brief. */
-  --zs-field-horizontal-label-w: 10rem;        /* 160 */
+  --zeroship-field-horizontal-label-w: 10rem;        /* 160 */
 
   /* ─── Material thicknesses. The default values here are theme-invariant;
-     the per-theme `--zs-material-regular` override below tunes the
+     the per-theme `--zeroship-material-regular` override below tunes the
      saturation for that theme. */
-  --zs-material-ultra-thin:  blur(0.5rem) saturate(1.6);
-  --zs-material-thin:        blur(1rem) saturate(1.6);
-  --zs-material-regular:     blur(1.5rem) saturate(1.8);   /* surfaces default */
-  --zs-material-thick:       blur(2rem) saturate(1.8);     /* backdrop default */
-  --zs-material-ultra-thick: blur(2.5rem) saturate(2);
+  --zeroship-material-ultra-thin:  blur(0.5rem) saturate(1.6);
+  --zeroship-material-thin:        blur(1rem) saturate(1.6);
+  --zeroship-material-regular:     blur(1.5rem) saturate(1.8);   /* surfaces default */
+  --zeroship-material-thick:       blur(2rem) saturate(1.8);     /* backdrop default */
+  --zeroship-material-ultra-thick: blur(2.5rem) saturate(2);
 
   /* ─── Shadow scale — elevation as a function of depth. All shadows
      use oklch alpha; no rgb literals. Each entry is two layers (a
      larger ambient + a smaller crisp) for the layered-shadow feel. */
-  --zs-shadow-1: 0 0.0625rem 0.125rem oklch(0 0 0 / 0.06),
+  --zeroship-shadow-1: 0 0.0625rem 0.125rem oklch(0 0 0 / 0.06),
                  0 0.0625rem 0.125rem oklch(0 0 0 / 0.04);
-  --zs-shadow-2: 0 0.25rem 0.5rem oklch(0 0 0 / 0.08),
+  --zeroship-shadow-2: 0 0.25rem 0.5rem oklch(0 0 0 / 0.08),
                  0 0.125rem 0.25rem oklch(0 0 0 / 0.06);
-  --zs-shadow-3: 0 0.5rem 1rem oklch(0 0 0 / 0.1),
+  --zeroship-shadow-3: 0 0.5rem 1rem oklch(0 0 0 / 0.1),
                  0 0.25rem 0.5rem oklch(0 0 0 / 0.06);
-  --zs-shadow-4: 0 1rem 2rem oklch(0 0 0 / 0.12),
+  --zeroship-shadow-4: 0 1rem 2rem oklch(0 0 0 / 0.12),
                  0 0.5rem 1rem oklch(0 0 0 / 0.08);
   /* Dialog elevation — two layered drops plus an outer hairline
      (visual-polish item 3). Label-based opacity replaces the earlier
@@ -373,104 +373,104 @@
      instead of a heavy dark bloom. The inner hairline (third stack)
      substitutes for the bigger shadow's bloom — gives the popup a
      defined edge without the dark glow. Inline `0 0 0 0.0625rem` ring
-     used (rather than the Card's `--zs-card-surface-edge` token, which
+     used (rather than the Card's `--zeroship-card-surface-edge` token, which
      is an `inset` hairline tuned for surface-on-surface delineation;
      the dialog popup needs an OUTER ring against the scrim instead). */
-  --zs-shadow-dialog:
-    0 var(--zs-space-6) var(--zs-space-10)
-      color-mix(in oklch, var(--zs-label) 24%, transparent),
-    0 var(--zs-space-2) var(--zs-space-6)
-      color-mix(in oklch, var(--zs-label) 12%, transparent),
-    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 6%, transparent);
+  --zeroship-shadow-dialog:
+    0 var(--zeroship-space-6) var(--zeroship-space-10)
+      color-mix(in oklch, var(--zeroship-label) 24%, transparent),
+    0 var(--zeroship-space-2) var(--zeroship-space-6)
+      color-mix(in oklch, var(--zeroship-label) 12%, transparent),
+    0 0 0 0.0625rem color-mix(in oklch, var(--zeroship-label) 6%, transparent);
 
   /* Popover elevation — lighter than dialog, three-layer label-mix.
      Popovers are anchored panels (helper copy, settings sub-flyouts);
-     reusing --zs-shadow-dialog made them read as full sheets and
+     reusing --zeroship-shadow-dialog made them read as full sheets and
      competed with real dialogs for visual weight. This token keeps the
      two-layer drop tighter (space-4/space-8 ambient + space-1/space-4
      crisp) and replaces the wide outer ring with an even thinner
      hairline so the popup edges read as cut-out, not chrome. The inner
-     hairline at the Popup selector still uses --zs-separator for the
+     hairline at the Popup selector still uses --zeroship-separator for the
      surface-on-surface line. */
-  --zs-shadow-popover:
-    0 var(--zs-space-4) var(--zs-space-8)
-      color-mix(in oklch, var(--zs-label) 16%, transparent),
-    0 var(--zs-space-1) var(--zs-space-4)
-      color-mix(in oklch, var(--zs-label) 10%, transparent),
-    0 0 0 var(--zs-selection-hairline)
-      color-mix(in oklch, var(--zs-label) 10%, transparent);
+  --zeroship-shadow-popover:
+    0 var(--zeroship-space-4) var(--zeroship-space-8)
+      color-mix(in oklch, var(--zeroship-label) 16%, transparent),
+    0 var(--zeroship-space-1) var(--zeroship-space-4)
+      color-mix(in oklch, var(--zeroship-label) 10%, transparent),
+    0 0 0 var(--zeroship-selection-hairline)
+      color-mix(in oklch, var(--zeroship-label) 10%, transparent);
 
   /* ─── Card sizing */
-  --zs-card-radius-sm: var(--zs-radius-4);     /* 10 */
-  --zs-card-radius-md: var(--zs-radius-5);     /* 12 — default */
-  --zs-card-radius-lg: var(--zs-radius-6);     /* 16 */
-  --zs-card-padding-sm: var(--zs-space-4);     /* 16 */
-  --zs-card-padding-md: var(--zs-space-6);     /* 24 — default */
-  --zs-card-padding-lg: var(--zs-space-7);     /* 32 */
-  --zs-card-gap-sm: var(--zs-space-3);         /* 12 */
-  --zs-card-gap-md: var(--zs-space-4);         /* 16 */
-  --zs-card-gap-lg: var(--zs-space-5);         /* 20 */
+  --zeroship-card-radius-sm: var(--zeroship-radius-4);     /* 10 */
+  --zeroship-card-radius-md: var(--zeroship-radius-5);     /* 12 — default */
+  --zeroship-card-radius-lg: var(--zeroship-radius-6);     /* 16 */
+  --zeroship-card-padding-sm: var(--zeroship-space-4);     /* 16 */
+  --zeroship-card-padding-md: var(--zeroship-space-6);     /* 24 — default */
+  --zeroship-card-padding-lg: var(--zeroship-space-7);     /* 32 */
+  --zeroship-card-gap-sm: var(--zeroship-space-3);         /* 12 */
+  --zeroship-card-gap-md: var(--zeroship-space-4);         /* 16 */
+  --zeroship-card-gap-lg: var(--zeroship-space-5);         /* 20 */
 
   /* ─── Card surface edge — subtle inset hairline so a surface Card
      sitting on a same-color parent surface still reads as a distinct
      cell. Theme-invariant default; themes may opt out by setting the
      token to a zero-sized invisible shadow:
-       --zs-card-surface-edge: 0 0 0 0 transparent;
+       --zeroship-card-surface-edge: 0 0 0 0 transparent;
      (Using a zero-sized transparent shadow rather than `none` so the
      value remains valid when composed into a multi-shadow list at
-     hover state.) The hairline uses --zs-fill-tertiary (theme-defined)
+     hover state.) The hairline uses --zeroship-fill-tertiary (theme-defined)
      so dark themes get a subtle light edge and light themes get a
      subtle dark edge. Visual-polish item 1. */
-  --zs-card-surface-edge: 0 0 0 0.0625rem var(--zs-fill-tertiary) inset;
+  --zeroship-card-surface-edge: 0 0 0 0.0625rem var(--zeroship-fill-tertiary) inset;
 
   /* ─── Dialog sizing. max-widths in rem so user font-size scales them. */
-  --zs-dialog-radius: var(--zs-radius-7);             /* 22 — standard sheet */
-  --zs-dialog-radius-alert: var(--zs-radius-5);       /* 12 — tighter for alerts */
-  --zs-dialog-max-width-sm: 22.5rem;                  /* 360 */
-  --zs-dialog-max-width-md: 32.5rem;                  /* 520 — default */
-  --zs-dialog-max-width-lg: 45rem;                    /* 720 */
-  --zs-dialog-padding: var(--zs-space-6);             /* 24 */
-  --zs-dialog-padding-alert: var(--zs-space-5);       /* 20 */
+  --zeroship-dialog-radius: var(--zeroship-radius-7);             /* 22 — standard sheet */
+  --zeroship-dialog-radius-alert: var(--zeroship-radius-5);       /* 12 — tighter for alerts */
+  --zeroship-dialog-max-width-sm: 22.5rem;                  /* 360 */
+  --zeroship-dialog-max-width-md: 32.5rem;                  /* 520 — default */
+  --zeroship-dialog-max-width-lg: 45rem;                    /* 720 */
+  --zeroship-dialog-padding: var(--zeroship-space-6);             /* 24 */
+  --zeroship-dialog-padding-alert: var(--zeroship-space-5);       /* 20 */
   /* Per-size dialog padding (visual-polish item 4). The popup resolves
-     `--zs-dialog-padding-current` from these per size; header/body/footer
+     `--zeroship-dialog-padding-current` from these per size; header/body/footer
      all read the current value so narrow dialogs feel tighter and large
      dialogs gain a stronger sheet rhythm. `md` matches the legacy
-     `--zs-dialog-padding` exactly so the default size is byte-identical
+     `--zeroship-dialog-padding` exactly so the default size is byte-identical
      before/after the rollout. */
-  --zs-dialog-padding-sm: var(--zs-space-5);          /* 20 */
-  --zs-dialog-padding-md: var(--zs-space-6);          /* 24 — default */
-  --zs-dialog-padding-lg: var(--zs-space-7);          /* 32 */
+  --zeroship-dialog-padding-sm: var(--zeroship-space-5);          /* 20 */
+  --zeroship-dialog-padding-md: var(--zeroship-space-6);          /* 24 — default */
+  --zeroship-dialog-padding-lg: var(--zeroship-space-7);          /* 32 */
 
   /* Modal z-stack token consumed by Dialog/AlertDialog backdrops. */
-  --zs-z-modal: 50;
+  --zeroship-z-modal: 50;
 
   /* ─── Breakpoints — minimal responsive scale for layout primitives.
      The system is fluid by default; these gate Grid `columns` objects and
      Split `collapseBelow` only. CSS custom properties cannot be used inside
      `@media` query conditions, so the layout CSS writes the literal rem
      values in its media queries with a comment referencing the token name
-     (e.g. a 40rem min-width query annotated as the --zs-bp-sm breakpoint).
+     (e.g. a 40rem min-width query annotated as the --zeroship-bp-sm breakpoint).
      These tokens stay the single documented source of the values. */
-  --zs-bp-sm: 40rem;   /* 640 */
-  --zs-bp-md: 48rem;   /* 768 */
-  --zs-bp-lg: 64rem;   /* 1024 */
+  --zeroship-bp-sm: 40rem;   /* 640 */
+  --zeroship-bp-md: 48rem;   /* 768 */
+  --zeroship-bp-lg: 64rem;   /* 1024 */
 
   /* ─── Container max-widths — Container is the sole width authority. */
-  --zs-container-sm: 30rem;   /* 480 */
-  --zs-container-md: 48rem;   /* 768 */
-  --zs-container-lg: 64rem;   /* 1024 */
-  --zs-container-xl: 80rem;   /* 1280 */
-  --zs-container-product: 61.25rem; /* 980 — dense product/legal pages */
-  --zs-container-wide: 78.75rem;    /* 1260 — premium marketing rails */
+  --zeroship-container-sm: 30rem;   /* 480 */
+  --zeroship-container-md: 48rem;   /* 768 */
+  --zeroship-container-lg: 64rem;   /* 1024 */
+  --zeroship-container-xl: 80rem;   /* 1280 */
+  --zeroship-container-product: 61.25rem; /* 980 — dense product/legal pages */
+  --zeroship-container-wide: 78.75rem;    /* 1260 — premium marketing rails */
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --zs-motion-fast: 1ms;
-    --zs-motion-base: 1ms;
-    --zs-motion-slow: 1ms;
-    --zs-motion-spring: linear;
-    --zs-motion-ease: linear;
+    --zeroship-motion-fast: 1ms;
+    --zeroship-motion-base: 1ms;
+    --zeroship-motion-slow: 1ms;
+    --zeroship-motion-spring: linear;
+    --zeroship-motion-ease: linear;
   }
 }
 
@@ -485,726 +485,726 @@
 [data-theme="crystal-dark"],
 [data-theme="studio-light"],
 [data-theme="ghibli-light"] {
-  --zs-button-focus-ring-width: 0.125rem;
-  --zs-button-font-weight: 400;
-  --zs-button-active-scale: 1;
-  --zs-button-height-md: 2.75rem;
-  --zs-button-line-height-md: 1.25rem;
-  --zs-button-padding-md: 1.3125rem;
-  --zs-button-radius-sm: var(--zs-radius-full);
-  --zs-button-radius-md: var(--zs-radius-full);
-  --zs-button-radius-lg: var(--zs-radius-full);
+  --zeroship-button-focus-ring-width: 0.125rem;
+  --zeroship-button-font-weight: 400;
+  --zeroship-button-active-scale: 1;
+  --zeroship-button-height-md: 2.75rem;
+  --zeroship-button-line-height-md: 1.25rem;
+  --zeroship-button-padding-md: 1.3125rem;
+  --zeroship-button-radius-sm: var(--zeroship-radius-full);
+  --zeroship-button-radius-md: var(--zeroship-radius-full);
+  --zeroship-button-radius-lg: var(--zeroship-radius-full);
 
-  --zs-material-ultra-thin: blur(1rem) saturate(1.34);
-  --zs-material-thin: blur(1.625rem) saturate(1.4);
-  --zs-material-regular: blur(2.25rem) saturate(1.46);
-  --zs-material-thick: blur(3rem) saturate(1.5);
-  --zs-blur-overlay: var(--zs-material-thick);
+  --zeroship-material-ultra-thin: blur(1rem) saturate(1.34);
+  --zeroship-material-thin: blur(1.625rem) saturate(1.4);
+  --zeroship-material-regular: blur(2.25rem) saturate(1.46);
+  --zeroship-material-thick: blur(3rem) saturate(1.5);
+  --zeroship-blur-overlay: var(--zeroship-material-thick);
 
-  --zs-card-backdrop-filter: var(--zs-material-regular);
-  --zs-control-backdrop-filter: var(--zs-material-ultra-thin);
-  --zs-dialog-backdrop-filter: var(--zs-material-regular);
+  --zeroship-card-backdrop-filter: var(--zeroship-material-regular);
+  --zeroship-control-backdrop-filter: var(--zeroship-material-ultra-thin);
+  --zeroship-dialog-backdrop-filter: var(--zeroship-material-regular);
 
-  --zs-input-border-focus: var(--zs-accent);
-  --zs-input-border-invalid: var(--zs-system-red);
-  --zs-input-ink: var(--zs-label);
-  --zs-input-placeholder: var(--zs-label-tertiary);
-  --zs-input-ink-disabled: var(--zs-label-tertiary);
-  --zs-input-ink-readonly: var(--zs-label-secondary);
+  --zeroship-input-border-focus: var(--zeroship-accent);
+  --zeroship-input-border-invalid: var(--zeroship-system-red);
+  --zeroship-input-ink: var(--zeroship-label);
+  --zeroship-input-placeholder: var(--zeroship-label-tertiary);
+  --zeroship-input-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-input-ink-readonly: var(--zeroship-label-secondary);
 
-  --zs-field-label-ink: var(--zs-label);
-  --zs-field-description-ink: var(--zs-label-secondary);
-  --zs-field-error-ink: var(--zs-system-red);
-  --zs-field-required-ink: var(--zs-system-red);
+  --zeroship-field-label-ink: var(--zeroship-label);
+  --zeroship-field-description-ink: var(--zeroship-label-secondary);
+  --zeroship-field-error-ink: var(--zeroship-system-red);
+  --zeroship-field-required-ink: var(--zeroship-system-red);
 }
 
 [data-theme="crystal-light"] {
   /* ─── Canvas: near-white Apple surface with faint warm/cool refraction. */
-  --zs-surface-bg:
+  --zeroship-surface-bg:
     radial-gradient(at 0% 18%, oklch(0.88 0.078 48 / 0.3), transparent 42%),
     radial-gradient(at 18% 0%, oklch(0.96 0.048 28 / 0.2), transparent 36%),
     radial-gradient(at 88% 6%, oklch(0.96 0.03 205 / 0.2), transparent 38%),
     radial-gradient(at 76% 94%, oklch(0.95 0.028 300 / 0.12), transparent 44%),
     linear-gradient(180deg, oklch(0.998 0.001 255), oklch(0.989 0.004 255) 58%, oklch(0.996 0.002 250));
 
-  --zs-surface: oklch(1 0 0 / 0.48);
-  --zs-surface-raised: oklch(1 0 0 / 0.42);
-  --zs-surface-overlay: oklch(1 0 0 / 0.5);
-  --zs-surface-sunken: oklch(0.98 0.005 255 / 0.3);
+  --zeroship-surface: oklch(1 0 0 / 0.48);
+  --zeroship-surface-raised: oklch(1 0 0 / 0.42);
+  --zeroship-surface-overlay: oklch(1 0 0 / 0.5);
+  --zeroship-surface-sunken: oklch(0.98 0.005 255 / 0.3);
 
-  --zs-crystal-edge-light: oklch(1 0 0 / 0.5);
-  --zs-crystal-edge-dark: oklch(0.45 0.026 255 / 0.035);
-  --zs-crystal-rim: oklch(0.62 0.032 250 / 0.055);
-  --zs-crystal-rim-strong: oklch(0.56 0.048 250 / 0.11);
-  --zs-crystal-inner-glow: oklch(1 0 0 / 0.18);
-  --zs-crystal-contact: oklch(0.42 0.032 255 / 0.035);
-  --zs-crystal-cyan: oklch(0.95 0.026 210 / 0.13);
-  --zs-crystal-violet: oklch(0.95 0.024 295 / 0.08);
-  --zs-crystal-mint: oklch(0.96 0.026 175 / 0.08);
-  --zs-crystal-peach: oklch(0.92 0.05 44 / 0.22);
-  --zs-crystal-story-backdrop:
+  --zeroship-crystal-edge-light: oklch(1 0 0 / 0.5);
+  --zeroship-crystal-edge-dark: oklch(0.45 0.026 255 / 0.035);
+  --zeroship-crystal-rim: oklch(0.62 0.032 250 / 0.055);
+  --zeroship-crystal-rim-strong: oklch(0.56 0.048 250 / 0.11);
+  --zeroship-crystal-inner-glow: oklch(1 0 0 / 0.18);
+  --zeroship-crystal-contact: oklch(0.42 0.032 255 / 0.035);
+  --zeroship-crystal-cyan: oklch(0.95 0.026 210 / 0.13);
+  --zeroship-crystal-violet: oklch(0.95 0.024 295 / 0.08);
+  --zeroship-crystal-mint: oklch(0.96 0.026 175 / 0.08);
+  --zeroship-crystal-peach: oklch(0.92 0.05 44 / 0.22);
+  --zeroship-crystal-story-backdrop:
     radial-gradient(at 11% 30%, oklch(0.82 0.15 28 / 0.26), transparent 16rem),
     radial-gradient(at 28% 18%, oklch(0.72 0.11 63 / 0.16), transparent 14rem),
     radial-gradient(at 44% 22%, oklch(0.52 0.12 252 / 0.14), transparent 16rem),
     radial-gradient(at 64% 16%, oklch(0.84 0.06 214 / 0.14), transparent 18rem),
     radial-gradient(at 86% 30%, oklch(0.74 0.1 320 / 0.1), transparent 16rem),
-    var(--zs-surface-bg);
+    var(--zeroship-surface-bg);
 
-  --zs-label: oklch(0.22 0.018 255);
-  --zs-label-secondary: oklch(0.4 0.016 255);
-  --zs-label-tertiary: oklch(0.55 0.014 255);
-  --zs-label-quaternary: oklch(0.7 0.012 255);
+  --zeroship-label: oklch(0.22 0.018 255);
+  --zeroship-label-secondary: oklch(0.4 0.016 255);
+  --zeroship-label-tertiary: oklch(0.55 0.014 255);
+  --zeroship-label-quaternary: oklch(0.7 0.012 255);
 
-  --zs-fill: oklch(0.28 0.018 255 / 0.07);
-  --zs-fill-secondary: oklch(0.28 0.018 255 / 0.05);
-  --zs-fill-tertiary: oklch(0.28 0.018 255 / 0.034);
-  --zs-fill-quaternary: oklch(0.28 0.018 255 / 0.022);
+  --zeroship-fill: oklch(0.28 0.018 255 / 0.07);
+  --zeroship-fill-secondary: oklch(0.28 0.018 255 / 0.05);
+  --zeroship-fill-tertiary: oklch(0.28 0.018 255 / 0.034);
+  --zeroship-fill-quaternary: oklch(0.28 0.018 255 / 0.022);
 
-  --zs-separator: oklch(0.5 0.022 255 / 0.075);
-  --zs-separator-strong: oklch(0.44 0.034 255 / 0.15);
+  --zeroship-separator: oklch(0.5 0.022 255 / 0.075);
+  --zeroship-separator-strong: oklch(0.44 0.034 255 / 0.15);
 
-  --zs-accent: oklch(0.55 0.17 254);
-  --zs-accent-hover: oklch(0.5 0.18 254);
-  --zs-accent-active: oklch(0.44 0.18 254);
-  --zs-accent-ink: oklch(0.99 0.004 255);
+  --zeroship-accent: oklch(0.55 0.17 254);
+  --zeroship-accent-hover: oklch(0.5 0.18 254);
+  --zeroship-accent-active: oklch(0.44 0.18 254);
+  --zeroship-accent-ink: oklch(0.99 0.004 255);
 
-  --zs-system-red: oklch(0.52 0.18 25);
-  --zs-system-red-hover: oklch(0.47 0.19 25);
-  --zs-system-red-active: oklch(0.41 0.2 25);
-  --zs-system-green: oklch(0.57 0.15 150);
-  --zs-system-yellow: oklch(0.82 0.14 95);
-  --zs-system-orange: oklch(0.67 0.18 48);
+  --zeroship-system-red: oklch(0.52 0.18 25);
+  --zeroship-system-red-hover: oklch(0.47 0.19 25);
+  --zeroship-system-red-active: oklch(0.41 0.2 25);
+  --zeroship-system-green: oklch(0.57 0.15 150);
+  --zeroship-system-yellow: oklch(0.82 0.14 95);
+  --zeroship-system-orange: oklch(0.67 0.18 48);
 
-  --zs-focus: var(--zs-accent);
-  --zs-focus-ring-color: oklch(0.58 0.17 254 / 0.22);
-  --zs-input-focus-ring-color: oklch(0.58 0.17 254 / 0.16);
-  --zs-button-focus-ring-color: oklch(0.58 0.17 254 / 0.2);
+  --zeroship-focus: var(--zeroship-accent);
+  --zeroship-focus-ring-color: oklch(0.58 0.17 254 / 0.22);
+  --zeroship-input-focus-ring-color: oklch(0.58 0.17 254 / 0.16);
+  --zeroship-button-focus-ring-color: oklch(0.58 0.17 254 / 0.2);
 
-  --zs-button-plain-ink: oklch(0.47 0.16 254);
-  --zs-button-filled-bg: oklch(0.54 0.18 254);
-  --zs-button-filled-bg-hover: oklch(0.54 0.18 254);
-  --zs-button-filled-bg-active: oklch(0.5 0.18 254);
-  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
-  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-tinted-bg: oklch(0.92 0.04 254 / 0.72);
-  --zs-button-tinted-bg-hover: oklch(0.9 0.052 254 / 0.78);
-  --zs-button-tinted-bg-active: oklch(0.87 0.064 254 / 0.84);
-  --zs-button-tinted-bg-disabled: oklch(0.94 0.018 254 / 0.45);
-  --zs-button-tinted-ink: var(--zs-accent-active);
-  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
-  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 5%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 7%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 9%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 2%, var(--zs-fill-quaternary));
-  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
-  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
-  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.16);
+  --zeroship-button-plain-ink: oklch(0.47 0.16 254);
+  --zeroship-button-filled-bg: oklch(0.54 0.18 254);
+  --zeroship-button-filled-bg-hover: oklch(0.54 0.18 254);
+  --zeroship-button-filled-bg-active: oklch(0.5 0.18 254);
+  --zeroship-button-filled-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 16%, var(--zeroship-fill-quaternary));
+  --zeroship-button-filled-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-tinted-bg: oklch(0.92 0.04 254 / 0.72);
+  --zeroship-button-tinted-bg-hover: oklch(0.9 0.052 254 / 0.78);
+  --zeroship-button-tinted-bg-active: oklch(0.87 0.064 254 / 0.84);
+  --zeroship-button-tinted-bg-disabled: oklch(0.94 0.018 254 / 0.45);
+  --zeroship-button-tinted-ink: var(--zeroship-accent-active);
+  --zeroship-button-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-accent) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-gray-bg: color-mix(in oklch, var(--zeroship-label) 5%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-hover: color-mix(in oklch, var(--zeroship-label) 7%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-active: color-mix(in oklch, var(--zeroship-label) 9%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-disabled: color-mix(in oklch, var(--zeroship-label) 2%, var(--zeroship-fill-quaternary));
+  --zeroship-button-gray-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-plain-bg-hover: color-mix(in oklch, var(--zeroship-accent) 7%, transparent);
+  --zeroship-button-plain-bg-active: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
+  --zeroship-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.16);
 
-  --zs-button-destructive-filled-bg: oklch(0.51 0.18 25);
-  --zs-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
-  --zs-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
-  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red-active) 10%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red-active) 15%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red-active) 20%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
-  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
-  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
-  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+  --zeroship-button-destructive-filled-bg: oklch(0.51 0.18 25);
+  --zeroship-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
+  --zeroship-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
+  --zeroship-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-bg: color-mix(in oklch, var(--zeroship-system-red-active) 10%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zeroship-system-red-active) 15%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zeroship-system-red-active) 20%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 5%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-ink: var(--zeroship-system-red-active);
+  --zeroship-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-system-red) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 7%, transparent);
+  --zeroship-button-destructive-plain-bg-active: color-mix(in oklch, var(--zeroship-system-red) 11%, transparent);
 
-  --zs-backdrop: oklch(0.42 0.03 255 / 0.13);
-  --zs-scrim: color-mix(in oklch, var(--zs-label) 14%, transparent);
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 56%, transparent);
-  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
-  --zs-story-surface: color-mix(in oklch, var(--zs-surface-overlay) 52%, transparent);
-  --zs-story-surface-radius: var(--zs-radius-7);
-  --zs-story-surface-edge:
+  --zeroship-backdrop: oklch(0.42 0.03 255 / 0.13);
+  --zeroship-scrim: color-mix(in oklch, var(--zeroship-label) 14%, transparent);
+  --zeroship-material-tint: color-mix(in oklch, var(--zeroship-surface-overlay) 56%, transparent);
+  --zeroship-story-backdrop: var(--zeroship-crystal-story-backdrop);
+  --zeroship-story-surface: color-mix(in oklch, var(--zeroship-surface-overlay) 52%, transparent);
+  --zeroship-story-surface-radius: var(--zeroship-radius-7);
+  --zeroship-story-surface-edge:
     inset 0 0.0625rem 0 oklch(1 0 0 / 0.46),
     inset 0 -0.0625rem 0 oklch(0.45 0.026 255 / 0.026);
 
-  --zs-shadow-1:
-    0 0.25rem 1rem var(--zs-crystal-contact);
-  --zs-shadow-2:
-    0 0.625rem 1.625rem var(--zs-crystal-contact),
+  --zeroship-shadow-1:
+    0 0.25rem 1rem var(--zeroship-crystal-contact);
+  --zeroship-shadow-2:
+    0 0.625rem 1.625rem var(--zeroship-crystal-contact),
     0 0.125rem 0.375rem oklch(0.42 0.028 255 / 0.022);
-  --zs-shadow-3:
+  --zeroship-shadow-3:
     0 1rem 2.5rem oklch(0.38 0.032 255 / 0.06),
     0 0.25rem 0.75rem oklch(0.42 0.028 255 / 0.034);
-  --zs-shadow-4:
+  --zeroship-shadow-4:
     0 1.375rem 3.25rem oklch(0.35 0.034 255 / 0.075),
     0 0.375rem 1.125rem oklch(0.42 0.028 255 / 0.04);
-  --zs-shadow-dialog:
+  --zeroship-shadow-dialog:
     0 1.75rem 4.5rem oklch(0.32 0.036 255 / 0.1),
     0 0.5rem 1.25rem oklch(0.42 0.03 255 / 0.052),
-    0 0 0 0.0625rem var(--zs-crystal-rim),
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-shadow-popover:
+    0 0 0 0.0625rem var(--zeroship-crystal-rim),
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-shadow-popover:
     0 0.875rem 2.125rem oklch(0.36 0.032 255 / 0.06),
     0 0.1875rem 0.625rem oklch(0.42 0.028 255 / 0.034),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
 
-  --zs-card-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-card-outline-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
-  --zs-popup-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-input-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zeroship-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
+  --zeroship-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
 
-  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 4%, transparent);
+  --zeroship-card-hover-tint: color-mix(in oklch, var(--zeroship-accent) 4%, transparent);
 
-  --zs-button-filled-shadow: none;
-  --zs-button-tinted-shadow: none;
-  --zs-button-gray-shadow: none;
-  --zs-button-destructive-filled-shadow: none;
-  --zs-button-destructive-tinted-shadow: none;
+  --zeroship-button-filled-shadow: none;
+  --zeroship-button-tinted-shadow: none;
+  --zeroship-button-gray-shadow: none;
+  --zeroship-button-destructive-filled-shadow: none;
+  --zeroship-button-destructive-tinted-shadow: none;
 
-  --zs-app-shell-bg: var(--zs-surface-bg);
-  --zs-shell-header-bg: color-mix(in oklch, var(--zs-surface-overlay) 58%, var(--zs-crystal-peach));
-  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 58%, transparent);
+  --zeroship-app-shell-bg: var(--zeroship-surface-bg);
+  --zeroship-shell-header-bg: color-mix(in oklch, var(--zeroship-surface-overlay) 58%, var(--zeroship-crystal-peach));
+  --zeroship-shell-sidebar-bg: color-mix(in oklch, var(--zeroship-surface-sunken) 58%, transparent);
 
-  --zs-input-bg: color-mix(in oklch, var(--zs-surface) 54%, transparent);
-  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 62%, var(--zs-fill-quaternary));
-  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 68%, var(--zs-crystal-mint));
-  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 46%, transparent);
-  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface) 46%, var(--zs-fill-quaternary));
-  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface) 52%, var(--zs-fill-secondary));
-  --zs-input-border: var(--zs-crystal-rim);
-  --zs-input-border-hover: var(--zs-crystal-rim-strong);
-  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface) 58%, var(--zs-fill-tertiary));
+  --zeroship-input-bg: color-mix(in oklch, var(--zeroship-surface) 54%, transparent);
+  --zeroship-input-bg-hover: color-mix(in oklch, var(--zeroship-surface) 62%, var(--zeroship-fill-quaternary));
+  --zeroship-input-bg-focus: color-mix(in oklch, var(--zeroship-surface) 68%, var(--zeroship-crystal-mint));
+  --zeroship-input-bg-disabled: color-mix(in oklch, var(--zeroship-surface) 46%, transparent);
+  --zeroship-input-bg-filled: color-mix(in oklch, var(--zeroship-surface) 46%, var(--zeroship-fill-quaternary));
+  --zeroship-input-bg-filled-hover: color-mix(in oklch, var(--zeroship-surface) 52%, var(--zeroship-fill-secondary));
+  --zeroship-input-border: var(--zeroship-crystal-rim);
+  --zeroship-input-border-hover: var(--zeroship-crystal-rim-strong);
+  --zeroship-input-bg-readonly: color-mix(in oklch, var(--zeroship-surface) 58%, var(--zeroship-fill-tertiary));
 }
 
 [data-theme="studio-light"] {
   /* Studio: a quiet creator-dashboard theme. Solid readable surfaces, restrained
      depth, blue-teal accent, and just enough warm/cool backdrop color for
      marketing sections without making operational UI feel decorative. */
-  --zs-surface-bg:
+  --zeroship-surface-bg:
     radial-gradient(at 0% 12%, oklch(0.93 0.048 44 / 0.22), transparent 34rem),
     radial-gradient(at 90% 0%, oklch(0.9 0.046 215 / 0.2), transparent 32rem),
     linear-gradient(180deg, oklch(0.982 0.006 235), oklch(0.962 0.008 245));
 
-  --zs-surface: oklch(1 0 0);
-  --zs-surface-raised: oklch(0.995 0.002 245);
-  --zs-surface-overlay: oklch(1 0 0 / 0.96);
-  --zs-surface-sunken: oklch(0.946 0.008 245);
+  --zeroship-surface: oklch(1 0 0);
+  --zeroship-surface-raised: oklch(0.995 0.002 245);
+  --zeroship-surface-overlay: oklch(1 0 0 / 0.96);
+  --zeroship-surface-sunken: oklch(0.946 0.008 245);
 
-  --zs-crystal-edge-light: oklch(1 0 0 / 0.7);
-  --zs-crystal-edge-dark: oklch(0.38 0.018 245 / 0.055);
-  --zs-crystal-rim: oklch(0.56 0.026 245 / 0.12);
-  --zs-crystal-rim-strong: oklch(0.5 0.034 245 / 0.22);
-  --zs-crystal-inner-glow: oklch(1 0 0 / 0.12);
-  --zs-crystal-contact: oklch(0.36 0.03 245 / 0.075);
-  --zs-crystal-cyan: oklch(0.91 0.04 215 / 0.2);
-  --zs-crystal-violet: oklch(0.92 0.034 292 / 0.1);
-  --zs-crystal-mint: oklch(0.91 0.04 170 / 0.13);
-  --zs-crystal-peach: oklch(0.9 0.05 42 / 0.18);
-  --zs-crystal-story-backdrop:
+  --zeroship-crystal-edge-light: oklch(1 0 0 / 0.7);
+  --zeroship-crystal-edge-dark: oklch(0.38 0.018 245 / 0.055);
+  --zeroship-crystal-rim: oklch(0.56 0.026 245 / 0.12);
+  --zeroship-crystal-rim-strong: oklch(0.5 0.034 245 / 0.22);
+  --zeroship-crystal-inner-glow: oklch(1 0 0 / 0.12);
+  --zeroship-crystal-contact: oklch(0.36 0.03 245 / 0.075);
+  --zeroship-crystal-cyan: oklch(0.91 0.04 215 / 0.2);
+  --zeroship-crystal-violet: oklch(0.92 0.034 292 / 0.1);
+  --zeroship-crystal-mint: oklch(0.91 0.04 170 / 0.13);
+  --zeroship-crystal-peach: oklch(0.9 0.05 42 / 0.18);
+  --zeroship-crystal-story-backdrop:
     radial-gradient(at 12% 24%, oklch(0.84 0.11 38 / 0.18), transparent 15rem),
     radial-gradient(at 54% 12%, oklch(0.72 0.09 215 / 0.12), transparent 18rem),
     radial-gradient(at 90% 24%, oklch(0.76 0.08 170 / 0.12), transparent 16rem),
-    var(--zs-surface-bg);
+    var(--zeroship-surface-bg);
 
-  --zs-label: oklch(0.2 0.016 245);
-  --zs-label-secondary: oklch(0.38 0.016 245);
-  --zs-label-tertiary: oklch(0.54 0.014 245);
-  --zs-label-quaternary: oklch(0.68 0.012 245);
+  --zeroship-label: oklch(0.2 0.016 245);
+  --zeroship-label-secondary: oklch(0.38 0.016 245);
+  --zeroship-label-tertiary: oklch(0.54 0.014 245);
+  --zeroship-label-quaternary: oklch(0.68 0.012 245);
 
-  --zs-fill: oklch(0.28 0.018 245 / 0.075);
-  --zs-fill-secondary: oklch(0.28 0.018 245 / 0.052);
-  --zs-fill-tertiary: oklch(0.28 0.018 245 / 0.036);
-  --zs-fill-quaternary: oklch(0.28 0.018 245 / 0.024);
+  --zeroship-fill: oklch(0.28 0.018 245 / 0.075);
+  --zeroship-fill-secondary: oklch(0.28 0.018 245 / 0.052);
+  --zeroship-fill-tertiary: oklch(0.28 0.018 245 / 0.036);
+  --zeroship-fill-quaternary: oklch(0.28 0.018 245 / 0.024);
 
-  --zs-separator: oklch(0.48 0.02 245 / 0.11);
-  --zs-separator-strong: oklch(0.4 0.026 245 / 0.22);
+  --zeroship-separator: oklch(0.48 0.02 245 / 0.11);
+  --zeroship-separator-strong: oklch(0.4 0.026 245 / 0.22);
 
-  --zs-accent: oklch(0.54 0.15 228);
-  --zs-accent-hover: oklch(0.48 0.16 228);
-  --zs-accent-active: oklch(0.42 0.16 228);
-  --zs-accent-ink: oklch(0.99 0.004 245);
+  --zeroship-accent: oklch(0.54 0.15 228);
+  --zeroship-accent-hover: oklch(0.48 0.16 228);
+  --zeroship-accent-active: oklch(0.42 0.16 228);
+  --zeroship-accent-ink: oklch(0.99 0.004 245);
 
-  --zs-system-red: oklch(0.5 0.17 25);
-  --zs-system-red-hover: oklch(0.45 0.18 25);
-  --zs-system-red-active: oklch(0.39 0.19 25);
-  --zs-system-green: oklch(0.54 0.14 148);
-  --zs-system-yellow: oklch(0.8 0.13 92);
-  --zs-system-orange: oklch(0.64 0.16 50);
+  --zeroship-system-red: oklch(0.5 0.17 25);
+  --zeroship-system-red-hover: oklch(0.45 0.18 25);
+  --zeroship-system-red-active: oklch(0.39 0.19 25);
+  --zeroship-system-green: oklch(0.54 0.14 148);
+  --zeroship-system-yellow: oklch(0.8 0.13 92);
+  --zeroship-system-orange: oklch(0.64 0.16 50);
 
-  --zs-focus: var(--zs-accent);
-  --zs-focus-ring-color: oklch(0.56 0.15 228 / 0.24);
-  --zs-input-focus-ring-color: oklch(0.56 0.15 228 / 0.16);
-  --zs-button-focus-ring-color: oklch(0.56 0.15 228 / 0.2);
+  --zeroship-focus: var(--zeroship-accent);
+  --zeroship-focus-ring-color: oklch(0.56 0.15 228 / 0.24);
+  --zeroship-input-focus-ring-color: oklch(0.56 0.15 228 / 0.16);
+  --zeroship-button-focus-ring-color: oklch(0.56 0.15 228 / 0.2);
 
-  --zs-button-plain-ink: oklch(0.45 0.14 228);
-  --zs-button-filled-bg: oklch(0.52 0.16 228);
-  --zs-button-filled-bg-hover: oklch(0.48 0.17 228);
-  --zs-button-filled-bg-active: oklch(0.43 0.17 228);
-  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
-  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-tinted-bg: color-mix(in oklch, var(--zs-accent) 12%, var(--zs-surface));
-  --zs-button-tinted-bg-hover: color-mix(in oklch, var(--zs-accent) 18%, var(--zs-surface));
-  --zs-button-tinted-bg-active: color-mix(in oklch, var(--zs-accent) 24%, var(--zs-surface));
-  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-surface));
-  --zs-button-tinted-ink: var(--zs-accent-active);
-  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
-  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 6%, var(--zs-surface));
-  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 9%, var(--zs-surface));
-  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 12%, var(--zs-surface));
-  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-surface));
-  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
-  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
-  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
+  --zeroship-button-plain-ink: oklch(0.45 0.14 228);
+  --zeroship-button-filled-bg: oklch(0.52 0.16 228);
+  --zeroship-button-filled-bg-hover: oklch(0.48 0.17 228);
+  --zeroship-button-filled-bg-active: oklch(0.43 0.17 228);
+  --zeroship-button-filled-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 16%, var(--zeroship-fill-quaternary));
+  --zeroship-button-filled-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-tinted-bg: color-mix(in oklch, var(--zeroship-accent) 12%, var(--zeroship-surface));
+  --zeroship-button-tinted-bg-hover: color-mix(in oklch, var(--zeroship-accent) 18%, var(--zeroship-surface));
+  --zeroship-button-tinted-bg-active: color-mix(in oklch, var(--zeroship-accent) 24%, var(--zeroship-surface));
+  --zeroship-button-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 6%, var(--zeroship-surface));
+  --zeroship-button-tinted-ink: var(--zeroship-accent-active);
+  --zeroship-button-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-accent) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-gray-bg: color-mix(in oklch, var(--zeroship-label) 6%, var(--zeroship-surface));
+  --zeroship-button-gray-bg-hover: color-mix(in oklch, var(--zeroship-label) 9%, var(--zeroship-surface));
+  --zeroship-button-gray-bg-active: color-mix(in oklch, var(--zeroship-label) 12%, var(--zeroship-surface));
+  --zeroship-button-gray-bg-disabled: color-mix(in oklch, var(--zeroship-label) 3%, var(--zeroship-surface));
+  --zeroship-button-gray-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-plain-bg-hover: color-mix(in oklch, var(--zeroship-accent) 7%, transparent);
+  --zeroship-button-plain-bg-active: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
+  --zeroship-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
 
-  --zs-button-destructive-filled-bg: oklch(0.49 0.17 25);
-  --zs-button-destructive-filled-bg-hover: oklch(0.45 0.18 25);
-  --zs-button-destructive-filled-bg-active: oklch(0.4 0.19 25);
-  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 10%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 15%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-surface));
-  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
-  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
-  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
-  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+  --zeroship-button-destructive-filled-bg: oklch(0.49 0.17 25);
+  --zeroship-button-destructive-filled-bg-hover: oklch(0.45 0.18 25);
+  --zeroship-button-destructive-filled-bg-active: oklch(0.4 0.19 25);
+  --zeroship-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-bg: color-mix(in oklch, var(--zeroship-system-red) 10%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 15%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zeroship-system-red) 20%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 5%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-ink: var(--zeroship-system-red-active);
+  --zeroship-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-system-red) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 7%, transparent);
+  --zeroship-button-destructive-plain-bg-active: color-mix(in oklch, var(--zeroship-system-red) 11%, transparent);
 
-  --zs-backdrop: oklch(0.36 0.028 245 / 0.16);
-  --zs-scrim: color-mix(in oklch, var(--zs-label) 18%, transparent);
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 86%, transparent);
-  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
-  --zs-story-surface: var(--zs-surface-overlay);
-  --zs-story-surface-radius: var(--zs-radius-5);
-  --zs-story-surface-edge:
+  --zeroship-backdrop: oklch(0.36 0.028 245 / 0.16);
+  --zeroship-scrim: color-mix(in oklch, var(--zeroship-label) 18%, transparent);
+  --zeroship-material-tint: color-mix(in oklch, var(--zeroship-surface-overlay) 86%, transparent);
+  --zeroship-story-backdrop: var(--zeroship-crystal-story-backdrop);
+  --zeroship-story-surface: var(--zeroship-surface-overlay);
+  --zeroship-story-surface-radius: var(--zeroship-radius-5);
+  --zeroship-story-surface-edge:
     inset 0 0.0625rem 0 oklch(1 0 0 / 0.62),
     inset 0 -0.0625rem 0 oklch(0.42 0.024 245 / 0.04),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
 
-  --zs-shadow-1:
-    0 0.1875rem 0.875rem var(--zs-crystal-contact);
-  --zs-shadow-2:
+  --zeroship-shadow-1:
+    0 0.1875rem 0.875rem var(--zeroship-crystal-contact);
+  --zeroship-shadow-2:
     0 0.5rem 1.375rem oklch(0.34 0.03 245 / 0.09),
     0 0.125rem 0.375rem oklch(0.36 0.028 245 / 0.05);
-  --zs-shadow-3:
+  --zeroship-shadow-3:
     0 0.875rem 2rem oklch(0.32 0.032 245 / 0.12),
     0 0.25rem 0.75rem oklch(0.34 0.03 245 / 0.065);
-  --zs-shadow-4:
+  --zeroship-shadow-4:
     0 1.25rem 3rem oklch(0.3 0.034 245 / 0.15),
     0 0.375rem 1rem oklch(0.34 0.03 245 / 0.075);
-  --zs-shadow-dialog:
+  --zeroship-shadow-dialog:
     0 1.5rem 4rem oklch(0.3 0.034 245 / 0.16),
     0 0.5rem 1.25rem oklch(0.34 0.03 245 / 0.09),
-    0 0 0 0.0625rem var(--zs-crystal-rim),
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light);
-  --zs-shadow-popover:
+    0 0 0 0.0625rem var(--zeroship-crystal-rim),
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light);
+  --zeroship-shadow-popover:
     0 0.75rem 1.75rem oklch(0.32 0.032 245 / 0.11),
     0 0.1875rem 0.5rem oklch(0.34 0.03 245 / 0.06),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
 
-  --zs-card-backdrop-filter: none;
-  --zs-control-backdrop-filter: none;
-  --zs-dialog-backdrop-filter: none;
-  --zs-card-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-card-outline-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
-  --zs-popup-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
-  --zs-input-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zeroship-card-backdrop-filter: none;
+  --zeroship-control-backdrop-filter: none;
+  --zeroship-dialog-backdrop-filter: none;
+  --zeroship-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
+  --zeroship-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
+  --zeroship-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
 
-  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 4%, transparent);
+  --zeroship-card-hover-tint: color-mix(in oklch, var(--zeroship-accent) 4%, transparent);
 
-  --zs-button-filled-shadow:
+  --zeroship-button-filled-shadow:
     inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
-  --zs-button-tinted-shadow: none;
-  --zs-button-gray-shadow: none;
-  --zs-button-destructive-filled-shadow:
+  --zeroship-button-tinted-shadow: none;
+  --zeroship-button-gray-shadow: none;
+  --zeroship-button-destructive-filled-shadow:
     inset 0 0.0625rem 0 oklch(1 0 0 / 0.16);
-  --zs-button-destructive-tinted-shadow: none;
+  --zeroship-button-destructive-tinted-shadow: none;
 
-  --zs-app-shell-bg: var(--zs-surface-bg);
-  --zs-shell-header-bg: var(--zs-surface-overlay);
-  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 82%, transparent);
+  --zeroship-app-shell-bg: var(--zeroship-surface-bg);
+  --zeroship-shell-header-bg: var(--zeroship-surface-overlay);
+  --zeroship-shell-sidebar-bg: color-mix(in oklch, var(--zeroship-surface-sunken) 82%, transparent);
 
-  --zs-input-bg: var(--zs-surface);
-  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 92%, var(--zs-fill-quaternary));
-  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 94%, var(--zs-crystal-cyan));
-  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 86%, var(--zs-fill-quaternary));
-  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface-sunken) 72%, var(--zs-surface));
-  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface-sunken) 82%, var(--zs-surface));
-  --zs-input-border: var(--zs-crystal-rim);
-  --zs-input-border-hover: var(--zs-crystal-rim-strong);
-  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface-sunken) 68%, var(--zs-surface));
+  --zeroship-input-bg: var(--zeroship-surface);
+  --zeroship-input-bg-hover: color-mix(in oklch, var(--zeroship-surface) 92%, var(--zeroship-fill-quaternary));
+  --zeroship-input-bg-focus: color-mix(in oklch, var(--zeroship-surface) 94%, var(--zeroship-crystal-cyan));
+  --zeroship-input-bg-disabled: color-mix(in oklch, var(--zeroship-surface) 86%, var(--zeroship-fill-quaternary));
+  --zeroship-input-bg-filled: color-mix(in oklch, var(--zeroship-surface-sunken) 72%, var(--zeroship-surface));
+  --zeroship-input-bg-filled-hover: color-mix(in oklch, var(--zeroship-surface-sunken) 82%, var(--zeroship-surface));
+  --zeroship-input-border: var(--zeroship-crystal-rim);
+  --zeroship-input-border-hover: var(--zeroship-crystal-rim-strong);
+  --zeroship-input-bg-readonly: color-mix(in oklch, var(--zeroship-surface-sunken) 68%, var(--zeroship-surface));
 }
 
 [data-theme="ghibli-light"] {
   /* Ghibli: Matsu/shadcn's watercolor-paper mechanics translated into
      zeroship tokens. Parchment canvas, moss primary actions, olive ink,
      chunky illustrated rims, and flat stamp shadows. */
-  --zs-ghibli-paper: oklch(0.91 0.048 83.6);
-  --zs-ghibli-paper-raised: oklch(0.92 0.042 83.6);
-  --zs-ghibli-paper-muted: oklch(0.86 0.064 83.7);
-  --zs-ghibli-ink: oklch(0.41 0.077 78.9);
-  --zs-ghibli-border: oklch(0.74 0.063 80.8);
-  --zs-ghibli-primary: oklch(0.71 0.097 111.7);
-  --zs-ghibli-primary-border: oklch(0.59 0.096 111.8);
+  --zeroship-ghibli-paper: oklch(0.91 0.048 83.6);
+  --zeroship-ghibli-paper-raised: oklch(0.92 0.042 83.6);
+  --zeroship-ghibli-paper-muted: oklch(0.86 0.064 83.7);
+  --zeroship-ghibli-ink: oklch(0.41 0.077 78.9);
+  --zeroship-ghibli-border: oklch(0.74 0.063 80.8);
+  --zeroship-ghibli-primary: oklch(0.71 0.097 111.7);
+  --zeroship-ghibli-primary-border: oklch(0.59 0.096 111.8);
 
-  --zs-surface-bg:
+  --zeroship-surface-bg:
     radial-gradient(at 8% 12%, oklch(0.82 0.1 111.7 / 0.18), transparent 26rem),
     radial-gradient(at 88% 0%, oklch(0.88 0.064 185 / 0.14), transparent 30rem),
     repeating-linear-gradient(0deg, oklch(0.74 0.063 80.8 / 0.05) 0 0.0625rem, transparent 0.0625rem 0.375rem),
     repeating-linear-gradient(90deg, oklch(1 0 0 / 0.04) 0 0.0625rem, transparent 0.0625rem 0.5rem),
-    var(--zs-ghibli-paper);
+    var(--zeroship-ghibli-paper);
 
-  --zs-surface: var(--zs-ghibli-paper-raised);
-  --zs-surface-raised: oklch(0.94 0.04 83.6);
-  --zs-surface-overlay: var(--zs-ghibli-paper-raised);
-  --zs-surface-sunken: var(--zs-ghibli-paper-muted);
+  --zeroship-surface: var(--zeroship-ghibli-paper-raised);
+  --zeroship-surface-raised: oklch(0.94 0.04 83.6);
+  --zeroship-surface-overlay: var(--zeroship-ghibli-paper-raised);
+  --zeroship-surface-sunken: var(--zeroship-ghibli-paper-muted);
 
-  --zs-crystal-edge-light: oklch(1 0 0 / 0.45);
-  --zs-crystal-edge-dark: color-mix(in oklch, var(--zs-ghibli-border) 72%, transparent);
-  --zs-crystal-rim: var(--zs-ghibli-border);
-  --zs-crystal-rim-strong: oklch(0.62 0.075 80.8);
-  --zs-crystal-inner-glow: oklch(1 0 0 / 0.1);
-  --zs-crystal-contact: color-mix(in oklch, var(--zs-ghibli-border) 78%, transparent);
-  --zs-crystal-cyan: oklch(0.88 0.064 185 / 0.16);
-  --zs-crystal-violet: oklch(0.88 0.042 315 / 0.08);
-  --zs-crystal-mint: oklch(0.84 0.08 111.7 / 0.18);
-  --zs-crystal-peach: oklch(0.9 0.068 58 / 0.18);
-  --zs-crystal-story-backdrop:
+  --zeroship-crystal-edge-light: oklch(1 0 0 / 0.45);
+  --zeroship-crystal-edge-dark: color-mix(in oklch, var(--zeroship-ghibli-border) 72%, transparent);
+  --zeroship-crystal-rim: var(--zeroship-ghibli-border);
+  --zeroship-crystal-rim-strong: oklch(0.62 0.075 80.8);
+  --zeroship-crystal-inner-glow: oklch(1 0 0 / 0.1);
+  --zeroship-crystal-contact: color-mix(in oklch, var(--zeroship-ghibli-border) 78%, transparent);
+  --zeroship-crystal-cyan: oklch(0.88 0.064 185 / 0.16);
+  --zeroship-crystal-violet: oklch(0.88 0.042 315 / 0.08);
+  --zeroship-crystal-mint: oklch(0.84 0.08 111.7 / 0.18);
+  --zeroship-crystal-peach: oklch(0.9 0.068 58 / 0.18);
+  --zeroship-crystal-story-backdrop:
     radial-gradient(at 14% 18%, oklch(0.79 0.112 111.7 / 0.2), transparent 15rem),
     radial-gradient(at 78% 12%, oklch(0.88 0.064 185 / 0.16), transparent 18rem),
     repeating-linear-gradient(0deg, oklch(0.74 0.063 80.8 / 0.055) 0 0.0625rem, transparent 0.0625rem 0.375rem),
     repeating-linear-gradient(90deg, oklch(1 0 0 / 0.045) 0 0.0625rem, transparent 0.0625rem 0.5rem),
-    var(--zs-surface-bg);
+    var(--zeroship-surface-bg);
 
-  --zs-label: oklch(0.31 0.06 78.9);
-  --zs-label-secondary: var(--zs-ghibli-ink);
-  --zs-label-tertiary: oklch(0.51 0.077 74.3);
-  --zs-label-quaternary: oklch(0.64 0.062 80.8);
+  --zeroship-label: oklch(0.31 0.06 78.9);
+  --zeroship-label-secondary: var(--zeroship-ghibli-ink);
+  --zeroship-label-tertiary: oklch(0.51 0.077 74.3);
+  --zeroship-label-quaternary: oklch(0.64 0.062 80.8);
 
-  --zs-fill: oklch(0.41 0.077 78.9 / 0.1);
-  --zs-fill-secondary: oklch(0.41 0.077 78.9 / 0.072);
-  --zs-fill-tertiary: oklch(0.41 0.077 78.9 / 0.05);
-  --zs-fill-quaternary: oklch(0.41 0.077 78.9 / 0.035);
+  --zeroship-fill: oklch(0.41 0.077 78.9 / 0.1);
+  --zeroship-fill-secondary: oklch(0.41 0.077 78.9 / 0.072);
+  --zeroship-fill-tertiary: oklch(0.41 0.077 78.9 / 0.05);
+  --zeroship-fill-quaternary: oklch(0.41 0.077 78.9 / 0.035);
 
-  --zs-separator: var(--zs-ghibli-border);
-  --zs-separator-strong: var(--zs-ghibli-primary-border);
+  --zeroship-separator: var(--zeroship-ghibli-border);
+  --zeroship-separator-strong: var(--zeroship-ghibli-primary-border);
 
-  --zs-accent: var(--zs-ghibli-primary);
-  --zs-accent-hover: oklch(0.66 0.105 111.7);
-  --zs-accent-active: oklch(0.59 0.096 111.8);
-  --zs-accent-ink: oklch(0.26 0.016 0);
+  --zeroship-accent: var(--zeroship-ghibli-primary);
+  --zeroship-accent-hover: oklch(0.66 0.105 111.7);
+  --zeroship-accent-active: oklch(0.59 0.096 111.8);
+  --zeroship-accent-ink: oklch(0.26 0.016 0);
 
-  --zs-system-red: oklch(0.48 0.16 28);
-  --zs-system-red-hover: oklch(0.43 0.17 28);
-  --zs-system-red-active: oklch(0.37 0.18 28);
-  --zs-system-green: oklch(0.48 0.13 154);
-  --zs-system-yellow: oklch(0.78 0.13 88);
-  --zs-system-orange: oklch(0.61 0.15 55);
+  --zeroship-system-red: oklch(0.48 0.16 28);
+  --zeroship-system-red-hover: oklch(0.43 0.17 28);
+  --zeroship-system-red-active: oklch(0.37 0.18 28);
+  --zeroship-system-green: oklch(0.48 0.13 154);
+  --zeroship-system-yellow: oklch(0.78 0.13 88);
+  --zeroship-system-orange: oklch(0.61 0.15 55);
 
-  --zs-focus: var(--zs-accent);
-  --zs-focus-ring-color: oklch(0.51 0.077 74.3 / 0.28);
-  --zs-input-focus-ring-color: oklch(0.51 0.077 74.3 / 0.18);
-  --zs-button-focus-ring-color: oklch(0.51 0.077 74.3 / 0.24);
+  --zeroship-focus: var(--zeroship-accent);
+  --zeroship-focus-ring-color: oklch(0.51 0.077 74.3 / 0.28);
+  --zeroship-input-focus-ring-color: oklch(0.51 0.077 74.3 / 0.18);
+  --zeroship-button-focus-ring-color: oklch(0.51 0.077 74.3 / 0.24);
 
-  --zs-button-font-weight: 700;
-  --zs-button-radius-sm: var(--zs-radius-3);
-  --zs-button-radius-md: var(--zs-radius-3);
-  --zs-button-radius-lg: var(--zs-radius-3);
-  --zs-button-plain-ink: oklch(0.34 0.09 111.8);
-  --zs-button-filled-bg: oklch(0.71 0.097 111.7);
-  --zs-button-filled-ink: var(--zs-accent-ink);
-  --zs-button-filled-bg-hover: oklch(0.68 0.1 111.7);
-  --zs-button-filled-bg-active: oklch(0.62 0.098 111.8);
-  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 16%, var(--zs-fill-quaternary));
-  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-tinted-bg: oklch(0.88 0.055 83.6);
-  --zs-button-tinted-bg-hover: oklch(0.84 0.06 83.6);
-  --zs-button-tinted-bg-active: oklch(0.8 0.064 83.6);
-  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-surface));
-  --zs-button-tinted-ink: var(--zs-accent-active);
-  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 34%, var(--zs-label-tertiary));
-  --zs-button-gray-bg: oklch(0.88 0.055 83.6);
-  --zs-button-gray-bg-hover: oklch(0.84 0.06 83.6);
-  --zs-button-gray-bg-active: oklch(0.8 0.064 83.6);
-  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-surface));
-  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 7%, transparent);
-  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 11%, transparent);
-  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
+  --zeroship-button-font-weight: 700;
+  --zeroship-button-radius-sm: var(--zeroship-radius-3);
+  --zeroship-button-radius-md: var(--zeroship-radius-3);
+  --zeroship-button-radius-lg: var(--zeroship-radius-3);
+  --zeroship-button-plain-ink: oklch(0.34 0.09 111.8);
+  --zeroship-button-filled-bg: oklch(0.71 0.097 111.7);
+  --zeroship-button-filled-ink: var(--zeroship-accent-ink);
+  --zeroship-button-filled-bg-hover: oklch(0.68 0.1 111.7);
+  --zeroship-button-filled-bg-active: oklch(0.62 0.098 111.8);
+  --zeroship-button-filled-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 16%, var(--zeroship-fill-quaternary));
+  --zeroship-button-filled-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-tinted-bg: oklch(0.88 0.055 83.6);
+  --zeroship-button-tinted-bg-hover: oklch(0.84 0.06 83.6);
+  --zeroship-button-tinted-bg-active: oklch(0.8 0.064 83.6);
+  --zeroship-button-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 6%, var(--zeroship-surface));
+  --zeroship-button-tinted-ink: var(--zeroship-accent-active);
+  --zeroship-button-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-accent) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-gray-bg: oklch(0.88 0.055 83.6);
+  --zeroship-button-gray-bg-hover: oklch(0.84 0.06 83.6);
+  --zeroship-button-gray-bg-active: oklch(0.8 0.064 83.6);
+  --zeroship-button-gray-bg-disabled: color-mix(in oklch, var(--zeroship-label) 3%, var(--zeroship-surface));
+  --zeroship-button-gray-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-plain-bg-hover: color-mix(in oklch, var(--zeroship-accent) 7%, transparent);
+  --zeroship-button-plain-bg-active: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
+  --zeroship-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.18);
 
-  --zs-button-destructive-filled-bg: oklch(0.47 0.16 28);
-  --zs-button-destructive-filled-ink: oklch(0.97 0.018 0);
-  --zs-button-destructive-filled-bg-hover: oklch(0.43 0.17 28);
-  --zs-button-destructive-filled-bg-active: oklch(0.38 0.18 28);
-  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 10%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 15%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface));
-  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 5%, var(--zs-surface));
-  --zs-button-destructive-tinted-ink: var(--zs-system-red-active);
-  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 34%, var(--zs-label-tertiary));
-  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 7%, transparent);
-  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
+  --zeroship-button-destructive-filled-bg: oklch(0.47 0.16 28);
+  --zeroship-button-destructive-filled-ink: oklch(0.97 0.018 0);
+  --zeroship-button-destructive-filled-bg-hover: oklch(0.43 0.17 28);
+  --zeroship-button-destructive-filled-bg-active: oklch(0.38 0.18 28);
+  --zeroship-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-bg: color-mix(in oklch, var(--zeroship-system-red) 10%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 15%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zeroship-system-red) 20%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 5%, var(--zeroship-surface));
+  --zeroship-button-destructive-tinted-ink: var(--zeroship-system-red-active);
+  --zeroship-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-system-red) 34%, var(--zeroship-label-tertiary));
+  --zeroship-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 7%, transparent);
+  --zeroship-button-destructive-plain-bg-active: color-mix(in oklch, var(--zeroship-system-red) 11%, transparent);
 
-  --zs-backdrop: oklch(0.32 0.052 128 / 0.16);
-  --zs-scrim: color-mix(in oklch, var(--zs-label) 18%, transparent);
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 86%, transparent);
-  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
-  --zs-story-surface: var(--zs-ghibli-paper-raised);
-  --zs-story-surface-radius: var(--zs-radius-3);
-  --zs-story-surface-edge:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border),
-    0 0.125rem 0 0 var(--zs-ghibli-border);
+  --zeroship-backdrop: oklch(0.32 0.052 128 / 0.16);
+  --zeroship-scrim: color-mix(in oklch, var(--zeroship-label) 18%, transparent);
+  --zeroship-material-tint: color-mix(in oklch, var(--zeroship-surface-overlay) 86%, transparent);
+  --zeroship-story-backdrop: var(--zeroship-crystal-story-backdrop);
+  --zeroship-story-surface: var(--zeroship-ghibli-paper-raised);
+  --zeroship-story-surface-radius: var(--zeroship-radius-3);
+  --zeroship-story-surface-edge:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
 
-  --zs-shadow-1:
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-shadow-2:
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-shadow-3:
-    0 0.1875rem 0 0 var(--zs-ghibli-border);
-  --zs-shadow-4:
-    0 0.25rem 0 0 var(--zs-ghibli-border);
-  --zs-shadow-dialog:
-    0 0.25rem 0 0 var(--zs-ghibli-border),
-    0 0 0 0.125rem var(--zs-ghibli-border),
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light);
-  --zs-shadow-popover:
-    0 0.1875rem 0 0 var(--zs-ghibli-border),
-    0 0 0 0.125rem var(--zs-ghibli-border);
+  --zeroship-shadow-1:
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-shadow-2:
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-shadow-3:
+    0 0.1875rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-shadow-4:
+    0 0.25rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-shadow-dialog:
+    0 0.25rem 0 0 var(--zeroship-ghibli-border),
+    0 0 0 0.125rem var(--zeroship-ghibli-border),
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light);
+  --zeroship-shadow-popover:
+    0 0.1875rem 0 0 var(--zeroship-ghibli-border),
+    0 0 0 0.125rem var(--zeroship-ghibli-border);
 
-  --zs-card-backdrop-filter: none;
-  --zs-control-backdrop-filter: none;
-  --zs-dialog-backdrop-filter: none;
-  --zs-card-surface-edge:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border);
-  --zs-card-outline-edge:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border),
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-popup-surface-edge:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border),
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-input-surface-edge:
+  --zeroship-card-backdrop-filter: none;
+  --zeroship-control-backdrop-filter: none;
+  --zeroship-dialog-backdrop-filter: none;
+  --zeroship-card-surface-edge:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border);
+  --zeroship-card-outline-edge:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-popup-surface-edge:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-input-surface-edge:
     inset 0 0 0 0 transparent;
 
-  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 5%, transparent);
+  --zeroship-card-hover-tint: color-mix(in oklch, var(--zeroship-accent) 5%, transparent);
 
-  --zs-button-filled-shadow:
-    inset 0 0 0 0.125rem var(--zs-ghibli-primary-border),
-    0 0.125rem 0 0 var(--zs-ghibli-primary-border);
-  --zs-button-tinted-shadow:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border),
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-button-gray-shadow:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border),
-    0 0.125rem 0 0 var(--zs-ghibli-border);
-  --zs-button-destructive-filled-shadow:
-    inset 0 0 0 0.125rem var(--zs-system-red-active),
-    0 0.125rem 0 0 var(--zs-system-red-active);
-  --zs-button-destructive-tinted-shadow:
-    inset 0 0 0 0.125rem var(--zs-system-red-active),
-    0 0.125rem 0 0 var(--zs-system-red-active);
-  --zs-button-disabled-shadow:
-    inset 0 0 0 0.125rem var(--zs-ghibli-border);
+  --zeroship-button-filled-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-primary-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-primary-border);
+  --zeroship-button-tinted-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-button-gray-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border),
+    0 0.125rem 0 0 var(--zeroship-ghibli-border);
+  --zeroship-button-destructive-filled-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-system-red-active),
+    0 0.125rem 0 0 var(--zeroship-system-red-active);
+  --zeroship-button-destructive-tinted-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-system-red-active),
+    0 0.125rem 0 0 var(--zeroship-system-red-active);
+  --zeroship-button-disabled-shadow:
+    inset 0 0 0 0.125rem var(--zeroship-ghibli-border);
 
-  --zs-app-shell-bg: var(--zs-surface-bg);
-  --zs-shell-header-bg: var(--zs-surface-overlay);
-  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 84%, transparent);
+  --zeroship-app-shell-bg: var(--zeroship-surface-bg);
+  --zeroship-shell-header-bg: var(--zeroship-surface-overlay);
+  --zeroship-shell-sidebar-bg: color-mix(in oklch, var(--zeroship-surface-sunken) 84%, transparent);
 
-  --zs-input-border-width: 0.125rem;
-  --zs-input-bg: oklch(0.92 0.042 83.6);
-  --zs-input-bg-hover: oklch(0.88 0.055 83.6);
-  --zs-input-bg-focus: oklch(0.92 0.042 83.6);
-  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface-sunken) 78%, var(--zs-surface));
-  --zs-input-bg-filled: var(--zs-ghibli-paper-muted);
-  --zs-input-bg-filled-hover: oklch(0.83 0.068 83.7);
-  --zs-input-border: var(--zs-ghibli-border);
-  --zs-input-border-hover: var(--zs-ghibli-primary-border);
-  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface-sunken) 72%, var(--zs-surface));
+  --zeroship-input-border-width: 0.125rem;
+  --zeroship-input-bg: oklch(0.92 0.042 83.6);
+  --zeroship-input-bg-hover: oklch(0.88 0.055 83.6);
+  --zeroship-input-bg-focus: oklch(0.92 0.042 83.6);
+  --zeroship-input-bg-disabled: color-mix(in oklch, var(--zeroship-surface-sunken) 78%, var(--zeroship-surface));
+  --zeroship-input-bg-filled: var(--zeroship-ghibli-paper-muted);
+  --zeroship-input-bg-filled-hover: oklch(0.83 0.068 83.7);
+  --zeroship-input-border: var(--zeroship-ghibli-border);
+  --zeroship-input-border-hover: var(--zeroship-ghibli-primary-border);
+  --zeroship-input-bg-readonly: color-mix(in oklch, var(--zeroship-surface-sunken) 72%, var(--zeroship-surface));
 }
 
 [data-theme="crystal-dark"] {
-  --zs-surface-bg:
+  --zeroship-surface-bg:
     radial-gradient(at 10% 0%, oklch(0.32 0.044 255 / 0.38), transparent 44%),
     radial-gradient(at 88% 8%, oklch(0.28 0.048 205 / 0.24), transparent 40%),
     radial-gradient(at 78% 92%, oklch(0.28 0.044 300 / 0.2), transparent 46%),
     linear-gradient(180deg, oklch(0.18 0.012 260), oklch(0.135 0.012 260) 60%, oklch(0.158 0.012 250));
 
-  --zs-surface: oklch(0.3 0.012 260 / 0.46);
-  --zs-surface-raised: oklch(0.36 0.014 260 / 0.42);
-  --zs-surface-overlay: oklch(0.38 0.014 260 / 0.5);
-  --zs-surface-sunken: oklch(0.18 0.012 260 / 0.3);
+  --zeroship-surface: oklch(0.3 0.012 260 / 0.46);
+  --zeroship-surface-raised: oklch(0.36 0.014 260 / 0.42);
+  --zeroship-surface-overlay: oklch(0.38 0.014 260 / 0.5);
+  --zeroship-surface-sunken: oklch(0.18 0.012 260 / 0.3);
 
-  --zs-crystal-edge-light: oklch(0.9 0.032 250 / 0.085);
-  --zs-crystal-edge-dark: oklch(0 0 0 / 0.16);
-  --zs-crystal-rim: oklch(0.72 0.05 250 / 0.08);
-  --zs-crystal-rim-strong: oklch(0.76 0.062 248 / 0.15);
-  --zs-crystal-inner-glow: oklch(0.7 0.044 230 / 0.045);
-  --zs-crystal-contact: oklch(0 0 0 / 0.16);
-  --zs-crystal-cyan: oklch(0.64 0.07 210 / 0.12);
-  --zs-crystal-violet: oklch(0.64 0.07 295 / 0.1);
-  --zs-crystal-mint: oklch(0.68 0.06 175 / 0.08);
-  --zs-crystal-story-backdrop:
+  --zeroship-crystal-edge-light: oklch(0.9 0.032 250 / 0.085);
+  --zeroship-crystal-edge-dark: oklch(0 0 0 / 0.16);
+  --zeroship-crystal-rim: oklch(0.72 0.05 250 / 0.08);
+  --zeroship-crystal-rim-strong: oklch(0.76 0.062 248 / 0.15);
+  --zeroship-crystal-inner-glow: oklch(0.7 0.044 230 / 0.045);
+  --zeroship-crystal-contact: oklch(0 0 0 / 0.16);
+  --zeroship-crystal-cyan: oklch(0.64 0.07 210 / 0.12);
+  --zeroship-crystal-violet: oklch(0.64 0.07 295 / 0.1);
+  --zeroship-crystal-mint: oklch(0.68 0.06 175 / 0.08);
+  --zeroship-crystal-story-backdrop:
     radial-gradient(at 11% 30%, oklch(0.48 0.14 28 / 0.26), transparent 16rem),
     radial-gradient(at 28% 18%, oklch(0.44 0.1 63 / 0.16), transparent 14rem),
     radial-gradient(at 44% 22%, oklch(0.38 0.12 252 / 0.18), transparent 16rem),
     radial-gradient(at 64% 16%, oklch(0.36 0.08 214 / 0.16), transparent 18rem),
     radial-gradient(at 86% 30%, oklch(0.42 0.11 320 / 0.12), transparent 16rem),
-    var(--zs-surface-bg);
+    var(--zeroship-surface-bg);
 
-  --zs-label: oklch(0.94 0.006 260);
-  --zs-label-secondary: oklch(0.78 0.01 260);
-  --zs-label-tertiary: oklch(0.64 0.012 260);
-  --zs-label-quaternary: oklch(0.5 0.014 260);
+  --zeroship-label: oklch(0.94 0.006 260);
+  --zeroship-label-secondary: oklch(0.78 0.01 260);
+  --zeroship-label-tertiary: oklch(0.64 0.012 260);
+  --zeroship-label-quaternary: oklch(0.5 0.014 260);
 
-  --zs-fill: oklch(1 0 0 / 0.09);
-  --zs-fill-secondary: oklch(1 0 0 / 0.064);
-  --zs-fill-tertiary: oklch(1 0 0 / 0.044);
-  --zs-fill-quaternary: oklch(1 0 0 / 0.03);
+  --zeroship-fill: oklch(1 0 0 / 0.09);
+  --zeroship-fill-secondary: oklch(1 0 0 / 0.064);
+  --zeroship-fill-tertiary: oklch(1 0 0 / 0.044);
+  --zeroship-fill-quaternary: oklch(1 0 0 / 0.03);
 
-  --zs-separator: oklch(0.84 0.018 255 / 0.07);
-  --zs-separator-strong: oklch(0.88 0.022 255 / 0.14);
+  --zeroship-separator: oklch(0.84 0.018 255 / 0.07);
+  --zeroship-separator-strong: oklch(0.88 0.022 255 / 0.14);
 
-  --zs-accent: oklch(0.68 0.17 252);
-  --zs-accent-hover: oklch(0.73 0.16 252);
-  --zs-accent-active: oklch(0.62 0.18 252);
-  --zs-accent-ink: oklch(0.13 0.02 255);
+  --zeroship-accent: oklch(0.68 0.17 252);
+  --zeroship-accent-hover: oklch(0.73 0.16 252);
+  --zeroship-accent-active: oklch(0.62 0.18 252);
+  --zeroship-accent-ink: oklch(0.13 0.02 255);
 
-  --zs-system-red: oklch(0.68 0.18 25);
-  --zs-system-red-hover: oklch(0.73 0.17 25);
-  --zs-system-red-active: oklch(0.61 0.19 25);
-  --zs-system-green: oklch(0.72 0.14 150);
-  --zs-system-yellow: oklch(0.84 0.13 95);
-  --zs-system-orange: oklch(0.74 0.16 48);
+  --zeroship-system-red: oklch(0.68 0.18 25);
+  --zeroship-system-red-hover: oklch(0.73 0.17 25);
+  --zeroship-system-red-active: oklch(0.61 0.19 25);
+  --zeroship-system-green: oklch(0.72 0.14 150);
+  --zeroship-system-yellow: oklch(0.84 0.13 95);
+  --zeroship-system-orange: oklch(0.74 0.16 48);
 
-  --zs-focus: var(--zs-accent);
-  --zs-focus-ring-color: oklch(0.72 0.16 252 / 0.26);
-  --zs-input-focus-ring-color: oklch(0.72 0.16 252 / 0.18);
-  --zs-button-focus-ring-color: oklch(0.72 0.16 252 / 0.22);
+  --zeroship-focus: var(--zeroship-accent);
+  --zeroship-focus-ring-color: oklch(0.72 0.16 252 / 0.26);
+  --zeroship-input-focus-ring-color: oklch(0.72 0.16 252 / 0.18);
+  --zeroship-button-focus-ring-color: oklch(0.72 0.16 252 / 0.22);
 
-  --zs-button-plain-ink: var(--zs-accent-hover);
-  --zs-button-filled-ink: oklch(0.99 0.004 255);
-  --zs-button-filled-bg: oklch(0.54 0.18 254);
-  --zs-button-filled-bg-hover: oklch(0.54 0.18 254);
-  --zs-button-filled-bg-active: oklch(0.5 0.18 254);
-  --zs-button-filled-bg-disabled: color-mix(in oklch, var(--zs-accent) 14%, var(--zs-fill-quaternary));
-  --zs-button-filled-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-tinted-bg: color-mix(in oklch, var(--zs-accent) 15%, var(--zs-surface-overlay));
-  --zs-button-tinted-bg-hover: color-mix(in oklch, var(--zs-accent) 20%, var(--zs-surface-overlay));
-  --zs-button-tinted-bg-active: color-mix(in oklch, var(--zs-accent) 25%, var(--zs-surface-overlay));
-  --zs-button-tinted-bg-disabled: color-mix(in oklch, var(--zs-accent) 6%, var(--zs-fill-quaternary));
-  --zs-button-tinted-ink: var(--zs-accent-hover);
-  --zs-button-tinted-ink-disabled: color-mix(in oklch, var(--zs-accent) 36%, var(--zs-label-tertiary));
-  --zs-button-gray-bg: color-mix(in oklch, var(--zs-label) 7%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-hover: color-mix(in oklch, var(--zs-label) 10%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-active: color-mix(in oklch, var(--zs-label) 13%, var(--zs-surface-overlay));
-  --zs-button-gray-bg-disabled: color-mix(in oklch, var(--zs-label) 3%, var(--zs-fill-quaternary));
-  --zs-button-gray-ink-disabled: var(--zs-label-tertiary);
-  --zs-button-plain-bg-hover: color-mix(in oklch, var(--zs-accent) 11%, transparent);
-  --zs-button-plain-bg-active: color-mix(in oklch, var(--zs-accent) 17%, transparent);
-  --zs-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.05);
+  --zeroship-button-plain-ink: var(--zeroship-accent-hover);
+  --zeroship-button-filled-ink: oklch(0.99 0.004 255);
+  --zeroship-button-filled-bg: oklch(0.54 0.18 254);
+  --zeroship-button-filled-bg-hover: oklch(0.54 0.18 254);
+  --zeroship-button-filled-bg-active: oklch(0.5 0.18 254);
+  --zeroship-button-filled-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 14%, var(--zeroship-fill-quaternary));
+  --zeroship-button-filled-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-tinted-bg: color-mix(in oklch, var(--zeroship-accent) 15%, var(--zeroship-surface-overlay));
+  --zeroship-button-tinted-bg-hover: color-mix(in oklch, var(--zeroship-accent) 20%, var(--zeroship-surface-overlay));
+  --zeroship-button-tinted-bg-active: color-mix(in oklch, var(--zeroship-accent) 25%, var(--zeroship-surface-overlay));
+  --zeroship-button-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-accent) 6%, var(--zeroship-fill-quaternary));
+  --zeroship-button-tinted-ink: var(--zeroship-accent-hover);
+  --zeroship-button-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-accent) 36%, var(--zeroship-label-tertiary));
+  --zeroship-button-gray-bg: color-mix(in oklch, var(--zeroship-label) 7%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-hover: color-mix(in oklch, var(--zeroship-label) 10%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-active: color-mix(in oklch, var(--zeroship-label) 13%, var(--zeroship-surface-overlay));
+  --zeroship-button-gray-bg-disabled: color-mix(in oklch, var(--zeroship-label) 3%, var(--zeroship-fill-quaternary));
+  --zeroship-button-gray-ink-disabled: var(--zeroship-label-tertiary);
+  --zeroship-button-plain-bg-hover: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
+  --zeroship-button-plain-bg-active: color-mix(in oklch, var(--zeroship-accent) 17%, transparent);
+  --zeroship-button-disabled-shadow: inset 0 0.0625rem 0 oklch(1 0 0 / 0.05);
 
-  --zs-button-destructive-filled-bg: oklch(0.51 0.18 25);
-  --zs-button-destructive-filled-ink: oklch(0.99 0.004 255);
-  --zs-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
-  --zs-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
-  --zs-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-bg: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zs-system-red) 20%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zs-system-red) 26%, var(--zs-surface-overlay));
-  --zs-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zs-system-red) 6%, var(--zs-fill-quaternary));
-  --zs-button-destructive-tinted-ink: var(--zs-system-red-hover);
-  --zs-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zs-system-red) 36%, var(--zs-label-tertiary));
-  --zs-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zs-system-red) 11%, transparent);
-  --zs-button-destructive-plain-bg-active: color-mix(in oklch, var(--zs-system-red) 17%, transparent);
+  --zeroship-button-destructive-filled-bg: oklch(0.51 0.18 25);
+  --zeroship-button-destructive-filled-ink: oklch(0.99 0.004 255);
+  --zeroship-button-destructive-filled-bg-hover: oklch(0.51 0.18 25);
+  --zeroship-button-destructive-filled-bg-active: oklch(0.47 0.19 25);
+  --zeroship-button-destructive-filled-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-bg: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 20%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-active: color-mix(in oklch, var(--zeroship-system-red) 26%, var(--zeroship-surface-overlay));
+  --zeroship-button-destructive-tinted-bg-disabled: color-mix(in oklch, var(--zeroship-system-red) 6%, var(--zeroship-fill-quaternary));
+  --zeroship-button-destructive-tinted-ink: var(--zeroship-system-red-hover);
+  --zeroship-button-destructive-tinted-ink-disabled: color-mix(in oklch, var(--zeroship-system-red) 36%, var(--zeroship-label-tertiary));
+  --zeroship-button-destructive-plain-bg-hover: color-mix(in oklch, var(--zeroship-system-red) 11%, transparent);
+  --zeroship-button-destructive-plain-bg-active: color-mix(in oklch, var(--zeroship-system-red) 17%, transparent);
 
-  --zs-backdrop: oklch(0.08 0.012 260 / 0.34);
-  --zs-scrim: oklch(0 0 0 / 0.28);
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 58%, transparent);
-  --zs-story-backdrop: var(--zs-crystal-story-backdrop);
-  --zs-story-surface: color-mix(in oklch, var(--zs-surface-overlay) 56%, transparent);
-  --zs-story-surface-radius: var(--zs-radius-7);
-  --zs-story-surface-edge:
+  --zeroship-backdrop: oklch(0.08 0.012 260 / 0.34);
+  --zeroship-scrim: oklch(0 0 0 / 0.28);
+  --zeroship-material-tint: color-mix(in oklch, var(--zeroship-surface-overlay) 58%, transparent);
+  --zeroship-story-backdrop: var(--zeroship-crystal-story-backdrop);
+  --zeroship-story-surface: color-mix(in oklch, var(--zeroship-surface-overlay) 56%, transparent);
+  --zeroship-story-surface-radius: var(--zeroship-radius-7);
+  --zeroship-story-surface-edge:
     inset 0 0.0625rem 0 oklch(0.9 0.032 250 / 0.08),
     inset 0 -0.0625rem 0 oklch(0 0 0 / 0.12);
 
-  --zs-shadow-1:
-    0 0.25rem 1rem var(--zs-crystal-contact);
-  --zs-shadow-2:
+  --zeroship-shadow-1:
+    0 0.25rem 1rem var(--zeroship-crystal-contact);
+  --zeroship-shadow-2:
     0 0.75rem 1.75rem oklch(0 0 0 / 0.2),
     0 0.125rem 0.375rem oklch(0 0 0 / 0.14);
-  --zs-shadow-3:
+  --zeroship-shadow-3:
     0 1rem 2.5rem oklch(0 0 0 / 0.26),
     0 0.1875rem 0.75rem oklch(0 0 0 / 0.18);
-  --zs-shadow-4:
+  --zeroship-shadow-4:
     0 1.375rem 3.5rem oklch(0 0 0 / 0.3),
     0 0.375rem 1rem oklch(0 0 0 / 0.2);
-  --zs-shadow-dialog:
+  --zeroship-shadow-dialog:
     0 1.75rem 4.5rem oklch(0 0 0 / 0.34),
     0 0.5rem 1.25rem oklch(0 0 0 / 0.22),
-    0 0 0 0.0625rem var(--zs-crystal-rim),
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-shadow-popover:
+    0 0 0 0.0625rem var(--zeroship-crystal-rim),
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-shadow-popover:
     0 1rem 2.25rem oklch(0 0 0 / 0.26),
     0 0.1875rem 0.625rem oklch(0 0 0 / 0.18),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
 
-  --zs-card-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-card-outline-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark),
-    0 0 0 0.0625rem var(--zs-crystal-rim);
-  --zs-popup-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 0.75rem 1.5rem var(--zs-crystal-inner-glow),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
-  --zs-input-surface-edge:
-    inset 0 0.0625rem 0 var(--zs-crystal-edge-light),
-    inset 0 -0.0625rem 0 var(--zs-crystal-edge-dark);
+  --zeroship-card-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-card-outline-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark),
+    0 0 0 0.0625rem var(--zeroship-crystal-rim);
+  --zeroship-popup-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 0.75rem 1.5rem var(--zeroship-crystal-inner-glow),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
+  --zeroship-input-surface-edge:
+    inset 0 0.0625rem 0 var(--zeroship-crystal-edge-light),
+    inset 0 -0.0625rem 0 var(--zeroship-crystal-edge-dark);
 
-  --zs-card-hover-tint: color-mix(in oklch, var(--zs-accent) 5%, transparent);
+  --zeroship-card-hover-tint: color-mix(in oklch, var(--zeroship-accent) 5%, transparent);
 
-  --zs-button-filled-shadow: none;
-  --zs-button-tinted-shadow: none;
-  --zs-button-gray-shadow: none;
-  --zs-button-destructive-filled-shadow: none;
-  --zs-button-destructive-tinted-shadow: none;
+  --zeroship-button-filled-shadow: none;
+  --zeroship-button-tinted-shadow: none;
+  --zeroship-button-gray-shadow: none;
+  --zeroship-button-destructive-filled-shadow: none;
+  --zeroship-button-destructive-tinted-shadow: none;
 
-  --zs-app-shell-bg: var(--zs-surface-bg);
-  --zs-shell-header-bg: color-mix(in oklch, var(--zs-surface-overlay) 62%, var(--zs-crystal-cyan));
-  --zs-shell-sidebar-bg: color-mix(in oklch, var(--zs-surface-sunken) 58%, transparent);
+  --zeroship-app-shell-bg: var(--zeroship-surface-bg);
+  --zeroship-shell-header-bg: color-mix(in oklch, var(--zeroship-surface-overlay) 62%, var(--zeroship-crystal-cyan));
+  --zeroship-shell-sidebar-bg: color-mix(in oklch, var(--zeroship-surface-sunken) 58%, transparent);
 
-  --zs-input-bg: color-mix(in oklch, var(--zs-surface) 64%, var(--zs-fill-tertiary));
-  --zs-input-bg-hover: color-mix(in oklch, var(--zs-surface) 72%, var(--zs-fill-secondary));
-  --zs-input-bg-focus: color-mix(in oklch, var(--zs-surface) 76%, var(--zs-crystal-cyan));
-  --zs-input-bg-disabled: color-mix(in oklch, var(--zs-surface) 56%, var(--zs-fill-quaternary));
-  --zs-input-bg-filled: color-mix(in oklch, var(--zs-surface) 58%, var(--zs-fill-secondary));
-  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-surface) 68%, var(--zs-fill-secondary));
-  --zs-input-border: var(--zs-crystal-rim);
-  --zs-input-border-hover: var(--zs-crystal-rim-strong);
-  --zs-input-bg-readonly: color-mix(in oklch, var(--zs-surface) 62%, var(--zs-fill-tertiary));
+  --zeroship-input-bg: color-mix(in oklch, var(--zeroship-surface) 64%, var(--zeroship-fill-tertiary));
+  --zeroship-input-bg-hover: color-mix(in oklch, var(--zeroship-surface) 72%, var(--zeroship-fill-secondary));
+  --zeroship-input-bg-focus: color-mix(in oklch, var(--zeroship-surface) 76%, var(--zeroship-crystal-cyan));
+  --zeroship-input-bg-disabled: color-mix(in oklch, var(--zeroship-surface) 56%, var(--zeroship-fill-quaternary));
+  --zeroship-input-bg-filled: color-mix(in oklch, var(--zeroship-surface) 58%, var(--zeroship-fill-secondary));
+  --zeroship-input-bg-filled-hover: color-mix(in oklch, var(--zeroship-surface) 68%, var(--zeroship-fill-secondary));
+  --zeroship-input-border: var(--zeroship-crystal-rim);
+  --zeroship-input-border-hover: var(--zeroship-crystal-rim-strong);
+  --zeroship-input-bg-readonly: color-mix(in oklch, var(--zeroship-surface) 62%, var(--zeroship-fill-tertiary));
 }

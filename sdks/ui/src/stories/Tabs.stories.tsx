@@ -63,7 +63,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic">
+    <div className="zeroship-story-row" role="group" aria-label="Basic">
       <Tabs defaultValue="overview" data-testid="tabs-basic">
         <Tabs.List>
           <Tabs.Tab value="overview" data-testid="tabs-basic-tab-overview">
@@ -121,13 +121,13 @@ export const AllVariants: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All variants"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default — underline</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default — underline</span>
         <Tabs defaultValue="one" variant="default" data-testid="tabs-variant-default">
           <Tabs.List>
             <Tabs.Tab value="one">Inbox</Tabs.Tab>
@@ -140,8 +140,8 @@ export const AllVariants: Story = {
           <Tabs.Panel value="three">Drafts content.</Tabs.Panel>
         </Tabs>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Pill — segmented</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Pill — segmented</span>
         <Tabs defaultValue="one" variant="pill" data-testid="tabs-variant-pill">
           <Tabs.List>
             <Tabs.Tab value="one">Day</Tabs.Tab>
@@ -154,8 +154,8 @@ export const AllVariants: Story = {
           <Tabs.Panel value="three">This month.</Tabs.Panel>
         </Tabs>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Card — folder tabs</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Card — folder tabs</span>
         <Tabs defaultValue="one" variant="card" data-testid="tabs-variant-card">
           <Tabs.List>
             <Tabs.Tab value="one">Details</Tabs.Tab>
@@ -196,14 +196,14 @@ export const AllSizes: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
       {(["sm", "md", "lg"] as const).map((size) => (
-        <div className="zs-story-cell" key={size}>
-          <span className="zs-story-label">Size: {size}</span>
+        <div className="zeroship-story-cell" key={size}>
+          <span className="zeroship-story-label">Size: {size}</span>
           <Tabs
             defaultValue="overview"
             size={size}
@@ -240,7 +240,7 @@ export const Vertical: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical"
       style={{ minBlockSize: "12rem" }}
@@ -293,7 +293,7 @@ export const WithIcons: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With icons">
+    <div className="zeroship-story-row" role="group" aria-label="With icons">
       <Tabs defaultValue="home" data-testid="tabs-with-icons">
         <Tabs.List>
           <Tabs.Tab value="home">
@@ -332,7 +332,7 @@ export const WithBadges: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With badges">
+    <div className="zeroship-story-row" role="group" aria-label="With badges">
       <Tabs defaultValue="all" data-testid="tabs-with-badges">
         <Tabs.List>
           <Tabs.Tab value="all">
@@ -345,9 +345,9 @@ export const WithBadges: Story = {
                 paddingInline: "0.5rem",
                 blockSize: "1.25rem",
                 borderRadius: "0.625rem",
-                backgroundColor: "var(--zs-fill-secondary)",
-                color: "var(--zs-label-secondary)",
-                fontSize: "var(--zs-text-caption-1-size)",
+                backgroundColor: "var(--zeroship-fill-secondary)",
+                color: "var(--zeroship-label-secondary)",
+                fontSize: "var(--zeroship-text-caption-1-size)",
                 fontWeight: 600,
               }}
             >
@@ -364,9 +364,9 @@ export const WithBadges: Story = {
                 paddingInline: "0.5rem",
                 blockSize: "1.25rem",
                 borderRadius: "0.625rem",
-                backgroundColor: "var(--zs-fill-secondary)",
-                color: "var(--zs-label-secondary)",
-                fontSize: "var(--zs-text-caption-1-size)",
+                backgroundColor: "var(--zeroship-fill-secondary)",
+                color: "var(--zeroship-label-secondary)",
+                fontSize: "var(--zeroship-text-caption-1-size)",
                 fontWeight: 600,
               }}
             >
@@ -383,9 +383,9 @@ export const WithBadges: Story = {
                 paddingInline: "0.5rem",
                 blockSize: "1.25rem",
                 borderRadius: "0.625rem",
-                backgroundColor: "color-mix(in oklch, var(--zs-system-red) 18%, transparent)",
-                color: "var(--zs-system-red)",
-                fontSize: "var(--zs-text-caption-1-size)",
+                backgroundColor: "color-mix(in oklch, var(--zeroship-system-red) 18%, transparent)",
+                color: "var(--zeroship-system-red)",
+                fontSize: "var(--zeroship-text-caption-1-size)",
                 fontWeight: 600,
               }}
             >
@@ -417,7 +417,7 @@ export const ManyTabs: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Many tabs"
       style={{ inlineSize: "32rem" }}
@@ -459,7 +459,7 @@ export const DisabledTab: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled tab">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled tab">
       <Tabs defaultValue="enabled-1" data-testid="tabs-disabled">
         <Tabs.List>
           <Tabs.Tab value="enabled-1">Active</Tabs.Tab>
@@ -515,7 +515,7 @@ export const ControlledValue: Story = {
     const [value, setValue] = useState<string>("two");
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Controlled value"
         style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -542,9 +542,9 @@ export const ControlledValue: Story = {
           aria-live="polite"
           data-testid="tabs-controlled-readout"
           style={{
-            marginBlockStart: "var(--zs-space-3)",
-            fontSize: "var(--zs-text-caption-1-size)",
-            color: "var(--zs-label-secondary)",
+            marginBlockStart: "var(--zeroship-space-3)",
+            fontSize: "var(--zeroship-text-caption-1-size)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Selected: {value}
@@ -578,7 +578,7 @@ export const WithAnimatedIndicator: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Animated indicator"
     >
@@ -652,7 +652,7 @@ export const LazyMountPanel: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Lazy-mount panel"
     >
@@ -686,7 +686,7 @@ export const ActivationAndOverrides: Story = {
   name: "Activate on focus and overrides",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Activation overrides"
     >
@@ -746,7 +746,7 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL"
     >

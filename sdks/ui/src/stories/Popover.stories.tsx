@@ -29,7 +29,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic popover">
+    <div className="zeroship-story-row" role="group" aria-label="Basic popover">
       <Popover>
         <Popover.Trigger
           render={<Button data-testid="popover-basic-trigger">Open popover</Button>}
@@ -83,7 +83,7 @@ export const WithTitleDescription: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With title and description">
+    <div className="zeroship-story-row" role="group" aria-label="With title and description">
       <Popover>
         <Popover.Trigger
           render={
@@ -124,13 +124,13 @@ export const WithArrow: Story = {
       description: {
         story:
           "Arrow renders an SVG triangle that Base UI rotates per side. " +
-          "The triangle picks up `--zs-surface` via `currentColor` so it " +
+          "The triangle picks up `--zeroship-surface` via `currentColor` so it " +
           "reads as a continuation of the popup surface.",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With arrow">
+    <div className="zeroship-story-row" role="group" aria-label="With arrow">
       <Popover>
         <Popover.Trigger
           render={
@@ -177,7 +177,7 @@ export const WithBackdrop: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With backdrop">
+    <div className="zeroship-story-row" role="group" aria-label="With backdrop">
       <Popover modal>
         <Popover.Trigger
           render={
@@ -232,7 +232,7 @@ export const WithClose: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With close">
+    <div className="zeroship-story-row" role="group" aria-label="With close">
       <Popover>
         <Popover.Trigger
           render={
@@ -285,7 +285,7 @@ export const PlacementSide: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placement sides"
       style={{ flexWrap: "wrap", gap: "1.5rem" }}
@@ -353,7 +353,7 @@ export const AlignStartCenterEnd: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Align"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1rem" }}
@@ -404,14 +404,14 @@ export const NestedInDialog: Story = {
       description: {
         story:
           "A Popover mounted inside a Dialog. The Popover's positioner " +
-          "uses `calc(var(--zs-z-modal) + 10)` so it stacks above the " +
+          "uses `calc(var(--zeroship-z-modal) + 10)` so it stacks above the " +
           "Dialog's popup. ESC closes the inner Popover first, then a " +
           "second ESC closes the Dialog (Base UI's overlay stack).",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Nested in dialog">
+    <div className="zeroship-story-row" role="group" aria-label="Nested in dialog">
       <Dialog>
         <Dialog.Trigger
           render={
@@ -495,7 +495,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
       <Popover>
         <Popover.Trigger
           disabled
@@ -543,7 +543,7 @@ export const Rtl: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL"
       dir="rtl"
@@ -593,7 +593,7 @@ export const CloseAsChildComposition: Story = {
   render: function CloseAsChildCompositionRender() {
     const [prevented, setPrevented] = useState(false);
     return (
-      <div className="zs-story-row" role="group" aria-label="Close asChild">
+      <div className="zeroship-story-row" role="group" aria-label="Close asChild">
         <Popover>
           <Popover.Trigger render={<Button>Open child close</Button>} />
           <Popover.Portal>
@@ -675,7 +675,7 @@ export const CloseAsChildForwardsRest: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Close asChild rest">
+    <div className="zeroship-story-row" role="group" aria-label="Close asChild rest">
       <Popover>
         <Popover.Trigger render={<Button>Open close-with-rest</Button>} />
         <Popover.Portal>
@@ -754,7 +754,7 @@ export const PayloadRender: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Payload render">
+    <div className="zeroship-story-row" role="group" aria-label="Payload render">
       {/* Single function-child carries the entire subtree so the Root's
           `PayloadChildRenderFunction` is invoked instead of being
           mixed with sibling React nodes (JSX would otherwise widen

@@ -9,11 +9,11 @@
  *
  * Layout:
  *   --horizontal (default): each item is a two-column grid — term in a
- *     fixed-ish first track (--zs-dl-term-w), detail fills the second.
+ *     fixed-ish first track (--zeroship-dl-term-w), detail fills the second.
  *     This is the "label: value" details-panel arrangement.
  *   --vertical: each item is a block; term stacks above detail.
  *
- *   --divided: a --zs-separator hairline (logical block-start border) on
+ *   --divided: a --zeroship-separator hairline (logical block-start border) on
  *     every item after the first.
  *
  * The list paints nothing of its own — it sits inside whatever surface
@@ -23,18 +23,18 @@
 
 [data-slot="description-list"] {
   /* Width of the term column in horizontal mode. A token so a consumer
-     can retune it per-list via inline `--zs-dl-term-w: …`. */
-  --zs-dl-term-w: 10rem;
+     can retune it per-list via inline `--zeroship-dl-term-w: …`. */
+  --zeroship-dl-term-w: 10rem;
 
   margin: 0;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 
 /* ─── item ────────────────────────────────────────────────────────────── */
 [data-slot="description-list-item"] {
   /* The block-axis gap between consecutive rows. */
-  padding-block: var(--zs-space-2);
+  padding-block: var(--zeroship-space-2);
 }
 
 [data-slot="description-list-item"]:first-child {
@@ -50,18 +50,18 @@
  * weight so the value reads as the answer. */
 [data-slot="description-list-term"] {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 500;
 }
 
 [data-slot="description-list-detail"] {
   /* Reset the UA default <dd> indent (a ~2.5rem inline-start margin). */
   margin: 0;
-  color: var(--zs-label);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 400;
   /* Let the detail shrink below its content width inside the grid track
      (the track itself is minmax(0,1fr); this guards the dd flex/grid
@@ -80,23 +80,23 @@
      min-width:auto, so a long unbreakable detail value forces the track
      wider than the container and overflows. minmax(0, …) lets the track
      shrink to zero so the detail wraps instead. */
-  grid-template-columns: var(--zs-dl-term-w) minmax(0, 1fr);
+  grid-template-columns: var(--zeroship-dl-term-w) minmax(0, 1fr);
   align-items: baseline;
-  column-gap: var(--zs-space-4);
+  column-gap: var(--zeroship-space-4);
 }
 
 /* ─── vertical ─────────────────────────────────────────────────────────
  * Term caption stacked above the detail value. */
 [data-slot="description-list"][data-orientation="vertical"] [data-slot="description-list-term"] {
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  margin-block-end: var(--zs-space-half);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  margin-block-end: var(--zeroship-space-half);
 }
 
 /* ─── divider ──────────────────────────────────────────────────────────
  * Logical block-start hairline on every item after the first. */
 [data-slot="description-list"][data-divided] [data-slot="description-list-item"] + [data-slot="description-list-item"] {
-  border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-block-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
 /* ─── forced-colors ───────────────────────────────────────────────────

@@ -27,8 +27,8 @@
      in a constrained region can still override min-block-size via the
      Center `minHeight` prop. */
   min-block-size: 100dvh;
-  padding: var(--zs-space-6);
-  font-family: var(--zs-font-system);
+  padding: var(--zeroship-space-6);
+  font-family: var(--zeroship-font-system);
 }
 
 [data-slot="auth-form"] {
@@ -36,10 +36,10 @@
      without forking the CSS. A login card sits comfortably around 24rem;
      wide enough for a 40-char email, narrow enough to read as a focused
      task. */
-  --zs-auth-form-width: 24rem;
+  --zeroship-auth-form-width: 24rem;
 
   inline-size: 100%;
-  max-inline-size: var(--zs-auth-form-width);
+  max-inline-size: var(--zeroship-auth-form-width);
 }
 
 /* The <form> is layout-only; the inner Stack owns the rhythm. Reset any
@@ -51,11 +51,11 @@
 /* ─── header ─────────────────────────────────────────────────────────── */
 [data-slot="auth-form-title"] {
   margin: 0;
-  color: var(--zs-label);
-  font-size: var(--zs-text-title-2-size);
-  line-height: var(--zs-text-title-2-line);
-  letter-spacing: var(--zs-text-title-2-tracking);
-  font-weight: var(--zs-text-title-2-weight);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-title-2-size);
+  line-height: var(--zeroship-text-title-2-line);
+  letter-spacing: var(--zeroship-text-title-2-tracking);
+  font-weight: var(--zeroship-text-title-2-weight);
   /* Center the heading over the form — a login card reads as a centered
      focal task, not a left-aligned settings row. */
   text-align: center;
@@ -63,9 +63,9 @@
 
 [data-slot="auth-form-description"] {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 400;
   text-align: center;
 }
@@ -98,10 +98,10 @@
   justify-content: flex-end;
   /* Pull it up toward the password field so it reads as attached to that
      field rather than floating midway to the submit button. The fields
-     Stack uses --zs-space-4 between rows; pulling back one step
-     (--zs-space-2) lands the affordance close to the password without
+     Stack uses --zeroship-space-4 between rows; pulling back one step
+     (--zeroship-space-2) lands the affordance close to the password without
      touching it. */
-  margin-block-start: calc(var(--zs-space-2) - var(--zs-space-4));
+  margin-block-start: calc(var(--zeroship-space-2) - var(--zeroship-space-4));
 }
 
 /* ─── submit ─────────────────────────────────────────────────────────── */
@@ -124,7 +124,7 @@
 [data-slot="auth-form-or"] {
   display: flex;
   align-items: center;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
 }
 
 [data-slot="auth-form-or-line"] {
@@ -136,9 +136,9 @@
   /* label-secondary (not tertiary): at the small footnote size the
      tertiary ink lands ~4.46:1 over the crystal surface — just under the
      4.5:1 AA threshold axe enforces. Secondary clears it. */
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   /* The label is content, not interactive — keep it out of the tab/AT
      flow's way but readable. */
   text-transform: lowercase;
@@ -160,12 +160,12 @@
 [data-slot="auth-form-footer-default"] {
   /* The prompt + the plain mode-switch Button sit on one centered line,
      wrapping on narrow widths. */
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
 }
 
 [data-slot="auth-form-footer-prompt"] {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── forced-colors ──────────────────────────────────────────────────── */

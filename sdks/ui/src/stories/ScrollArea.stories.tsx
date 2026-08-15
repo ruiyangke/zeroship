@@ -44,23 +44,23 @@ export const BasicVertical: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="BasicVertical">
+    <div className="zeroship-story-row" role="group" aria-label="BasicVertical">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "12rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea data-testid="scrollarea-basic-vertical">
-          <div style={{ padding: "var(--zs-space-4)" }}>
+          <div style={{ padding: "var(--zeroship-space-4)" }}>
             {makeListItems(40).map((label) => (
               <div
                 key={label}
                 style={{
-                  paddingBlock: "var(--zs-space-2)",
-                  borderBlockEnd: "0.0625rem solid var(--zs-separator)",
+                  paddingBlock: "var(--zeroship-space-2)",
+                  borderBlockEnd: "0.0625rem solid var(--zeroship-separator)",
                 }}
               >
                 {label}
@@ -101,13 +101,13 @@ export const BasicHorizontal: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="BasicHorizontal">
+    <div className="zeroship-story-row" role="group" aria-label="BasicHorizontal">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "6rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea
@@ -117,8 +117,8 @@ export const BasicHorizontal: Story = {
           <div
             style={{
               display: "flex",
-              gap: "var(--zs-space-3)",
-              padding: "var(--zs-space-4)",
+              gap: "var(--zeroship-space-3)",
+              padding: "var(--zeroship-space-4)",
               inlineSize: "max-content",
             }}
           >
@@ -131,8 +131,8 @@ export const BasicHorizontal: Story = {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  borderRadius: "var(--zs-radius-3)",
-                  background: "var(--zs-fill-tertiary)",
+                  borderRadius: "var(--zeroship-radius-3)",
+                  background: "var(--zeroship-fill-tertiary)",
                   flexShrink: 0,
                 }}
               >
@@ -177,19 +177,19 @@ export const Both: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Both">
+    <div className="zeroship-story-row" role="group" aria-label="Both">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "12rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea orientation="both" data-testid="scrollarea-both">
           <div
             style={{
-              padding: "var(--zs-space-4)",
+              padding: "var(--zeroship-space-4)",
               inlineSize: "max-content",
             }}
           >
@@ -198,8 +198,8 @@ export const Both: Story = {
                 key={label}
                 style={{
                   display: "flex",
-                  gap: "var(--zs-space-3)",
-                  marginBlockEnd: "var(--zs-space-2)",
+                  gap: "var(--zeroship-space-3)",
+                  marginBlockEnd: "var(--zeroship-space-2)",
                 }}
               >
                 {[0, 1, 2, 3, 4, 5].map((col) => (
@@ -208,13 +208,13 @@ export const Both: Story = {
                     style={{
                       inlineSize: "6rem",
                       flexShrink: 0,
-                      paddingInline: "var(--zs-space-3)",
-                      paddingBlock: "var(--zs-space-2)",
-                      borderRadius: "var(--zs-radius-2)",
+                      paddingInline: "var(--zeroship-space-3)",
+                      paddingBlock: "var(--zeroship-space-2)",
+                      borderRadius: "var(--zeroship-radius-2)",
                       background:
                         (rowIndex + col) % 2 === 0
-                          ? "var(--zs-fill-tertiary)"
-                          : "var(--zs-fill-quaternary)",
+                          ? "var(--zeroship-fill-tertiary)"
+                          : "var(--zeroship-fill-quaternary)",
                     }}
                   >
                     {label}.{col}
@@ -260,26 +260,26 @@ export const AlwaysVisible: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="AlwaysVisible">
+    <div className="zeroship-story-row" role="group" aria-label="AlwaysVisible">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "12rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea
           type="always"
           data-testid="scrollarea-always-visible"
         >
-          <div style={{ padding: "var(--zs-space-4)" }}>
+          <div style={{ padding: "var(--zeroship-space-4)" }}>
             {makeListItems(30).map((label) => (
               <div
                 key={label}
                 style={{
-                  paddingBlock: "var(--zs-space-2)",
-                  borderBlockEnd: "0.0625rem solid var(--zs-separator)",
+                  paddingBlock: "var(--zeroship-space-2)",
+                  borderBlockEnd: "0.0625rem solid var(--zeroship-separator)",
                 }}
               >
                 {label}
@@ -311,26 +311,26 @@ export const HoverOnly: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="HoverOnly">
+    <div className="zeroship-story-row" role="group" aria-label="HoverOnly">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "12rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea
           type="hover"
           data-testid="scrollarea-hover-only"
         >
-          <div style={{ padding: "var(--zs-space-4)" }}>
+          <div style={{ padding: "var(--zeroship-space-4)" }}>
             {makeListItems(30).map((label) => (
               <div
                 key={label}
                 style={{
-                  paddingBlock: "var(--zs-space-2)",
-                  borderBlockEnd: "0.0625rem solid var(--zs-separator)",
+                  paddingBlock: "var(--zeroship-space-2)",
+                  borderBlockEnd: "0.0625rem solid var(--zeroship-separator)",
                 }}
               >
                 {label}
@@ -366,29 +366,29 @@ export const LongList: Story = {
         story:
           "200 items in a constrained Viewport — exercises the thumb's " +
           "minimum-size enforcement (Base UI sizes the thumb " +
-          "proportionally; we floor it at `--zs-space-6` so the handle " +
+          "proportionally; we floor it at `--zeroship-space-6` so the handle " +
           "stays grabbable on long content).",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="LongList">
+    <div className="zeroship-story-row" role="group" aria-label="LongList">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "16rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea data-testid="scrollarea-long-list">
-          <div style={{ padding: "var(--zs-space-4)" }}>
+          <div style={{ padding: "var(--zeroship-space-4)" }}>
             {makeListItems(200).map((label) => (
               <div
                 key={label}
                 style={{
-                  paddingBlock: "var(--zs-space-2)",
-                  borderBlockEnd: "0.0625rem solid var(--zs-separator)",
+                  paddingBlock: "var(--zeroship-space-2)",
+                  borderBlockEnd: "0.0625rem solid var(--zeroship-separator)",
                 }}
               >
                 {label}
@@ -423,13 +423,13 @@ export const GridContent: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="GridContent">
+    <div className="zeroship-story-row" role="group" aria-label="GridContent">
       <div
         style={{
           inlineSize: "22rem",
           blockSize: "14rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea
@@ -441,8 +441,8 @@ export const GridContent: Story = {
               display: "grid",
               gridTemplateColumns: "repeat(10, 6rem)",
               gridAutoRows: "4rem",
-              gap: "var(--zs-space-2)",
-              padding: "var(--zs-space-4)",
+              gap: "var(--zeroship-space-2)",
+              padding: "var(--zeroship-space-4)",
               inlineSize: "max-content",
             }}
           >
@@ -450,15 +450,15 @@ export const GridContent: Story = {
               <div
                 key={i}
                 style={{
-                  borderRadius: "var(--zs-radius-3)",
+                  borderRadius: "var(--zeroship-radius-3)",
                   background:
                     i % 2 === 0
-                      ? "var(--zs-fill-tertiary)"
-                      : "var(--zs-fill-quaternary)",
+                      ? "var(--zeroship-fill-tertiary)"
+                      : "var(--zeroship-fill-quaternary)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  fontSize: "var(--zs-text-footnote-size)",
+                  fontSize: "var(--zeroship-text-footnote-size)",
                 }}
               >
                 Cell {i + 1}
@@ -491,7 +491,7 @@ export const InsideCard: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="InsideCard">
+    <div className="zeroship-story-row" role="group" aria-label="InsideCard">
       <Card variant="surface" size="md" style={{ inlineSize: "22rem" }}>
         <Card.Header>
           <Card.Title>Recent activity</Card.Title>
@@ -501,19 +501,19 @@ export const InsideCard: Story = {
           <div
             style={{
               blockSize: "12rem",
-              borderRadius: "var(--zs-radius-3)",
-              border: "0.0625rem solid var(--zs-separator)",
+              borderRadius: "var(--zeroship-radius-3)",
+              border: "0.0625rem solid var(--zeroship-separator)",
             }}
           >
             <ScrollArea data-testid="scrollarea-inside-card">
-              <div style={{ padding: "var(--zs-space-3)" }}>
+              <div style={{ padding: "var(--zeroship-space-3)" }}>
                 {makeListItems(40).map((label) => (
                   <div
                     key={label}
                     style={{
-                      paddingBlock: "var(--zs-space-2)",
+                      paddingBlock: "var(--zeroship-space-2)",
                       borderBlockEnd:
-                        "0.0625rem solid var(--zs-separator)",
+                        "0.0625rem solid var(--zeroship-separator)",
                     }}
                   >
                     {label}
@@ -551,7 +551,7 @@ export const RTL: Story = {
   render: () => (
     <DirectionProvider direction="rtl">
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL"
         dir="rtl"
@@ -561,22 +561,22 @@ export const RTL: Story = {
           style={{
             inlineSize: "20rem",
             blockSize: "12rem",
-            border: "0.0625rem solid var(--zs-separator)",
-            borderRadius: "var(--zs-radius-5)",
+            border: "0.0625rem solid var(--zeroship-separator)",
+            borderRadius: "var(--zeroship-radius-5)",
           }}
         >
           <ScrollArea
             type="always"
             data-testid="scrollarea-rtl"
           >
-            <div style={{ padding: "var(--zs-space-4)" }}>
+            <div style={{ padding: "var(--zeroship-space-4)" }}>
               {makeListItems(40).map((label) => (
                 <div
                   key={label}
                   style={{
-                    paddingBlock: "var(--zs-space-2)",
+                    paddingBlock: "var(--zeroship-space-2)",
                     borderBlockEnd:
-                      "0.0625rem solid var(--zs-separator)",
+                      "0.0625rem solid var(--zeroship-separator)",
                   }}
                 >
                   {label}
@@ -628,13 +628,13 @@ export const KeyboardScroll: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="KeyboardScroll">
+    <div className="zeroship-story-row" role="group" aria-label="KeyboardScroll">
       <div
         style={{
           inlineSize: "20rem",
           blockSize: "12rem",
-          border: "0.0625rem solid var(--zs-separator)",
-          borderRadius: "var(--zs-radius-5)",
+          border: "0.0625rem solid var(--zeroship-separator)",
+          borderRadius: "var(--zeroship-radius-5)",
         }}
       >
         <ScrollArea.Root data-testid="scrollarea-keyboard-root">
@@ -643,14 +643,14 @@ export const KeyboardScroll: Story = {
             data-testid="scrollarea-keyboard-viewport"
           >
             <ScrollArea.Content>
-              <div style={{ padding: "var(--zs-space-4)" }}>
+              <div style={{ padding: "var(--zeroship-space-4)" }}>
                 {makeListItems(60).map((label) => (
                   <div
                     key={label}
                     style={{
-                      paddingBlock: "var(--zs-space-2)",
+                      paddingBlock: "var(--zeroship-space-2)",
                       borderBlockEnd:
-                        "0.0625rem solid var(--zs-separator)",
+                        "0.0625rem solid var(--zeroship-separator)",
                     }}
                   >
                     {label}

@@ -3,7 +3,7 @@
  *
  * Wraps Base UI's headless `select` primitive. The trigger reads as an
  * Input (same height / padding / focus-ring rhythm); the popup reads as
- * a Dialog (same `--zs-shadow-dialog`, same opaque-surface invariant).
+ * a Dialog (same `--zeroship-shadow-dialog`, same opaque-surface invariant).
  *
  *   <Select value={v} onValueChange={setV}>
  *     <Select.Item value="mango">Mango</Select.Item>
@@ -19,10 +19,10 @@
  *      exclusive choices fit on screen, Toggle.Group reads better; when
  *      freeform-required, Combobox does. Pure principle, no source check.
  *
- *   2. Trigger looks like an Input. Same `--zs-control-h-{sm,md,lg}`,
+ *   2. Trigger looks like an Input. Same `--zeroship-control-h-{sm,md,lg}`,
  *      same outline-vs-default border treatment, same Field cascade.
  *
- *   3. Popup uses Dialog's surface tokens. Same `--zs-shadow-dialog`,
+ *   3. Popup uses Dialog's surface tokens. Same `--zeroship-shadow-dialog`,
  *      same opaque Crystal base. Reads as a member of the popover family
  *      (Dialog / AlertDialog / Select / Combobox / Autocomplete).
  *

@@ -13,7 +13,7 @@
  *     `data-chrome="menubar"` for Menu.css-scoped variants) don't
  *     accidentally inherit trigger sizing/layout.
  *   - Triggers are sized to the body-tall hit target
- *     (`--zs-menubar-trigger-min-size`) by padding alone; no border, so
+ *     (`--zeroship-menubar-trigger-min-size`) by padding alone; no border, so
  *     the strip stays low-chrome.
  *
  * The Menu popup chrome itself is owned by `Menu.css` — Menubar-scoped
@@ -35,23 +35,23 @@
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: var(--zs-space-1);
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
-  border-radius: var(--zs-radius-3);
-  background-color: var(--zs-fill-quaternary);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  gap: var(--zeroship-space-1);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
+  border-radius: var(--zeroship-radius-3);
+  background-color: var(--zeroship-fill-quaternary);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   outline: none;
 
   /* Body-tall trigger floor — the desktop-menubar reading rhythm wants a
-     trigger noticeably shorter than `--zs-control-h-sm` while still
+     trigger noticeably shorter than `--zeroship-control-h-sm` while still
      meeting the body line-height; `1.75rem` is the floor (matches the
      Toolbar button rhythm). This token also lets consumers retune the
-     strip density via the `--zs-menubar-trigger-min-size` custom
+     strip density via the `--zeroship-menubar-trigger-min-size` custom
      property without forking the rule set. */
-  --zs-menubar-trigger-min-size: 1.75rem;
+  --zeroship-menubar-trigger-min-size: 1.75rem;
 }
 
 [data-slot="menubar"][data-orientation="vertical"] {
@@ -76,38 +76,38 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-1);
-  block-size: var(--zs-menubar-trigger-min-size);
-  min-inline-size: var(--zs-menubar-trigger-min-size);
-  padding-inline: var(--zs-space-3);
+  gap: var(--zeroship-space-1);
+  block-size: var(--zeroship-menubar-trigger-min-size);
+  min-inline-size: var(--zeroship-menubar-trigger-min-size);
+  padding-inline: var(--zeroship-space-3);
   border: 0;
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zeroship-radius-2);
   background-color: transparent;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   font: inherit;
-  font-weight: var(--zs-text-body-weight);
-  letter-spacing: var(--zs-text-body-tracking);
+  font-weight: var(--zeroship-text-body-weight);
+  letter-spacing: var(--zeroship-text-body-tracking);
   cursor: default;
   user-select: none;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="menubar"] :where(button[data-chrome="menubar"]):hover:not([data-disabled]) {
-  background-color: var(--zs-fill-tertiary);
+  background-color: var(--zeroship-fill-tertiary);
 }
 
 [data-slot="menubar"] :where(button[data-chrome="menubar"])[data-popup-open],
 [data-slot="menubar"] :where(button[data-chrome="menubar"])[data-highlighted] {
-  background-color: var(--zs-fill-secondary);
+  background-color: var(--zeroship-fill-secondary);
 }
 
 [data-slot="menubar"] :where(button[data-chrome="menubar"]):focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 [data-slot="menubar"] :where(button[data-chrome="menubar"])[data-disabled] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   cursor: not-allowed;
 }
 
@@ -130,7 +130,7 @@
   [data-slot="menubar"] {
     background-color: Canvas;
     color: CanvasText;
-    box-shadow: inset 0 0 0 var(--zs-selection-hairline) CanvasText;
+    box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) CanvasText;
     forced-color-adjust: none;
   }
   [data-slot="menubar"] :where(button[data-chrome="menubar"]) {
@@ -148,8 +148,8 @@
     color: HighlightText;
   }
   [data-slot="menubar"] :where(button[data-chrome="menubar"]):focus-visible {
-    outline: var(--zs-focus-ring-width) solid Highlight;
-    outline-offset: var(--zs-focus-ring-offset);
+    outline: var(--zeroship-focus-ring-width) solid Highlight;
+    outline-offset: var(--zeroship-focus-ring-offset);
   }
   [data-slot="menubar"] :where(button[data-chrome="menubar"])[data-disabled] {
     color: GrayText;

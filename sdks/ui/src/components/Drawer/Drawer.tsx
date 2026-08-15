@@ -45,7 +45,7 @@
  *    starts on actual content, not the dismiss control.
  *
  * Crystal styling lives in `Drawer.css`. The Content carries an
- * opaque `background-color: var(--zs-surface)` so axe's color-contrast
+ * opaque `background-color: var(--zeroship-surface)` so axe's color-contrast
  * walk terminates on a solid surface even if the theme adds a
  * `backdrop-filter` for the over-content glass effect (glass-surface
  * invariant: opaque base + backdrop-filter NEVER alone).

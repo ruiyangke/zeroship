@@ -16,9 +16,9 @@
  *     with a consistent gap and Fieldsets / Fields measure block-size
  *     against the grid track (avoids the flex-with-min-height: 0 dance
  *     a Textarea inside a Form would otherwise hit).
- *   - --zs-form-gap controls the vertical rhythm between top-level
+ *   - --zeroship-form-gap controls the vertical rhythm between top-level
  *     Field rows; consumers can override per-form by setting
- *     `--zs-form-gap` inline on the Form element.
+ *     `--zeroship-form-gap` inline on the Form element.
  *   - `min-inline-size: 0` lets a Form nested inside a flex parent
  *     shrink without pushing its inputs to overflow.
  *
@@ -34,28 +34,28 @@
 [data-slot="form-card"] {
   display: grid;
   grid-template-columns: 1fr;
-  gap: var(--zs-form-gap, var(--zs-space-5));
+  gap: var(--zeroship-form-gap, var(--zeroship-space-5));
   min-inline-size: 0;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 
 /* ─── variant=card ────────────────────────────────────────────────── */
 /*
- * Surface + rim matches Card.surface (--zs-card-surface-edge, opaque
- * --zs-surface base) so dropping a Form variant=card next to a Card
- * doesn't double the chrome. Padding lifts from --zs-card-padding-md
+ * Surface + rim matches Card.surface (--zeroship-card-surface-edge, opaque
+ * --zeroship-surface base) so dropping a Form variant=card next to a Card
+ * doesn't double the chrome. Padding lifts from --zeroship-card-padding-md
  * for the same reason.
  */
 [data-slot="form-card"] {
-  padding: var(--zs-card-padding-md);
-  border-radius: var(--zs-card-radius-md);
-  background-color: var(--zs-surface);
-  box-shadow: var(--zs-card-surface-edge);
-  backdrop-filter: var(--zs-card-backdrop-filter, var(--zs-material-regular));
+  padding: var(--zeroship-card-padding-md);
+  border-radius: var(--zeroship-card-radius-md);
+  background-color: var(--zeroship-surface);
+  box-shadow: var(--zeroship-card-surface-edge);
+  backdrop-filter: var(--zeroship-card-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-card-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-card-backdrop-filter,
+    var(--zeroship-material-regular)
   );
   /* `overflow: hidden` so a sub-Card.Media inside the form clips to
      the form's border-radius the same way it does inside a Card. */
@@ -65,7 +65,7 @@
 /* ─── reduced motion ──────────────────────────────────────────────── *
  * Form itself owns no animation today, but downstream Field error
  * subtrees may animate in. The reduced-motion @media on the foundation
- * tokens (--zs-motion-base → 1ms) already gates that. No per-form rule
+ * tokens (--zeroship-motion-base → 1ms) already gates that. No per-form rule
  * needed; the @media block exists to document the contract. */
 @media (prefers-reduced-motion: reduce) {
   /* No per-component motion to disable — placeholder so the

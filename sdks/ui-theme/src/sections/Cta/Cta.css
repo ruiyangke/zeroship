@@ -18,7 +18,7 @@
  *     the inline width + padding. The composed Stack / Cluster own the gaps
  *     and the CTA wrapping.
  *   - `data-align="center"` (default) centers the column on a readable
- *     measure (`--zs-cta-measure`); `data-align="start"` start-aligns it.
+ *     measure (`--zeroship-cta-measure`); `data-align="start"` start-aligns it.
  *   - `data-variant="tinted"` paints the panel as a subtle accent-tint card
  *     (the house `color-mix` idiom, cf. FeatureGrid's icon badge) with radius
  *     + padding. `plain` paints nothing — the band is composable.
@@ -30,17 +30,17 @@
  */
 
 [data-slot="cta"] {
-  /* Local single-knob custom property (the house idiom, cf. --zs-hero-measure
-     / --zs-feature-grid-header-measure): a named, tunable handle for the
+  /* Local single-knob custom property (the house idiom, cf. --zeroship-hero-measure
+     / --zeroship-feature-grid-header-measure): a named, tunable handle for the
      centered column's readable measure + the tinted panel's tint percentage. */
-  --zs-cta-measure: 44rem;
-  --zs-cta-tint: 8%;
+  --zeroship-cta-measure: 44rem;
+  --zeroship-cta-tint: 8%;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop. */
   display: block;
-  padding-block: var(--zs-space-10);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-10);
+  color: var(--zeroship-label);
 }
 
 /* ─── Panel — the body column ────────────────────────────────────────────── */
@@ -49,7 +49,7 @@
      edge-to-edge on wide viewports. Centered when the band is centered (the
      composed Stack `align="center"` already centers the inline children);
      start-aligned otherwise. */
-  max-inline-size: var(--zs-cta-measure);
+  max-inline-size: var(--zeroship-cta-measure);
   inline-size: 100%;
 }
 
@@ -66,13 +66,13 @@
    is the house `color-mix` idiom so it tracks the accent token and stays
    token-pure. The plain variant adds nothing — the band stays composable. */
 [data-slot="cta-panel"][data-variant="tinted"] {
-  padding-block: var(--zs-space-9);
-  padding-inline: var(--zs-space-9);
-  border-radius: var(--zs-radius-6);
+  padding-block: var(--zeroship-space-9);
+  padding-inline: var(--zeroship-space-9);
+  border-radius: var(--zeroship-radius-6);
   background: color-mix(
     in oklch,
-    var(--zs-accent) var(--zs-cta-tint),
-    var(--zs-surface)
+    var(--zeroship-accent) var(--zeroship-cta-tint),
+    var(--zeroship-surface)
   );
 }
 
@@ -85,21 +85,21 @@
   margin-block: 0;
   /* Marketing display-3 — a confident closing headline, markedly bigger than
      the former title-1. */
-  font-size: var(--zs-text-display-3-size);
-  line-height: var(--zs-text-display-3-line);
-  font-weight: var(--zs-text-display-3-weight);
-  letter-spacing: var(--zs-text-display-3-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-display-3-size);
+  line-height: var(--zeroship-text-display-3-line);
+  font-weight: var(--zeroship-text-display-3-weight);
+  letter-spacing: var(--zeroship-text-display-3-tracking);
+  color: var(--zeroship-label);
   text-wrap: balance;
 }
 
 /* ─── Description — muted supporting copy ─────────────────────────────────── */
 [data-slot="cta-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-body-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-body-weight);
+  color: var(--zeroship-label-secondary);
   text-wrap: pretty;
 }
 
@@ -107,7 +107,7 @@
 [data-slot="cta-actions"] {
   /* Cluster owns the gap + wrap; the band only adds a touch of top rhythm
      beyond the Stack gap so the CTAs read as a distinct action band. */
-  margin-block-start: var(--zs-space-2);
+  margin-block-start: var(--zeroship-space-2);
 }
 
 /* ─── forced-colors — keep text legible + tinted panel edged ──────────────
@@ -124,6 +124,6 @@
     color: CanvasText;
   }
   [data-slot="cta-panel"][data-variant="tinted"] {
-    border: var(--zs-selection-hairline) solid CanvasText;
+    border: var(--zeroship-selection-hairline) solid CanvasText;
   }
 }

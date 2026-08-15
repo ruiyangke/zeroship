@@ -26,21 +26,21 @@ export const Variants: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Skeleton variants"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
-        <span className="zs-story-label">text</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+        <span className="zeroship-story-label">text</span>
         <Skeleton variant="text" data-testid="skeleton-text" />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
-        <span className="zs-story-label">rect</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+        <span className="zeroship-story-label">rect</span>
         <Skeleton variant="rect" height="6rem" data-testid="skeleton-rect" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">circle</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">circle</span>
         <Skeleton
           variant="circle"
           width="3rem"
@@ -77,8 +77,8 @@ export const MultiLineText: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Multi-line skeleton">
-      <div className="zs-story-cell" style={{ inlineSize: "min(24rem, 100%)" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Multi-line skeleton">
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(24rem, 100%)" }}>
         <Skeleton variant="text" lines={4} data-testid="skeleton-lines" />
       </div>
     </div>
@@ -112,8 +112,8 @@ export const CircleSingleDimension: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Circle single dimension">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Circle single dimension">
+      <div className="zeroship-story-cell">
         <Skeleton variant="circle" width="4rem" data-testid="skeleton-circle-w" />
       </div>
     </div>
@@ -133,7 +133,7 @@ export const CircleSingleDimension: Story = {
  * the static base fill stays painted (paint preserved). The CSS gates
  * `animation: none` + `background-image: none` inside the
  * `@media (prefers-reduced-motion: reduce)` block; the base
- * `background-color: var(--zs-fill-secondary)` remains. This story
+ * `background-color: var(--zeroship-fill-secondary)` remains. This story
  * documents that contract and asserts the placeholder still renders
  * (visible) regardless of the motion preference. */
 export const ReducedMotion: Story = {
@@ -150,8 +150,8 @@ export const ReducedMotion: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Reduced-motion skeleton">
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Reduced-motion skeleton">
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <Skeleton variant="rect" height="4rem" data-testid="skeleton-rm" />
       </div>
     </div>

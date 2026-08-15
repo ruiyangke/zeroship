@@ -35,18 +35,18 @@
    * (centered via the rules below). */
   position: fixed;
   inset: 0;
-  z-index: var(--zs-z-modal);
-  background-color: var(--zs-scrim);
+  z-index: var(--zeroship-z-modal);
+  background-color: var(--zeroship-scrim);
   /* Explicit baseline opacity (review-fix item 23): the open/close
    * transition goes auto → 0 → auto; declaring the visible end-state
    * directly keeps the transition origin portable. */
   opacity: 1;
-  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 :is([data-slot="alertdialog-backdrop"], [data-slot="dialog-backdrop"])[data-tint="material"] {
-  background-color: var(--zs-material-tint);
-  backdrop-filter: var(--zs-material-thick);
-  -webkit-backdrop-filter: var(--zs-material-thick);
+  background-color: var(--zeroship-material-tint);
+  backdrop-filter: var(--zeroship-material-thick);
+  -webkit-backdrop-filter: var(--zeroship-material-thick);
 }
 :is([data-slot="alertdialog-backdrop"], [data-slot="dialog-backdrop"])[data-tint="invisible"] {
   background-color: transparent;
@@ -61,9 +61,9 @@
   /* Per-size padding (visual-polish item 4). Defaults to the `md`
    * padding so header/body/footer match the legacy single-token
    * resolution byte-for-byte; `sm` and `lg` overrides below shift
-   * `--zs-dialog-padding-current` so narrow dialogs feel tighter and
+   * `--zeroship-dialog-padding-current` so narrow dialogs feel tighter and
    * large dialogs gain a stronger sheet rhythm. */
-  --zs-dialog-padding-current: var(--zs-dialog-padding-md);
+  --zeroship-dialog-padding-current: var(--zeroship-dialog-padding-md);
   /* Popup positions itself — Base UI's DOM puts Backdrop and Popup as
    * siblings, so we center the Popup directly on the viewport.
    *
@@ -82,44 +82,44 @@
   /* Translate -50%, -50% to centre, then layer in the nested-scale
    * + enter/leave deltas. The base transform sets the origin so
    * sizing math works regardless of nesting depth. */
-  --zs-nested-scale: calc(1 - var(--nested-dialogs, 0) * 0.02);
-  --zs-nested-offset: calc(var(--nested-dialogs, 0) * 0.5rem);
-  transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
-    scale(var(--zs-nested-scale));
+  --zeroship-nested-scale: calc(1 - var(--nested-dialogs, 0) * 0.02);
+  --zeroship-nested-offset: calc(var(--nested-dialogs, 0) * 0.5rem);
+  transform: translate(-50%, calc(-50% + var(--zeroship-nested-offset)))
+    scale(var(--zeroship-nested-scale));
   transform-origin: center;
-  z-index: calc(var(--zs-z-modal) + 1);
+  z-index: calc(var(--zeroship-z-modal) + 1);
   display: flex;
   flex-direction: column;
-  inline-size: calc(100% - var(--zs-space-7) * 2);
-  max-inline-size: var(--zs-dialog-max-width-md);
-  max-block-size: calc(100dvh - var(--zs-space-7) * 2);
-  background-color: var(--zs-surface);
+  inline-size: calc(100% - var(--zeroship-space-7) * 2);
+  max-inline-size: var(--zeroship-dialog-max-width-md);
+  max-block-size: calc(100dvh - var(--zeroship-space-7) * 2);
+  background-color: var(--zeroship-surface);
   background-clip: padding-box;
-  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-dialog-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-dialog-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-dialog-backdrop-filter,
+    var(--zeroship-material-regular)
   );
-  border-radius: var(--zs-dialog-radius);
-  box-shadow: var(--zs-shadow-dialog);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  border-radius: var(--zeroship-dialog-radius);
+  box-shadow: var(--zeroship-shadow-dialog);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   overflow: hidden;
   /* Explicit baseline opacity (review-fix item 23). */
   opacity: 1;
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 
 /* sizes */
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="sm"] {
-  max-inline-size: var(--zs-dialog-max-width-sm);
-  --zs-dialog-padding-current: var(--zs-dialog-padding-sm);
+  max-inline-size: var(--zeroship-dialog-max-width-sm);
+  --zeroship-dialog-padding-current: var(--zeroship-dialog-padding-sm);
 }
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="lg"] {
-  max-inline-size: var(--zs-dialog-max-width-lg);
-  --zs-dialog-padding-current: var(--zs-dialog-padding-lg);
+  max-inline-size: var(--zeroship-dialog-max-width-lg);
+  --zeroship-dialog-padding-current: var(--zeroship-dialog-padding-lg);
 }
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="full"] {
   /* Full takeover — anchor to the inset edges instead of centering.
@@ -145,44 +145,44 @@
 /* Safe-area-aware padding on the inner layout sections when size=full
  * (review-fix item 12). Apply to Header (top inset), Body (sides), and
  * Footer (bottom inset) so content clears notches and the home bar.
- * Composes against `--zs-dialog-padding-current` (visual-polish item 4)
+ * Composes against `--zeroship-dialog-padding-current` (visual-polish item 4)
  * so the safe-area max() still resolves against the right per-size base
  * even when size=full inherits a custom padding. */
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="full"] :is([data-slot="alertdialog-header"], [data-slot="dialog-header"]) {
   padding-block-start: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-top)
   );
   padding-inline-start: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="full"] :is([data-slot="alertdialog-body"], [data-slot="dialog-body"]) {
   padding-inline-start: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="full"] :is([data-slot="alertdialog-footer"], [data-slot="dialog-footer"]) {
   padding-block-end: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-bottom)
   );
   padding-inline-start: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding-current),
+    var(--zeroship-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
@@ -194,9 +194,9 @@
  * matching the centering convention above so RTL doesn't shift the
  * popup off-center (review-fix item 4). */
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-placement="top"] {
-  top: max(var(--zs-space-9), env(safe-area-inset-top));
-  transform: translate(-50%, calc(var(--zs-nested-offset)))
-    scale(var(--zs-nested-scale));
+  top: max(var(--zeroship-space-9), env(safe-area-inset-top));
+  transform: translate(-50%, calc(var(--zeroship-nested-offset)))
+    scale(var(--zeroship-nested-scale));
 }
 
 /* enter/leave transitions — Base UI emits data-starting/ending-style
@@ -241,11 +241,11 @@
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-starting-style],
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-ending-style] {
     opacity: 1;
-    transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
-      scale(var(--zs-nested-scale));
+    transform: translate(-50%, calc(-50% + var(--zeroship-nested-offset)))
+      scale(var(--zeroship-nested-scale));
   }
   /* Top placement is `top`-anchored — its steady state has NO -50%
-     vertical (only `--zs-nested-offset`). Lumping it into the centered
+     vertical (only `--zeroship-nested-offset`). Lumping it into the centered
      rule above re-added a -50% the steady state never had, causing a
      one-frame vertical jump on open/close under reduced motion. Mirror
      the steady top transform here instead (see the [data-placement="top"]
@@ -253,8 +253,8 @@
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-placement="top"][data-starting-style],
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-placement="top"][data-ending-style] {
     opacity: 1;
-    transform: translate(-50%, calc(var(--zs-nested-offset)))
-      scale(var(--zs-nested-scale));
+    transform: translate(-50%, calc(var(--zeroship-nested-offset)))
+      scale(var(--zeroship-nested-scale));
   }
   /* Full-takeover popups anchor to the viewport edges (transform: none);
    * keep that, just restore opacity. */
@@ -276,16 +276,16 @@
 :is([data-slot="alertdialog-header"], [data-slot="dialog-header"]) {
   display: flex;
   align-items: flex-start;
-  gap: var(--zs-space-3);
-  padding: var(--zs-dialog-padding-current);
-  padding-block-end: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
+  padding: var(--zeroship-dialog-padding-current);
+  padding-block-end: var(--zeroship-space-3);
 }
 [data-slot="dialog-header-content"] {
   flex: 1;
   min-inline-size: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
 }
 [data-slot="dialog-header-close"] {
   /* Auto-X close button inside the header, NOT absolutely positioned
@@ -302,26 +302,26 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--zs-radius-full);
-  color: var(--zs-label-secondary);
+  border-radius: var(--zeroship-radius-full);
+  color: var(--zeroship-label-secondary);
   cursor: pointer;
   flex-shrink: 0;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   /* Visual square is small; the hit target is 44pt via the same
    * invisible-pseudo trick Button.css uses on coarse pointers. */
   position: relative;
 }
 @media (hover: hover) {
   [data-slot="dialog-header-close"]:hover {
-    background-color: var(--zs-fill-tertiary);
-    color: var(--zs-label);
+    background-color: var(--zeroship-fill-tertiary);
+    color: var(--zeroship-label);
   }
 }
 [data-slot="dialog-header-close"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 @media (pointer: coarse) {
   [data-slot="dialog-header-close"]::before {
@@ -333,40 +333,40 @@
     inset-block-start: 50%;
     inset-inline-start: 50%;
     transform: translate(-50%, -50%);
-    inline-size: max(100%, var(--zs-hit-min));
-    block-size: max(100%, var(--zs-hit-min));
+    inline-size: max(100%, var(--zeroship-hit-min));
+    block-size: max(100%, var(--zeroship-hit-min));
   }
 }
 
 /* ─── Title / Description ──────────────────────────────────────────────── */
 [data-slot="dialog-title"] {
   margin: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
   /* Use the shared headline-weight token (review-fix item 18) — same
    * resolution as Card.Title; keeps the typography promise consistent
    * across surfaces. */
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-title-3-tracking);
-  color: var(--zs-label);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-title-3-tracking);
+  color: var(--zeroship-label);
 }
 [data-slot="dialog-description"] {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── Body / Footer ────────────────────────────────────────────────────── */
 :is([data-slot="alertdialog-body"], [data-slot="dialog-body"]) {
-  padding-inline: var(--zs-dialog-padding-current);
+  padding-inline: var(--zeroship-dialog-padding-current);
   padding-block: 0;
   flex: 1;
   min-block-size: 0;
   overflow-y: auto;
-  color: var(--zs-label);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
 }
 /* Normalise direct-child prose margins so a single `<p>` slotted into
  * Body doesn't double-up with the dialog padding (review-fix item 9 —
@@ -388,16 +388,16 @@
    * justify-content: flex-end the wrapped buttons still trail the
    * row, and row-gap keeps the wrapped rows visually grouped.
    *
-   * Gap bumped from --zs-space-2 → --zs-space-3 (visual-polish item 5)
-   * so action buttons breathe; row-gap stays tight (--zs-space-2) so a
+   * Gap bumped from --zeroship-space-2 → --zeroship-space-3 (visual-polish item 5)
+   * so action buttons breathe; row-gap stays tight (--zeroship-space-2) so a
    * wrapped row reads as part of the same cluster, not a new row. */
   flex-wrap: wrap;
-  gap: var(--zs-space-3);
-  row-gap: var(--zs-space-2);
+  gap: var(--zeroship-space-3);
+  row-gap: var(--zeroship-space-2);
   align-items: center;
   justify-content: flex-end;
-  padding: var(--zs-dialog-padding-current);
-  padding-block-start: var(--zs-space-4);
+  padding: var(--zeroship-dialog-padding-current);
+  padding-block-start: var(--zeroship-space-4);
 }
 
 /* sm + 3+ buttons — make the wrap intentional instead of accidental
@@ -411,7 +411,7 @@
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="sm"]
   :is([data-slot="alertdialog-footer"], [data-slot="dialog-footer"]):has(> :nth-child(3))
   > * {
-  flex: 1 1 calc((100% - var(--zs-space-3)) / 2);
+  flex: 1 1 calc((100% - var(--zeroship-space-3)) / 2);
 }
 :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-size="sm"]
   :is([data-slot="alertdialog-footer"], [data-slot="dialog-footer"]):has(> :nth-child(3))

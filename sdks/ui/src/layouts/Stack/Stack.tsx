@@ -3,14 +3,14 @@
  *
  * The workhorse layout primitive: lay children out along one axis
  * (column by default), separated by a governed `gap` from the
- * `--zs-space-*` scale. A Stack paints NOTHING — no background, no
+ * `--zeroship-space-*` scale. A Stack paints NOTHING — no background, no
  * border, no padding of its own. It only arranges.
  *
  * Design guarantees encoded here (in source so they travel with the
  * code, not in a sibling doc):
  *
  *   1. Spacing is governed. `gap` is the closed `Gap` union mapped to
- *      `--zs-space-*` via `spaceVar`; a consumer cannot pass an
+ *      `--zeroship-space-*` via `spaceVar`; a consumer cannot pass an
  *      arbitrary px/rem value. This is the governance lever — layouts
  *      stay on the 4pt grid.
  *
@@ -50,7 +50,7 @@ import {
 export interface StackProps extends ComponentPropsWithoutRef<"div"> {
   /** Main axis. `column` (default) stacks vertically; `row` lays out inline. */
   direction?: "row" | "column";
-  /** Gap between children, from the `--zs-space-*` scale. Default `0`. */
+  /** Gap between children, from the `--zeroship-space-*` scale. Default `0`. */
   gap?: Gap;
   /** Cross-axis alignment (`align-items`). */
   align?: Align;

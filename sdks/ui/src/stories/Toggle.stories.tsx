@@ -67,25 +67,25 @@ export const AllStates: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All states">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Unpressed</span>
+    <div className="zeroship-story-row" role="group" aria-label="All states">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Unpressed</span>
         <Toggle data-testid="toggle-state-unpressed">Bold</Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Pressed</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Pressed</span>
         <Toggle defaultPressed data-testid="toggle-state-pressed">
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled</span>
         <Toggle disabled data-testid="toggle-state-disabled">
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled + pressed</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled + pressed</span>
         <Toggle
           disabled
           defaultPressed
@@ -136,21 +136,21 @@ export const AllSizes: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+    <div className="zeroship-story-row" role="group" aria-label="All sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Toggle size="sm" defaultPressed data-testid="toggle-size-sm">
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Toggle size="md" defaultPressed data-testid="toggle-size-md">
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Toggle size="lg" defaultPressed data-testid="toggle-size-lg">
           Bold
         </Toggle>
@@ -174,9 +174,9 @@ export const AllVariants: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All variants">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default</span>
+    <div className="zeroship-story-row" role="group" aria-label="All variants">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default</span>
         <Toggle variant="default" data-testid="toggle-variant-default-off">
           Bold
         </Toggle>
@@ -188,8 +188,8 @@ export const AllVariants: Story = {
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Toggle variant="plain" data-testid="toggle-variant-plain-off">
           Bold
         </Toggle>
@@ -201,8 +201,8 @@ export const AllVariants: Story = {
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Toggle variant="tinted" data-testid="toggle-variant-tinted-off">
           Bold
         </Toggle>
@@ -233,8 +233,8 @@ export const WithIconOnly: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Icon only">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Icon only">
+      <div className="zeroship-story-cell">
         <Toggle aria-label="Bold" data-testid="toggle-icon-only">
           <BoldGlyph />
         </Toggle>
@@ -257,8 +257,8 @@ export const WithIconAndText: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Icon and text">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Icon and text">
+      <div className="zeroship-story-cell">
         <Toggle defaultPressed data-testid="toggle-icon-text">
           <BoldGlyph />
           Bold
@@ -283,13 +283,13 @@ export const AsChild: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Toggle as child">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Toggle as child">
+      <div className="zeroship-story-cell">
         <Toggle asChild>
           <a href="#filters">Open filters</a>
         </Toggle>
       </div>
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         <Toggle asChild>
           <button type="button">Native child</button>
         </Toggle>
@@ -329,15 +329,15 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — unpressed</span>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — unpressed</span>
         <Toggle disabled data-testid="toggle-disabled-unpressed">
           Bold
         </Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — pressed</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — pressed</span>
         <Toggle
           disabled
           defaultPressed
@@ -376,11 +376,11 @@ export const TwoSegmentsSingle: Story = {
     const [value, setValue] = useState<string | undefined>("day");
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Two segments single"
       >
-        <div className="zs-story-cell">
+        <div className="zeroship-story-cell">
           <Toggle.Group
             value={value}
             onValueChange={(v) => setValue(v)}
@@ -431,11 +431,11 @@ export const FiveSegmentsSingle: Story = {
     const [value, setValue] = useState<string | undefined>("1y");
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Five segments single"
       >
-        <div className="zs-story-cell">
+        <div className="zeroship-story-cell">
           <Toggle.Group
             value={value}
             onValueChange={(v) => setValue(v)}
@@ -485,11 +485,11 @@ export const MultipleMode: Story = {
     const [value, setValue] = useState<string[]>([]);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Multiple mode"
       >
-        <div className="zs-story-cell">
+        <div className="zeroship-story-cell">
           <Toggle.Group
             multiple
             value={value}
@@ -558,30 +558,30 @@ export const AllSizesGroup: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All group sizes"
       style={{ flexDirection: "column", alignItems: "flex-start" }}
     >
       {/* Item 3 fix: scalar defaultValue. */}
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Toggle.Group size="sm" defaultValue="a" aria-label="Small group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
           <Toggle value="c">Charlie</Toggle>
         </Toggle.Group>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Toggle.Group size="md" defaultValue="b" aria-label="Medium group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
           <Toggle value="c">Charlie</Toggle>
         </Toggle.Group>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Toggle.Group size="lg" defaultValue="c" aria-label="Large group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
@@ -610,8 +610,8 @@ export const Horizontal: Story = {
   },
   // Item 3 fix: scalar defaultValue.
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Horizontal">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Horizontal">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           orientation="horizontal"
           defaultValue="list"
@@ -660,8 +660,8 @@ export const Vertical: Story = {
   },
   // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Vertical">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Vertical">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           orientation="vertical"
           defaultValue="medium"
@@ -699,11 +699,11 @@ export const EqualWidthOff: Story = {
   // Item 3 fix: scalar defaultValue.
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Equal width off"
     >
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           equalWidth={false}
           defaultValue="left"
@@ -748,8 +748,8 @@ export const WithLabel: Story = {
   render: () => {
     const labelId = "toggle-withlabel-label";
     return (
-      <div className="zs-story-row" role="group" aria-label="With label">
-        <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="With label">
+        <div className="zeroship-story-cell" style={{ maxWidth: "24rem" }}>
           <Field>
             <Field.Label id={labelId} data-testid="toggle-withlabel-label">
               View
@@ -792,8 +792,8 @@ export const DisabledGroup: Story = {
   },
   // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled group">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled group">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           disabled
           defaultValue="week"
@@ -844,11 +844,11 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL toggle group"
     >
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           defaultValue="שבוע"
           aria-label="טווח זמן"
@@ -878,7 +878,7 @@ export const RTL: Story = {
  * outside forced-colors). Pre-fix, the state selectors
  * `.zs-toggle--default:not([data-disabled]):not([data-pressed]):hover`
  * outranked the forced-colors `.zs-toggle` block and the hover would
- * stay tinted with `--zs-label`. The mirrored selectors inside the
+ * stay tinted with `--zeroship-label`. The mirrored selectors inside the
  * `@media (forced-colors: active)` block restore the cascade. */
 export const ForcedColorsHover: Story = {
   name: "Forced-colors hover",
@@ -892,16 +892,16 @@ export const ForcedColorsHover: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Forced colors hover"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Standalone</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Standalone</span>
         <Toggle data-testid="toggle-forced-colors-standalone">Bold</Toggle>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Inside group</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Inside group</span>
         <Toggle.Group
           defaultValue="day"
           aria-label="Range"
@@ -940,8 +940,8 @@ export const RoleToolbarLock: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Role toolbar lock">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Role toolbar lock">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           defaultValue="list"
           aria-label="View mode"
@@ -987,11 +987,11 @@ function ControlledClearableHarness() {
   const [value, setValue] = useState<string | undefined>("list");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Controlled clearable"
     >
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         <Toggle.Group
           value={value}
           onValueChange={(next) => setValue(next)}
@@ -1063,11 +1063,11 @@ export const RoleOverrideAttempt: Story = {
     } as unknown as Record<string, never>;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Role override attempt"
       >
-        <div className="zs-story-cell">
+        <div className="zeroship-story-cell">
           <Toggle.Group
             defaultValue="list"
             aria-label="View mode rogue"

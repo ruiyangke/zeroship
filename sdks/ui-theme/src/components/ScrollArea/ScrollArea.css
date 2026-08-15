@@ -30,7 +30,7 @@
  * Visibility policy (data-visibility on Root drives the CSS):
  *
  *   - auto:    Scrollbar is visible while scrolling and fades out after
- *              var(--zs-scrollarea-hide-delay). Implemented via a
+ *              var(--zeroship-scrollarea-hide-delay). Implemented via a
  *              transition-delay on the opacity fade-out so no JS timer
  *              is needed in our shell — Base UI's `data-scrolling`
  *              attribute on the Root drives the active-scroll signal.
@@ -53,8 +53,8 @@
    * transparent enhancement of overflow, not a sizing primitive. */
   inline-size: 100%;
   block-size: 100%;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 
 /* ─── Viewport (overflow container) ────────────────────────────────────── */
@@ -66,12 +66,12 @@
   /* The Viewport is the focusable scroll container — keyboard ArrowKeys,
    * PageUp/PageDown, Home/End all scroll it natively. Outline goes on
    * the Viewport itself so focus-visible reads cleanly. */
-  outline-offset: calc(-1 * var(--zs-focus-ring-offset));
+  outline-offset: calc(-1 * var(--zeroship-focus-ring-offset));
   border-radius: inherit;
 }
 
 [data-slot="scrollarea-viewport"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
 }
 
 /* ─── Content wrapper (block flow) ─────────────────────────────────────── */
@@ -85,7 +85,7 @@
 /* ─── Scrollbar — base (vertical default) ──────────────────────────────── *
  *
  * Scrollbars sit absolutely positioned over the Viewport. The track is
- * a thin tinted strip painted from --zs-fill at 20% so it reads as a
+ * a thin tinted strip painted from --zeroship-fill at 20% so it reads as a
  * gentle gutter behind the thumb without competing with content.
  *
  * `touch-action: none` keeps the bar from initiating a scroll gesture
@@ -101,11 +101,11 @@
   position: absolute;
   display: flex;
   /* Above the content but never above modal layers (Dialog/Drawer set
-   * --zs-z-modal). A small positive z-index handles ordering with
+   * --zeroship-z-modal). A small positive z-index handles ordering with
    * sibling chrome inside the same panel. */
   z-index: 1;
-  background-color: color-mix(in oklch, var(--zs-fill) 20%, transparent);
-  border-radius: var(--zs-radius-full);
+  background-color: color-mix(in oklch, var(--zeroship-fill) 20%, transparent);
+  border-radius: var(--zeroship-radius-full);
   /* The bar fades via opacity. Visibility policies override the
    * resting opacity via the data-visibility selectors below. */
   opacity: 1;
@@ -120,8 +120,8 @@
    * changes (which would leave a fading-but-uninteractive bar during
    * the hide-delay window of `type="auto"`). */
   transition:
-    opacity var(--zs-motion-base) var(--zs-motion-ease),
-    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
   touch-action: none;
@@ -137,8 +137,8 @@
   inset-block-start: 0;
   inset-block-end: 0;
   inset-inline-end: 0;
-  inline-size: var(--zs-space-3);
-  padding-block: var(--zs-space-half);
+  inline-size: var(--zeroship-space-3);
+  padding-block: var(--zeroship-space-half);
   flex-direction: column;
   justify-content: flex-start;
 }
@@ -148,8 +148,8 @@
   inset-inline-start: 0;
   inset-inline-end: 0;
   inset-block-end: 0;
-  block-size: var(--zs-space-3);
-  padding-inline: var(--zs-space-half);
+  block-size: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-half);
   flex-direction: row;
   align-items: stretch;
 }
@@ -166,7 +166,7 @@
  * `:hover` on the Root for the broader area-hover reveal, plus
  * `[data-scrolling]` so flicks keep the bar lit.
  *
- * The hide-delay token (`--zs-scrollarea-hide-delay`) is ALWAYS set by
+ * The hide-delay token (`--zeroship-scrollarea-hide-delay`) is ALWAYS set by
  * the Root inline style — `ScrollAreaRootInner` writes it on mount —
  * so the transition-delay reads it without a fallback.
  *
@@ -194,9 +194,9 @@
   opacity: 1;
   pointer-events: auto;
   transition:
-    opacity var(--zs-motion-base) var(--zs-motion-ease)
-      var(--zs-scrollarea-hide-delay),
-    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease)
+      var(--zeroship-scrollarea-hide-delay),
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
@@ -207,8 +207,8 @@
   /* While actively scrolling, drop the delay — keep the bar visible
    * immediately. */
   transition:
-    opacity var(--zs-motion-fast) var(--zs-motion-ease),
-    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
@@ -224,11 +224,11 @@
   opacity: 0;
   pointer-events: none;
   transition:
-    opacity var(--zs-motion-base) var(--zs-motion-ease)
-      var(--zs-scrollarea-hide-delay),
-    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease)
+      var(--zeroship-scrollarea-hide-delay),
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
     pointer-events 0s linear
-      calc(var(--zs-scrollarea-hide-delay) + var(--zs-motion-base));
+      calc(var(--zeroship-scrollarea-hide-delay) + var(--zeroship-motion-base));
   transition-behavior: allow-discrete;
 }
 
@@ -300,9 +300,9 @@
  * list stays grabbable.
  */
 [data-slot="scrollarea-thumb"] {
-  background-color: color-mix(in oklch, var(--zs-label) 32%, transparent);
-  border-radius: var(--zs-radius-full);
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  background-color: color-mix(in oklch, var(--zeroship-label) 32%, transparent);
+  border-radius: var(--zeroship-radius-full);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   /* Grabbable minimum on the long axis; Base UI handles the other
    * axis (it expands to fill the bar's cross axis). */
   flex-shrink: 0;
@@ -310,21 +310,21 @@
 
 [data-slot="scrollarea-scrollbar"][data-orientation="vertical"] [data-slot="scrollarea-thumb"] {
   inline-size: 100%;
-  min-block-size: var(--zs-space-6);
+  min-block-size: var(--zeroship-space-6);
 }
 [data-slot="scrollarea-scrollbar"][data-orientation="horizontal"] [data-slot="scrollarea-thumb"] {
   block-size: 100%;
-  min-inline-size: var(--zs-space-6);
+  min-inline-size: var(--zeroship-space-6);
 }
 
 @media (hover: hover) {
   [data-slot="scrollarea-scrollbar"]:hover [data-slot="scrollarea-thumb"] {
-    background-color: color-mix(in oklch, var(--zs-label) 50%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-label) 50%, transparent);
   }
 }
 [data-slot="scrollarea-thumb"][data-dragging],
 [data-slot="scrollarea-thumb"]:active {
-  background-color: color-mix(in oklch, var(--zs-label) 64%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 64%, transparent);
 }
 
 /* ─── Corner ───────────────────────────────────────────────────────────── */
@@ -332,9 +332,9 @@
   position: absolute;
   inset-inline-end: 0;
   inset-block-end: 0;
-  inline-size: var(--zs-space-3);
-  block-size: var(--zs-space-3);
-  background-color: color-mix(in oklch, var(--zs-fill) 20%, transparent);
+  inline-size: var(--zeroship-space-3);
+  block-size: var(--zeroship-space-3);
+  background-color: color-mix(in oklch, var(--zeroship-fill) 20%, transparent);
 }
 
 /* ─── RTL — logical properties handle the mirror ──────────────────────── *
@@ -388,7 +388,7 @@
     [data-slot="scrollarea-scrollbar"],
   [data-slot="scrollarea"][data-visibility="hover"]:hover [data-slot="scrollarea-scrollbar"] {
     background-color: ButtonFace;
-    border: var(--zs-selection-hairline) solid ButtonText;
+    border: var(--zeroship-selection-hairline) solid ButtonText;
   }
   [data-slot="scrollarea-thumb"],
   [data-slot="scrollarea-thumb"][data-dragging],
@@ -397,7 +397,7 @@
   }
   [data-slot="scrollarea-corner"] {
     background-color: ButtonFace;
-    border: var(--zs-selection-hairline) solid ButtonText;
+    border: var(--zeroship-selection-hairline) solid ButtonText;
   }
   [data-slot="scrollarea-viewport"]:focus-visible {
     outline-color: Highlight;

@@ -41,7 +41,7 @@ export const Horizontal: Story = {
     },
   },
   render: () => (
-    <div style={{ padding: "var(--zs-space-6)" }}>
+    <div style={{ padding: "var(--zeroship-space-6)" }}>
       <Stepper data-testid="stepper" steps={STEPS} current={1} />
     </div>
   ),
@@ -107,7 +107,7 @@ export const HorizontalConnectorGeometry: Story = {
     },
   },
   render: () => (
-    <div style={{ padding: "var(--zs-space-6)", inlineSize: "48rem" }}>
+    <div style={{ padding: "var(--zeroship-space-6)", inlineSize: "48rem" }}>
       <Stepper data-testid="stepper" steps={STEPS} current={1} />
     </div>
   ),
@@ -158,7 +158,7 @@ export const Vertical: Story = {
     },
   },
   render: () => (
-    <div style={{ padding: "var(--zs-space-6)" }}>
+    <div style={{ padding: "var(--zeroship-space-6)" }}>
       <Stepper
         data-testid="stepper"
         steps={STEPS}
@@ -193,7 +193,7 @@ export const Clickable: Story = {
   },
   args: { onStepChange: fn() },
   render: (args) => (
-    <div style={{ padding: "var(--zs-space-6)" }}>
+    <div style={{ padding: "var(--zeroship-space-6)" }}>
       <Stepper
         data-testid="stepper"
         steps={STEPS}
@@ -238,7 +238,7 @@ export const StatusOverride: Story = {
     },
   },
   render: () => (
-    <div style={{ padding: "var(--zs-space-6)" }}>
+    <div style={{ padding: "var(--zeroship-space-6)" }}>
       <Stepper
         data-testid="stepper"
         current={3}

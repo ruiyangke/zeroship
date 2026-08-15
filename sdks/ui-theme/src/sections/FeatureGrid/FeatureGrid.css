@@ -20,7 +20,7 @@
  *   - The section sets only its vertical rhythm; the composed Container
  *     owns the inline width + padding. The composed Grid owns the column
  *     tracks + gap.
- *   - Responsive: N columns (2|3|4) at the --zs-bp-md breakpoint and up (the
+ *   - Responsive: N columns (2|3|4) at the --zeroship-bp-md breakpoint and up (the
  *     Grid `columns={{ md: N }}` prop); below it the Grid primitive ITSELF
  *     collapses to a single stacked column (its responsive base count is 1).
  *     The collapse is owned by the Grid — this band carries no local
@@ -37,28 +37,28 @@
 
 [data-slot="feature-grid"] {
   /* Local single-knob custom properties (the house idiom, cf.
-     --zs-pricing-lead-measure / --zs-hero-measure): named, tunable handles
+     --zeroship-pricing-lead-measure / --zeroship-hero-measure): named, tunable handles
      for the band's calibrated literals so the intent is legible and a
      consumer can retune in one place.
-       --zs-feature-grid-header-measure — the centered header's max measure
-       --zs-feature-grid-icon-size      — the tinted icon badge box size
-       --zs-feature-grid-icon-glyph     — the glyph size inside the badge
-       --zs-feature-grid-icon-tint      — the badge's accent-tint percentage
+       --zeroship-feature-grid-header-measure — the centered header's max measure
+       --zeroship-feature-grid-icon-size      — the tinted icon badge box size
+       --zeroship-feature-grid-icon-glyph     — the glyph size inside the badge
+       --zeroship-feature-grid-icon-tint      — the badge's accent-tint percentage
   */
-  --zs-feature-grid-header-measure: 40rem;
+  --zeroship-feature-grid-header-measure: 40rem;
   /* Bigger badge box (R2 "more presence") — a confident 3.5rem square that
      reads as a deliberate mark rather than a small chip. */
-  --zs-feature-grid-icon-size: 3.5rem;
+  --zeroship-feature-grid-icon-size: 3.5rem;
   /* The glyph is sized UP to 1.75rem inside the bigger badge (above the
      Icon `lg` 1.5rem default) so the mark fills the box with presence. */
-  --zs-feature-grid-icon-glyph: 1.75rem;
-  --zs-feature-grid-icon-tint: 12%;
+  --zeroship-feature-grid-icon-glyph: 1.75rem;
+  --zeroship-feature-grid-icon-tint: 12%;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop. */
   display: block;
-  padding-block: var(--zs-space-10);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-10);
+  color: var(--zeroship-label);
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
@@ -66,8 +66,8 @@
   /* Cap the header to a readable measure above the grid. Centered when the
      band is centered (the composed Stack `align="center"` already centers
      the inline children); start-aligned otherwise. */
-  max-inline-size: var(--zs-feature-grid-header-measure);
-  margin-block-end: var(--zs-space-9);
+  max-inline-size: var(--zeroship-feature-grid-header-measure);
+  margin-block-end: var(--zeroship-space-9);
 }
 
 [data-slot="feature-grid"][data-align="center"] [data-slot="feature-grid-header"] {
@@ -87,27 +87,27 @@
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2> so the band header
      carries real weight. */
-  font-size: var(--zs-text-display-3-size);
-  line-height: var(--zs-text-display-3-line);
-  font-weight: var(--zs-text-display-3-weight);
-  letter-spacing: var(--zs-text-display-3-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-display-3-size);
+  line-height: var(--zeroship-text-display-3-line);
+  font-weight: var(--zeroship-text-display-3-weight);
+  letter-spacing: var(--zeroship-text-display-3-tracking);
+  color: var(--zeroship-label);
   text-wrap: balance;
 }
 
 [data-slot="feature-grid-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-body-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-body-weight);
+  color: var(--zeroship-label-secondary);
   text-wrap: pretty;
 }
 
 /* ─── Items — the responsive Grid of feature cells ───────────────────────── */
 /* The composed Grid owns the column tracks, gap AND the single-column
    collapse: its responsive base column count is 1, and the `columns={{ md }}`
-   prop only PROMOTES to the multi-column row at ≥ --zs-bp-md. Below the
+   prop only PROMOTES to the multi-column row at ≥ --zeroship-bp-md. Below the
    breakpoint the Grid is already a single stacked column, so this band adds
    no local collapse override. */
 
@@ -119,7 +119,7 @@
      touch more separation below it (its own margin, set on the badge) so the
      cell reads as a deliberate badge → title → copy rhythm rather than three
      evenly-spaced rows. */
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
 
 /* Centered band: center the icon badge + text within each cell. */
@@ -144,46 +144,46 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  inline-size: var(--zs-feature-grid-icon-size);
-  block-size: var(--zs-feature-grid-icon-size);
+  inline-size: var(--zeroship-feature-grid-icon-size);
+  block-size: var(--zeroship-feature-grid-icon-size);
   /* A touch more breathing room beneath the bigger badge so it reads as a
      distinct mark above the text group (the R2 "more structure per item"). */
-  margin-block-end: var(--zs-space-2);
+  margin-block-end: var(--zeroship-space-2);
   /* radius-5 (12) sits in proportion with the larger 3.5rem box. */
-  border-radius: var(--zs-radius-5);
+  border-radius: var(--zeroship-radius-5);
   background: color-mix(
     in oklch,
-    var(--zs-accent) var(--zs-feature-grid-icon-tint),
-    var(--zs-surface)
+    var(--zeroship-accent) var(--zeroship-feature-grid-icon-tint),
+    var(--zeroship-surface)
   );
-  color: var(--zs-accent-active);
+  color: var(--zeroship-accent-active);
 }
 
 /* Size the glyph UP inside the bigger badge. The composed Icon sets its own
-   `--zs-icon-*` box via `.zs-icon--lg` (0,1,0); this descendant rule (0,2,0)
+   `--zeroship-icon-*` box via `.zs-icon--lg` (0,1,0); this descendant rule (0,2,0)
    outranks it regardless of stylesheet concat order, so the badge owns the
    glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
    to the badge's glyph token. */
 [data-slot="feature-grid-item-icon"] [data-slot="icon"] {
-  inline-size: var(--zs-feature-grid-icon-glyph);
-  block-size: var(--zs-feature-grid-icon-glyph);
+  inline-size: var(--zeroship-feature-grid-icon-glyph);
+  block-size: var(--zeroship-feature-grid-icon-glyph);
 }
 
 [data-slot="feature-grid-item-title"] {
   margin-block: 0;
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-headline-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-headline-tracking);
+  color: var(--zeroship-label);
   text-wrap: balance;
 }
 
 [data-slot="feature-grid-item-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
   text-wrap: pretty;
 }
 
@@ -207,7 +207,7 @@
      stays a visible mark, and resolve its ink to CanvasText so the glyph
      stays legible. */
   [data-slot="feature-grid-item-icon"] {
-    border: var(--zs-selection-hairline) solid CanvasText;
+    border: var(--zeroship-selection-hairline) solid CanvasText;
     color: CanvasText;
   }
 }

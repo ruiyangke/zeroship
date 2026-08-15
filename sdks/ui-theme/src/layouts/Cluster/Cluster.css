@@ -5,7 +5,7 @@
  *   .zs-cluster   — the wrapping flex row
  *
  * Driven by inline custom properties set from props:
- *   --cluster-gap       --zs-space-*    (default --zs-space-2)
+ *   --cluster-gap       --zeroship-space-*    (default --zeroship-space-2)
  *   --cluster-align     align-items     (default center)
  *   --cluster-justify   justify-content (default flex-start)
  *
@@ -23,7 +23,7 @@
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: var(--cluster-gap, var(--zs-space-2));
+  gap: var(--cluster-gap, var(--zeroship-space-2));
   align-items: var(--cluster-align, center);
   justify-content: var(--cluster-justify, flex-start);
 }

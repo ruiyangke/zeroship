@@ -37,11 +37,11 @@ export const Basic: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Basic checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={["newsletter", "beta"]}
           data-testid="checkboxgroup-basic"
@@ -92,12 +92,12 @@ export const Controlled: Story = {
     const [value, setValue] = useState<string[]>(["product"]);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Controlled checkbox group"
       >
         <div
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{
             inlineSize: "min(20rem, 100%)",
             display: "flex",
@@ -120,7 +120,7 @@ export const Controlled: Story = {
             ))}
           </CheckboxGroup>
           <span
-            className="zs-story-label"
+            className="zeroship-story-label"
             data-testid="checkboxgroup-controlled-readout"
           >
             Selected: [{value.join(", ")}]
@@ -154,11 +154,11 @@ export const Disabled: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Disabled checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           disabled
           defaultValue={["newsletter"]}
@@ -188,11 +188,11 @@ export const Horizontal: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Horizontal checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(26rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(26rem, 100%)" }}>
         <CheckboxGroup
           orientation="horizontal"
           defaultValue={["mon", "wed", "fri"]}
@@ -235,14 +235,14 @@ export const NestedFieldset: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Fieldset checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(22rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(22rem, 100%)" }}>
         <Fieldset>
           <Fieldset.Legend>Email preferences</Fieldset.Legend>
-          <p className="zs-story-description">
+          <p className="zeroship-story-description">
             Pick the categories you would like to hear from us about.
           </p>
           <CheckboxGroup
@@ -278,11 +278,11 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={["news-he"]}
           data-testid="checkboxgroup-rtl"
@@ -311,11 +311,11 @@ export const AllSelected: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All selected checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup
           defaultValue={NEWSLETTER_OPTIONS.map((opt) => opt.value)}
           data-testid="checkboxgroup-all-selected"
@@ -343,11 +343,11 @@ export const NoneSelected: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="None selected checkbox group"
     >
-      <div className="zs-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
+      <div className="zeroship-story-cell" style={{ inlineSize: "min(20rem, 100%)" }}>
         <CheckboxGroup data-testid="checkboxgroup-none-selected">
           {NEWSLETTER_OPTIONS.map((opt) => (
             <Checkbox key={opt.value} name={opt.value} label={opt.label} />

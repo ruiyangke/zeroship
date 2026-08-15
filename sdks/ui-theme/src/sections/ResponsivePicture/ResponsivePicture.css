@@ -37,19 +37,19 @@
 }
 
 [data-slot="responsive-picture"][data-radius="sm"] {
-  border-radius: var(--zs-radius-4);
+  border-radius: var(--zeroship-radius-4);
 }
 
 [data-slot="responsive-picture"][data-radius="md"] {
-  border-radius: var(--zs-radius-5);
+  border-radius: var(--zeroship-radius-5);
 }
 
 [data-slot="responsive-picture"][data-radius="lg"] {
-  border-radius: var(--zs-radius-6);
+  border-radius: var(--zeroship-radius-6);
 }
 
 [data-slot="responsive-picture"][data-radius="xl"] {
-  border-radius: var(--zs-radius-7);
+  border-radius: var(--zeroship-radius-7);
 }
 
 [data-slot="responsive-picture"][data-frame="none"] {
@@ -57,9 +57,9 @@
 }
 
 [data-slot="responsive-picture"][data-frame="surface"] {
-  border: var(--zs-selection-hairline) solid var(--zs-separator);
-  background: var(--zs-surface-raised);
-  box-shadow: var(--zs-shadow-2);
+  border: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
+  background: var(--zeroship-surface-raised);
+  box-shadow: var(--zeroship-shadow-2);
 }
 
 [data-slot="responsive-picture-img"] {

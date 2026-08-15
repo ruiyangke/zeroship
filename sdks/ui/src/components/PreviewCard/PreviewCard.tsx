@@ -200,7 +200,7 @@ export function createPreviewCardHandle(): PreviewCardHandle {
   // is created outside of render). The id only needs to be unique per
   // handle instance; collisions across handles are harmless because
   // each instance pairs a single Root with its own Triggers.
-  const id = `zs-previewcard-${Math.random().toString(36).slice(2, 10)}`;
+  const id = `zeroship-previewcard-${Math.random().toString(36).slice(2, 10)}`;
   Object.defineProperty(handle, "popupId", {
     value: id,
     writable: false,

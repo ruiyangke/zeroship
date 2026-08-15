@@ -19,7 +19,7 @@ type Story = StoryObj<typeof Dialog>;
 export const Default: Story = {
   name: "Default",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Default dialog">
+    <div className="zeroship-story-row" role="group" aria-label="Default dialog">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Open dialog</Button>}
@@ -69,7 +69,7 @@ export const Default: Story = {
 export const Sizes: Story = {
   name: "Sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All dialog sizes">
+    <div className="zeroship-story-row" role="group" aria-label="All dialog sizes">
       {(["sm", "md", "lg", "full"] as const).map((size) => (
         <Dialog key={size}>
           <Dialog.Trigger
@@ -109,7 +109,7 @@ export const Sizes: Story = {
 export const PlacementTop: Story = {
   name: "Placement: top",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Dialog top placement">
+    <div className="zeroship-story-row" role="group" aria-label="Dialog top placement">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Open top sheet</Button>}
@@ -136,7 +136,7 @@ export const PlacementTop: Story = {
     </div>
   ),
   // Regression guard (#6): top placement is `top`-anchored — its steady
-  // transform has NO -50% vertical translate (only --zs-nested-offset,
+  // transform has NO -50% vertical translate (only --zeroship-nested-offset,
   // which is 0 for a non-nested dialog). The reduced-motion enter/leave
   // override now MIRRORS this (it previously re-added a -50% it never had,
   // causing a one-frame vertical jump). After open + transition settle,
@@ -176,7 +176,7 @@ export const PlacementTop: Story = {
 export const BackdropTints: Story = {
   name: "Backdrop tints",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Backdrop tints">
+    <div className="zeroship-story-row" role="group" aria-label="Backdrop tints">
       {(["scrim", "material", "invisible"] as const).map((tint) => (
         <Dialog key={tint} modal={tint === "invisible" ? false : true}>
           <Dialog.Trigger
@@ -215,7 +215,7 @@ export const BackdropTints: Story = {
 export const WithForm: Story = {
   name: "With form",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Dialog containing a form">
+    <div className="zeroship-story-row" role="group" aria-label="Dialog containing a form">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Edit profile</Button>}
@@ -257,7 +257,7 @@ export const WithForm: Story = {
 export const NonDismissible: Story = {
   name: "Non-dismissible",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Non-dismissible dialog">
+    <div className="zeroship-story-row" role="group" aria-label="Non-dismissible dialog">
       <Dialog dismissible={false}>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Open required action</Button>}
@@ -303,7 +303,7 @@ export const NonDismissible: Story = {
 function InitialFocusStory() {
   const usernameRef = useRef<HTMLInputElement | null>(null);
   return (
-    <div className="zs-story-row" role="group" aria-label="Initial focus dialog">
+    <div className="zeroship-story-row" role="group" aria-label="Initial focus dialog">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Sign in</Button>}
@@ -373,7 +373,7 @@ function CloseWithSaveOnClickStory() {
   const [saved, setSaved] = useState<string>("not-saved");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog close with caller onClick"
     >
@@ -439,7 +439,7 @@ export const CloseAsChild: Story = {
   name: "Close — asChild (Slot)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog close asChild"
     >
@@ -497,7 +497,7 @@ function CloseAsChildWrapperPropsStory() {
   const [order, setOrder] = useState<string[]>([]);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog close asChild wrapper props"
     >
@@ -518,7 +518,7 @@ function CloseAsChildWrapperPropsStory() {
             <Dialog.Footer>
               <Dialog.Close
                 asChild
-                className="zs-wrapper-cls"
+                className="zeroship-wrapper-cls"
                 data-wrapper-flag="present"
                 aria-label="Wrapper aria label"
                 style={{ outlineStyle: "dotted" }}
@@ -526,7 +526,7 @@ function CloseAsChildWrapperPropsStory() {
               >
                 <button
                   type="button"
-                  className="zs-child-cls"
+                  className="zeroship-child-cls"
                   data-child-flag="present"
                   data-testid="dialog-close-aschild-wrapped"
                   onClick={() => setOrder((prev) => [...prev, "child"])}
@@ -568,8 +568,8 @@ export const CloseAsChildWrapperProps: Story = {
     await expect(target).toHaveAttribute("data-wrapper-flag", "present");
     await expect(target).toHaveAttribute("data-child-flag", "present");
     // Wrapper's className concatenates with the child's className.
-    await expect(target).toHaveClass("zs-child-cls");
-    await expect(target).toHaveClass("zs-wrapper-cls");
+    await expect(target).toHaveClass("zeroship-child-cls");
+    await expect(target).toHaveClass("zeroship-wrapper-cls");
     // Wrapper's style merges onto the child.
     await expect(target).toHaveStyle({ outlineStyle: "dotted" });
 
@@ -609,7 +609,7 @@ function CreateDialogHandlePayloadStory() {
   const [confirmed, setConfirmed] = useState<string>("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog createHandle payload"
     >
@@ -688,7 +688,7 @@ function ClosePreventDefaultStory() {
   const [status, setStatus] = useState("idle");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog close preventDefault"
     >
@@ -755,7 +755,7 @@ export const CloseAsChildLink: Story = {
   name: "Close — asChild link (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog close asChild link"
     >
@@ -823,7 +823,7 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="Dialog RTL">
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="Dialog RTL">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">פתח דיאלוג</Button>}
@@ -858,7 +858,7 @@ export const LongFooterLabels: Story = {
   name: "Long footer labels (wrap)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog long footer labels"
     >
@@ -905,7 +905,7 @@ export const UnlabeledPopupWarns: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Unlabeled popup dev warn"
     >
@@ -945,7 +945,7 @@ export const FullTopWarns: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Dialog full plus top placement"
     >
@@ -999,7 +999,7 @@ export const NonModal: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Non-modal dialog"
     >
@@ -1032,7 +1032,7 @@ export const NonModal: Story = {
 export const Nested: Story = {
   name: "Nested",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Nested dialogs">
+    <div className="zeroship-story-row" role="group" aria-label="Nested dialogs">
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger-outer">Open outer</Button>}

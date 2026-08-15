@@ -23,8 +23,8 @@
  *
  *   1. Cells share the Input visual rhythm. Each cell is a bordered shell
  *      with the same focus-ring, the same hairline border, and the same
- *      `--zs-control-h-*` heights so a row of OtpField cells next to an
- *      Input reads coherent. The cell uses --zs-otp-cell-size for the
+ *      `--zeroship-control-h-*` heights so a row of OtpField cells next to an
+ *      Input reads coherent. The cell uses --zeroship-otp-cell-size for the
  *      square inline-size — height-equals-width by design.
  *
  *   2. Auto-advance + paste-split are Base UI's responsibility. We DO NOT
@@ -32,10 +32,10 @@
  *      verify paste; the aria-wiring suite asserts that a single
  *      paste of N digits fills all N cells AND advances focus to the end.
  *
- *   3. Sizes — sm/md/lg — drive `--zs-otp-cell-size`. Each cell is square,
+ *   3. Sizes — sm/md/lg — drive `--zeroship-otp-cell-size`. Each cell is square,
  *      so the inline-size === block-size. lg cells = 3rem; md = 2.5rem
  *      (matches Input md); sm = 2rem (matches Input sm). Every size is
- *      floored by `--zs-hit-min` on coarse-pointer pointers via a
+ *      floored by `--zeroship-hit-min` on coarse-pointer pointers via a
  *      `max()` clamp so the cell always meets the WCAG 2.5.5 touch
  *      target (44 device-units / 2.75rem) without disturbing the
  *      desktop density.

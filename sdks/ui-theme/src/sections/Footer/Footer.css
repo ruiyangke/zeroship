@@ -21,10 +21,10 @@
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
  *     the inline width + padding. The composed Grid owns the link-column
- *     tracks + gap + the single-column collapse below --zs-bp-md (its
+ *     tracks + gap + the single-column collapse below --zeroship-bp-md (its
  *     responsive base count is 1; columns={{ md }} only PROMOTES at ≥ the bp).
  *   - The top row is a flex row: the brand block beside the columns block.
- *     Below --zs-bp-md it stacks (brand over columns). The literal rem is
+ *     Below --zeroship-bp-md it stacks (brand over columns). The literal rem is
  *     written here because custom properties cannot appear in an @media
  *     condition; the token name is the documented source.
  *   - The bottom bar is a wrapping flex row: copyright at the inline-start,
@@ -40,7 +40,7 @@
 [data-slot="footer"] {
   /* Local single-knob custom property (the house idiom): the inline size the
      brand block holds before the link columns take the remaining space. */
-  --zs-footer-brand-size: 18rem;
+  --zeroship-footer-brand-size: 18rem;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop.
@@ -48,18 +48,18 @@
      _section-tone.css (every section band claims 100% so it never
      shrinks-to-fit under a centering parent). */
   display: block;
-  padding-block: var(--zs-space-10);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-10);
+  color: var(--zeroship-label);
 }
 
 /* ─── Footnotes — fine print above the directory ─────────────────────────── */
 [data-slot="footer-footnotes"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  gap: var(--zeroship-space-2);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
 }
 
 [data-slot="footer-footnotes"] :where(p, ol, ul) {
@@ -77,16 +77,16 @@
 }
 
 [data-slot="footer-footnotes"] :where(a:focus-visible) {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  border-radius: var(--zs-radius-2);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
+  border-radius: var(--zeroship-radius-2);
 }
 
 /* ─── Top row — brand block beside the link columns ──────────────────────── */
 [data-slot="footer-top"] {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--zs-space-9);
+  gap: var(--zeroship-space-9);
   align-items: flex-start;
   /* The two children carry flex-grow (brand `flex: 1 1`, columns `flex: 2 1`),
      so they already absorb ALL free space between them — the row finishes flush
@@ -97,26 +97,26 @@
      grow doing the distribution, flex-start packs them from the start and the
      grow ratio carries them to the trailing edge. */
   justify-content: flex-start;
-  margin-block-end: var(--zs-space-8);
+  margin-block-end: var(--zeroship-space-8);
 }
 
 /* The brand block holds a comfortable inline size; the columns block takes the
    remaining space. Both wrap to a full row below the breakpoint. */
 [data-slot="footer-brand-block"] {
-  flex: 1 1 var(--zs-footer-brand-size);
+  flex: 1 1 var(--zeroship-footer-brand-size);
   min-inline-size: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
 }
 
 [data-slot="footer-columns"] {
   /* The link-group Grid takes the remaining inline space beside the brand. */
-  flex: 2 1 var(--zs-footer-brand-size);
+  flex: 2 1 var(--zeroship-footer-brand-size);
   min-inline-size: 0;
 }
 
-/* Below --zs-bp-md the top row stacks the brand over the columns (each takes
+/* Below --zeroship-bp-md the top row stacks the brand over the columns (each takes
    the full row). The Grid already collapses to one column on its own. */
 @media (max-width: 47.999rem) {
   [data-slot="footer-brand-block"],
@@ -129,18 +129,18 @@
   /* Stronger brand anchoring (R2): the wordmark reads at the title-2 scale,
      bolder and weightier than the former headline step so the footer has a
      clear brand anchor at its top-start rather than a quiet label. */
-  font-size: var(--zs-text-title-2-size);
-  line-height: var(--zs-text-title-2-line);
-  font-weight: var(--zs-text-title-2-weight);
-  letter-spacing: var(--zs-text-title-2-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-title-2-size);
+  line-height: var(--zeroship-text-title-2-line);
+  font-weight: var(--zeroship-text-title-2-weight);
+  letter-spacing: var(--zeroship-text-title-2-tracking);
+  color: var(--zeroship-label);
 }
 
 [data-slot="footer-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
   text-wrap: pretty;
 }
 
@@ -148,17 +148,17 @@
 [data-slot="footer-column"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
 }
 
 [data-slot="footer-column-title"] {
   margin-block: 0;
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  font-weight: var(--zs-text-headline-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  color: var(--zeroship-label-secondary);
   text-transform: uppercase;
-  letter-spacing: var(--zs-text-footnote-tracking);
+  letter-spacing: var(--zeroship-text-footnote-tracking);
 }
 
 [data-slot="footer-links"] {
@@ -168,7 +168,7 @@
   padding-inline-start: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
 
 [data-slot="footer-link-item"] {
@@ -184,34 +184,34 @@
    house class). Without this, raw children fell back to browser-default blue
    underlined anchors — inconsistent with the gray array links. */
 [data-slot="footer-links"] a {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
   text-decoration: none;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  border-radius: var(--zs-radius-2);
-  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  border-radius: var(--zeroship-radius-2);
+  transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="footer-links"] a:hover {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   text-decoration: underline;
 }
 
 [data-slot="footer-links"] a:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  color: var(--zs-label);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
+  color: var(--zeroship-label);
 }
 
 /* ─── Separator + bottom bar ─────────────────────────────────────────────── */
 :is([data-slot="footer-footnotes-separator"], [data-slot="footer-separator"]) {
-  margin-block: var(--zs-space-7);
+  margin-block: var(--zeroship-space-7);
 }
 
 [data-slot="footer-bottom"] {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
   align-items: center;
   justify-content: space-between;
 }
@@ -222,7 +222,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-3) var(--zs-space-4);
+  gap: var(--zeroship-space-3) var(--zeroship-space-4);
 }
 
 [data-slot="footer-bottom-end"] {
@@ -230,9 +230,9 @@
 }
 
 [data-slot="footer-copyright"] {
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  color: var(--zeroship-label-secondary);
 }
 
 [data-slot="footer-legal-links"] {
@@ -242,7 +242,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-2) var(--zs-space-4);
+  gap: var(--zeroship-space-2) var(--zeroship-space-4);
 }
 
 [data-slot="footer-legal-link-item"] {
@@ -251,38 +251,38 @@
 
 [data-slot="footer-legal-links"] a,
 [data-slot="footer-locale"] a {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
   text-decoration: none;
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  border-radius: var(--zs-radius-2);
-  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  border-radius: var(--zeroship-radius-2);
+  transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="footer-legal-links"] a:hover,
 [data-slot="footer-locale"] a:hover {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   text-decoration: underline;
 }
 
 [data-slot="footer-legal-links"] a:focus-visible,
 [data-slot="footer-locale"] a:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  color: var(--zs-label);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
+  color: var(--zeroship-label);
 }
 
 [data-slot="footer-locale"] {
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
 }
 
 [data-slot="footer-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
 }
 
 /* ─── forced-colors — keep text, links + separator legible ────────────────

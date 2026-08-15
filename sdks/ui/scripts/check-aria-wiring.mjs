@@ -430,7 +430,7 @@ await open("components-input--combined-disabled-propagation");
  * token-coloured hover rules at lines 117 / 123 / 129 outrank the
  * forced-colors base reset on specificity (the `:hover` + `:not()`
  * chain beats `.zs-input`), so hovering an input in Windows High
- * Contrast painted `--zs-input-bg-hover` over the system `Field`
+ * Contrast painted `--zeroship-input-bg-hover` over the system `Field`
  * swatch. Readonly had no forced-colors mirror at all.
  *
  * Playwright's `emulateMedia({ forcedColors: 'active' })` flips the
@@ -839,7 +839,7 @@ await openStoryAndTrigger(
 /* ─── 9f. AlertDialog popup forced-colors mirror (wave-7 🔴 #2) ────────
  *
  * Regression for the wave-7 focused-review 🔴 #2: AlertDialog.css set
- * `.zs-alertdialog-popup { box-shadow: var(--zs-shadow-4); }` and is
+ * `.zs-alertdialog-popup { box-shadow: var(--zeroship-shadow-4); }` and is
  * imported AFTER Dialog.css. Both rules have equal specificity, so
  * the AlertDialog rule clobbered Dialog's
  * `@media (forced-colors: active) .zs-dialog-popup { box-shadow:
@@ -859,7 +859,7 @@ await openStoryAndTrigger(
  * `document.styleSheets` and confirming a `.zs-alertdialog-popup`
  * rule nested inside a `forced-colors` media block declares a
  * `CanvasText`-keyed box-shadow that LANDS AFTER the base
- * `.zs-alertdialog-popup` rule that set `var(--zs-shadow-4)`. That
+ * `.zs-alertdialog-popup` rule that set `var(--zeroship-shadow-4)`. That
  * combination — same selector, system-color value, later source
  * order — is what restores parity with Dialog's mirror in HCM
  * environments that paint `forced-color-adjust: auto` shadows.
@@ -883,7 +883,7 @@ await openStoryAndTrigger(
   // `.zs-alertdialog-popup`, whose `box-shadow` references
   // `CanvasText`, and that is nested inside a `forced-colors: active`
   // @media block. Also record the source order of the BASE
-  // `.zs-alertdialog-popup { box-shadow: var(--zs-shadow-...) }` rule
+  // `.zs-alertdialog-popup { box-shadow: var(--zeroship-shadow-...) }` rule
   // so we can prove the forced-colors mirror lands AFTER it (same
   // specificity → source order wins).
   const cascade = await page.evaluate(() => {
@@ -925,7 +925,7 @@ await openStoryAndTrigger(
             mirrorShadowIndex = cursor;
             mirrorShadowValue = shadow;
             mirrorMedia = mediaCondition;
-          } else if (!isInForcedColors && /var\(--zs-shadow/.test(shadow)) {
+          } else if (!isInForcedColors && /var\(--zeroship-shadow/.test(shadow)) {
             baseShadowIndex = cursor;
           }
         }
@@ -2947,8 +2947,8 @@ await page.emulateMedia({ forcedColors: "none" });
 
 /* ─── 61. Coarse-pointer hit-target — NumberField stepper ───────────── *
  *
- * Coarse-pointer touch-target floor: 44 device-units ≈ --zs-hit-min
- * Coarse-pointer touch target floor: 44 device-units ≈ --zs-hit-min
+ * Coarse-pointer touch-target floor: 44 device-units ≈ --zeroship-hit-min
+ * Coarse-pointer touch target floor: 44 device-units ≈ --zeroship-hit-min
  * 2.75rem. The 1rem root font-size means 2.75rem = 44px. Assert the
  * rendered stepper button's bounding rect is ≥ 44px on BOTH axes —
  * pre-fix only inline-size grew, leaving block-size at 2rem (32px) or
@@ -2976,22 +2976,22 @@ async function injectCoarsePointerOverride() {
       .zs-number-field--sm .zs-number-field__step,
       .zs-number-field--md .zs-number-field__step,
       .zs-number-field--lg .zs-number-field__step {
-        min-inline-size: var(--zs-hit-min);
-        min-block-size: var(--zs-hit-min);
+        min-inline-size: var(--zeroship-hit-min);
+        min-block-size: var(--zeroship-hit-min);
       }
       .zs-number-field--sm .zs-number-field__group,
       .zs-number-field--md .zs-number-field__group,
       .zs-number-field--lg .zs-number-field__group {
-        min-block-size: var(--zs-hit-min);
+        min-block-size: var(--zeroship-hit-min);
       }
       .zs-slider__thumb {
-        --zs-slider-hit: var(--zs-hit-min);
+        --zeroship-slider-hit: var(--zeroship-hit-min);
       }
       .zs-slider__control {
-        min-block-size: var(--zs-hit-min);
+        min-block-size: var(--zeroship-hit-min);
       }
       .zs-slider--vertical .zs-slider__control {
-        min-inline-size: var(--zs-hit-min);
+        min-inline-size: var(--zeroship-hit-min);
       }
     `,
   });
@@ -3017,7 +3017,7 @@ await injectCoarsePointerOverride();
 /* ─── 62. Coarse-pointer hit-target — Slider thumb halo ───────────── *
  *
  * The visible thumb stays at design size (≤ 1.25rem) but the
- * transparent ::after halo grows to --zs-hit-min under coarse pointer.
+ * transparent ::after halo grows to --zeroship-hit-min under coarse pointer.
  * The Thumb DOM element absorbs pointer events through the ::after
  * halo's inset:50% + negative margins — so its
  * `getBoundingClientRect()` returns the visible knob's size, NOT the
@@ -3718,10 +3718,10 @@ await open("components-otpfield--with-label");
  *
  * Regression for the wave 5 review #3: pre-fix the coarse-pointer
  * `@media (pointer: coarse)` block bumped only `.zs-otp-field--sm`,
- * leaving the default md cell at `--zs-control-h-md` (2.5rem = 40px),
- * under the WCAG 2.5.5 floor of 44 device-units (`--zs-hit-min` =
+ * leaving the default md cell at `--zeroship-control-h-md` (2.5rem = 40px),
+ * under the WCAG 2.5.5 floor of 44 device-units (`--zeroship-hit-min` =
  * 2.75rem = 44px). Post-fix the CSS uses `max(<size>,
- * var(--zs-hit-min))` on every size so md and lg also satisfy the
+ * var(--zeroship-hit-min))` on every size so md and lg also satisfy the
  * floor.
  *
  * Playwright's hasTouch + isMobile signals don't toggle the
@@ -3760,10 +3760,10 @@ await open("components-otpfield--with-label");
   }
   // Every size — including the default md (the `.zs-otp-field` bare
   // selector OR an explicit `--md` declaration) — must clamp the cell
-  // size against `--zs-hit-min`. The new shape uses `max(...,
-  // var(--zs-hit-min))` on the bare `.zs-otp-field` selector + the
+  // size against `--zeroship-hit-min`. The new shape uses `max(...,
+  // var(--zeroship-hit-min))` on the bare `.zs-otp-field` selector + the
   // `--sm` and `--lg` modifiers. We slice the per-selector body and
-  // assert it contains both `max(` and `var(--zs-hit-min)` — a regex
+  // assert it contains both `max(` and `var(--zeroship-hit-min)` — a regex
   // that walks both nested parens would be brittle.
   function selectorBodyHasMaxHitMin(body, selectorRe) {
     const match = body.match(selectorRe);
@@ -3773,7 +3773,7 @@ await open("components-otpfield--with-label");
     const closeIdx = after.indexOf("}", openIdx);
     if (openIdx < 0 || closeIdx < 0) return false;
     const ruleBody = after.slice(openIdx + 1, closeIdx);
-    return /max\(/.test(ruleBody) && /var\(--zs-hit-min\)/.test(ruleBody);
+    return /max\(/.test(ruleBody) && /var\(--zeroship-hit-min\)/.test(ruleBody);
   }
   const bareHasMax = selectorBodyHasMaxHitMin(
     coarseBody,
@@ -4285,7 +4285,7 @@ await open("components-menu--with-keyboard-shortcuts");
     const sc = row.querySelector(".zs-menu-item__shortcut");
     return sc ? getComputedStyle(sc).color : null;
   });
-  // Pre-fix: the shortcut paints with the inherited `var(--zs-label-
+  // Pre-fix: the shortcut paints with the inherited `var(--zeroship-label-
   // tertiary)` oklch token (the popup inherits `forced-color-adjust:
   // none` and the per-state rules weren't restated). Post-fix: the
   // shortcut resolves to GrayText / HighlightText (concrete rgb()
@@ -4863,7 +4863,7 @@ await open("components-tabs--rtl");
  * specificity, so this assertion compares the computed
  * background-color against `Highlight`'s computed value (probed at
  * runtime via a sacrificial element) — they must match exactly.
- * Pre-fix the bg would resolve to `var(--zs-accent-hover)` (an oklch
+ * Pre-fix the bg would resolve to `var(--zeroship-accent-hover)` (an oklch
  * brand token) instead of the system `Highlight` value. */
 await page.emulateMedia({ forcedColors: "active" });
 await open("components-tabs--all-variants");
@@ -4890,7 +4890,7 @@ await open("components-tabs--all-variants");
     (el) => getComputedStyle(el).backgroundColor,
   );
   // Pre-fix value: `rgba(0, 122, 255, ?)` / `oklch(...)` form derived
-  // from `--zs-accent-hover`. Post-fix: matches the probed Highlight.
+  // from `--zeroship-accent-hover`. Post-fix: matches the probed Highlight.
   const ok =
     bg === highlightBg &&
     !/oklch\(/i.test(bg) &&
@@ -5913,7 +5913,7 @@ await open("components-collapsible--trigger-as-child");
   await target.waitFor({ state: "visible", timeout: 5000 });
   const tag = await target.evaluate((el) => el.tagName);
   const hasConsumerClass = await target.evaluate((el) =>
-    el.classList.contains("zs-collapsible-aschild-target"),
+    el.classList.contains("zeroship-collapsible-aschild-target"),
   );
   const hasInternalClass = await target.evaluate((el) =>
     el.classList.contains("zs-collapsible-trigger"),
@@ -5967,7 +5967,7 @@ await open("components-collapsible--panel-as-child");
   await panelTarget.waitFor({ state: "visible", timeout: 5000 });
   const tag = await panelTarget.evaluate((el) => el.tagName);
   const hasConsumerClass = await panelTarget.evaluate((el) =>
-    el.classList.contains("zs-collapsible-aschild-section"),
+    el.classList.contains("zeroship-collapsible-aschild-section"),
   );
   const hasInternalClass = await panelTarget.evaluate((el) =>
     el.classList.contains("zs-collapsible-panel"),
@@ -6112,11 +6112,11 @@ await open("components-toast--with-action");
     .locator(".zs-toast-root")
     .count()
     .catch(() => -1);
-  // The WithAction story's onClick mutates `window.__zsToastActionCalls`
+  // The WithAction story's onClick mutates `window.__zeroshipToastActionCalls`
   // — reading it from the page evaluate confirms the callback fired
   // EXACTLY once (F2 regression: pre-fix this would be 2).
   const callCount = await page
-    .evaluate(() => window.__zsToastActionCalls ?? -1)
+    .evaluate(() => window.__zeroshipToastActionCalls ?? -1)
     .catch(() => -1);
   const ok = stillMounted === 0 && callCount === 1;
   report(
@@ -6542,7 +6542,7 @@ await open("components-scrollarea--hover-only");
     present = false;
   }
   // Wait for the opacity transition to settle to the resting state.
-  // The `--zs-motion-base` transition runs ~250ms; we poll for a
+  // The `--zeroship-motion-base` transition runs ~250ms; we poll for a
   // resting opacity below 0.5 instead of sleeping a fixed window.
   if (present) {
     try {
@@ -6729,14 +6729,14 @@ await open("components-scrollarea--hover-only");
  * Pre-fix: the not-scrolling rule for `type="auto"` set
  *   `opacity: 0; pointer-events: none;`
  * with `opacity` transitioned through `transition-delay:
- * var(--zs-scrollarea-hide-delay)` (default 600ms). The opacity drop
+ * var(--zeroship-scrollarea-hide-delay)` (default 600ms). The opacity drop
  * was visually deferred but `pointer-events: none` applied immediately.
  * Result: a visibly-present bar that refused thumb drags or track
  * clicks for the whole hide-delay window.
  *
  * Post-fix: `pointer-events` is itself a transitioned property with
- * `transition-delay: calc(var(--zs-scrollarea-hide-delay) +
- * var(--zs-motion-base))`. The discrete-property swap fires AFTER both
+ * `transition-delay: calc(var(--zeroship-scrollarea-hide-delay) +
+ * var(--zeroship-motion-base))`. The discrete-property swap fires AFTER both
  * the hide-delay and the opacity fade complete — so the hit-test
  * surface tracks visibility instead of dropping the instant the
  * `data-scrolling` attribute clears.
@@ -7018,7 +7018,7 @@ await openStoryAndTrigger(
   await customClose.waitFor({ state: "visible", timeout: 5000 });
   const tag = await customClose.evaluate((el) => el.tagName);
   const hasWrapperClass = await customClose.evaluate((el) =>
-    el.classList.contains("zs-drawer-close-aschild-extra"),
+    el.classList.contains("zeroship-drawer-close-aschild-extra"),
   );
   const sideEffectAttr = await customClose.getAttribute("data-side-effect");
   const countsLocator = page.locator(
@@ -7413,16 +7413,16 @@ await open("components-separator--role-lock");
  *
  * Pre-fix, `.zs-separator--vertical` set `block-size: 1.25rem` — a raw
  * rem literal in production CSS. The project standard is
- * "--zs-* tokens only — no raw px in component CSS"; 1.25rem === the
- * value `--zs-space-5` resolves to, so the literal was a token-purity
+ * "--zeroship-* tokens only — no raw px in component CSS"; 1.25rem === the
+ * value `--zeroship-space-5` resolves to, so the literal was a token-purity
  * regression that would silently outlive any future re-tuning of the
- * spacing scale (a designer who shrinks `--zs-space-5` from 1.25rem
+ * spacing scale (a designer who shrinks `--zeroship-space-5` from 1.25rem
  * to 1.125rem to fit a tighter density grid would expect the vertical
  * Separator to follow; pre-fix, it would NOT).
  *
  * This test is a real-path source grep over the on-disk CSS file: it
  * locates the `.zs-separator--vertical` rule body via balanced-brace
- * matching and asserts (a) `var(--zs-space-5)` appears AND (b) no raw
+ * matching and asserts (a) `var(--zeroship-space-5)` appears AND (b) no raw
  * `1.25rem` literal remains. Reading the rendered DOM's
  * computedStyle.blockSize would only prove the resolved pixel value,
  * not the source-level token use; the source grep is the contract.
@@ -7457,14 +7457,14 @@ await open("components-separator--role-lock");
     }
     ruleBody = cssSource.slice(openBraceIdx + 1, i - 1);
   }
-  // The block-size declaration must reference --zs-space-5 (or another
+  // The block-size declaration must reference --zeroship-space-5 (or another
   // documented token) AND there must be NO raw rem/px literal on the
   // block-size line. Match the specific line so a comment a few lines
   // up that says "1.25rem" (annotating what the token resolves to) is
   // not a false-positive.
   const blockSizeLineMatch = ruleBody.match(/block-size\s*:\s*([^;]+);/);
   const blockSizeValue = blockSizeLineMatch ? blockSizeLineMatch[1].trim() : "";
-  const usesToken = /var\(--zs-space-5\)/.test(blockSizeValue);
+  const usesToken = /var\(--zeroship-space-5\)/.test(blockSizeValue);
   const noRawRem = !/\b\d+(?:\.\d+)?rem\b/.test(blockSizeValue);
   const noRawPx = !/\b\d+(?:\.\d+)?px\b/.test(blockSizeValue);
   // Live check: open the Vertical story and confirm the rendered
@@ -7481,7 +7481,7 @@ await open("components-separator--role-lock");
   const liveOk = Number.isFinite(renderedPx) && renderedPx > 0;
   const ok = usesToken && noRawRem && noRawPx && liveOk;
   report(
-    "Separator vertical block-size tokenized via --zs-space-5 (wave-10 🟡)",
+    "Separator vertical block-size tokenized via --zeroship-space-5 (wave-10 🟡)",
     ok,
     `blockSizeValue="${blockSizeValue}", usesToken=${usesToken}, noRawRem=${noRawRem}, noRawPx=${noRawPx}, rendered="${renderedBlockSize}"`,
   );
@@ -7727,8 +7727,8 @@ await open("components-previewcard--rtl");
 /* ─── 91. Slice 19 review fix 2: asChild trigger keeps wrapper className ─ *
  *
  * Regression for the 🟡 `asChild` className drop. The AsChild story
- * sets `className="zs-aschild-wrapper-class"` on `<PreviewCard.Trigger
- * asChild>` AND `className="zs-aschild-consumer-class"` on the
+ * sets `className="zeroship-aschild-wrapper-class"` on `<PreviewCard.Trigger
+ * asChild>` AND `className="zeroship-aschild-consumer-class"` on the
  * consumer's `<a>`. The fix routes the wrapper's className through
  * the Slot helper's className-merge path so the rendered element
  * carries BOTH classes. Pre-fix, the wrapper class was destructured
@@ -7743,8 +7743,8 @@ await open("components-previewcard--as-child");
   const classList = await trigger.evaluate(
     (node) => Array.from(node.classList),
   );
-  const hasWrapperClass = classList.includes("zs-aschild-wrapper-class");
-  const hasConsumerClass = classList.includes("zs-aschild-consumer-class");
+  const hasWrapperClass = classList.includes("zeroship-aschild-wrapper-class");
+  const hasConsumerClass = classList.includes("zeroship-aschild-consumer-class");
   report(
     "PreviewCard asChild composes wrapper className with consumer className",
     hasWrapperClass && hasConsumerClass,
@@ -8231,29 +8231,29 @@ await open("components-previewcard--detached-handle");
 /* ─── Wave-5 fix: PreviewCard popup paints on an opaque surface ──────── *
  *
  * Regression for the 🔴 glass-invariant violation. Pre-fix, the popup
- * painted `background-color: var(--zs-surface-raised)` which in the
+ * painted `background-color: var(--zeroship-surface-raised)` which in the
  * crystal-light used to resolve to a translucent alpha-white surface.
  * With `backdrop-filter` unsupported (older browsers,
  * forced-colors aside), the page below bled through and axe-core's
  * color-contrast walk would not terminate inside the popup.
  *
- * Post-fix the popup paints on `--zs-surface` (the same opaque token
+ * Post-fix the popup paints on `--zeroship-surface` (the same opaque token
  * Popover.Popup uses). We assert two things:
  *
  *   1. The computed `background-color` on the popup is fully opaque
  *      (alpha === 1). Pre-fix the rgba() string carried a non-1 alpha.
  *   2. The token in the SOURCE CSS that the popup is painted with is
- *      `--zs-surface`, not `--zs-surface-raised`. We verify this by
+ *      `--zeroship-surface`, not `--zeroship-surface-raised`. We verify this by
  *      reading the literal background-color declaration from the
  *      authored stylesheet — the computed value is theme-resolved and
- *      could in theory be opaque even from `--zs-surface-raised` under
+ *      could in theory be opaque even from `--zeroship-surface-raised` under
  *      a non-crystal-light theme. */
 await open("components-previewcard--basic");
 {
   // The Storybook addon-themes decorator only sets `data-theme` on
   // `<html>` from within the manager UI; direct `iframe.html?...`
   // loads (which this script uses) never get the attribute. Set it
-  // explicitly so `--zs-surface` (and the rest of the crystal palette)
+  // explicitly so `--zeroship-surface` (and the rest of the crystal palette)
   // actually resolves during the sample below — otherwise every popup
   // here would compute to a transparent fallback regardless of which
   // token the rule references.
@@ -8299,7 +8299,7 @@ await open("components-previewcard--basic");
     const bg = window.getComputedStyle(p).backgroundColor;
     const surfaceVar = window
       .getComputedStyle(document.documentElement)
-      .getPropertyValue("--zs-surface")
+      .getPropertyValue("--zeroship-surface")
       .trim();
     // Walk authored stylesheets for the `.zs-preview-card-popup` rule
     // and read its `background-color` declaration verbatim — this is
@@ -8344,16 +8344,16 @@ await open("components-previewcard--basic");
       opaque = slashMatch ? Number(slashMatch[1]) >= 0.999 : true;
     }
   }
-  // Pre-fix: rule referenced `--zs-surface-raised`, the source-of-
-  // truth token check fails. Post-fix: rule references `--zs-surface`.
-  // We require the literal `var(--zs-surface)` substring and the
-  // absence of `--zs-surface-raised` so a hybrid declaration would
+  // Pre-fix: rule referenced `--zeroship-surface-raised`, the source-of-
+  // truth token check fails. Post-fix: rule references `--zeroship-surface`.
+  // We require the literal `var(--zeroship-surface)` substring and the
+  // absence of `--zeroship-surface-raised` so a hybrid declaration would
   // still fail.
   const usesOpaqueToken =
-    sample?.authored.includes("var(--zs-surface)") === true &&
-    !sample.authored.includes("--zs-surface-raised");
+    sample?.authored.includes("var(--zeroship-surface)") === true &&
+    !sample.authored.includes("--zeroship-surface-raised");
   report(
-    "PreviewCard popup paints on opaque --zs-surface (glass invariant)",
+    "PreviewCard popup paints on opaque --zeroship-surface (glass invariant)",
     attached && opaque && usesOpaqueToken,
     `attached=${attached}, computed-bg="${sample?.bg ?? ""}", ` +
       `authored="${sample?.authored ?? ""}", surfaceVar="${sample?.surfaceVar ?? ""}", ` +
@@ -8537,7 +8537,7 @@ await open("components-checkbox--rtl-glyph-centering");
  *
  * The forced-colors block must paint system colors (Canvas / CanvasText
  * / Highlight / GrayText) at specificity equal to or greater than the
- * normal-mode rules that paint `--zs-*` tokens for the same selector
+ * normal-mode rules that paint `--zeroship-*` tokens for the same selector
  * combinations. Without that, a normal-mode rule at e.g. (0,2,1)
  * defeats a forced-colors rule at (0,1,1) for the same selector — and
  * the disabled-checked / disabled-indeterminate / readonly chips keep
@@ -8697,13 +8697,13 @@ await open("components-switch--inline");
  * and readonly+checked-thumb have higher specificity and WON inside
  * forced-colors mode. That violates the forced-colors specificity
  * mirror standard: a checked-readonly track would still paint
- * `--zs-selection-bg-readonly` (a translucent oklch token), with the
- * `--zs-accent` hairline rather than `Highlight`.
+ * `--zeroship-selection-bg-readonly` (a translucent oklch token), with the
+ * `--zeroship-accent` hairline rather than `Highlight`.
  *
  * Pre-fix regression: with forced-colors active, the readonly+checked
  * track's background computed to the token's oklch mix; post-fix it
  * resolves to `Canvas` (system color rgb()). Same shape for the
- * thumb: pre-fix `--zs-accent` token, post-fix `Highlight`.
+ * thumb: pre-fix `--zeroship-accent` token, post-fix `Highlight`.
  *
  * Story: AllStates has a "Read only" switch with `defaultChecked`. */
 await page.emulateMedia({ forcedColors: "active" });
@@ -8925,9 +8925,9 @@ await open("components-button--as-child-disabled-is-inert");
  *
  * Meanwhile normal-mode rules climbed specificity:
  *   .zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
- *     background: var(--zs-accent-hover);
+ *     background: var(--zeroship-accent-hover);
  *   }
- *   .zs-button--destructive.zs-button--filled { background: var(--zs-system-red); }
+ *   .zs-button--destructive.zs-button--filled { background: var(--zeroship-system-red); }
  *   .zs-button--destructive.zs-button--filled:disabled { ... }
  *
  * With higher specificity than the forced-colors counterparts, the
@@ -9810,7 +9810,7 @@ await open("components-navigationmenu--icon-rotation-regression");
  * removing the gutter) the un-clamped minimum overrode the maximum,
  * so the popup painted wider than the viewport and overflowed
  * horizontally. Post-fix the minimum ALSO clamps: `min(18rem,
- * calc(100dvw - var(--zs-space-6) * 2))`.
+ * calc(100dvw - var(--zeroship-space-6) * 2))`.
  *
  * We force a narrow iframe (320px), open the popup, and read its
  * `getBoundingClientRect().width`. Pre-fix the width landed near
@@ -9838,7 +9838,7 @@ await open("components-navigationmenu--popup-min-width-clamp-regression");
   // Pre-fix the un-clamped `min-inline-size: 18rem` (= 288px) won on
   // narrow viewports, so the popup rendered ~287.97-288.03px on a
   // 320px viewport. Post-fix both bounds collapse to
-  // `calc(100dvw - var(--zs-space-6) * 2)` (320px - 48px = 272px) on
+  // `calc(100dvw - var(--zeroship-space-6) * 2)` (320px - 48px = 272px) on
   // the same viewport. We gate at 280px — comfortably below the
   // pre-fix ~288 but well above the post-fix 272, so sub-pixel
   // rounding can't flip the result either way.
@@ -10084,10 +10084,10 @@ await open("components-progress--external-aria-labelling");
  *  reduced-motion keeps disabled paint, not reduced-motion placeholder ─
  *
  * Pre-fix the base `.zs-progress[data-disabled] .zs-progress__indicator`
- * rule painted the indicator at `var(--zs-label-quaternary)` (solid,
+ * rule painted the indicator at `var(--zeroship-label-quaternary)` (solid,
  * alpha=1), but an equal-specificity rule inside `@media (prefers-
  * reduced-motion: reduce)` re-painted the indeterminate indicator with
- * `color-mix(in oklch, var(--zs-accent) 45%, transparent)` (≈ alpha
+ * `color-mix(in oklch, var(--zeroship-accent) 45%, transparent)` (≈ alpha
  * 0.45) and appeared LATER in source order, so the reduced-motion rule
  * won the cascade on a `data-disabled + data-status="indeterminate"`
  * row.
@@ -10100,7 +10100,7 @@ await open("components-progress--external-aria-labelling");
  * nate story, reads the indicator's computed background-color, and
  * asserts (a) alpha ≈ 1 (solid disabled paint, NOT the 45%-alpha
  * reduced-motion fill) and (b) the colour matches a sibling probe
- * painted with `var(--zs-label-quaternary)`. Either signal alone would
+ * painted with `var(--zeroship-label-quaternary)`. Either signal alone would
  * catch the bug; both together lock the contract. */
 await page.emulateMedia({ reducedMotion: "reduce" });
 await open("components-progress--disabled-indeterminate");
@@ -10113,7 +10113,7 @@ await open("components-progress--disabled-indeterminate");
   const disabled = await prog.getAttribute("data-disabled");
 
   // Probe the indicator computed style + a reference element painted
-  // with `var(--zs-label-quaternary)` for direct colour comparison.
+  // with `var(--zeroship-label-quaternary)` for direct colour comparison.
   // Returning the rgba string from the indicator alongside the
   // reference lets the assertion match colours even though the
   // browser canonicalises oklch through its own colour pipeline.
@@ -10133,13 +10133,13 @@ await open("components-progress--disabled-indeterminate");
     // the cascade; if it doesn't, the reduced-motion color-mix leaked
     // through.
     const refIndicator = document.createElement("div");
-    refIndicator.style.background = "var(--zs-label-quaternary)";
+    refIndicator.style.background = "var(--zeroship-label-quaternary)";
     el.appendChild(refIndicator);
     const refIndicatorBg = getComputedStyle(refIndicator).backgroundColor;
     refIndicator.remove();
 
     const refTrack = document.createElement("div");
-    refTrack.style.background = "var(--zs-fill-quaternary)";
+    refTrack.style.background = "var(--zeroship-fill-quaternary)";
     el.appendChild(refTrack);
     const refTrackBg = getComputedStyle(refTrack).backgroundColor;
     refTrack.remove();

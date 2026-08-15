@@ -25,10 +25,10 @@
  * Design guarantees:
  *   - `sideWidth` is a free CSS length (the one place an explicit width
  *     is expected — it sizes a structural rail, not inter-item spacing).
- *   - `gap` is the closed `Gap` union → `--zs-space-*` via `spaceVar`.
+ *   - `gap` is the closed `Gap` union → `--zeroship-space-*` via `spaceVar`.
  *   - `collapseBelow` rides on a data-attribute consumed by Split.css
  *     media queries; the breakpoint rem literals there carry a comment
- *     naming the --zs-bp-* token (custom properties can't appear in
+ *     naming the --zeroship-bp-* token (custom properties can't appear in
  *     @media conditions).
  *   - RTL is automatic — `flex-direction: row` / `row-reverse` follow the
  *     writing direction, so "start"/"end" map to the correct inline edge.
@@ -52,7 +52,7 @@ export interface SplitProps extends ComponentPropsWithoutRef<"div"> {
   side?: SplitSide;
   /** Width of the fixed rail (`Split.Side`). Default `"16rem"`. */
   sideWidth?: string;
-  /** Gap between rail and main, from the `--zs-space-*` scale. */
+  /** Gap between rail and main, from the `--zeroship-space-*` scale. */
   gap?: Gap;
   /** Stack into a column below this breakpoint (rail above main). */
   collapseBelow?: SplitCollapse;

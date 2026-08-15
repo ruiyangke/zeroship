@@ -34,7 +34,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic">
+    <div className="zeroship-story-row" role="group" aria-label="Basic">
       <Collapsible data-testid="collapsible-basic">
         <Collapsible.Trigger data-testid="collapsible-basic-trigger">
           Show advanced options
@@ -81,7 +81,7 @@ export const Controlled: Story = {
     const [open, setOpen] = useState<boolean>(true);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Controlled"
         style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -106,9 +106,9 @@ export const Controlled: Story = {
           aria-live="polite"
           data-testid="collapsible-controlled-readout"
           style={{
-            marginBlockStart: "var(--zs-space-3)",
-            fontSize: "var(--zs-text-caption-1-size)",
-            color: "var(--zs-label-secondary)",
+            marginBlockStart: "var(--zeroship-space-3)",
+            fontSize: "var(--zeroship-text-caption-1-size)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Open: {String(open)}
@@ -146,7 +146,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
       <Collapsible disabled data-testid="collapsible-disabled">
         <Collapsible.Trigger data-testid="collapsible-disabled-trigger">
           Disabled disclosure
@@ -200,7 +200,7 @@ export const TransitionBehavior: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Behavior transitions"
     >
@@ -236,7 +236,7 @@ export const InsideCard: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Inside card">
+    <div className="zeroship-story-row" role="group" aria-label="Inside card">
       <Card style={{ inlineSize: "28rem" }}>
         <Card.Header>
           <Card.Title>Notification preferences</Card.Title>
@@ -293,7 +293,7 @@ export const RTL: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL"
     >
@@ -337,7 +337,7 @@ function TriggerAsChildStory() {
   const [clicked, setClicked] = useState<string>("not-clicked");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Trigger as child"
       style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -353,7 +353,7 @@ function TriggerAsChildStory() {
         <Collapsible.Trigger asChild>
           <button
             type="button"
-            className="zs-collapsible-aschild-target"
+            className="zeroship-collapsible-aschild-target"
             data-testid="collapsible-trigger-aschild-target"
             onClick={() => setClicked("child-onclick-ran")}
           >
@@ -393,8 +393,8 @@ export const TriggerAsChild: Story = {
 
     // Consumer className lands on the rendered element (Slot's
     // mergeProps concatenates "zs-collapsible-trigger" with the
-    // consumer's "zs-collapsible-aschild-target").
-    await expect(trigger).toHaveClass("zs-collapsible-aschild-target");
+    // consumer's "zeroship-collapsible-aschild-target").
+    await expect(trigger).toHaveClass("zeroship-collapsible-aschild-target");
     await expect(trigger).toHaveClass("zs-collapsible-trigger");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
 
@@ -415,7 +415,7 @@ export const TriggerAsChild: Story = {
  * default path injects a `<div class="zs-collapsible-panel-inner">`
  * wrapper for padding. `asChild` MUST drop that wrapper — the
  * consumer's element becomes the panel itself. The story renders an
- * `<section data-testid="..." class="zs-collapsible-aschild-section">`
+ * `<section data-testid="..." class="zeroship-collapsible-aschild-section">`
  * and we assert:
  *   - `tagName === "SECTION"` on the rendered panel,
  *   - the consumer's `className` is present,
@@ -440,7 +440,7 @@ export const PanelAsChild: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Panel as child"
       style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -454,7 +454,7 @@ export const PanelAsChild: Story = {
         </Collapsible.Trigger>
         <Collapsible.Panel asChild>
           <section
-            className="zs-collapsible-aschild-section"
+            className="zeroship-collapsible-aschild-section"
             data-testid="collapsible-panel-aschild-target"
             aria-label="Release notes content"
           >
@@ -471,7 +471,7 @@ export const PanelAsChild: Story = {
     const section = canvas.getByTestId("collapsible-panel-aschild-target");
 
     await expect(section.tagName).toBe("SECTION");
-    await expect(section).toHaveClass("zs-collapsible-aschild-section");
+    await expect(section).toHaveClass("zeroship-collapsible-aschild-section");
     await expect(section).toHaveClass("zs-collapsible-panel");
     // No inner padding wrapper got injected — the asChild element IS
     // the panel.
@@ -503,7 +503,7 @@ function OnOpenChangeDetailsStory() {
   const [details, setDetails] = useState<string>("no-details-yet");
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="onOpenChange details"
       style={{ flexDirection: "column", alignItems: "stretch" }}
@@ -598,7 +598,7 @@ export const DisabledOpenForcedColors: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Disabled open forced colors"
     >

@@ -61,8 +61,8 @@ function ContentPanel({
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(2, minmax(min(10rem, 100%), 1fr))",
-          gap: "var(--zs-space-3)",
-          inlineSize: "min(20rem, calc(100dvw - var(--zs-space-6)))",
+          gap: "var(--zeroship-space-3)",
+          inlineSize: "min(20rem, calc(100dvw - var(--zeroship-space-6)))",
           maxInlineSize: "100%",
         }}
       >
@@ -92,9 +92,9 @@ function LinkCard({
       style={{
         flexDirection: "column",
         alignItems: "flex-start",
-        gap: "var(--zs-space-1)",
-        paddingBlock: "var(--zs-space-3)",
-        paddingInline: "var(--zs-space-3)",
+        gap: "var(--zeroship-space-1)",
+        paddingBlock: "var(--zeroship-space-3)",
+        paddingInline: "var(--zeroship-space-3)",
         textAlign: "start",
       }}
     >
@@ -102,8 +102,8 @@ function LinkCard({
         style={{
           display: "inline-flex",
           alignItems: "center",
-          gap: "var(--zs-space-2)",
-          fontWeight: "var(--zs-text-headline-weight)" as unknown as number,
+          gap: "var(--zeroship-space-2)",
+          fontWeight: "var(--zeroship-text-headline-weight)" as unknown as number,
         }}
       >
         {icon ? (
@@ -122,9 +122,9 @@ function LinkCard({
       </span>
       <span
         style={{
-          color: "var(--zs-label-secondary)",
-          fontSize: "var(--zs-text-subheadline-size)",
-          lineHeight: "var(--zs-text-subheadline-line)",
+          color: "var(--zeroship-label-secondary)",
+          fontSize: "var(--zeroship-text-subheadline-size)",
+          lineHeight: "var(--zeroship-text-subheadline-line)",
         }}
       >
         {description}
@@ -147,7 +147,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic navmenu">
+    <div className="zeroship-story-row" role="group" aria-label="Basic navmenu">
       <NavigationMenu data-testid="navmenu-basic">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -210,7 +210,7 @@ export const WithContent: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Mega menu">
+    <div className="zeroship-story-row" role="group" aria-label="Mega menu">
       <NavigationMenu data-testid="navmenu-content">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -284,7 +284,7 @@ export const WithIcons: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With icons">
+    <div className="zeroship-story-row" role="group" aria-label="With icons">
       <NavigationMenu data-testid="navmenu-icons">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -342,7 +342,7 @@ export const WithViewport: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With viewport">
+    <div className="zeroship-story-row" role="group" aria-label="With viewport">
       <NavigationMenu data-testid="navmenu-viewport">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -448,7 +448,7 @@ export const WithArrow: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With arrow">
+    <div className="zeroship-story-row" role="group" aria-label="With arrow">
       <NavigationMenu data-testid="navmenu-arrow">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -501,7 +501,7 @@ export const KeyboardNav: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Keyboard navigation"
     >
@@ -625,7 +625,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled trigger">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled trigger">
       <NavigationMenu data-testid="navmenu-disabled">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -698,7 +698,7 @@ export const Rtl: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="RTL navmenu" dir="rtl">
+    <div className="zeroship-story-row" role="group" aria-label="RTL navmenu" dir="rtl">
       <NavigationMenu data-testid="navmenu-rtl">
         <NavigationMenu.List>
           <NavigationMenu.Item>
@@ -743,7 +743,7 @@ export const ControlledAsChild: Story = {
     const [value, setValue] = useState<string | null>(null);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Controlled navmenu"
         style={{ flexDirection: "column", alignItems: "flex-start" }}
@@ -809,7 +809,7 @@ export const VerticalCustomChrome: Story = {
   name: "Vertical with custom chrome",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical navmenu"
     >
@@ -942,7 +942,7 @@ export const AsChildRefAttach: Story = {
 
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="AsChild ref-attach"
       >
@@ -958,7 +958,7 @@ export const AsChildRefAttach: Story = {
                   asChild
                   ref={wrapperRef}
                   data-testid="navmenu-aschild-ref-link"
-                  className="zs-aschild-ref-link"
+                  className="zeroship-aschild-ref-link"
                 >
                   <a href="/launch" ref={childCallbackRef}>
                     Launch docs
@@ -1033,7 +1033,7 @@ export const IconRotation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Icon rotation"
     >
@@ -1079,7 +1079,7 @@ export const IconRotation: Story = {
  *
  * Wave10 review 🔴 #3 — `.zs-navmenu-popup` had `min-inline-size:
  * 18rem` (= 288px) and `max-inline-size: min(56rem, calc(100dvw -
- * var(--zs-space-6) * 2))`. On a narrow viewport (≤ ~320px after the
+ * var(--zeroship-space-6) * 2))`. On a narrow viewport (≤ ~320px after the
  * gutter) the un-clamped minimum overrode the viewport-capped maximum,
  * so the popup still overflowed horizontally. Post-fix both bounds
  * clamp against the same gutter expression, so the popup never
@@ -1101,7 +1101,7 @@ export const PopupMinWidthClamp: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Popup min-width"
     >

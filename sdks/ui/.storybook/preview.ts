@@ -27,7 +27,7 @@ const preview: Preview = {
       createElement(
         "main",
         {
-          className: "zs-story-main",
+          className: "zeroship-story-main",
           "aria-label": context.title,
         },
         createElement(Story),

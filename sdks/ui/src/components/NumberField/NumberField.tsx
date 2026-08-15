@@ -20,12 +20,12 @@
  *
  * Design principles encoded:
  *
- *   1. The Group reads as an Input. Same `--zs-control-h-{sm,md,lg}`,
+ *   1. The Group reads as an Input. Same `--zeroship-control-h-{sm,md,lg}`,
  *      same Field cascade, same focus ring lives on the SHELL so the
  *      whole row lights up when the input gains focus.
  *
  *   2. Stepper buttons hit-target floor at 1.75rem (sm) so a finger can
- *      land them. On `pointer: coarse` they grow to `--zs-hit-min`
+ *      land them. On `pointer: coarse` they grow to `--zeroship-hit-min`
  *      (2.75rem ≈ 44 device-units) — the coarse-pointer minimum target
  *      we adopt platform-wide. Brief contingency.
  *

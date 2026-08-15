@@ -8,7 +8,7 @@
  *           └─ children             label text
  *
  * Inverted surface — Tooltips read as system labels, so the popup paints
- * with `--zs-label` background + `--zs-surface` text (the inverse of the
+ * with `--zeroship-label` background + `--zeroship-surface` text (the inverse of the
  * usual content surface). High contrast at small sizes; doesn't compete
  * with the page chrome for attention.
  *
@@ -33,7 +33,7 @@
 [data-slot="tooltip-positioner"] {
   /* Tooltips stack above popovers AND dialogs — the topmost surface
    * for transient labels. */
-  z-index: calc(var(--zs-z-modal) + 20);
+  z-index: calc(var(--zeroship-z-modal) + 20);
   outline: none;
   /* Tooltips never trap pointer events — they're labels, not panels. */
   pointer-events: none;
@@ -42,29 +42,29 @@
 /* ─── Popup ─────────────────────────────────────────────────────────── */
 [data-slot="tooltip-popup"] {
   /* Inverted surface — label-tone fill, surface-tone text. */
-  background-color: var(--zs-label);
-  color: var(--zs-surface);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  font-weight: var(--zs-text-footnote-weight);
+  background-color: var(--zeroship-label);
+  color: var(--zeroship-surface);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  font-weight: var(--zeroship-text-footnote-weight);
   /* Logical sizing for RTL. */
   max-inline-size: 18rem;
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
-  border-radius: var(--zs-radius-2);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
+  border-radius: var(--zeroship-radius-2);
   box-shadow:
-    0 var(--zs-space-1) var(--zs-space-3)
-      color-mix(in oklch, var(--zs-label) 22%, transparent),
-    0 0 0 var(--zs-selection-hairline)
-      color-mix(in oklch, var(--zs-label) 10%, transparent);
+    0 var(--zeroship-space-1) var(--zeroship-space-3)
+      color-mix(in oklch, var(--zeroship-label) 22%, transparent),
+    0 0 0 var(--zeroship-selection-hairline)
+      color-mix(in oklch, var(--zeroship-label) 10%, transparent);
   /* Opaque background guarantees axe contrast walk terminates here. */
   opacity: 1;
   outline: none;
   isolation: isolate;
   transition:
-    transform var(--zs-motion-fast) var(--zs-motion-ease),
-    opacity var(--zs-motion-fast) var(--zs-motion-ease);
+    transform var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* enter/leave — Base UI emits data-starting-style / data-ending-style.
@@ -104,7 +104,7 @@
  *   bottom → 180°  (popup below, apex up   toward trigger)
  *   right  → 90°   (popup right of trigger, apex left  toward trigger)
  *   left   → 270°  (popup left  of trigger, apex right toward trigger)
- * `currentColor` is pinned to the popup's --zs-label fill so arrow +
+ * `currentColor` is pinned to the popup's --zeroship-label fill so arrow +
  * popup read as one shape. */
 [data-slot="tooltip-arrow"] {
   display: inline-flex;
@@ -115,10 +115,10 @@
    * gives the tip the same soft label-mix edge the popup carries. */
   inline-size: 1rem;
   block-size: 0.5rem;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   filter: drop-shadow(
-    0 var(--zs-selection-hairline) var(--zs-space-half)
-      color-mix(in oklch, var(--zs-label) 24%, transparent)
+    0 var(--zeroship-selection-hairline) var(--zeroship-space-half)
+      color-mix(in oklch, var(--zeroship-label) 24%, transparent)
   );
 }
 [data-slot="tooltip-arrow"] > svg {

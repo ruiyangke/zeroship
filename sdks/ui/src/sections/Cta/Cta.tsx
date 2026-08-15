@@ -122,7 +122,7 @@ export interface CtaProps
   variant?: CtaVariant;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `md` — a CTA reads tightest on a narrower measure than the wider
    * content bands.
    */
@@ -134,8 +134,8 @@ export interface CtaProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band, a CTA's loudest close.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band, a CTA's loudest close.
    *
    * Distinct from `variant`: `variant="tinted"` paints a CONTAINED tint card
    * on the readable measure, whereas `tone="accent"` paints the WHOLE band.

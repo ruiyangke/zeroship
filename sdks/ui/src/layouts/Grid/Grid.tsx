@@ -13,19 +13,19 @@
  *
  *   2. `columns` (explicit count). A number fixes the column count at
  *      every width. A `{ sm, md, lg }` object changes the count at the
- *      governed breakpoints (--zs-bp-sm/md/lg) via media queries in
+ *      governed breakpoints (--zeroship-bp-sm/md/lg) via media queries in
  *      Grid.css. The base (mobile-first) count is always 1; each
  *      provided breakpoint promotes the count upward from there.
  *
  * A Grid paints NOTHING — no background, no border. It only arranges.
  *
  * Design guarantees:
- *   - `gap` is the closed `Gap` union → `--zs-space-*` via `spaceVar`;
+ *   - `gap` is the closed `Gap` union → `--zeroship-space-*` via `spaceVar`;
  *     no arbitrary spacing.
  *   - `align` flows through the shared `alignValue` map (align-items).
  *   - Responsive `columns` is set through data-attributes consumed by
  *     Grid.css media queries; the breakpoint rem literals there carry a
- *     comment naming the --zs-bp-* token (custom properties can't appear
+ *     comment naming the --zeroship-bp-* token (custom properties can't appear
  *     in @media conditions).
  *   - `asChild` routes through `Slot` (React-19-safe refs).
  */
@@ -49,11 +49,11 @@ import {
  * upward from there (mobile-first).
  */
 export interface GridColumns {
-  /** Columns at the --zs-bp-sm breakpoint and up. */
+  /** Columns at the --zeroship-bp-sm breakpoint and up. */
   sm?: number;
-  /** Columns at the --zs-bp-md breakpoint and up. */
+  /** Columns at the --zeroship-bp-md breakpoint and up. */
   md?: number;
-  /** Columns at the --zs-bp-lg breakpoint and up. */
+  /** Columns at the --zeroship-bp-lg breakpoint and up. */
   lg?: number;
 }
 
@@ -62,11 +62,11 @@ export interface GridProps extends ComponentPropsWithoutRef<"div"> {
    * Column count. A number fixes the count at all widths. A
    * `{ sm, md, lg }` object is mobile-first: the base (below `sm`) is
    * always 1 and each provided breakpoint promotes the count upward, so
-   * `{ lg: 4 }` is 1 column until --zs-bp-lg, then 4. Default `1`.
+   * `{ lg: 4 }` is 1 column until --zeroship-bp-lg, then 4. Default `1`.
    * Ignored when `minColWidth` is set.
    */
   columns?: number | GridColumns;
-  /** Gap between cells, from the `--zs-space-*` scale. */
+  /** Gap between cells, from the `--zeroship-space-*` scale. */
   gap?: Gap;
   /** Cross-axis alignment of cells within their tracks (`align-items`). */
   align?: Align;
@@ -145,7 +145,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
   // Layout values flow as inline custom properties / data-attributes
   // consumed by Grid.css. The responsive object's per-breakpoint counts
   // ride on --grid-cols-sm/md/lg; Grid.css media queries (rem literals
-  // commented with the --zs-bp-* token names) switch --grid-cols to them.
+  // commented with the --zeroship-bp-* token names) switch --grid-cols to them.
   const layoutVars: React.CSSProperties = {
     ...(gap != null ? { "--grid-gap": spaceVar(gap) } : null),
     ...(align ? { "--grid-align": alignValue(align) } : null),

@@ -25,7 +25,7 @@ const config: TestRunnerConfig = {
     // Emulate `prefers-reduced-motion: reduce` for the whole run. Every
     // component gates its enter/leave transitions behind a reduced-motion
     // block, so without this a synchronous `toBeVisible()` in a play() races
-    // the entrance transition (popups go opacity 0 → 1 over --zs-motion-base)
+    // the entrance transition (popups go opacity 0 → 1 over --zeroship-motion-base)
     // and fails deterministically. Reduced-motion is a real supported path
     // the components are built for, so testing under it is faithful — and it
     // makes overlay open-state assertions deterministic.

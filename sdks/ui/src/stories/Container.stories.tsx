@@ -6,9 +6,9 @@ import { Container } from "../layouts";
 const fill = (label: string) => (
   <div
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-4)",
-      borderRadius: "var(--zs-radius-3)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-4)",
+      borderRadius: "var(--zeroship-radius-3)",
       textAlign: "center",
     }}
   >
@@ -58,7 +58,7 @@ export const Sizes: Story = {
     docs: {
       description: {
         story:
-          "Each size maps to a `--zs-container-*` token (`full` opts out of " +
+          "Each size maps to a `--zeroship-container-*` token (`full` opts out of " +
           "any max-width). `max-width` only CONSTRAINS, so the sizes only " +
           "diverge once the available width exceeds them — this demo lays " +
           "them out start-aligned inside a fixed-wide (88rem) frame so the " +
@@ -72,8 +72,8 @@ export const Sizes: Story = {
   render: () => (
     // Fixed-wide frame: guarantees room for every cap (full ≈ 88rem here) so
     // the sizes visibly differ even when the Storybook canvas is narrow.
-    <div style={{ minInlineSize: "88rem", paddingBlock: "var(--zs-space-4)" }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--zs-space-3)" }}>
+    <div style={{ minInlineSize: "88rem", paddingBlock: "var(--zeroship-space-4)" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "var(--zeroship-space-3)" }}>
         {(
           [
             ["sm", "sm — 30rem"],
@@ -92,11 +92,11 @@ export const Sizes: Story = {
           >
             <div
               style={{
-                background: "var(--zs-fill-secondary)",
+                background: "var(--zeroship-fill-secondary)",
                 borderInlineStart:
-                  "var(--zs-space-half) solid var(--zs-accent)",
-                padding: "var(--zs-space-3) var(--zs-space-4)",
-                borderRadius: "var(--zs-radius-3)",
+                  "var(--zeroship-space-half) solid var(--zeroship-accent)",
+                padding: "var(--zeroship-space-3) var(--zeroship-space-4)",
+                borderRadius: "var(--zeroship-radius-3)",
               }}
             >
               {label}

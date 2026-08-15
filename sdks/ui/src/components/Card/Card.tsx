@@ -40,7 +40,7 @@
  *    (axe-glass rule — pseudos break the color-contrast walk).
  *  - 2: NO wrapping the card root in an <a> by default; `asChild` is
  *    opt-in.
- *  - 14: Card padding ALWAYS comes from --zs-card-padding-* tokens.
+ *  - 14: Card padding ALWAYS comes from --zeroship-card-padding-* tokens.
  *  - 15: Card.Media side="top" pulls a negative margin out to the
  *    card edge; the Card root has `overflow: hidden` so the media
  *    clips to the card's border-radius (no negative-margin overflow
@@ -91,7 +91,7 @@ export interface CardProps extends ComponentPropsWithoutRef<"div"> {
   /**
    * Visual style.
    * - `surface`: opaque background; no border; no shadow. Default.
-   * - `elevated`: opaque + small layered shadow (--zs-shadow-2).
+   * - `elevated`: opaque + small layered shadow (--zeroship-shadow-2).
    * - `outline`: opaque + 1px inset separator.
    * - `ghost`: TRANSPARENT — the only variant that opts out of the
    *   opaque-base rule. Meant for nesting inside an already-opaque

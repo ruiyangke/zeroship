@@ -20,9 +20,9 @@
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]) {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  gap: var(--zeroship-space-2);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
   cursor: pointer;
 }
 
@@ -30,7 +30,7 @@
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
   cursor: not-allowed;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* The shared inline label text. Each primitive uses the same class
@@ -40,8 +40,8 @@
 [data-slot="checkbox-field-text"],
 [data-slot="switch-field-text"],
 [data-slot="radio-field-text"] {
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   color: inherit;
   user-select: none;
 }
@@ -62,22 +62,22 @@
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] {
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
 }
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] {
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
 }
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="checkbox-field-text"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="switch-field-text"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="radio-field-text"] {
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
 }
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="checkbox-field-text"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="switch-field-text"],
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="radio-field-text"] {
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
 }

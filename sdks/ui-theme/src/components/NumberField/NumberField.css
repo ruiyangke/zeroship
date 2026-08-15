@@ -24,7 +24,7 @@
  *   - Logical properties only (inline-size, padding-inline, margin-inline-*)
  *     so RTL flips correctly. Verified by the RTL story.
  *   - Stepper hit-target ≥ 1.75rem at the sm size. On `pointer: coarse`
- *     the buttons grow to `--zs-hit-min` (2.75rem) so a finger lands.
+ *     the buttons grow to `--zeroship-hit-min` (2.75rem) so a finger lands.
  *   - The scrub area sits OUTSIDE the shell at the leading edge; absolute
  *     positioning anchored to the Root. cursor: ew-resize so the
  *     affordance reads even when ScrubAreaCursor is hidden (Safari).
@@ -37,7 +37,7 @@
   position: relative;
   display: inline-block;
   inline-size: 100%;
-  font-family: var(--zs-font-system);
+  font-family: var(--zeroship-font-system);
 }
 
 /* ─── Group — the bordered shell (focus ring sits here) ────────────── */
@@ -46,38 +46,38 @@
   display: inline-flex;
   align-items: stretch;
   inline-size: 100%;
-  block-size: var(--zs-control-h-md);
-  border-radius: var(--zs-control-radius-md);
-  background: var(--zs-input-bg);
-  color: var(--zs-input-ink, var(--zs-label));
+  block-size: var(--zeroship-control-h-md);
+  border-radius: var(--zeroship-control-radius-md);
+  background: var(--zeroship-input-bg);
+  color: var(--zeroship-input-ink, var(--zeroship-label));
   overflow: hidden;
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border),
+    inset 0 0 0 0.0625rem var(--zeroship-input-border),
     0 0 0 0 transparent;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* ─── Sizes ────────────────────────────────────────────────────────── */
 [data-slot="number-field"][data-size="sm"] [data-slot="number-field-group"] {
-  block-size: var(--zs-control-h-sm);
-  border-radius: var(--zs-control-radius-sm);
+  block-size: var(--zeroship-control-h-sm);
+  border-radius: var(--zeroship-control-radius-sm);
 }
 [data-slot="number-field"][data-size="lg"] [data-slot="number-field-group"] {
-  block-size: var(--zs-control-h-lg);
-  border-radius: var(--zs-control-radius-lg);
+  block-size: var(--zeroship-control-h-lg);
+  border-radius: var(--zeroship-control-radius-lg);
 }
 
 /* ─── Variants ─────────────────────────────────────────────────────── *
  *
  * Slice 7 visual-polish item 6: pre-fix the `default` variant fell back
- * to `--zs-input-bg` (Crystal: ~6% alpha — visually indistinguishable
+ * to `--zeroship-input-bg` (Crystal: ~6% alpha — visually indistinguishable
  * from the transparent `--outline`). Promote default to the FILLED
  * surface so the two variants read as distinct material vs. rim. */
 [data-slot="number-field"][data-variant="default"] [data-slot="number-field-group"] {
-  background-color: var(--zs-input-bg-filled);
+  background-color: var(--zeroship-input-bg-filled);
 }
 [data-slot="number-field"][data-variant="outline"] [data-slot="number-field-group"] {
   background: transparent;
@@ -89,58 +89,58 @@
  * has the SAME specificity as this generic hover rule (one variant /
  * shell class + one descendant class + three :not() attribute
  * selectors + :hover). When the variant rule sat BEFORE the generic
- * one, the later cascade entry won and `--zs-input-bg-filled-hover`
+ * one, the later cascade entry won and `--zeroship-input-bg-filled-hover`
  * was dead. Order the variant rule AFTER the generic so the filled
  * surface tone wins for the default variant. The outline variant has
  * no per-variant hover treatment; it falls through to the generic
- * `--zs-input-bg-hover`. */
+ * `--zeroship-input-bg-hover`. */
 @media (hover: hover) {
   [data-slot="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused])
     [data-slot="number-field-group"]:hover {
-    background: var(--zs-input-bg-hover);
+    background: var(--zeroship-input-bg-hover);
     box-shadow:
-      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      inset 0 0 0 0.0625rem var(--zeroship-input-border-hover),
       0 0 0 0 transparent;
   }
   [data-slot="number-field"][data-variant="default"]:not([data-disabled]):not([data-readonly]):not(
       [data-focused]
     )
     [data-slot="number-field-group"]:hover {
-    background-color: var(--zs-input-bg-filled-hover);
+    background-color: var(--zeroship-input-bg-filled-hover);
   }
 }
 
 /* ─── Focused — group owns the ring so input + buttons share it ────── */
 [data-slot="number-field"][data-focused] [data-slot="number-field-group"] {
-  background: var(--zs-input-bg-focus);
+  background: var(--zeroship-input-bg-focus);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    inset 0 0 0 0.0625rem var(--zeroship-input-border-focus),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 
 /* ─── Invalid ──────────────────────────────────────────────────────── */
 [data-slot="number-field"][data-invalid] [data-slot="number-field-group"] {
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
     0 0 0 0 transparent;
 }
 [data-slot="number-field"][data-invalid][data-focused] [data-slot="number-field-group"] {
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
-    0 0 0 var(--zs-focus-ring-width)
-      color-mix(in oklch, var(--zs-system-red) 35%, transparent);
+    inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
+    0 0 0 var(--zeroship-focus-ring-width)
+      color-mix(in oklch, var(--zeroship-system-red) 35%, transparent);
 }
 
 /* ─── Readonly ─────────────────────────────────────────────────────── */
 [data-slot="number-field"][data-readonly] [data-slot="number-field-group"] {
-  background: var(--zs-input-bg-readonly);
-  color: var(--zs-input-ink-readonly);
+  background: var(--zeroship-input-bg-readonly);
+  color: var(--zeroship-input-ink-readonly);
 }
 
 /* ─── Disabled ─────────────────────────────────────────────────────── */
 [data-slot="number-field"][data-disabled] [data-slot="number-field-group"] {
-  background: var(--zs-input-bg-disabled);
-  color: var(--zs-input-ink-disabled);
+  background: var(--zeroship-input-bg-disabled);
+  color: var(--zeroship-input-ink-disabled);
   cursor: not-allowed;
 }
 [data-slot="number-field"][data-disabled] [data-slot="number-field-input"],
@@ -158,11 +158,11 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   text-align: center;
-  padding-inline: var(--zs-space-2);
+  padding-inline: var(--zeroship-space-2);
   margin: 0;
   outline: none;
   /* Mobile Safari zooms when the focused input's computed font-size is
@@ -172,15 +172,15 @@
      floor on focus. Same trick Input uses. */
 }
 [data-slot="number-field"][data-size="sm"] [data-slot="number-field-input"] {
-  font-size: max(1rem, var(--zs-text-subheadline-size));
-  line-height: var(--zs-text-subheadline-line);
+  font-size: max(1rem, var(--zeroship-text-subheadline-size));
+  line-height: var(--zeroship-text-subheadline-line);
 }
 [data-slot="number-field"][data-size="lg"] [data-slot="number-field-input"] {
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
 }
 [data-slot="number-field-input"]::placeholder {
-  color: var(--zs-input-placeholder);
+  color: var(--zeroship-input-placeholder);
   opacity: 1;
 }
 
@@ -195,7 +195,7 @@
 /* ─── Stepper buttons ──────────────────────────────────────────────── *
  *
  * Hit-target floor at 1.75rem (sm) so finger / touch lands a real area.
- * On pointer:coarse the buttons grow to --zs-hit-min (44 device-units).
+ * On pointer:coarse the buttons grow to --zeroship-hit-min (44 device-units).
  * The buttons render as flex children of the group so their height ties
  * to the shell's block-size.
  *
@@ -212,7 +212,7 @@
   min-inline-size: 1.75rem;
   border: 0;
   background: transparent;
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
   cursor: pointer;
   /* Buttons sit inside the group's bordered shell — no extra outline so
      focus ring escapes the inset rim via the focus-visible block below. */
@@ -221,8 +221,8 @@
   -webkit-user-select: none;
   user-select: none;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) > svg {
   inline-size: 1em;
@@ -242,7 +242,7 @@
 }
 
 /* Coarse-pointer hit-target floor (44 device-units ≈
-   --zs-hit-min 2.75rem — the platform-wide coarse-pointer minimum
+   --zeroship-hit-min 2.75rem — the platform-wide coarse-pointer minimum
    target). Pre-fix only inline-size grew, leaving block-size at
    2rem/2.5rem — a stylus or finger could land off the target's
    vertical centre. Slice-7 review item 4: expand BOTH axes under
@@ -259,8 +259,8 @@
   [data-slot="number-field"][data-size="sm"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]),
   [data-slot="number-field"][data-size="md"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]),
   [data-slot="number-field"][data-size="lg"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
-    min-inline-size: var(--zs-hit-min);
-    min-block-size: var(--zs-hit-min);
+    min-inline-size: var(--zeroship-hit-min);
+    min-block-size: var(--zeroship-hit-min);
   }
   /* The group is the box that owns block-size; relax its fixed size to
      let the coarse-pointer hit floor on the buttons take precedence
@@ -271,27 +271,27 @@
   [data-slot="number-field"][data-size="sm"] [data-slot="number-field-group"],
   [data-slot="number-field"][data-size="md"] [data-slot="number-field-group"],
   [data-slot="number-field"][data-size="lg"] [data-slot="number-field-group"] {
-    min-block-size: var(--zs-hit-min);
+    min-block-size: var(--zeroship-hit-min);
   }
 }
 
 @media (hover: hover) {
   :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):hover {
-    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
-    color: var(--zs-label);
+    background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
+    color: var(--zeroship-label);
   }
 }
 :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):active {
-  background-color: color-mix(in oklch, var(--zs-label) 14%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-label) 14%, transparent);
 }
 :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):focus-visible {
   /* Inset outline so the ring stays inside the shell's overflow. */
-  outline: 0.125rem solid var(--zs-input-border-focus);
+  outline: 0.125rem solid var(--zeroship-input-border-focus);
   outline-offset: -0.125rem;
 }
 :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"])[data-disabled] {
   cursor: not-allowed;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* ─── Scrub area ────────────────────────────────────────────────────── *
@@ -308,32 +308,32 @@
      the Root. The small visual is a horizontal-resize glyph.
 
      Slice 7 visual-polish item 3: pre-fix the chip was a near-blank
-     square (--zs-fill-quaternary is ≈ 6% alpha, no border, no resting
+     square (--zeroship-fill-quaternary is ≈ 6% alpha, no border, no resting
      glyph — the ScrubAreaCursor's SVG only shows while pointer-locked).
-     Bump the rest treatment to `--zs-input-bg-hover` + a hairline rim
+     Bump the rest treatment to `--zeroship-input-bg-hover` + a hairline rim
      so the affordance reads at rest, and paint a bidirectional-arrow
      glyph via a ::before SVG mask so `currentColor` (and forced-colors
      mappings) flow through. */
   position: absolute;
   inset-block-start: 50%;
-  inset-inline-start: calc(-1 * var(--zs-space-6));
+  inset-inline-start: calc(-1 * var(--zeroship-space-6));
   transform: translateY(-50%);
-  inline-size: var(--zs-space-5);
-  block-size: var(--zs-space-5);
+  inline-size: var(--zeroship-space-5);
+  block-size: var(--zeroship-space-5);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--zs-label-secondary);
-  background-color: var(--zs-input-bg-hover);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-input-border);
-  border-radius: var(--zs-control-radius-sm);
+  color: var(--zeroship-label-secondary);
+  background-color: var(--zeroship-input-bg-hover);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-input-border);
+  border-radius: var(--zeroship-control-radius-sm);
   cursor: ew-resize;
   -webkit-user-select: none;
   user-select: none;
   touch-action: none;
   transition:
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="number-field-scrub"]::before {
   content: "";
@@ -346,9 +346,9 @@
 }
 @media (hover: hover) {
   [data-slot="number-field-scrub"]:hover {
-    color: var(--zs-accent-active);
-    box-shadow: inset 0 0 0 var(--zs-selection-hairline)
-      var(--zs-input-border-hover);
+    color: var(--zeroship-accent-active);
+    box-shadow: inset 0 0 0 var(--zeroship-selection-hairline)
+      var(--zeroship-input-border-hover);
   }
 }
 /* The fixed-position ScrubAreaCursor's SVG sizing (used during
@@ -362,11 +362,11 @@
   position: fixed;
   z-index: 1000;
   pointer-events: none;
-  color: var(--zs-label);
-  background: var(--zs-surface-raised);
-  border-radius: var(--zs-radius-2);
-  padding: var(--zs-space-1);
-  box-shadow: 0 0.125rem 0.5rem 0 color-mix(in oklch, var(--zs-label) 30%, transparent);
+  color: var(--zeroship-label);
+  background: var(--zeroship-surface-raised);
+  border-radius: var(--zeroship-radius-2);
+  padding: var(--zeroship-space-1);
+  box-shadow: 0 0.125rem 0.5rem 0 color-mix(in oklch, var(--zeroship-label) 30%, transparent);
 }
 
 /* ─── Reduced motion ───────────────────────────────────────────────── *
@@ -462,7 +462,7 @@
   }
   /* Per-button-disabled mirror — `.zs-number-field__step[data-disabled]`
      in the non-forced block is double-spec (class + attribute) and
-     paints `color: var(--zs-label-tertiary)`. Mirror at equal spec so
+     paints `color: var(--zeroship-label-tertiary)`. Mirror at equal spec so
      GrayText wins. */
   :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"])[data-disabled] {
     color: GrayText;

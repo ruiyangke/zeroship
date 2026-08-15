@@ -19,34 +19,34 @@
  * cascade (this file is imported after Dialog.css in styles.css), so
  * equal specificity resolves in favor of the alert rule. */
 [data-slot="alertdialog-backdrop"] {
-  background-color: var(--zs-scrim);
-  backdrop-filter: var(--zs-material-thick);
-  -webkit-backdrop-filter: var(--zs-material-thick);
+  background-color: var(--zeroship-scrim);
+  backdrop-filter: var(--zeroship-material-thick);
+  -webkit-backdrop-filter: var(--zeroship-material-thick);
 }
 
 /* ─── Popup ────────────────────────────────────────────────────────────── */
 [data-slot="alertdialog-popup"] {
   /* Default to the small size + tighter radius + alert padding. */
-  max-inline-size: var(--zs-dialog-max-width-sm);
-  border-radius: var(--zs-dialog-radius-alert);
+  max-inline-size: var(--zeroship-dialog-max-width-sm);
+  border-radius: var(--zeroship-dialog-radius-alert);
   /* Compact alerts deserve a lighter elevation than full Dialog sheets
-   * (visual-polish item 7). --zs-shadow-dialog is tuned for larger
-   * modal surfaces; --zs-shadow-4 keeps the popup readable as elevated
+   * (visual-polish item 7). --zeroship-shadow-dialog is tuned for larger
+   * modal surfaces; --zeroship-shadow-4 keeps the popup readable as elevated
    * without giving a one- or two-button alert more visual mass than
    * its content warrants. */
-  box-shadow: var(--zs-shadow-4);
+  box-shadow: var(--zeroship-shadow-4);
 }
 [data-slot="alertdialog-popup"][data-size="md"] {
-  max-inline-size: var(--zs-dialog-max-width-md);
+  max-inline-size: var(--zeroship-dialog-max-width-md);
 }
 [data-slot="alertdialog-popup"][data-size="lg"] {
-  max-inline-size: var(--zs-dialog-max-width-lg);
+  max-inline-size: var(--zeroship-dialog-max-width-lg);
 }
 
 /* ─── Header (tighter padding) ─────────────────────────────────────────── */
 [data-slot="alertdialog-header"] {
-  padding: var(--zs-dialog-padding-alert);
-  padding-block-end: var(--zs-space-2);
+  padding: var(--zeroship-dialog-padding-alert);
+  padding-block-end: var(--zeroship-space-2);
 }
 
 /* ─── Body (tighter padding + alert type scale) ────────────────────────── */
@@ -58,23 +58,23 @@
  * keeps its own control typography rather than shrinking with the
  * surrounding prose. */
 [data-slot="alertdialog-body"] {
-  padding-inline: var(--zs-dialog-padding-alert);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  padding-inline: var(--zeroship-dialog-padding-alert);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
 }
 [data-slot="alertdialog-body"] [data-slot="input"]:where(, input, textarea, select) {
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  color: var(--zs-input-ink);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
+  color: var(--zeroship-input-ink);
 }
 
 /* ─── Footer (grid; adapts to button count) ────────────────────────────── */
 [data-slot="alertdialog-footer"] {
   display: grid;
-  gap: var(--zs-space-2);
-  padding: var(--zs-dialog-padding-alert);
-  padding-block-start: var(--zs-space-3);
+  gap: var(--zeroship-space-2);
+  padding: var(--zeroship-dialog-padding-alert);
+  padding-block-start: var(--zeroship-space-3);
   /* No flex-justification reset needed: grid tracks already span the
    * container, so `justify-content: stretch` / `align-items: stretch`
    * would be no-ops (review-fix item 13). */
@@ -108,7 +108,7 @@
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */
 /* `.zs-alertdialog-popup` at the top of this file overrides
- * `box-shadow` with `var(--zs-shadow-4)`. Because AlertDialog.css is
+ * `box-shadow` with `var(--zeroship-shadow-4)`. Because AlertDialog.css is
  * imported AFTER Dialog.css (see sdks/ui/src/styles.css), that rule
  * also wins inside `@media (forced-colors: active)` against Dialog's
  * `.zs-dialog-popup { box-shadow: 0 0 0 0.0625rem CanvasText inset; }`

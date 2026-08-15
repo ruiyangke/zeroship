@@ -11,12 +11,12 @@
  *                                   holds the aria-hidden × glyph
  *
  * Glass / axe-contrast invariant: the resting chip paints an OPAQUE
- * tinted base (the neutral fill blended INTO --zs-surface) so axe's
+ * tinted base (the neutral fill blended INTO --zeroship-surface) so axe's
  * color-contrast walk resolves against a known background. The filter
- * selected state swaps to the opaque --zs-accent fill.
+ * selected state swaps to the opaque --zeroship-accent fill.
  *
  * Motion: hover/selected background transitions, honored down to none
- * under prefers-reduced-motion via the --zs-motion-* tokens (which the
+ * under prefers-reduced-motion via the --zeroship-motion-* tokens (which the
  * root stylesheet collapses to 1ms under reduce). The remove button's
  * tap-target uses the standard active-scale guarded the same way.
  */
@@ -24,44 +24,44 @@
 [data-slot="tag"] {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   inline-size: fit-content;
   max-inline-size: 100%;
   white-space: nowrap;
-  font-family: var(--zs-font-system);
+  font-family: var(--zeroship-font-system);
   font-weight: 600;
-  border-radius: var(--zs-radius-full);
-  border: var(--zs-selection-hairline) solid transparent;
+  border-radius: var(--zeroship-radius-full);
+  border: var(--zeroship-selection-hairline) solid transparent;
   /* OPAQUE tinted base (neutral fill mixed into the surface) — never
      alpha-over-page. */
-  background: color-mix(in oklch, var(--zs-label) 8%, var(--zs-surface));
-  color: var(--zs-label);
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+  background: color-mix(in oklch, var(--zeroship-label) 8%, var(--zeroship-surface));
+  color: var(--zeroship-label);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
 [data-slot="tag"][data-size="sm"] {
-  padding-block: var(--zs-space-half);
-  padding-inline: var(--zs-space-2);
-  font-size: var(--zs-text-caption-1-size);
-  line-height: var(--zs-text-caption-1-line);
+  padding-block: var(--zeroship-space-half);
+  padding-inline: var(--zeroship-space-2);
+  font-size: var(--zeroship-text-caption-1-size);
+  line-height: var(--zeroship-text-caption-1-line);
 }
 
 [data-slot="tag"][data-size="md"] {
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-3);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-3);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
 }
 
 /* Tighten the trailing edge when a remove button rides along so the ×
    doesn't sit too far from the chip edge. */
 [data-slot="tag"][data-removable][data-size="sm"] {
-  padding-inline-end: var(--zs-space-1);
+  padding-inline-end: var(--zeroship-space-1);
 }
 [data-slot="tag"][data-removable][data-size="md"] {
-  padding-inline-end: var(--zs-space-2);
+  padding-inline-end: var(--zeroship-space-2);
 }
 
 [data-slot="tag-icon"] {
@@ -98,31 +98,31 @@
   padding: 0;
   border: 0;
   cursor: pointer;
-  border-radius: var(--zs-radius-full);
+  border-radius: var(--zeroship-radius-full);
   background: transparent;
   color: inherit;
   /* Quieter than the label so the × reads as secondary chrome until
      hovered. */
   opacity: 0.7;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    opacity var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="tag-remove"][data-size="sm"] {
   inline-size: 1rem;
   block-size: 1rem;
-  font-size: var(--zs-text-footnote-size);
+  font-size: var(--zeroship-text-footnote-size);
 }
 [data-slot="tag-remove"][data-size="md"] {
   inline-size: 1.25rem;
   block-size: 1.25rem;
-  font-size: var(--zs-text-callout-size);
+  font-size: var(--zeroship-text-callout-size);
 }
 [data-slot="tag-remove-glyph"] {
   line-height: 1;
 }
 /* 44pt minimum tap target. The visible button stays small (1–1.25rem) so
    the chip rhythm is unchanged, but an invisible centered `::before`
-   expands the pointer/click region to --zs-hit-min in BOTH axes. Overlay
+   expands the pointer/click region to --zeroship-hit-min in BOTH axes. Overlay
    only (no layout) — `max(100%, …)` so the visible box is never shrunk.
    Mirrors Button.css's coarse-pointer hit-target trick, applied on every
    pointer here because the × is too small to reliably hit even with a
@@ -133,23 +133,23 @@
   inset-block-start: 50%;
   inset-inline-start: 50%;
   transform: translate(-50%, -50%);
-  inline-size: max(100%, var(--zs-hit-min));
-  block-size: max(100%, var(--zs-hit-min));
+  inline-size: max(100%, var(--zeroship-hit-min));
+  block-size: max(100%, var(--zeroship-hit-min));
   /* Keep the expanded region clickable. */
   pointer-events: auto;
 }
 @media (hover: hover) {
   [data-slot="tag-remove"]:hover {
     opacity: 1;
-    background: color-mix(in oklch, var(--zs-label) 14%, transparent);
+    background: color-mix(in oklch, var(--zeroship-label) 14%, transparent);
   }
 }
 [data-slot="tag-remove"]:active {
-  background: color-mix(in oklch, var(--zs-label) 20%, transparent);
+  background: color-mix(in oklch, var(--zeroship-label) 20%, transparent);
 }
 [data-slot="tag-remove"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
   opacity: 1;
 }
 
@@ -162,22 +162,22 @@
 }
 @media (hover: hover) {
   [data-slot="tag"][data-filter]:hover:not([data-selected]) {
-    background: color-mix(in oklch, var(--zs-label) 12%, var(--zs-surface));
+    background: color-mix(in oklch, var(--zeroship-label) 12%, var(--zeroship-surface));
   }
 }
 [data-slot="tag"][data-filter]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 [data-slot="tag"][data-filter][data-selected] {
-  background: var(--zs-accent);
-  color: var(--zs-accent-ink);
-  border-color: var(--zs-accent);
+  background: var(--zeroship-accent);
+  color: var(--zeroship-accent-ink);
+  border-color: var(--zeroship-accent);
 }
 @media (hover: hover) {
   [data-slot="tag"][data-filter][data-selected]:hover {
-    background: var(--zs-accent-hover);
-    border-color: var(--zs-accent-hover);
+    background: var(--zeroship-accent-hover);
+    border-color: var(--zeroship-accent-hover);
   }
 }
 
@@ -211,7 +211,7 @@
      `.zs-tag--filter[data-selected]:hover` outrank the plain
      `.zs-tag` / `.zs-tag--filter[data-selected]` system-color rules
      above, so without a same-shape mirror a HOVERED filter chip would
-     paint the OKLCH `--zs-label`/`--zs-accent-hover` mix instead of the
+     paint the OKLCH `--zeroship-label`/`--zeroship-accent-hover` mix instead of the
      system colors. Each mirror reuses the SAME selector shape so
      specificity ties and source order (this block is last) wins. */
   [data-slot="tag"][data-filter]:hover:not([data-selected]) {

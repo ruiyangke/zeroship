@@ -127,7 +127,7 @@ export interface FaqProps
   multiple?: boolean;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `md` — a FAQ reads best on a narrow, readable measure.
    */
   size?: ContainerSize;
@@ -138,8 +138,8 @@ export interface FaqProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band.
    */
   tone?: SectionTone;
 

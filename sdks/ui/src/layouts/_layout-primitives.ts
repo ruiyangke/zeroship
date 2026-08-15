@@ -1,6 +1,6 @@
 /**
  * Shared layout vocabulary. Layout primitives map these closed unions to
- * `--zs-space-*` / flex / grid values. Keeping them closed is the governance
+ * `--zeroship-space-*` / flex / grid values. Keeping them closed is the governance
  * lever: consumers cannot pass arbitrary px/rem spacing into a layout.
  */
 export type Gap = 0 | "half" | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
@@ -20,9 +20,9 @@ export type Justify =
  */
 export type Side = "start" | "end";
 
-/** Map a Gap/Pad token to its `--zs-space-*` custom property reference. */
+/** Map a Gap/Pad token to its `--zeroship-space-*` custom property reference. */
 export function spaceVar(token: Gap): string {
-  return `var(--zs-space-${token === "half" ? "half" : token})`;
+  return `var(--zeroship-space-${token === "half" ? "half" : token})`;
 }
 
 const ALIGN: Record<Align, string> = {

@@ -18,12 +18,12 @@ export const RequiredFallbackAndControl: Story = {
   name: "Required fallback and bare control (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field required fallback and bare control"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
         <Field required>
@@ -35,7 +35,7 @@ export const RequiredFallbackAndControl: Story = {
         </Field>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
         <Field>
@@ -46,7 +46,7 @@ export const RequiredFallbackAndControl: Story = {
         </Field>
       </div>
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
         <Field name="alias">
@@ -107,12 +107,12 @@ export const RequiredBareControl: Story = {
   name: "Required bare control (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field required bare control"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 18rem", minWidth: "14rem" }}
       >
         <Field required name="handle">
@@ -143,12 +143,12 @@ export const ValidityRenderProp: Story = {
   name: "Validity render prop (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field validity render prop"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 22rem", minWidth: "18rem" }}
       >
         <Field
@@ -190,12 +190,12 @@ export const CallbackClassParts: Story = {
   name: "Callback class parts (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field callback class parts"
     >
       <div
-        className="zs-story-cell"
+        className="zeroship-story-cell"
         style={{ flex: "1 1 22rem", minWidth: "18rem" }}
       >
         <Field required validationMode="onBlur">

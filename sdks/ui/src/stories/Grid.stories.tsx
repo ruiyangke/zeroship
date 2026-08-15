@@ -6,9 +6,9 @@ const box = (label: string) => (
   <div
     key={label}
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-3)",
-      borderRadius: "var(--zs-radius-2)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-3)",
+      borderRadius: "var(--zeroship-radius-2)",
       textAlign: "center",
     }}
   >
@@ -88,7 +88,7 @@ export const Responsive: Story = {
       description: {
         story:
           "A `{ sm, md, lg }` object changes the column count at the " +
-          "governed `--zs-bp-*` breakpoints via media queries. It is " +
+          "governed `--zeroship-bp-*` breakpoints via media queries. It is " +
           "mobile-first: the base (below `sm`) is always 1 and each " +
           "provided breakpoint promotes the count upward — so `{ lg: 4 }` " +
           "is 1 column until `lg`, then 4. Resize the viewport to see the " +
@@ -198,9 +198,9 @@ export const IntrinsicNarrowContainer: Story = {
       <Grid minColWidth="24rem" gap={3} data-testid="grid-narrow">
         <div
           style={{
-            background: "var(--zs-fill-secondary)",
-            padding: "var(--zs-space-3)",
-            borderRadius: "var(--zs-radius-2)",
+            background: "var(--zeroship-fill-secondary)",
+            padding: "var(--zeroship-space-3)",
+            borderRadius: "var(--zeroship-radius-2)",
           }}
         >
           Card content that wraps normally inside the shrunk column.

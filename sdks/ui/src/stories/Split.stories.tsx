@@ -5,10 +5,10 @@ import { Split } from "../layouts";
 const panel = (label: string) => (
   <div
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-4)",
-      borderRadius: "var(--zs-radius-3)",
-      minBlockSize: "var(--zs-space-10)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-4)",
+      borderRadius: "var(--zeroship-radius-3)",
+      minBlockSize: "var(--zeroship-space-10)",
     }}
   >
     {label}
@@ -97,7 +97,7 @@ export const CollapseBelow: Story = {
       description: {
         story:
           "`collapseBelow=\"md\"` stacks the rail above the main into a " +
-          "column below the `--zs-bp-md` (48rem) breakpoint. Narrow the " +
+          "column below the `--zeroship-bp-md` (48rem) breakpoint. Narrow the " +
           "viewport below 48rem to see it stack.",
       },
     },

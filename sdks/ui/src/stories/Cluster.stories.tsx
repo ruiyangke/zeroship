@@ -7,9 +7,9 @@ const chip = (label: string) => (
   <span
     key={label}
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-1) var(--zs-space-3)",
-      borderRadius: "var(--zs-radius-full)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-1) var(--zeroship-space-3)",
+      borderRadius: "var(--zeroship-radius-full)",
       whiteSpace: "nowrap",
     }}
   >
@@ -44,7 +44,7 @@ export const Default: Story = {
   render: () => (
     <Cluster
       data-testid="cluster-default"
-      style={{ maxInlineSize: "var(--zs-container-sm)" }}
+      style={{ maxInlineSize: "var(--zeroship-container-sm)" }}
     >
       {[
         "TypeScript",
@@ -81,7 +81,7 @@ export const JustifyBetween: Story = {
     <Cluster
       justify="between"
       data-testid="cluster-between"
-      style={{ inlineSize: "var(--zs-container-sm)" }}
+      style={{ inlineSize: "var(--zeroship-container-sm)" }}
     >
       {chip("Draft")}
       {chip("Edited 2h ago")}

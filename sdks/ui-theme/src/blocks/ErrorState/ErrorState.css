@@ -21,17 +21,17 @@
  */
 
 [data-slot="error-state"] {
-  padding-block: var(--zs-space-8);
-  padding-inline: var(--zs-space-6);
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-8);
+  padding-inline: var(--zeroship-space-6);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
   /* Per-intent icon color resolved here so the __icon rule below stays
      a single declaration. Default is the error red. */
-  --zs-error-state-icon-color: var(--zs-system-red);
+  --zeroship-error-state-icon-color: var(--zeroship-system-red);
 }
 
 [data-slot="error-state"][data-intent="warning"] {
-  --zs-error-state-icon-color: var(--zs-system-orange);
+  --zeroship-error-state-icon-color: var(--zeroship-system-orange);
 }
 
 [data-slot="error-state-column"] {
@@ -48,10 +48,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--zs-error-state-icon-color);
+  color: var(--zeroship-error-state-icon-color);
   /* One step smaller than the large-title scale so the alert glyph sits
      lighter against the type rather than dominating the panel. */
-  font-size: var(--zs-text-title-1-size);
+  font-size: var(--zeroship-text-title-1-size);
   line-height: 1;
 }
 
@@ -74,23 +74,23 @@
 
 [data-slot="error-state-title"] {
   margin: 0;
-  color: var(--zs-label);
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
   font-weight: 600;
 }
 
 [data-slot="error-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
-     --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
+     --zeroship-label-secondary for color: tertiary is ~4.46:1 on --zeroship-surface
      (below AA 4.5:1) and this copy composites on the opaque DataTable
      surface, so the smaller size carries the hierarchy while secondary
      keeps it AA-safe. */
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  margin-block-start: calc(-1 * var(--zs-space-1));
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  margin-block-start: calc(-1 * var(--zeroship-space-1));
 }
 
 [data-slot="error-state-actions"] {
@@ -98,8 +98,8 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-2);
-  margin-block-start: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
+  margin-block-start: var(--zeroship-space-2);
 }
 
 /* ─── forced-colors ───────────────────────────────────────────────────

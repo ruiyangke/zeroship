@@ -19,8 +19,8 @@ const shellStyle: React.CSSProperties = {
   inlineSize: "100%",
   maxInlineSize: "56rem",
   boxSizing: "border-box",
-  margin: "var(--zs-space-8) auto",
-  padding: "0 var(--zs-space-6)",
+  margin: "var(--zeroship-space-8) auto",
+  padding: "0 var(--zeroship-space-6)",
 };
 
 /* A constrained shell so the fullscreen stories read as a real settings
@@ -122,7 +122,7 @@ export const Stacked: Story = {
 
 /* ─── 2. Aside (two-column settings) ───────────────────────────────────
  * Header in a start column, body in the end column; footer spans under
- * the body. Collapses to stacked below --zs-bp-md. */
+ * the body. Collapses to stacked below --zeroship-bp-md. */
 export const Aside: Story = {
   name: "Aside (two-column settings)",
   parameters: {
@@ -132,7 +132,7 @@ export const Aside: Story = {
           "`orientation=\"aside\"`: the header sits in a start column and " +
           "the body Fields in the end column — the settings-page two-column " +
           "arrangement. The footer spans the full width under the body. " +
-          "Below `--zs-bp-md` (48rem) the layout collapses to stacked.",
+          "Below `--zeroship-bp-md` (48rem) the layout collapses to stacked.",
       },
     },
   },

@@ -116,7 +116,7 @@ export const WithDivider: Story = {
     docs: {
       description: {
         story:
-          "`divider` draws a `--zs-separator` hairline between items " +
+          "`divider` draws a `--zeroship-separator` hairline between items " +
           "(a logical block-start border) so a long list reads as " +
           "discrete rows.",
       },

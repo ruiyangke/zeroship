@@ -20,7 +20,7 @@
  *
  *   1. Token-pure sizing. The size is governed by CSS: the
  *      `[data-slot="icon"][data-size]` mapping sets its dimensions to a
- *      `--zs-icon-*` token. We deliberately do NOT forward a numeric
+ *      `--zeroship-icon-*` token. We deliberately do NOT forward a numeric
  *      `size` prop to the Lucide component (Lucide would stamp a raw
  *      `width`/`height="24"` px attribute on the svg). Letting CSS own
  *      the dimension keeps the surface token-pure and lets a consumer

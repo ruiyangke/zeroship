@@ -112,7 +112,7 @@ export const Basic: Story = {
   },
   render: () => (
     <Wrap>
-      <div className="zs-story-row" role="group" aria-label="Basic">
+      <div className="zeroship-story-row" role="group" aria-label="Basic">
         <Tooltip delay={50}>
           <Tooltip.Trigger
             render={
@@ -161,7 +161,7 @@ export const WithDelay: Story = {
   },
   render: () => (
     <Wrap>
-      <div className="zs-story-row" role="group" aria-label="With delay">
+      <div className="zeroship-story-row" role="group" aria-label="With delay">
         <Tooltip delay={200}>
           <Tooltip.Trigger
             render={
@@ -208,7 +208,7 @@ export const WithArrow: Story = {
   },
   render: () => (
     <Wrap>
-      <div className="zs-story-row" role="group" aria-label="With arrow">
+      <div className="zeroship-story-row" role="group" aria-label="With arrow">
         <Tooltip delay={150}>
           <Tooltip.Trigger
             render={
@@ -258,7 +258,7 @@ export const PlacementSide: Story = {
   render: () => (
     <Wrap>
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Placement sides"
         style={{ flexWrap: "wrap", gap: "1.5rem" }}
@@ -328,7 +328,7 @@ export const OnFocusable: Story = {
   render: () => (
     <Wrap>
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="On focusable"
         style={{ gap: "1rem" }}
@@ -391,7 +391,7 @@ export const RichContent: Story = {
   },
   render: () => (
     <Wrap>
-      <div className="zs-story-row" role="group" aria-label="Rich content">
+      <div className="zeroship-story-row" role="group" aria-label="Rich content">
         <Tooltip delay={150}>
           <Tooltip.Trigger
             render={
@@ -438,7 +438,7 @@ export const Disabled: Story = {
   },
   render: () => (
     <Wrap>
-      <div className="zs-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-row" role="group" aria-label="Disabled">
         <Tooltip disabled>
           <Tooltip.Trigger
             render={
@@ -494,11 +494,11 @@ export const ComposedDescribedBy: Story = {
   render: () => (
     <Wrap>
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Composed tooltip describedby"
       >
-        <span id="tooltip-external-description" className="zs-story-label">
+        <span id="tooltip-external-description" className="zeroship-story-label">
           External trigger description
         </span>
         <Tooltip delay={0}>
@@ -561,7 +561,7 @@ export const Rtl: Story = {
   render: () => (
     <Wrap>
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL"
         dir="rtl"
@@ -625,7 +625,7 @@ export const DetachedHandle: Story = {
       return (
         <Wrap>
           <div
-            className="zs-story-row"
+            className="zeroship-story-row"
             role="group"
             aria-label="Detached tooltip handle"
             style={{

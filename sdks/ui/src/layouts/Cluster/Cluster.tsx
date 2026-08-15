@@ -15,7 +15,7 @@
  * A Cluster paints NOTHING — no background, no border. It only arranges.
  *
  * Design guarantees:
- *   - `gap` is the closed `Gap` union → `--zs-space-*` via `spaceVar`;
+ *   - `gap` is the closed `Gap` union → `--zeroship-space-*` via `spaceVar`;
  *     no arbitrary spacing. Applies on both row and cross axes (one
  *     `gap` shorthand) so wrapped lines breathe the same as inline gaps.
  *   - `align`/`justify` flow through the shared `alignValue`/
@@ -40,7 +40,7 @@ import {
 } from "../_layout-primitives";
 
 export interface ClusterProps extends ComponentPropsWithoutRef<"div"> {
-  /** Gap between items (both axes), from the `--zs-space-*` scale. Default `2`. */
+  /** Gap between items (both axes), from the `--zeroship-space-*` scale. Default `2`. */
   gap?: Gap;
   /** Cross-axis alignment (`align-items`). Default `center`. */
   align?: Align;

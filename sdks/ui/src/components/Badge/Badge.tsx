@@ -13,10 +13,10 @@
  *
  * Glass / axe-contrast invariant: EVERY variant paints an OPAQUE
  * background base — even `soft` and `outline`. A chip that relied on an
- * alpha tint over the page (e.g. `--zs-accent` at 14%) would let axe's
+ * alpha tint over the page (e.g. `--zeroship-accent` at 14%) would let axe's
  * color-contrast walk see straight through to the mesh background and
  * either fail or report an incomplete. So each variant resolves an
- * opaque background via `color-mix(... , var(--zs-surface))` (a tint
+ * opaque background via `color-mix(... , var(--zeroship-surface))` (a tint
  * blended INTO the opaque surface token) rather than `... , transparent`.
  * The per-intent / per-variant token plumbing lives in Badge.css; this
  * file only stamps the modifier classes.

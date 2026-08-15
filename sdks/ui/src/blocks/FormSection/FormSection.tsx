@@ -165,7 +165,7 @@ export interface FormSectionProps extends Omit<
    * - `aside`: header in a start column, body in the end column (the
    *   two-column settings-page arrangement); the footer spans the full
    *   width under the body. Collapses to `stacked` below the
-   *   `--zs-bp-md` breakpoint.
+   *   `--zeroship-bp-md` breakpoint.
    */
   orientation?: FormSectionOrientation;
 

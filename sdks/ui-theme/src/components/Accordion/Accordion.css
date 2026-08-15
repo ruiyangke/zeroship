@@ -31,22 +31,22 @@
   /* Item separator hairline — same family Slice 4 uses for selection
      edges; sits between rows so the stack reads as a discrete list
      without competing with the trigger labels for ink. */
-  --zs-accordion-separator: var(--zs-separator);
+  --zeroship-accordion-separator: var(--zeroship-separator);
 
   /* Trigger row rhythm — matches Button/Tabs control-h-md so an
      accordion inside a content sheet sits in the same rhythm as nearby
      surfaces. */
-  --zs-accordion-trigger-pad-block: var(--zs-space-3);   /* 12 */
-  --zs-accordion-trigger-pad-inline: var(--zs-space-4);  /* 16 */
-  --zs-accordion-trigger-gap: var(--zs-space-3);         /* 12 */
+  --zeroship-accordion-trigger-pad-block: var(--zeroship-space-3);   /* 12 */
+  --zeroship-accordion-trigger-pad-inline: var(--zeroship-space-4);  /* 16 */
+  --zeroship-accordion-trigger-gap: var(--zeroship-space-3);         /* 12 */
 
   /* Panel inner padding — leaves room for one prose paragraph or a
      small form without feeling cramped; matches Card content rhythm. */
-  --zs-accordion-panel-pad-block: var(--zs-space-3);
-  --zs-accordion-panel-pad-inline: var(--zs-space-4);
+  --zeroship-accordion-panel-pad-block: var(--zeroship-space-3);
+  --zeroship-accordion-panel-pad-inline: var(--zeroship-space-4);
 
   /* Chevron diameter — sits in the optical sweet spot for a 1rem label. */
-  --zs-accordion-chevron-size: 0.75rem;                   /* 12 */
+  --zeroship-accordion-chevron-size: 0.75rem;                   /* 12 */
 }
 
 /* ─── root ──────────────────────────────────────────────────────────── */
@@ -56,10 +56,10 @@
   flex-direction: column;
   inline-size: 100%;
   min-inline-size: 0;
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
 }
 
 [data-slot="accordion"][data-orientation="horizontal"] {
@@ -82,8 +82,8 @@
   flex-direction: column;
   inline-size: 100%;
   min-inline-size: 0;
-  border-block-end: var(--zs-selection-hairline) solid
-    var(--zs-accordion-separator);
+  border-block-end: var(--zeroship-selection-hairline) solid
+    var(--zeroship-accordion-separator);
 }
 [data-slot="accordion-item"]:last-of-type {
   border-block-end: 0;
@@ -91,8 +91,8 @@
 
 [data-slot="accordion-item"][data-orientation="horizontal"] {
   border-block-end: 0;
-  border-inline-end: var(--zs-selection-hairline) solid
-    var(--zs-accordion-separator);
+  border-inline-end: var(--zeroship-selection-hairline) solid
+    var(--zeroship-accordion-separator);
 }
 [data-slot="accordion-item"][data-orientation="horizontal"]:last-of-type {
   border-inline-end: 0;
@@ -121,24 +121,24 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--zs-accordion-trigger-gap);
+  gap: var(--zeroship-accordion-trigger-gap);
   inline-size: 100%;
-  padding-block: var(--zs-accordion-trigger-pad-block);
-  padding-inline: var(--zs-accordion-trigger-pad-inline);
+  padding-block: var(--zeroship-accordion-trigger-pad-block);
+  padding-inline: var(--zeroship-accordion-trigger-pad-inline);
   border: 0;
   background-color: transparent;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   font-family: inherit;
-  font-size: var(--zs-text-body-size);
+  font-size: var(--zeroship-text-body-size);
   font-weight: 600;
-  line-height: var(--zs-text-body-line);
+  line-height: var(--zeroship-text-body-line);
   text-align: start;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="accordion-trigger-label"] {
@@ -150,12 +150,12 @@
    the focus ring. Disabled triggers do NOT receive the hover treatment. */
 @media (hover: hover) {
   [data-slot="accordion-trigger"]:not([data-disabled]):hover {
-    background-color: color-mix(in oklch, var(--zs-fill) 50%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-fill) 50%, transparent);
   }
 }
 
 [data-slot="accordion-trigger"]:not([data-disabled]):active {
-  background-color: color-mix(in oklch, var(--zs-fill) 80%, transparent);
+  background-color: color-mix(in oklch, var(--zeroship-fill) 80%, transparent);
 }
 
 /* Open-state — a CALM open treatment so the expanded row reads as "current"
@@ -173,8 +173,8 @@
    The `::before` pins to `inset-inline-start` (logical → RTL-correct) and
    sits as an overlay, so it adds no layout. */
 [data-slot="accordion-trigger"][data-panel-open] {
-  background-color: color-mix(in oklch, var(--zs-accent) 7%, transparent);
-  color: var(--zs-label);
+  background-color: color-mix(in oklch, var(--zeroship-accent) 7%, transparent);
+  color: var(--zeroship-label);
 }
 [data-slot="accordion-trigger"][data-panel-open]::before {
   content: "";
@@ -182,7 +182,7 @@
   inset-block: 0;
   inset-inline-start: 0;
   inline-size: 0.1875rem;
-  background-color: var(--zs-accent);
+  background-color: var(--zeroship-accent);
   /* Overlay only — never reflows the trigger's padding box. */
   pointer-events: none;
 }
@@ -191,7 +191,7 @@
   [data-slot="accordion-trigger"][data-panel-open]:not([data-disabled]):hover {
     /* Keep the open tint reading on hover (a hair stronger) rather than
        letting the base hover fill flatten the open cue. */
-    background-color: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+    background-color: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
   }
 }
 
@@ -200,8 +200,8 @@
    the open row is a soft fill + an inline-start accent rule, the focus ring is
    a crisp full-perimeter outline. */
 [data-slot="accordion-trigger"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: calc(var(--zs-focus-ring-offset) * -1);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: calc(var(--zeroship-focus-ring-offset) * -1);
   /* Pull the outline INSIDE the trigger box so it doesn't overlap with
      the next item's separator. */
 }
@@ -209,7 +209,7 @@
 /* Disabled — quiet. Cursor changes to not-allowed; ink fades. */
 [data-slot="accordion-trigger"][data-disabled] {
   cursor: not-allowed;
-  color: var(--zs-label-quaternary);
+  color: var(--zeroship-label-quaternary);
 }
 
 /* ─── chevron ───────────────────────────────────────────────────────── *
@@ -224,14 +224,14 @@
    regardless of stylesheet concat order — the chevron stays at the
    accordion token size, not the default Icon md box. */
 [data-slot="accordion-trigger"] [data-slot="accordion-trigger-chevron"] {
-  inline-size: var(--zs-accordion-chevron-size);
-  block-size: var(--zs-accordion-chevron-size);
+  inline-size: var(--zeroship-accordion-chevron-size);
+  block-size: var(--zeroship-accordion-chevron-size);
 }
 [data-slot="accordion-trigger-chevron"] {
   flex: 0 0 auto;
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
   transform-origin: 50% 50%;
-  transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: transform var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="accordion-trigger"][data-panel-open] [data-slot="accordion-trigger-chevron"] {
@@ -282,15 +282,15 @@
  * of the transition). */
 [data-slot="accordion-panel"] {
   overflow: hidden;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
 }
 
 /* Vertical (default) — block-size animates between 0 and measured. */
 [data-slot="accordion-panel"][data-orientation="vertical"] {
   block-size: var(--accordion-panel-height);
-  transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
+  transition: block-size var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="accordion-panel"][data-orientation="vertical"][data-starting-style],
 [data-slot="accordion-panel"][data-orientation="vertical"][data-ending-style] {
@@ -302,7 +302,7 @@
    frame of the transition. */
 [data-slot="accordion-panel"][data-orientation="horizontal"] {
   inline-size: var(--accordion-panel-width);
-  transition: inline-size var(--zs-motion-base) var(--zs-motion-ease);
+  transition: inline-size var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="accordion-panel"][data-orientation="horizontal"][data-starting-style],
 [data-slot="accordion-panel"][data-orientation="horizontal"][data-ending-style] {
@@ -310,8 +310,8 @@
 }
 
 [data-slot="accordion-panel-inner"] {
-  padding-block: var(--zs-accordion-panel-pad-block);
-  padding-inline: var(--zs-accordion-panel-pad-inline);
+  padding-block: var(--zeroship-accordion-panel-pad-block);
+  padding-inline: var(--zeroship-accordion-panel-pad-inline);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
@@ -361,7 +361,7 @@
     color: HighlightText;
     background-color: Highlight;
   }
-  /* The open marker `::before` paints `--zs-accent`, which collapses under
+  /* The open marker `::before` paints `--zeroship-accent`, which collapses under
      forced-colors; map it to HighlightText so the inline-start rule stays
      visible against the Highlight fill. */
   [data-slot="accordion-trigger"][data-panel-open]::before {

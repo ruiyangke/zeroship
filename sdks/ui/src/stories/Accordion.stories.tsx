@@ -14,7 +14,7 @@ const meta: Meta<typeof Accordion> = {
 export default meta;
 
 type Story = StoryObj<typeof Accordion>;
-const accordionStoryRowClassName = "zs-story-row zs-story-row--wide";
+const accordionStoryRowClassName = "zeroship-story-row zeroship-story-row--wide";
 
 /* ─── shared content (so the stories stay focused on the prop matrix) */
 const sampleItems = [
@@ -230,9 +230,9 @@ export const Controlled: Story = {
           aria-live="polite"
           data-testid="accordion-controlled-readout"
           style={{
-            marginBlockStart: "var(--zs-space-3)",
-            fontSize: "var(--zs-text-caption-1-size)",
-            color: "var(--zs-label-secondary)",
+            marginBlockStart: "var(--zeroship-space-3)",
+            fontSize: "var(--zeroship-text-caption-1-size)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Open: {value ?? "(none)"}
@@ -597,9 +597,9 @@ export const ControlledValueCycle: Story = {
           aria-live="polite"
           data-testid="accordion-regression-controlled-readout"
           style={{
-            marginBlockStart: "var(--zs-space-3)",
-            fontSize: "var(--zs-text-caption-1-size)",
-            color: "var(--zs-label-secondary)",
+            marginBlockStart: "var(--zeroship-space-3)",
+            fontSize: "var(--zeroship-text-caption-1-size)",
+            color: "var(--zeroship-label-secondary)",
           }}
         >
           Open: {value ?? "(none)"}
@@ -689,9 +689,9 @@ export const RichContent: Story = {
             </p>
             <ul
               style={{
-                margin: "var(--zs-space-2) 0 0 0",
-                paddingInlineStart: "var(--zs-space-5)",
-                color: "var(--zs-label)",
+                margin: "var(--zeroship-space-2) 0 0 0",
+                paddingInlineStart: "var(--zeroship-space-5)",
+                color: "var(--zeroship-label)",
               }}
             >
               <li>Unlimited deployments</li>
@@ -715,9 +715,9 @@ export const RichContent: Story = {
             </p>
             <p
               style={{
-                margin: "var(--zs-space-2) 0 0 0",
-                color: "var(--zs-label-secondary)",
-                fontSize: "var(--zs-text-caption-1-size)",
+                margin: "var(--zeroship-space-2) 0 0 0",
+                color: "var(--zeroship-label-secondary)",
+                fontSize: "var(--zeroship-text-caption-1-size)",
               }}
             >
               Payouts arrive on a rolling 7-day schedule.

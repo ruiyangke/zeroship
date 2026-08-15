@@ -29,7 +29,7 @@ export const BasicItems: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic menu">
+    <div className="zeroship-story-row" role="group" aria-label="Basic menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-basic-trigger">Actions</Button>}
@@ -86,7 +86,7 @@ export const WithGroups: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Grouped menu">
+    <div className="zeroship-story-row" role="group" aria-label="Grouped menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-groups-trigger">Edit</Button>}
@@ -124,7 +124,7 @@ export const WithSeparator: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Separated menu">
+    <div className="zeroship-story-row" role="group" aria-label="Separated menu">
       <Menu>
         <Menu.Trigger
           render={
@@ -166,7 +166,7 @@ export const WithCheckboxItem: Story = {
     const [italic, setItalic] = useState(false);
     const [underline, setUnderline] = useState(false);
     return (
-      <div className="zs-story-row" role="group" aria-label="Checkbox menu">
+      <div className="zeroship-story-row" role="group" aria-label="Checkbox menu">
         <Menu>
           <Menu.Trigger
             render={
@@ -236,7 +236,7 @@ export const WithRadioGroup: Story = {
   render: function RadioStory() {
     const [theme, setTheme] = useState<string>("system");
     return (
-      <div className="zs-story-row" role="group" aria-label="Radio menu">
+      <div className="zeroship-story-row" role="group" aria-label="Radio menu">
         <Menu>
           <Menu.Trigger
             render={
@@ -297,7 +297,7 @@ export const WithIcons: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Icons menu">
+    <div className="zeroship-story-row" role="group" aria-label="Icons menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-icons-trigger">Project</Button>}
@@ -346,7 +346,7 @@ export const WithKeyboardShortcuts: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Keyboard shortcuts menu">
+    <div className="zeroship-story-row" role="group" aria-label="Keyboard shortcuts menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-kbd-trigger">Edit</Button>}
@@ -411,7 +411,7 @@ export const NestedSubmenu: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Nested menu">
+    <div className="zeroship-story-row" role="group" aria-label="Nested menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-submenu-trigger">More</Button>}
@@ -481,7 +481,7 @@ export const WithArrow: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Arrow menu">
+    <div className="zeroship-story-row" role="group" aria-label="Arrow menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-arrow-trigger">Options</Button>}
@@ -513,7 +513,7 @@ export const DisabledItem: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled item menu">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled item menu">
       <Menu>
         <Menu.Trigger
           render={
@@ -579,7 +579,7 @@ export const PlacementSide: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placement sides"
       style={{ flexWrap: "wrap", gap: "1.5rem" }}
@@ -633,7 +633,7 @@ export const Rtl: Story = {
     // attribute doesn't propagate.
     <DirectionProvider direction="rtl">
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="RTL menu"
         dir="rtl"
@@ -683,7 +683,7 @@ export const WithLinkItemAsChild: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="LinkItem asChild menu">
+    <div className="zeroship-story-row" role="group" aria-label="LinkItem asChild menu">
       <Menu>
         <Menu.Trigger
           render={<Button data-testid="menu-link-trigger">Help</Button>}
@@ -786,7 +786,7 @@ function LinkItemAsChildSingleAttachImpl() {
   }, []);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="LinkItem asChild single attach"
     >
@@ -880,7 +880,7 @@ export const LinkItemAsChildSingleAttach: Story = {
 export const ModalBackdrop: Story = {
   name: "Modal menu with backdrop",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Modal menu">
+    <div className="zeroship-story-row" role="group" aria-label="Modal menu">
       <Menu modal>
         <Menu.Trigger render={<Button>Share</Button>} />
         <Menu.Portal>

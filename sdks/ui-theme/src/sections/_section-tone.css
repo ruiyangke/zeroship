@@ -29,8 +29,8 @@
  *             changes unless a tone is opted into).
  *   muted   — a subtle full-bleed surface fill so the band reads as its own
  *             panel. Gives light/dark alternation against default bands.
- *   accent  — `--zs-accent` fill with ALL inner ink remapped to
- *             `--zs-accent-ink` (the near-white text-on-accent token, the
+ *   accent  — `--zeroship-accent` fill with ALL inner ink remapped to
+ *             `--zeroship-accent-ink` (the near-white text-on-accent token, the
  *             same pairing Button.filled already ships axe-clean). Secondary
  *             text (descriptions, the FAQ chrome) reads a translucent
  *             accent-ink so the hierarchy survives the remap. This is the
@@ -82,28 +82,28 @@
  * keeps both layers — the surface fill behind the radial wash. The shorthand
  * would reset `background-image` to `none` and silently wipe the wash. */
 [data-section-band][data-tone="muted"] {
-  background-color: var(--zs-surface);
+  background-color: var(--zeroship-surface);
 }
 
 /* accent — the bold contrast band. */
 [data-section-band][data-tone="accent"] {
-  background: var(--zs-accent);
+  background: var(--zeroship-accent);
   /* A translucent accent-ink for secondary text inside the band, so the
      description / muted chrome recede WITHOUT dropping below contrast. The
      house color-mix idiom keeps it token-pure and theme-tracking. */
-  --zs-section-ink: var(--zs-accent-ink);
+  --zeroship-section-ink: var(--zeroship-accent-ink);
   /* Secondary copy in an accent band must clear AA across every palette.
      Some warmer accent fills leave too little margin for a recessed mix,
      so the accent band uses the full ink token for all readable text. */
-  --zs-section-ink-secondary: var(--zs-accent-ink);
-  color: var(--zs-section-ink);
+  --zeroship-section-ink-secondary: var(--zeroship-accent-ink);
+  color: var(--zeroship-section-ink);
 }
 
 /* ─── accent — ink remap ───────────────────────────────────────────────────
  *
  * Every text region inside an accent band resolves to the accent ink. The
  * primary ink (titles, eyebrows, headings, stat values, footer brand/links)
- * goes fully opaque `--zs-accent-ink`; secondary copy (descriptions, the FAQ
+ * goes fully opaque `--zeroship-accent-ink`; secondary copy (descriptions, the FAQ
  * trigger chrome, stat labels, footer blurb) reads the translucent variant.
  *
  * The selectors enumerate every section's documented ink hook ONCE — the
@@ -124,7 +124,7 @@
 [data-section-band][data-tone="accent"] [data-slot="footer-link"],
 [data-section-band][data-tone="accent"] [data-slot="footer-link"]:hover,
 [data-section-band][data-tone="accent"] [data-slot="footer-link"]:focus-visible {
-  color: var(--zs-section-ink);
+  color: var(--zeroship-section-ink);
 }
 
 /* Secondary ink — descriptions, supporting lines, the muted chrome. */
@@ -141,12 +141,12 @@
 [data-section-band][data-tone="accent"] [data-slot="footer-description"],
 [data-section-band][data-tone="accent"] [data-slot="footer-column-title"],
 [data-section-band][data-tone="accent"] [data-slot="footer-copyright"] {
-  color: var(--zs-section-ink-secondary);
+  color: var(--zeroship-section-ink-secondary);
 }
 
 /* ─── forced-colors — accent band falls back safely ───────────────────────
  *
- * Under a forced palette the painted `--zs-accent` fill and `--zs-accent-ink`
+ * Under a forced palette the painted `--zeroship-accent` fill and `--zeroship-accent-ink`
  * remap both drop out. Re-pin the band to system colors so it stays a real,
  * legible band (Canvas behind CanvasText) rather than collapsing to an
  * invisible or low-contrast field. The muted band's surface fill likewise
@@ -160,8 +160,8 @@
   /* The accent ink remap resolves back to CanvasText so every remapped
      region stays legible on Canvas. */
   [data-section-band][data-tone="accent"] {
-    --zs-section-ink: CanvasText;
-    --zs-section-ink-secondary: CanvasText;
+    --zeroship-section-ink: CanvasText;
+    --zeroship-section-ink-secondary: CanvasText;
   }
 }
 
@@ -176,18 +176,18 @@
  * This keeps the contract simple: the consumer drops the default `<Button>`
  * (filled) into an accent CTA and it reads as the bold inverse button. */
 [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"] {
-  background: var(--zs-accent-ink);
-  color: var(--zs-accent);
+  background: var(--zeroship-accent-ink);
+  color: var(--zeroship-accent);
 }
 @media (hover: hover) {
   [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     /* Slightly recede the inverse chip on hover (a touch of accent mixed into
        the ink) while keeping the accent text well clear of AA. */
-    background: color-mix(in oklch, var(--zs-accent-ink) 88%, var(--zs-accent));
+    background: color-mix(in oklch, var(--zeroship-accent-ink) 88%, var(--zeroship-accent));
   }
 }
 [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-accent-ink) 80%, var(--zs-accent));
+  background: color-mix(in oklch, var(--zeroship-accent-ink) 80%, var(--zeroship-accent));
 }
 
 /* forced-colors: the inverse chip's painted ink/accent both drop out — pin it
@@ -196,7 +196,7 @@
   [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"] {
     background: ButtonFace;
     color: ButtonText;
-    border: var(--zs-selection-hairline) solid ButtonText;
+    border: var(--zeroship-selection-hairline) solid ButtonText;
   }
 }
 
@@ -220,25 +220,25 @@
   display: inline-block;
   inline-size: fit-content;
   max-inline-size: fit-content;
-  padding-block: var(--zs-space-half);
-  padding-inline: var(--zs-space-3);
-  border-radius: var(--zs-radius-full);
+  padding-block: var(--zeroship-space-half);
+  padding-inline: var(--zeroship-space-3);
+  border-radius: var(--zeroship-radius-full);
   background: color-mix(
     in oklch,
-    var(--zs-accent) 12%,
+    var(--zeroship-accent) 12%,
     transparent
   );
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  /* The DEEPER accent (`--zs-accent-active`, the same ink the former
-     per-section eyebrows used) — the base `--zs-accent` is tuned for
+  /* The DEEPER accent (`--zeroship-accent-active`, the same ink the former
+     per-section eyebrows used) — the base `--zeroship-accent` is tuned for
      fills/buttons and lands just under AA for small footnote text on the
      light surface + the accent-tint pill. The deeper step keeps the eyebrow
      axe-clean while still reading clearly as the accent family. */
-  color: var(--zs-accent-active);
+  color: var(--zeroship-accent-active);
 }
 
 /* On an accent band the accent-tint pill collapses into the accent fill, and a
@@ -259,7 +259,7 @@
 @media (forced-colors: active) {
   :is([data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]) {
     color: CanvasText;
-    border: var(--zs-selection-hairline) solid CanvasText;
+    border: var(--zeroship-selection-hairline) solid CanvasText;
     background: Canvas;
   }
 }

@@ -48,7 +48,7 @@
  * crumb is an `<li>`. The current page is `aria-current="page"` and is
  * not a link. Separators are `<li role="presentation" aria-hidden="true">`
  * so AT skips them. Links get a `:focus-visible` ring via the
- * `--zs-focus-ring-*` tokens.
+ * `--zeroship-focus-ring-*` tokens.
  *
  * Collapse (`maxItems`): when the crumb count exceeds `maxItems` the
  * middle collapses into a single ellipsis crumb — a real

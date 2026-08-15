@@ -35,7 +35,7 @@
  *
  *   5. The accent fill is the SYSTEM signal — overriding it loses
  *      the cross-control affordance Switch and Radio share. Consumers
- *      override via the `--zs-checkbox-fill-checked` CSS variable
+ *      override via the `--zeroship-checkbox-fill-checked` CSS variable
  *      when they truly need to (rare).
  *
  * Field integration:

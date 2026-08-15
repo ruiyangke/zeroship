@@ -19,8 +19,8 @@ const MediaPlaceholder = () => (
       inlineSize: "100%",
       blockSize: "auto",
       display: "block",
-      background: "var(--zs-surface)",
-      color: "var(--zs-label-quaternary)",
+      background: "var(--zeroship-surface)",
+      color: "var(--zeroship-label-quaternary)",
     }}
   >
     {/* Toolbar bar — a quiet header strip reading as a product window chrome. */}
@@ -35,7 +35,7 @@ const MediaPlaceholder = () => (
     <rect x="40" y="84" width="320" height="32" rx="8" fill="currentColor" opacity="0.45" />
     <rect x="40" y="136" width="380" height="18" rx="6" fill="currentColor" opacity="0.25" />
     <rect x="40" y="166" width="300" height="18" rx="6" fill="currentColor" opacity="0.25" />
-    <rect x="40" y="220" width="156" height="48" rx="12" fill="var(--zs-accent)" opacity="0.85" />
+    <rect x="40" y="220" width="156" height="48" rx="12" fill="var(--zeroship-accent)" opacity="0.85" />
     <rect x="212" y="220" width="120" height="48" rx="12" fill="currentColor" opacity="0.2" />
   </svg>
 );
@@ -138,7 +138,7 @@ export const Split: Story = {
         story:
           "With `media` set the band becomes a two-column split (text + " +
           "media) that collapses to a single stacked column below " +
-          "`--zs-bp-md`. The text column start-aligns under a split. The " +
+          "`--zeroship-bp-md`. The text column start-aligns under a split. The " +
           "media wrapper is a FRAMED PRODUCT SURFACE — a rounded raised panel " +
           "(border + elevation) so the placeholder reads as a product window, " +
           "not a flat skeleton — and is decorative (`aria-hidden`). " +
@@ -510,7 +510,7 @@ export const MutedBackdrop: Story = {
     // …AND the muted surface fill is still painted (the tone's
     // `background-color`), so both layers genuinely coexist rather than one
     // clobbering the other.
-    const surface = styles.getPropertyValue("--zs-surface").trim();
+    const surface = styles.getPropertyValue("--zeroship-surface").trim();
     await expect(surface.length).toBeGreaterThan(0);
     await expect(styles.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
     await expect(styles.backgroundColor).not.toBe("transparent");

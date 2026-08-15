@@ -18,21 +18,21 @@ type Story = StoryObj<typeof Button>;
 export const AllStyles: Story = {
   name: "All styles",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All button styles">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled</span>
+    <div className="zeroship-story-row" role="group" aria-label="All button styles">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled</span>
         <Button variant="filled">Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Button variant="tinted">Continue</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Gray</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Gray</span>
         <Button variant="gray">More</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Button variant="plain">Cancel</Button>
       </div>
     </div>
@@ -42,17 +42,17 @@ export const AllStyles: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All button sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+    <div className="zeroship-story-row" role="group" aria-label="All button sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Button size="small">Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Button size="medium">Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Button size="large">Save</Button>
       </div>
     </div>
@@ -62,25 +62,25 @@ export const AllSizes: Story = {
 export const AllStates: Story = {
   name: "All states",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All button states">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default</span>
+    <div className="zeroship-story-row" role="group" aria-label="All button states">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default</span>
         <Button>Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled</span>
         <Button disabled>Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Loading</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Loading</span>
         <Button loading>Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted disabled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted disabled</span>
         <Button variant="tinted" disabled>Continue</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain loading</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain loading</span>
         <Button variant="plain" loading>Cancel</Button>
       </div>
     </div>
@@ -89,21 +89,21 @@ export const AllStates: Story = {
 
 export const Destructive: Story = {
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Destructive buttons">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled</span>
+    <div className="zeroship-story-row" role="group" aria-label="Destructive buttons">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled</span>
         <Button variant="filled" intent="destructive">Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Button variant="tinted" intent="destructive">Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Gray</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Gray</span>
         <Button variant="gray" intent="destructive">Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Button variant="plain" intent="destructive">Delete</Button>
       </div>
     </div>
@@ -114,24 +114,24 @@ export const DestructiveDisabled: Story = {
   name: "Destructive disabled",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Destructive disabled buttons across variants"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled</span>
         <Button variant="filled" intent="destructive" disabled>Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Button variant="tinted" intent="destructive" disabled>Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Gray</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Gray</span>
         <Button variant="gray" intent="destructive" disabled>Delete</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Button variant="plain" intent="destructive" disabled>Delete</Button>
       </div>
     </div>
@@ -142,24 +142,24 @@ export const LoadingDestructive: Story = {
   name: "Loading destructive",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Destructive buttons in loading state"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled</span>
         <Button variant="filled" intent="destructive" loading>Deleting…</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Button variant="tinted" intent="destructive" loading>Deleting…</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Gray</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Gray</span>
         <Button variant="gray" intent="destructive" loading>Deleting…</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Button variant="plain" intent="destructive" loading>Deleting…</Button>
       </div>
     </div>
@@ -212,17 +212,17 @@ function IconPlus() {
 export const WithSlots: Story = {
   name: "With slots",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Buttons with icons">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Start slot</span>
+    <div className="zeroship-story-row" role="group" aria-label="Buttons with icons">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Start slot</span>
         <Button variant="filled" startSlot={<IconPlus />}>New project</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">End slot</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">End slot</span>
         <Button variant="tinted" endSlot={<IconArrow />}>Continue</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Both slots</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Both slots</span>
         <Button variant="gray" startSlot={<IconPlus />} endSlot={<IconArrow />}>
           Open
         </Button>
@@ -247,19 +247,19 @@ export const LongLabel: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Long-label ellipsis behavior"
     >
-      <div className="zs-story-cell" style={{ maxWidth: "16rem", display: "block" }}>
-        <span className="zs-story-label">Constrained 16rem</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "16rem", display: "block" }}>
+        <span className="zeroship-story-label">Constrained 16rem</span>
         <Button variant="filled" style={{ display: "flex", maxWidth: "100%" }}>
           A very long label that should ellipsize gracefully when the parent
           constrains the button's width
         </Button>
       </div>
-      <div className="zs-story-cell" style={{ maxWidth: "20rem", display: "block" }}>
-        <span className="zs-story-label">Constrained 20rem</span>
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem", display: "block" }}>
+        <span className="zeroship-story-label">Constrained 20rem</span>
         <Button variant="tinted" style={{ display: "flex", maxWidth: "100%" }}>
           A very long label that should ellipsize gracefully when the parent
           constrains the button's width
@@ -282,25 +282,25 @@ export const FocusVisible: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Focus-visible focus ring demo"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled</span>
         {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
         <Button variant="filled" autoFocus>Save</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted</span>
         <Button variant="tinted">Continue</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Gray</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Gray</span>
         <Button variant="gray">More</Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain</span>
         <Button variant="plain">Cancel</Button>
       </div>
     </div>
@@ -335,7 +335,7 @@ export const DisabledAndLoadingAreInert: Story = {
     const [count, setCount] = useState(0);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Disabled and loading button interactions"
       >
@@ -392,18 +392,18 @@ export const AsChild: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Button rendered as anchor via asChild"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Filled link</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Filled link</span>
         <Button asChild variant="filled">
           <a href="#open">Open in browser</a>
         </Button>
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Plain link</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Plain link</span>
         <Button asChild variant="plain">
           <a href="#learn">Learn more</a>
         </Button>
@@ -429,7 +429,7 @@ export const AsChildBusyAndDisabled: Story = {
   name: "asChild busy and disabled (play)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="asChild state attributes"
     >
@@ -480,7 +480,7 @@ export const AsChildDisabledIsInert: Story = {
     const [wrapperClicks, setWrapperClicks] = useState(0);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="asChild disabled inert interactions"
       >

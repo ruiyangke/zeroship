@@ -39,39 +39,39 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   inline-size: 100%;
-  block-size: var(--zs-control-h-md);
-  padding-inline: var(--zs-control-px-md);
-  border-radius: var(--zs-control-radius-md);
-  background: var(--zs-input-bg);
-  backdrop-filter: var(--zs-control-backdrop-filter, none);
-  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
-  color: var(--zs-input-ink);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  block-size: var(--zeroship-control-h-md);
+  padding-inline: var(--zeroship-control-px-md);
+  border-radius: var(--zeroship-control-radius-md);
+  background: var(--zeroship-input-bg);
+  backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  color: var(--zeroship-input-ink);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   /* 0.0625rem hairline (≈ one device unit) via box-shadow inset → no layout shift on
      state change. Keep the second shadow slot occupied with a 0/0
      transparent so the focus-ring transition has something to morph
      into / out of without snapping. */
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border),
     0 0 0 0 transparent;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* ─── sizes ──────────────────────────────────────────────────────────── */
 [data-slot="input"][data-size="sm"] {
-  block-size: var(--zs-control-h-sm);
-  padding-inline: var(--zs-control-px-sm);
-  border-radius: var(--zs-control-radius-sm);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  block-size: var(--zeroship-control-h-sm);
+  padding-inline: var(--zeroship-control-px-sm);
+  border-radius: var(--zeroship-control-radius-sm);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
 }
 
 /* 44pt minimum hit target on coarse pointers — small inputs only grow their
@@ -80,23 +80,23 @@
    a genuine target. */
 @media (pointer: coarse) {
   [data-slot="input"][data-size="sm"] {
-    min-block-size: var(--zs-hit-min);
+    min-block-size: var(--zeroship-hit-min);
   }
 }
 
 [data-slot="input"][data-size="lg"] {
-  block-size: var(--zs-control-h-lg);
-  padding-inline: var(--zs-control-px-lg);
-  border-radius: var(--zs-control-radius-lg);
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
+  block-size: var(--zeroship-control-h-lg);
+  padding-inline: var(--zeroship-control-px-lg);
+  border-radius: var(--zeroship-control-radius-lg);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
 }
 
 /* ─── variants ───────────────────────────────────────────────────────── */
 [data-slot="input"][data-variant="filled"] {
-  background: var(--zs-input-bg-filled);
+  background: var(--zeroship-input-bg-filled);
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 0.0625rem transparent,
     0 0 0 0 transparent;
 }
@@ -112,7 +112,7 @@
   background: transparent;
   padding-inline: 0;
   box-shadow:
-    inset 0 -0.0625rem 0 0 var(--zs-separator),
+    inset 0 -0.0625rem 0 0 var(--zeroship-separator),
     0 0 0 0 transparent;
 }
 
@@ -126,30 +126,30 @@
    Measured 2026-08-13. */
 @media (hover: hover) {
   [data-slot="input"]:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
-    background: var(--zs-input-bg-hover);
+    background: var(--zeroship-input-bg-hover);
     box-shadow:
-      var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-      inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-hover),
+      var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+      inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-hover),
       0 0 0 0 transparent;
   }
   [data-slot="input"][data-variant="filled"]:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
-    background: var(--zs-input-bg-filled-hover);
+    background: var(--zeroship-input-bg-filled-hover);
     box-shadow:
-      var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
+      var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
       inset 0 0 0 0.0625rem transparent,
       0 0 0 0 transparent;
   }
   [data-slot="input"][data-variant="plain"]:not([data-disabled]):not([data-focused]):not(:focus-within):not([data-readonly]):hover {
     background: transparent;
     box-shadow:
-      inset 0 -0.0625rem 0 0 var(--zs-separator-strong),
+      inset 0 -0.0625rem 0 0 var(--zeroship-separator-strong),
       0 0 0 0 transparent;
   }
 }
 
 /* ─── focused — the wrapper owns the ring so slots + control share it.
-   Visual-polish item 7: use --zs-input-focus-ring-color (alpha 0.25)
-   instead of the heavier --zs-focus-ring-color (0.35) so the input
+   Visual-polish item 7: use --zeroship-input-focus-ring-color (alpha 0.25)
+   instead of the heavier --zeroship-focus-ring-color (0.35) so the input
    focus halo reads quieter — a softer form-control focus.
    Button keeps the heavier ring via its own selectors.
 
@@ -167,19 +167,19 @@
    of the wrapper's: exactly what wrapper-owns-the-ring exists to prevent. */
 [data-slot="input"][data-focused],
 [data-slot="input"]:focus-within {
-  background: var(--zs-input-bg-focus);
+  background: var(--zeroship-input-bg-focus);
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-focus),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 [data-slot="input"][data-variant="filled"][data-focused],
 [data-slot="input"][data-variant="filled"]:focus-within {
-  background: var(--zs-input-bg-filled);
+  background: var(--zeroship-input-bg-filled);
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-focus),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 /* Plain on focus: intensify the baseline to the accent and keep the
    quieter input ring as the halo. Visual-polish items 4 + 7. */
@@ -187,52 +187,52 @@
 [data-slot="input"][data-variant="plain"]:focus-within {
   background: transparent;
   box-shadow:
-    inset 0 -0.0625rem 0 0 var(--zs-accent),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    inset 0 -0.0625rem 0 0 var(--zeroship-accent),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 
 /* ─── invalid ────────────────────────────────────────────────────────── */
 [data-slot="input"][data-invalid] {
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-invalid),
     0 0 0 0 transparent;
 }
 [data-slot="input"][data-invalid][data-focused],
 [data-slot="input"][data-invalid]:focus-within {
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border-invalid),
-    0 0 0 var(--zs-focus-ring-width)
-      color-mix(in oklch, var(--zs-system-red) 35%, transparent);
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border-invalid),
+    0 0 0 var(--zeroship-focus-ring-width)
+      color-mix(in oklch, var(--zeroship-system-red) 35%, transparent);
 }
 
 /* ─── readonly — distinct from default + disabled. Visual-polish item 5.
    Non-editable text presentation:
-     - background lifts one fill step (--zs-input-bg-readonly) so the
+     - background lifts one fill step (--zeroship-input-bg-readonly) so the
        cell visibly differs from a default editable input
      - value italicizes (read-only / static text convention)
      - cursor stays the default arrow — not the disabled not-allowed
        (readonly is presented, not blocked) */
 [data-slot="input"][data-readonly] {
-  background: var(--zs-input-bg-readonly);
-  color: var(--zs-input-ink-readonly);
+  background: var(--zeroship-input-bg-readonly);
+  color: var(--zeroship-input-ink-readonly);
   cursor: default;
 }
 [data-slot="input"][data-readonly] [data-slot="input-control"] {
   cursor: default;
   font-style: italic;
-  color: var(--zs-input-ink-readonly);
+  color: var(--zeroship-input-ink-readonly);
 }
 
 /* ─── disabled ───────────────────────────────────────────────────────── */
 [data-slot="input"][data-disabled] {
-  background: var(--zs-input-bg-disabled);
-  color: var(--zs-input-ink-disabled);
+  background: var(--zeroship-input-bg-disabled);
+  color: var(--zeroship-input-ink-disabled);
   cursor: not-allowed;
   box-shadow:
-    var(--zs-input-surface-edge, inset 0 0 0 0 transparent),
-    inset 0 0 0 var(--zs-input-border-width, 0.0625rem) var(--zs-input-border),
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem) var(--zeroship-input-border),
     0 0 0 0 transparent;
 }
 [data-slot="input"][data-disabled] [data-slot="input-control"] {
@@ -254,7 +254,7 @@
   margin: 0;
 }
 [data-slot="input-control"]::placeholder {
-  color: var(--zs-input-placeholder);
+  color: var(--zeroship-input-placeholder);
   /* Some UAs render placeholder text at lower opacity by default; pin
      to 1 so our oklch token controls contrast deterministically. */
   opacity: 1;
@@ -295,8 +295,8 @@
    text inside renders at 16 device-units on focus — Mobile Safari's
    zoom threshold is absolute. Item 6 of the slice-2 review fix brief. */
 [data-slot="input"][data-size="sm"] [data-slot="input-control"] {
-  font-size: max(1rem, var(--zs-text-subheadline-size));
-  line-height: var(--zs-text-subheadline-line);
+  font-size: max(1rem, var(--zeroship-text-subheadline-size));
+  line-height: var(--zeroship-text-subheadline-line);
 }
 
 /* Chrome's yellow autofill background bleeds through the wrapper's bg.
@@ -313,9 +313,9 @@
 [data-slot="input-control"]:-webkit-autofill:hover,
 [data-slot="input-control"]:-webkit-autofill:focus,
 [data-slot="input-control"]:-webkit-autofill:active {
-  -webkit-box-shadow: 0 0 0 1000rem var(--zs-input-bg) inset;
-  -webkit-text-fill-color: var(--zs-input-ink);
-  caret-color: var(--zs-input-ink);
+  -webkit-box-shadow: 0 0 0 1000rem var(--zeroship-input-bg) inset;
+  -webkit-text-fill-color: var(--zeroship-input-ink);
+  caret-color: var(--zeroship-input-ink);
   /* Firefox paints its own autofill background; -moz-appearance: none
      lets the inset-shadow trick win there too. */
   -moz-appearance: none;
@@ -345,7 +345,7 @@
    the start-slot search icon used elsewhere. Visual-polish item 9.
    The mask paints `currentColor` from the inline SVG with a solid
    background swatch via mask-composite; we pick the swatch from
-   --zs-label-secondary so the glyph reads as a sibling of the other
+   --zeroship-label-secondary so the glyph reads as a sibling of the other
    adornments. Inline data URI; no extra files. */
 [data-slot="input-control"][type="date"]::-webkit-calendar-picker-indicator,
 [data-slot="input-control"][type="time"]::-webkit-calendar-picker-indicator,
@@ -353,7 +353,7 @@
 [data-slot="input-control"][type="month"]::-webkit-calendar-picker-indicator,
 [data-slot="input-control"][type="week"]::-webkit-calendar-picker-indicator {
   filter: none;
-  background-color: var(--zs-label-secondary);
+  background-color: var(--zeroship-label-secondary);
   background-image: none;
   -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M11 1v1.5h2.25A1.75 1.75 0 0 1 15 4.25v9.5A1.75 1.75 0 0 1 13.25 15.5h-10.5A1.75 1.75 0 0 1 1 13.75v-9.5C1 3.286 1.786 2.5 2.75 2.5H5V1h1.5v1.5h3V1H11Zm2.5 6h-11v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7Z' fill='black'/></svg>");
   mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M11 1v1.5h2.25A1.75 1.75 0 0 1 15 4.25v9.5A1.75 1.75 0 0 1 13.25 15.5h-10.5A1.75 1.75 0 0 1 1 13.75v-9.5C1 3.286 1.786 2.5 2.75 2.5H5V1h1.5v1.5h3V1H11Zm2.5 6h-11v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7Z' fill='black'/></svg>");
@@ -372,16 +372,16 @@
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 [data-slot="input-slot-start"] {
-  margin-inline-end: var(--zs-space-1);
+  margin-inline-end: var(--zeroship-space-1);
 }
 [data-slot="input-slot-end"] {
-  margin-inline-start: var(--zs-space-1);
+  margin-inline-start: var(--zeroship-space-1);
 }
 [data-slot="input"][data-disabled] :is([data-slot="input-slot-end"], [data-slot="input-slot-start"]) {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* ─── forced-colors / Windows High Contrast ──────────────────────────── */
@@ -399,7 +399,7 @@
      because they include the `:hover` pseudo + `:not()` chain. Without
      equal-specificity hover mirrors inside the forced-colors query,
      hovering an input in Windows High Contrast paints the
-     `--zs-input-bg-hover` token over the system `Field` swatch and
+     `--zeroship-input-bg-hover` token over the system `Field` swatch and
      loses the user's chosen contrast theme. We re-state the same
      selectors here and clamp to system colors. The plain variant's
      hover hairline lifts to `Highlight` so a hover-capable pointer
@@ -446,7 +446,7 @@
   }
   /* Readonly mirror: the editable-vs-static distinction must survive
      into high-contrast mode. We can't rely on the token-painted
-     `--zs-input-bg-readonly` fill (forced colors wipes it), so we
+     `--zeroship-input-bg-readonly` fill (forced colors wipes it), so we
      mark readonly by switching the foreground to GrayText — the same
      system colour the disabled mirror uses for ink. The shell itself
      stays on `CanvasText` so it remains a discoverable control (it's

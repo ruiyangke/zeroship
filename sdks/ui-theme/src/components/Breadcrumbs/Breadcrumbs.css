@@ -12,33 +12,33 @@
  *        └─ .zs-breadcrumbs__separator   — <li aria-hidden> glyph
  *
  * Colors (live crystal set):
- *   link text          --zs-label
- *   link hover/focus   --zs-accent
- *   current page       --zs-label-secondary
- *   separators/ellipsis--zs-label-tertiary
- *   focus ring         --zs-focus-ring-*
+ *   link text          --zeroship-label
+ *   link hover/focus   --zeroship-accent
+ *   current page       --zeroship-label-secondary
+ *   separators/ellipsis--zeroship-label-tertiary
+ *   focus ring         --zeroship-focus-ring-*
  *
- * Motion: the link color transition is token-gated (--zs-motion-fast),
+ * Motion: the link color transition is token-gated (--zeroship-motion-fast),
  * which the root stylesheet collapses to ~0 under prefers-reduced-motion.
  * The inline collapse expand has NO animation — it is an instant
  * re-render (keeps the reduced-motion story trivial).
  */
 
 [data-slot="breadcrumbs"] {
-  font-family: var(--zs-font-system);
+  font-family: var(--zeroship-font-system);
 }
 
 [data-slot="breadcrumbs-list"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   margin-block: 0;
   padding-inline-start: 0;
   list-style: none;
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  font-weight: var(--zs-text-footnote-weight);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  font-weight: var(--zeroship-text-footnote-weight);
 }
 
 /* Each crumb is an inline-flex box so its link/page/text centers with the
@@ -60,21 +60,21 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   text-decoration: none;
-  border-radius: var(--zs-radius-1);
-  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+  border-radius: var(--zeroship-radius-1);
+  transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
   [data-slot="breadcrumbs-link"]:hover {
-    color: var(--zs-accent);
+    color: var(--zeroship-accent);
     text-decoration: underline;
   }
 }
 [data-slot="breadcrumbs-link"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  color: var(--zs-accent);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
+  color: var(--zeroship-accent);
 }
 
 /* ─── current page ───────────────────────────────────────────────────────
@@ -87,8 +87,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--zs-label-secondary);
-  font-weight: var(--zs-text-headline-weight);
+  color: var(--zeroship-label-secondary);
+  font-weight: var(--zeroship-text-headline-weight);
 }
 
 /* ─── plain (non-link, non-current) text crumb ───────────────────────────── */
@@ -98,7 +98,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 
 /* ─── separator ──────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@
   /* Never shrink — a custom Icon separator must keep its intrinsic size
      when the trail wraps; without this it could squish as a flex item. */
   flex: 0 0 auto;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   user-select: none;
 }
 
@@ -127,30 +127,30 @@
   align-items: center;
   justify-content: center;
   margin: 0;
-  padding-block: var(--zs-space-half);
-  padding-inline: var(--zs-space-1);
+  padding-block: var(--zeroship-space-half);
+  padding-inline: var(--zeroship-space-1);
   border: 0;
   cursor: pointer;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   background: transparent;
-  border-radius: var(--zs-radius-1);
+  border-radius: var(--zeroship-radius-1);
   line-height: 1;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
   [data-slot="breadcrumbs-ellipsis"]:hover {
-    color: var(--zs-label);
-    background: color-mix(in oklch, var(--zs-label) 10%, transparent);
+    color: var(--zeroship-label);
+    background: color-mix(in oklch, var(--zeroship-label) 10%, transparent);
   }
 }
 [data-slot="breadcrumbs-ellipsis"]:active {
-  background: color-mix(in oklch, var(--zs-label) 16%, transparent);
+  background: color-mix(in oklch, var(--zeroship-label) 16%, transparent);
 }
 [data-slot="breadcrumbs-ellipsis"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  color: var(--zs-label);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
+  color: var(--zeroship-label);
 }
 [data-slot="breadcrumbs-ellipsis-glyph"] {
   line-height: 1;

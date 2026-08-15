@@ -27,8 +27,8 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic meter">
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Basic meter">
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
         <Meter
           value={60}
           aria-label="Disk usage"
@@ -62,13 +62,13 @@ export const AllIntents: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All intents"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Neutral</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Neutral</span>
         <Meter
           value={50}
           intent="neutral"
@@ -76,8 +76,8 @@ export const AllIntents: Story = {
           data-testid="meter-neutral"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Success</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Success</span>
         <Meter
           value={50}
           intent="success"
@@ -85,8 +85,8 @@ export const AllIntents: Story = {
           data-testid="meter-success"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Warning</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Warning</span>
         <Meter
           value={50}
           intent="warning"
@@ -94,8 +94,8 @@ export const AllIntents: Story = {
           data-testid="meter-warning"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Danger</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Danger</span>
         <Meter
           value={50}
           intent="danger"
@@ -120,13 +120,13 @@ export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
     >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Small (track 0.25rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Small (track 0.25rem)</span>
         <Meter
           size="sm"
           value={70}
@@ -134,8 +134,8 @@ export const AllSizes: Story = {
           data-testid="meter-sm"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Medium (track 0.375rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Medium (track 0.375rem)</span>
         <Meter
           size="md"
           value={70}
@@ -143,8 +143,8 @@ export const AllSizes: Story = {
           data-testid="meter-md"
         />
       </div>
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <span className="zs-story-label">Large (track 0.5rem)</span>
+      <div className="zeroship-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zeroship-story-label">Large (track 0.5rem)</span>
         <Meter
           size="lg"
           value={70}
@@ -191,8 +191,8 @@ export const WithValue: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With value">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With value">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Meter
           value={72}
           label="Storage used"
@@ -222,7 +222,7 @@ export const Ranges: Story = {
     const values = [15, 50, 85];
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Ranges"
         style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
@@ -230,7 +230,7 @@ export const Ranges: Story = {
         {values.map((v) => (
           <div
             key={v}
-            className="zs-story-cell"
+            className="zeroship-story-cell"
             style={{ inlineSize: "24rem" }}
           >
             <Meter
@@ -278,8 +278,8 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Meter
           value={42}
           label="Signal"
@@ -321,9 +321,9 @@ export const ExternalAriaLabelling: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Meter external aria">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
-        <span id="meter-incidents-label" className="zs-story-label">
+    <div className="zeroship-story-row" role="group" aria-label="Meter external aria">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
+        <span id="meter-incidents-label" className="zeroship-story-label">
           Incident budget
         </span>
         <span id="meter-incidents-description" style={{ fontSize: "0.8125rem" }}>
@@ -378,8 +378,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL meter">
-      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL meter">
+      <div className="zeroship-story-cell" style={{ inlineSize: "24rem" }}>
         <Meter
           value={67}
           label="مساحة التخزين"

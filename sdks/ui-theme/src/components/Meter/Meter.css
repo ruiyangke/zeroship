@@ -30,21 +30,21 @@
 [data-slot="meter"] {
   display: grid;
   inline-size: 100%;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
-  gap: var(--zs-space-1);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
+  gap: var(--zeroship-space-1);
   /* Intent color — defaults to the accent for the neutral variant.
      Each --intent class below overrides. */
-  --zs-meter-color: var(--zs-accent);
+  --zeroship-meter-color: var(--zeroship-accent);
   /* Track block-size — defaults to md; sm/lg modifiers override. */
-  --zs-meter-track-block: 0.375rem;
+  --zeroship-meter-track-block: 0.375rem;
 }
 
 [data-slot="meter"][data-size="sm"] {
-  --zs-meter-track-block: 0.25rem;
+  --zeroship-meter-track-block: 0.25rem;
 }
 [data-slot="meter"][data-size="lg"] {
-  --zs-meter-track-block: 0.5rem;
+  --zeroship-meter-track-block: 0.5rem;
 }
 
 /* Intent palette — neutral = accent; the others map to system color
@@ -52,16 +52,16 @@
    side of the orange/yellow split — yellow-on-white loses contrast
    below AA, so the orange-leaning hue is the readable choice). */
 [data-slot="meter"][data-intent="neutral"] {
-  --zs-meter-color: var(--zs-accent);
+  --zeroship-meter-color: var(--zeroship-accent);
 }
 [data-slot="meter"][data-intent="success"] {
-  --zs-meter-color: var(--zs-system-green);
+  --zeroship-meter-color: var(--zeroship-system-green);
 }
 [data-slot="meter"][data-intent="warning"] {
-  --zs-meter-color: var(--zs-system-orange);
+  --zeroship-meter-color: var(--zeroship-system-orange);
 }
 [data-slot="meter"][data-intent="danger"] {
-  --zs-meter-color: var(--zs-system-red);
+  --zeroship-meter-color: var(--zeroship-system-red);
 }
 
 /* ─── Header row ───────────────────────────────────────────────────── */
@@ -69,18 +69,18 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--zs-space-2);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  gap: var(--zeroship-space-2);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
 }
 
 [data-slot="meter-label"] {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
   font-weight: 500;
 }
 
 [data-slot="meter-value"] {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
@@ -89,9 +89,9 @@
 [data-slot="meter-track"] {
   position: relative;
   inline-size: 100%;
-  block-size: var(--zs-meter-track-block);
-  background: var(--zs-fill-secondary);
-  border-radius: var(--zs-radius-full);
+  block-size: var(--zeroship-meter-track-block);
+  background: var(--zeroship-fill-secondary);
+  border-radius: var(--zeroship-radius-full);
   overflow: hidden;
 }
 
@@ -102,9 +102,9 @@
  * `inherit` so they hug the track's pill curve at the leading edge. */
 [data-slot="meter-indicator"] {
   block-size: 100%;
-  background: var(--zs-meter-color);
+  background: var(--zeroship-meter-color);
   border-radius: inherit;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* ─── Disabled — when consumers pass aria-disabled or data-disabled
@@ -112,14 +112,14 @@
      meter is a static read-only gauge; a creator marking the row
      disabled signals "this measurement is currently unavailable"). */
 [data-slot="meter"][data-disabled] [data-slot="meter-track"] {
-  background: var(--zs-fill-quaternary);
+  background: var(--zeroship-fill-quaternary);
 }
 [data-slot="meter"][data-disabled] [data-slot="meter-indicator"] {
-  background: var(--zs-label-quaternary);
+  background: var(--zeroship-label-quaternary);
 }
 [data-slot="meter"][data-disabled] [data-slot="meter-label"],
 [data-slot="meter"][data-disabled] [data-slot="meter-value"] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* ─── Reduced motion ───────────────────────────────────────────────── */
@@ -132,7 +132,7 @@
 /* ─── forced-colors / Windows High Contrast ──────────────────────────
  *
  * Slice 5/6 lesson: mirror every state selector at EQUAL specificity so
- * the system palette wins. The intent surface tokens (--zs-system-*)
+ * the system palette wins. The intent surface tokens (--zeroship-system-*)
  * collapse to the system's two semantic slots:
  *   - success / neutral → Highlight (positive measurement read)
  *   - warning / danger  → Mark (attention-needed measurement)

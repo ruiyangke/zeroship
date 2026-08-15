@@ -18,130 +18,130 @@ import { DescriptionList, StatCard } from "../blocks";
  * recipe for a grouped, icon+label navigation rail: a quiet group label,
  * a comfortable rounded hit target with a hover fill, a focus-visible
  * ring, and one accent-tinted active item. Everything is expressed in
- * `--zs-*` tokens (no raw hex/px) so the recipe drops straight into a
+ * `--zeroship-*` tokens (no raw hex/px) so the recipe drops straight into a
  * governed surface. Scoped under
- * `.zs-demo-nav` so it can't leak past the story.
+ * `.zeroship-demo-nav` so it can't leak past the story.
  */
 const navRecipe = `
-.zs-demo-nav {
+.zeroship-demo-nav {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-5);
+  gap: var(--zeroship-space-5);
 }
-.zs-demo-nav__group {
+.zeroship-demo-nav__group {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-half);
+  gap: var(--zeroship-space-half);
 }
-.zs-demo-nav__label {
+.zeroship-demo-nav__label {
   margin: 0;
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
   /* Secondary (not tertiary) label ink: tertiary fails WCAG contrast over
    * the semi-transparent sunken rail once composited against the page.
    * Secondary keeps the quiet uppercase-caption read while passing AA. */
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-caption-2-size);
-  line-height: var(--zs-text-caption-2-line);
-  font-weight: var(--zs-text-caption-2-weight);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-caption-2-size);
+  line-height: var(--zeroship-text-caption-2-line);
+  font-weight: var(--zeroship-text-caption-2-weight);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.zs-demo-nav__item {
+.zeroship-demo-nav__item {
   position: relative;
   display: flex;
   align-items: center;
-  gap: var(--zs-space-2);
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-2);
-  border-radius: var(--zs-radius-full);
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-callout-size);
-  line-height: var(--zs-text-callout-line);
-  font-weight: var(--zs-text-callout-weight);
+  gap: var(--zeroship-space-2);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-2);
+  border-radius: var(--zeroship-radius-full);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-callout-size);
+  line-height: var(--zeroship-text-callout-line);
+  font-weight: var(--zeroship-text-callout-weight);
   text-decoration: none;
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-.zs-demo-nav__item:hover {
-  background: var(--zs-fill-quaternary);
-  backdrop-filter: var(--zs-control-backdrop-filter, none);
-  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
-  color: var(--zs-label);
+.zeroship-demo-nav__item:hover {
+  background: var(--zeroship-fill-quaternary);
+  backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  color: var(--zeroship-label);
 }
-.zs-demo-nav__item:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+.zeroship-demo-nav__item:focus-visible {
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
-.zs-demo-nav__item[aria-current="page"] {
-  background: color-mix(in oklch, var(--zs-accent) 10%, var(--zs-surface));
-  backdrop-filter: var(--zs-control-backdrop-filter, none);
-  -webkit-backdrop-filter: var(--zs-control-backdrop-filter, none);
-  box-shadow: var(--zs-input-surface-edge, none);
-  color: var(--zs-accent-hover);
-  font-weight: var(--zs-text-headline-weight);
+.zeroship-demo-nav__item[aria-current="page"] {
+  background: color-mix(in oklch, var(--zeroship-accent) 10%, var(--zeroship-surface));
+  backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  -webkit-backdrop-filter: var(--zeroship-control-backdrop-filter, none);
+  box-shadow: var(--zeroship-input-surface-edge, none);
+  color: var(--zeroship-accent-hover);
+  font-weight: var(--zeroship-text-headline-weight);
 }
-.zs-demo-nav__item[aria-current="page"]::before {
+.zeroship-demo-nav__item[aria-current="page"]::before {
   content: none;
 }
-.zs-demo-nav__icon {
+.zeroship-demo-nav__icon {
   flex: 0 0 auto;
   display: inline-flex;
-  inline-size: var(--zs-space-4);
-  block-size: var(--zs-space-4);
+  inline-size: var(--zeroship-space-4);
+  block-size: var(--zeroship-space-4);
 }
-.zs-demo-nav__icon svg {
+.zeroship-demo-nav__icon svg {
   inline-size: 100%;
   block-size: 100%;
 }
 /* Header global-action glyph — sized in tokens like the nav icon so the
  * icon-only ghost button reads as a peer of the avatar. */
-.zs-demo-header__icon {
+.zeroship-demo-header__icon {
   display: inline-flex;
-  inline-size: var(--zs-space-4);
-  block-size: var(--zs-space-4);
+  inline-size: var(--zeroship-space-4);
+  block-size: var(--zeroship-space-4);
 }
-.zs-demo-header__icon svg {
+.zeroship-demo-header__icon svg {
   inline-size: 100%;
   block-size: 100%;
 }
 /* The brand mark — an accent-tinted rounded square holding the glyph. */
-.zs-demo-brand {
+.zeroship-demo-brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
-.zs-demo-brand__mark {
+.zeroship-demo-brand__mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-space-6);
-  block-size: var(--zs-space-6);
-  border-radius: var(--zs-radius-full);
-  background: color-mix(in oklch, var(--zs-accent) 16%, transparent);
-  color: var(--zs-accent);
+  inline-size: var(--zeroship-space-6);
+  block-size: var(--zeroship-space-6);
+  border-radius: var(--zeroship-radius-full);
+  background: color-mix(in oklch, var(--zeroship-accent) 16%, transparent);
+  color: var(--zeroship-accent);
 }
-.zs-demo-brand__mark svg {
-  inline-size: var(--zs-space-4);
-  block-size: var(--zs-space-4);
+.zeroship-demo-brand__mark svg {
+  inline-size: var(--zeroship-space-4);
+  block-size: var(--zeroship-space-4);
 }
-.zs-demo-brand__word {
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-headline-tracking);
-  color: var(--zs-label);
+.zeroship-demo-brand__word {
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-headline-tracking);
+  color: var(--zeroship-label);
 }
 @media (prefers-reduced-motion: reduce) {
-  .zs-demo-nav__item {
+  .zeroship-demo-nav__item {
     transition: none;
   }
 }
 @media (forced-colors: active) {
-  .zs-demo-nav__item[aria-current="page"] {
+  .zeroship-demo-nav__item[aria-current="page"] {
     color: Highlight;
   }
-  .zs-demo-nav__item[aria-current="page"]::before {
+  .zeroship-demo-nav__item[aria-current="page"]::before {
     background: Highlight;
   }
 }
@@ -151,7 +151,7 @@ const navRecipe = `
 
 type IconProps = { children: ReactNode };
 const Icon = ({ children }: IconProps) => (
-  <span className="zs-demo-nav__icon" aria-hidden="true">
+  <span className="zeroship-demo-nav__icon" aria-hidden="true">
     <svg
       viewBox="0 0 24 24"
       fill="none"
@@ -241,7 +241,7 @@ const PRIMARY_NAV: NavGroup[] = [
 const NavLink = ({ label, icon, current }: NavItem) => (
   <a
     href="#"
-    className="zs-demo-nav__item"
+    className="zeroship-demo-nav__item"
     aria-current={current ? "page" : undefined}
   >
     {icon}
@@ -250,10 +250,10 @@ const NavLink = ({ label, icon, current }: NavItem) => (
 );
 
 const PrimaryNav = ({ groups }: { groups: NavGroup[] }) => (
-  <div className="zs-demo-nav">
+  <div className="zeroship-demo-nav">
     {groups.map((group) => (
-      <div className="zs-demo-nav__group" key={group.label}>
-        <p className="zs-demo-nav__label">{group.label}</p>
+      <div className="zeroship-demo-nav__group" key={group.label}>
+        <p className="zeroship-demo-nav__label">{group.label}</p>
         {group.items.map((item) => (
           <NavLink key={item.label} {...item} />
         ))}
@@ -265,8 +265,8 @@ const PrimaryNav = ({ groups }: { groups: NavGroup[] }) => (
 /* The brand lockup: an accent-tinted rounded mark (decorative SVG glyph,
  * aria-hidden — the wordmark conveys identity) + the "Acme" wordmark. */
 const BrandLockup = () => (
-  <span className="zs-demo-brand">
-    <span className="zs-demo-brand__mark" aria-hidden="true">
+  <span className="zeroship-demo-brand">
+    <span className="zeroship-demo-brand__mark" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <path
           d="M12 3 3 19h6l3-6 3 6h6Z"
@@ -275,7 +275,7 @@ const BrandLockup = () => (
         />
       </svg>
     </span>
-    <span className="zs-demo-brand__word">Acme</span>
+    <span className="zeroship-demo-brand__word">Acme</span>
   </span>
 );
 
@@ -294,7 +294,7 @@ const HeaderBar = ({ extraStart }: { extraStart?: ReactNode }) => (
     style={{
       display: "flex",
       alignItems: "center",
-      gap: "var(--zs-space-3)",
+      gap: "var(--zeroship-space-3)",
       inlineSize: "100%",
     }}
   >
@@ -302,7 +302,7 @@ const HeaderBar = ({ extraStart }: { extraStart?: ReactNode }) => (
     <BrandLockup />
     <div style={{ flex: 1 }} />
     <Button variant="plain" size="small" aria-label="Notifications">
-      <span className="zs-demo-header__icon" aria-hidden="true">
+      <span className="zeroship-demo-header__icon" aria-hidden="true">
         <svg
           viewBox="0 0 24 24"
           fill="none"
@@ -335,7 +335,7 @@ const FooterBar = () => (
     style={{
       display: "flex",
       alignItems: "center",
-      gap: "var(--zs-space-4)",
+      gap: "var(--zeroship-space-4)",
     }}
   >
     <span>© Acme</span>
@@ -369,7 +369,7 @@ const meta: Meta<typeof AppShell> = {
       config: {
         rules: [
           // The global preview decorator wraps EVERY story in
-          // `<main class="zs-story-main">`. AppShell legitimately renders
+          // `<main class="zeroship-story-main">`. AppShell legitimately renders
           // its own `<main>` landmark, so inside the decorator there are
           // two mains and the shell's main is not top-level — both are
           // artifacts of the Storybook harness, not the component. In a
@@ -422,12 +422,12 @@ export const FullShell: Story = {
           <Container
             size="lg"
             style={{
-              paddingBlock: "var(--zs-space-6)",
+              paddingBlock: "var(--zeroship-space-6)",
               display: "flex",
               flexDirection: "column",
               // A step more vertical air (6 → 7) so the stat row breathes
               // away from the activity card and the page reads less dense.
-              gap: "var(--zs-space-7)",
+              gap: "var(--zeroship-space-7)",
             }}
           >
             <PageHeader>
@@ -522,7 +522,7 @@ export const FullShell: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     // Exactly ONE shell <main> — the shell's own. (The global preview
-    // decorator wraps the story in its OWN `<main class="zs-story-main">`,
+    // decorator wraps the story in its OWN `<main class="zeroship-story-main">`,
     // a harness artifact; we scope to the shell's `data-slot` to assert
     // the SHELL renders a single main landmark.)
     const shellMains = canvasElement.querySelectorAll(
@@ -553,7 +553,7 @@ export const FullShell: Story = {
     ).toBeInTheDocument();
     // Exactly one active nav item, carrying aria-current="page".
     const active = canvasElement.querySelectorAll(
-      '.zs-demo-nav__item[aria-current="page"]',
+      '.zeroship-demo-nav__item[aria-current="page"]',
     );
     await expect(active.length).toBe(1);
   },
@@ -588,7 +588,7 @@ export const SidebarCollapsed: Story = {
         <AppShell.Main>
           <Container
             size="lg"
-            style={{ paddingBlock: "var(--zs-space-6)" }}
+            style={{ paddingBlock: "var(--zeroship-space-6)" }}
           >
             <PageHeader>
               <PageHeader.Text>
@@ -658,7 +658,7 @@ function ControlledShell({
         <AppShell.Main>
           <Container
             size="lg"
-            style={{ paddingBlock: "var(--zs-space-6)" }}
+            style={{ paddingBlock: "var(--zeroship-space-6)" }}
           >
             <PageHeader>
               <PageHeader.Text>
@@ -754,7 +754,7 @@ export const SidebarEnd: Story = {
         <AppShell.Main>
           <Container
             size="lg"
-            style={{ paddingBlock: "var(--zs-space-6)" }}
+            style={{ paddingBlock: "var(--zeroship-space-6)" }}
           >
             <PageHeader>
               <PageHeader.Text>
@@ -800,7 +800,7 @@ export const ScrollFrame: Story = {
             </nav>
           </AppShell.Sidebar>
           <AppShell.Main>
-            <Container size="lg" style={{ paddingBlock: "var(--zs-space-6)" }}>
+            <Container size="lg" style={{ paddingBlock: "var(--zeroship-space-6)" }}>
               {/* Real app main areas carry focusable controls; a leading
                   action makes the scroll region keyboard-reachable so it is
                   not an inaccessible scroll trap (axe

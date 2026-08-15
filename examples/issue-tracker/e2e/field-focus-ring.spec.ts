@@ -17,8 +17,8 @@ import { signIn } from "./session";
  * user nothing about where they were.
  *
  * The fix is one `.app-field-shell` class built from the DS's published focus
- * tokens (`--zs-input-border-focus`, `--zs-input-focus-ring-color`,
- * `--zs-focus-ring-width`) -- the same ones Select, Combobox, NumberField and
+ * tokens (`--zeroship-input-border-focus`, `--zeroship-input-focus-ring-color`,
+ * `--zeroship-focus-ring-width`) -- the same ones Select, Combobox, NumberField and
  * Slider draw from.
  *
  * So the assertion is not "it changes on focus", which a wrong-coloured

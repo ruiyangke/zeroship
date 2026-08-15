@@ -81,7 +81,7 @@
  *  - No `onScroll` prop on the Root — the consumer attaches it to the
  *    Viewport (`<ScrollArea.Viewport onScroll={…}>`) so the event
  *    fires on the actual scroll container.
- *  - No `barColor` / `barSize` numeric props — color via `--zs-*`
+ *  - No `barColor` / `barSize` numeric props — color via `--zeroship-*`
  *    tokens; size variants would be a future `variant="hairline" |
  *    "regular"` token discriminator, not raw pixel inputs.
  */
@@ -201,11 +201,11 @@ function ScrollAreaRootInner(
   // can read it as a `transition-delay` value. The token-only rule
   // forbids raw `px` in stylesheets, but a NUMERIC PROP from a
   // consumer is allowed to land as a CSS custom property — the
-  // stylesheet still references `var(--zs-scrollarea-hide-delay)`,
+  // stylesheet still references `var(--zeroship-scrollarea-hide-delay)`,
   // never a hardcoded `600ms`.
   const rootStyle = {
     ...(style as React.CSSProperties | undefined),
-    "--zs-scrollarea-hide-delay": `${scrollHideDelay}ms`,
+    "--zeroship-scrollarea-hide-delay": `${scrollHideDelay}ms`,
   } as React.CSSProperties;
 
   return (

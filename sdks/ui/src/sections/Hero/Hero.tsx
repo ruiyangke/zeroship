@@ -51,7 +51,7 @@
  *     max-width measure; `align="start"` start-aligns it.
  *   - When `media` (prop) or a `<Hero.Media>` child is present, the body
  *     becomes a two-column split (text + media); it collapses to a single
- *     stacked column below `--zs-bp-md`. Without media it is a single
+ *     stacked column below `--zeroship-bp-md`. Without media it is a single
  *     column. The two modes are driven by `data-layout` on the body.
  *
  * a11y:
@@ -194,7 +194,7 @@ export interface HeroProps
   /**
    * Optional media (image / illustration / product shot). When set, the
    * band becomes a two-column split (text + media) that collapses to a
-   * stacked single column below `--zs-bp-md`. Without media the band is a
+   * stacked single column below `--zeroship-bp-md`. Without media the band is a
    * single column. The wrapper is decorative (`aria-hidden`) by default;
    * pass a labelled image and `aria-hidden={false}` on a `<Hero.Media>`
    * part for a meaningful image.
@@ -214,7 +214,7 @@ export interface HeroProps
   align?: HeroAlign;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `lg`. The hero is the only place a section sets its own
    * Container size; everything else inherits the page width.
    */
@@ -226,8 +226,8 @@ export interface HeroProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band.
    */
   tone?: SectionTone;
 

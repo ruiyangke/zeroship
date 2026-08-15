@@ -77,7 +77,7 @@ export interface AlertDialogProps {
  * breaks the moment a consumer wraps the component in `React.memo` or
  * a thin wrapper. `React.memo` copies static properties onto its memo
  * shell, so the sentinel survives that path; we fall back to walking
- * `type?.type?.__zsAlertButton` for the memo case (item 4 contingency).
+ * `type?.type?.__zeroshipAlertButton` for the memo case (item 4 contingency).
  */
 type AlertButtonRole = "action" | "cancel";
 
@@ -85,14 +85,14 @@ function readAlertButtonRole(type: unknown): AlertButtonRole | undefined {
   if (!type || (typeof type !== "function" && typeof type !== "object")) {
     return undefined;
   }
-  const direct = (type as { __zsAlertButton?: AlertButtonRole })
-    .__zsAlertButton;
+  const direct = (type as { __zeroshipAlertButton?: AlertButtonRole })
+    .__zeroshipAlertButton;
   if (direct === "action" || direct === "cancel") return direct;
   // memo(inner): `type` is the memo shell; `type.type` is the inner
   // forwardRef object. memo copies statics off the SHELL but for
   // belt-and-braces we walk one level deeper too.
-  const inner = (type as { type?: { __zsAlertButton?: AlertButtonRole } }).type;
-  const innerRole = inner?.__zsAlertButton;
+  const inner = (type as { type?: { __zeroshipAlertButton?: AlertButtonRole } }).type;
+  const innerRole = inner?.__zeroshipAlertButton;
   if (innerRole === "action" || innerRole === "cancel") return innerRole;
   return undefined;
 }
@@ -368,7 +368,7 @@ export interface AlertDialogFooterProps extends ComponentPropsWithoutRef<"div"> 
  * Flatten footer children into a list of `{element, role}` for the
  * sentinel-driven counts (review-fix item 4). Descends into Fragments
  * and arrays; ignores null/undefined/boolean/string children. Only
- * elements carrying the `__zsAlertButton` sentinel (Cancel/Action,
+ * elements carrying the `__zeroshipAlertButton` sentinel (Cancel/Action,
  * including memo-wrapped variants) are counted.
  */
 type FlattenedAlertButton = {
@@ -703,11 +703,11 @@ AlertDialogAction.displayName = "AlertDialog.Action";
  * memo wrappers copy static properties off the inner forwardRef, so
  * the sentinel survives that path. */
 (
-  AlertDialogAction as unknown as { __zsAlertButton: AlertButtonRole }
-).__zsAlertButton = "action";
+  AlertDialogAction as unknown as { __zeroshipAlertButton: AlertButtonRole }
+).__zeroshipAlertButton = "action";
 (
-  AlertDialogCancel as unknown as { __zsAlertButton: AlertButtonRole }
-).__zsAlertButton = "cancel";
+  AlertDialogCancel as unknown as { __zeroshipAlertButton: AlertButtonRole }
+).__zeroshipAlertButton = "cancel";
 
 /* ─── public namespace ──────────────────────────────────────────────── */
 

@@ -1,8 +1,8 @@
 /*
  * Drawer — side-anchored modal panel. Anatomy:
  *
- *   .zs-drawer-backdrop      fixed-position overlay; tinted from --zs-scrim
- *                              + optional --zs-blur-overlay (Crystal-gated).
+ *   .zs-drawer-backdrop      fixed-position overlay; tinted from --zeroship-scrim
+ *                              + optional --zeroship-blur-overlay (Crystal-gated).
  *   .zs-drawer-content       opaque side-pinned sheet; data-side selects the
  *                              anchored edge (start | end | top | bottom);
  *                              data-size selects the cross-axis preset.
@@ -16,8 +16,8 @@
  * declarative and reduced-motion-aware.
  *
  * Crystal material pattern: Content declares a computable
- * `background-color: var(--zs-surface)`. The Backdrop layers a
- * translucent --zs-scrim plus `--zs-blur-overlay`, while the Content
+ * `background-color: var(--zeroship-surface)`. The Backdrop layers a
+ * translucent --zeroship-scrim plus `--zeroship-blur-overlay`, while the Content
  * keeps axe's color-contrast walk on a readable surface.
  *
  * RTL: `side="start"` / `side="end"` flip via `inset-inline-*` and a
@@ -35,15 +35,15 @@
 [data-slot="drawer-backdrop"] {
   position: fixed;
   inset: 0;
-  z-index: var(--zs-z-modal);
-  background-color: var(--zs-scrim);
-  /* Crystal can gate `--zs-blur-overlay`. When undefined we fall back
+  z-index: var(--zeroship-z-modal);
+  background-color: var(--zeroship-scrim);
+  /* Crystal can gate `--zeroship-blur-overlay`. When undefined we fall back
    * to `none` so the glass effect is opt-in per theme — matches the
    * brief: backdrop-filter never alone. */
-  backdrop-filter: var(--zs-blur-overlay, none);
-  -webkit-backdrop-filter: var(--zs-blur-overlay, none);
+  backdrop-filter: var(--zeroship-blur-overlay, none);
+  -webkit-backdrop-filter: var(--zeroship-blur-overlay, none);
   opacity: 1;
-  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="drawer-backdrop"][data-starting-style],
 [data-slot="drawer-backdrop"][data-ending-style] {
@@ -61,24 +61,24 @@
    * direction-aware translate gives true RTL flip.
    */
   position: fixed;
-  z-index: calc(var(--zs-z-modal) + 1);
+  z-index: calc(var(--zeroship-z-modal) + 1);
   display: flex;
   flex-direction: column;
-  background-color: var(--zs-surface);
-  color: var(--zs-label);
+  background-color: var(--zeroship-surface);
+  color: var(--zeroship-label);
   background-clip: padding-box;
-  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-dialog-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-dialog-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-dialog-backdrop-filter,
+    var(--zeroship-material-regular)
   );
-  box-shadow: var(--zs-shadow-dialog);
-  font-family: var(--zs-font-system);
+  box-shadow: var(--zeroship-shadow-dialog);
+  font-family: var(--zeroship-font-system);
   overflow: hidden;
   opacity: 1;
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
   /* Steady-open state needs no transform — per-side data-starting /
    * data-ending rules supply their own translate. We deliberately set
    * `none` (not `translate(0,0)`) because any non-`none` transform
@@ -270,9 +270,9 @@
 [data-slot="drawer-header"] {
   display: flex;
   align-items: flex-start;
-  gap: var(--zs-space-3);
-  padding: var(--zs-space-6);
-  padding-block-end: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
+  padding: var(--zeroship-space-6);
+  padding-block-end: var(--zeroship-space-3);
   /* Notch-friendly: safe-area-aware on top + sides for side="top" and
    * the start/end orientations. The mask resolves the larger of the
    * intrinsic space and the env() inset.
@@ -286,16 +286,16 @@
    * direction-aware blocks that don't survive container-query / nested
    * `dir` flips reliably. Same caveat applies to .zs-drawer__body /
    * .zs-drawer__footer below. */
-  padding-block-start: max(var(--zs-space-6), env(safe-area-inset-top));
-  padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
-  padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
+  padding-block-start: max(var(--zeroship-space-6), env(safe-area-inset-top));
+  padding-inline-start: max(var(--zeroship-space-6), env(safe-area-inset-left));
+  padding-inline-end: max(var(--zeroship-space-6), env(safe-area-inset-right));
 }
 [data-slot="drawer-header-content"] {
   flex: 1;
   min-inline-size: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
 }
 [data-slot="drawer-header-close"] {
   /* Auto-X close button INSIDE the header (flex child), never absolutely
@@ -310,24 +310,24 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--zs-radius-full);
-  color: var(--zs-label-secondary);
+  border-radius: var(--zeroship-radius-full);
+  color: var(--zeroship-label-secondary);
   cursor: pointer;
   flex-shrink: 0;
   position: relative;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
   [data-slot="drawer-header-close"]:hover {
-    background-color: var(--zs-fill-tertiary);
-    color: var(--zs-label);
+    background-color: var(--zeroship-fill-tertiary);
+    color: var(--zeroship-label);
   }
 }
 [data-slot="drawer-header-close"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 @media (pointer: coarse) {
   [data-slot="drawer-header-close"]::before {
@@ -336,42 +336,42 @@
     inset-block-start: 50%;
     inset-inline-start: 50%;
     transform: translate(-50%, -50%);
-    inline-size: max(100%, var(--zs-hit-min));
-    block-size: max(100%, var(--zs-hit-min));
+    inline-size: max(100%, var(--zeroship-hit-min));
+    block-size: max(100%, var(--zeroship-hit-min));
   }
 }
 
 /* ─── Title / Description ──────────────────────────────────────────────── */
 [data-slot="drawer-title"] {
   margin: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-title-3-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-title-3-tracking);
+  color: var(--zeroship-label);
 }
 [data-slot="drawer-description"] {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── Body / Footer ────────────────────────────────────────────────────── */
 [data-slot="drawer-body"] {
-  padding-inline: var(--zs-space-6);
+  padding-inline: var(--zeroship-space-6);
   padding-block: 0;
   flex: 1;
   min-block-size: 0;
   overflow-y: auto;
-  color: var(--zs-label);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   /* Side-respecting safe areas — for start/end drawers the inline
    * padding already handles notch insets via max(); we top it up here
    * so a long-scroll body never slides under a curved edge. */
-  padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
-  padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
+  padding-inline-start: max(var(--zeroship-space-6), env(safe-area-inset-left));
+  padding-inline-end: max(var(--zeroship-space-6), env(safe-area-inset-right));
 }
 [data-slot="drawer-body"] > p:first-child,
 [data-slot="drawer-body"] > ul:first-child,
@@ -386,15 +386,15 @@
 [data-slot="drawer-footer"] {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--zs-space-3);
-  row-gap: var(--zs-space-2);
+  gap: var(--zeroship-space-3);
+  row-gap: var(--zeroship-space-2);
   align-items: center;
   justify-content: flex-end;
-  padding: var(--zs-space-6);
-  padding-block-start: var(--zs-space-4);
-  padding-block-end: max(var(--zs-space-6), env(safe-area-inset-bottom));
-  padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
-  padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
+  padding: var(--zeroship-space-6);
+  padding-block-start: var(--zeroship-space-4);
+  padding-block-end: max(var(--zeroship-space-6), env(safe-area-inset-bottom));
+  padding-inline-start: max(var(--zeroship-space-6), env(safe-area-inset-left));
+  padding-inline-end: max(var(--zeroship-space-6), env(safe-area-inset-right));
 }
 
 /* ─── forced-colors (specificity mirror) ───────────────────────────────────
@@ -434,8 +434,8 @@
   [data-slot="drawer-header-close"]:focus-visible {
     outline-color: Highlight;
   }
-  /* Child text selectors paint their own color tokens (`--zs-label`,
-   * `--zs-label-secondary`), which forced-colors-active replaces with
+  /* Child text selectors paint their own color tokens (`--zeroship-label`,
+   * `--zeroship-label-secondary`), which forced-colors-active replaces with
    * system colors per-element. Inheriting `CanvasText` from the
    * Content alone does NOT override these explicit color declarations
    * — the cascade picks the more specific child rule. Mirror each

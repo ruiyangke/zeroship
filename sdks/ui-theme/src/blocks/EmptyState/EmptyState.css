@@ -19,10 +19,10 @@
   /* Generous breathing room so the panel reads as a deliberate "empty"
      surface rather than a collapsed container. Logical padding so RTL /
      vertical writing modes inset correctly. */
-  padding-block: var(--zs-space-8);
-  padding-inline: var(--zs-space-6);
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-8);
+  padding-inline: var(--zeroship-space-6);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 
 [data-slot="empty-state-column"] {
@@ -42,10 +42,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   /* Icon size keyed off the title scale so it stays optically paired
      with the heading. Slotted <svg> children inherit 1em. */
-  font-size: var(--zs-text-large-title-size);
+  font-size: var(--zeroship-text-large-title-size);
   line-height: 1;
 }
 
@@ -56,27 +56,27 @@
 
 [data-slot="empty-state-title"] {
   margin: 0;
-  color: var(--zs-label);
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
   font-weight: 600;
 }
 
 [data-slot="empty-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
-     --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
+     --zeroship-label-secondary for color: tertiary is ~4.46:1 on --zeroship-surface
      (below AA 4.5:1) and this copy composites on the opaque DataTable
      surface, so the smaller size carries the hierarchy while secondary
      keeps it AA-safe. */
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   /* Tighten the title↔description pairing: the Stack gap governs the
      inter-part rhythm, but the description should sit a touch closer to
      its title than to the action row. A small negative top margin pulls
      it up by one space step. */
-  margin-block-start: calc(-1 * var(--zs-space-1));
+  margin-block-start: calc(-1 * var(--zeroship-space-1));
 }
 
 [data-slot="empty-state-actions"] {
@@ -84,10 +84,10 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   /* A little extra separation above the action row so the button reads
      as a distinct affordance below the copy. */
-  margin-block-start: var(--zs-space-2);
+  margin-block-start: var(--zeroship-space-2);
 }
 
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */

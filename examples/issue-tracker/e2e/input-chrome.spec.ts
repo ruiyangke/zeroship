@@ -26,8 +26,8 @@ import { signIn } from "./session";
  *
  * What the DS actually draws on `[data-slot="input"][data-focused]`:
  *
- *   inset 0 0 0 0.0625rem var(--zs-input-border-focus)   accent hairline
- *   0 0 0 0.1875rem var(--zs-input-focus-ring-color)     soft 16% halo
+ *   inset 0 0 0 0.0625rem var(--zeroship-input-border-focus)   accent hairline
+ *   0 0 0 0.1875rem var(--zeroship-input-focus-ring-color)     soft 16% halo
  *
  * and `[data-slot="input-control"] { outline: none }`, deliberately, so the wrapper
  * owns the ring and the control and slots share it.

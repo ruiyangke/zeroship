@@ -57,7 +57,7 @@
  *   - Silent dismissal on duplicate id: a second `toast({id: "x"})`
  *     UPDATES the existing toast (Base UI's documented contract). We
  *     surface this in `useToast` JSDoc.
- *   - Crystal material pattern: `--zs-surface-raised` carries the
+ *   - Crystal material pattern: `--zeroship-surface-raised` carries the
  *     readable panel base; Toast.Root receives material, rim, and shadow
  *     tokens without making contrast depend on page bleed.
  */

@@ -27,19 +27,19 @@
 [data-slot="faq"] {
   /* Local single-knob custom property (the house idiom): the readable measure
      the header + Q/A list are capped to. */
-  --zs-faq-measure: 44rem;
+  --zeroship-faq-measure: 44rem;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop. */
   display: block;
-  padding-block: var(--zs-space-10);
-  color: var(--zs-label);
+  padding-block: var(--zeroship-space-10);
+  color: var(--zeroship-label);
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
 [data-slot="faq-header"] {
-  max-inline-size: var(--zs-faq-measure);
-  margin-block-end: var(--zs-space-8);
+  max-inline-size: var(--zeroship-faq-measure);
+  margin-block-end: var(--zeroship-space-8);
   text-align: start;
 }
 
@@ -49,26 +49,26 @@
 [data-slot="faq-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2>. */
-  font-size: var(--zs-text-display-3-size);
-  line-height: var(--zs-text-display-3-line);
-  font-weight: var(--zs-text-display-3-weight);
-  letter-spacing: var(--zs-text-display-3-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-display-3-size);
+  line-height: var(--zeroship-text-display-3-line);
+  font-weight: var(--zeroship-text-display-3-weight);
+  letter-spacing: var(--zeroship-text-display-3-tracking);
+  color: var(--zeroship-label);
   text-wrap: balance;
 }
 
 [data-slot="faq-description"] {
   margin-block: 0;
-  font-size: var(--zs-text-title-3-size);
-  line-height: var(--zs-text-title-3-line);
-  font-weight: var(--zs-text-body-weight);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-title-3-size);
+  line-height: var(--zeroship-text-title-3-line);
+  font-weight: var(--zeroship-text-body-weight);
+  color: var(--zeroship-label-secondary);
   text-wrap: pretty;
 }
 
 /* ─── List — the composed Accordion, capped to the readable measure ──────── */
 [data-slot="faq-list"] {
-  max-inline-size: var(--zs-faq-measure);
+  max-inline-size: var(--zeroship-faq-measure);
   /* The Accordion owns its own internal chrome (rows, dividers, chevron,
      panel animation). This band only constrains its inline measure. */
 }

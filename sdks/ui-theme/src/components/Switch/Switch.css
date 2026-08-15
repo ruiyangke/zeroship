@@ -47,7 +47,7 @@
  *
  *   7. Tokens only — no raw oklch literals (slice-4 review fix item 4).
  *      The thumb shadow recipes its alpha-stops via color-mix on
- *      --zs-label so dark themes will de-shift the shadow when they
+ *      --zeroship-label so dark themes will de-shift the shadow when they
  *      land; the disabled-checked background mixes the accent INTO an
  *      opaque fill so the glass-surface invariant holds.
  */
@@ -56,31 +56,31 @@
 [data-slot="switch"] {
   /* Track sizes — width slightly more than 2x the thumb so the slide
      reads as a deliberate trip, not a snap. */
-  --zs-switch-track-w-sm: 1.5rem;     /* 24 */
-  --zs-switch-track-w-md: 2rem;       /* 32 — default */
-  --zs-switch-track-w-lg: 2.5rem;     /* 40 */
-  --zs-switch-track-h-sm: 0.875rem;   /* 14 */
-  --zs-switch-track-h-md: 1.125rem;   /* 18 */
-  --zs-switch-track-h-lg: 1.375rem;   /* 22 */
+  --zeroship-switch-track-w-sm: 1.5rem;     /* 24 */
+  --zeroship-switch-track-w-md: 2rem;       /* 32 — default */
+  --zeroship-switch-track-w-lg: 2.5rem;     /* 40 */
+  --zeroship-switch-track-h-sm: 0.875rem;   /* 14 */
+  --zeroship-switch-track-h-md: 1.125rem;   /* 18 */
+  --zeroship-switch-track-h-lg: 1.375rem;   /* 22 */
 
-  --zs-switch-thumb-sm: 0.625rem;     /* 10 */
-  --zs-switch-thumb-md: 0.875rem;     /* 14 */
-  --zs-switch-thumb-lg: 1.125rem;     /* 18 */
+  --zeroship-switch-thumb-sm: 0.625rem;     /* 10 */
+  --zeroship-switch-thumb-md: 0.875rem;     /* 14 */
+  --zeroship-switch-thumb-lg: 1.125rem;     /* 18 */
 
-  --zs-switch-inset: 0.125rem;        /* 2 — thumb inset from track edge */
+  --zeroship-switch-inset: 0.125rem;        /* 2 — thumb inset from track edge */
 
-  --zs-switch-track-bg: var(--zs-fill-secondary);
-  --zs-switch-track-bg-hover: var(--zs-fill);
-  --zs-switch-track-bg-checked: var(--zs-accent);
-  --zs-switch-track-bg-checked-hover: var(--zs-accent-hover);
-  --zs-switch-thumb-bg: var(--zs-accent-ink);
+  --zeroship-switch-track-bg: var(--zeroship-fill-secondary);
+  --zeroship-switch-track-bg-hover: var(--zeroship-fill);
+  --zeroship-switch-track-bg-checked: var(--zeroship-accent);
+  --zeroship-switch-track-bg-checked-hover: var(--zeroship-accent-hover);
+  --zeroship-switch-thumb-bg: var(--zeroship-accent-ink);
   /* Thumb shadow uses label-mix so the alpha-stops de-shift on dark
    * themes once those land. Earlier this was a raw color literal
    * (black-with-alpha-α) — banned in component CSS by the token-purity
    * rule (slice-4 review fix item 4). */
-  --zs-switch-thumb-shadow:
-    0 0.0625rem 0.125rem color-mix(in oklch, var(--zs-label) 18%, transparent),
-    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 4%, transparent);
+  --zeroship-switch-thumb-shadow:
+    0 0.0625rem 0.125rem color-mix(in oklch, var(--zeroship-label) 18%, transparent),
+    0 0 0 0.0625rem color-mix(in oklch, var(--zeroship-label) 4%, transparent);
 }
 
 /* ─── track ─────────────────────────────────────────────────────────── */
@@ -88,18 +88,18 @@
   position: relative;
   display: inline-block;
   flex: 0 0 auto;
-  inline-size: var(--zs-switch-track-w-md);
-  block-size: var(--zs-switch-track-h-md);
-  border-radius: var(--zs-radius-full);
-  background-color: var(--zs-switch-track-bg);
+  inline-size: var(--zeroship-switch-track-w-md);
+  block-size: var(--zeroship-switch-track-h-md);
+  border-radius: var(--zeroship-radius-full);
+  background-color: var(--zeroship-switch-track-bg);
   /* No border — the contrast comes from track fill vs thumb fill. The
      glass-surface invariant is satisfied by the OPAQUE background-color
      above; a translucent fill on its own would let the page paint
      through and axe would emit an incomplete. */
-  box-shadow: inset 0 0 0 0.0625rem var(--zs-fill-tertiary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zeroship-fill-tertiary);
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   cursor: pointer;
   vertical-align: middle;
 }
@@ -119,60 +119,60 @@
   inset-block-start: 50%;
   inset-inline-start: 50%;
   translate: -50% -50%;
-  min-inline-size: var(--zs-hit-target, 1.75rem);
-  min-block-size: var(--zs-hit-target, 1.75rem);
+  min-inline-size: var(--zeroship-hit-target, 1.75rem);
+  min-block-size: var(--zeroship-hit-target, 1.75rem);
   inline-size: 100%;
   block-size: 100%;
   pointer-events: auto;
 }
 @media (pointer: coarse) {
   [data-slot="switch"]::before {
-    --zs-hit-target: var(--zs-hit-min);
+    --zeroship-hit-target: var(--zeroship-hit-min);
   }
 }
 
 [data-slot="switch"][data-size="sm"] {
-  inline-size: var(--zs-switch-track-w-sm);
-  block-size: var(--zs-switch-track-h-sm);
+  inline-size: var(--zeroship-switch-track-w-sm);
+  block-size: var(--zeroship-switch-track-h-sm);
 }
 [data-slot="switch"][data-size="lg"] {
-  inline-size: var(--zs-switch-track-w-lg);
-  block-size: var(--zs-switch-track-h-lg);
+  inline-size: var(--zeroship-switch-track-w-lg);
+  block-size: var(--zeroship-switch-track-h-lg);
 }
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
   [data-slot="switch"]:not([data-disabled]):not([data-checked]):hover {
-    background-color: var(--zs-switch-track-bg-hover);
+    background-color: var(--zeroship-switch-track-bg-hover);
   }
   [data-slot="switch"]:not([data-disabled])[data-checked]:hover {
-    background-color: var(--zs-switch-track-bg-checked-hover);
+    background-color: var(--zeroship-switch-track-bg-checked-hover);
   }
 }
 
 /* ─── checked ───────────────────────────────────────────────────────── */
 [data-slot="switch"][data-checked] {
-  background-color: var(--zs-switch-track-bg-checked);
+  background-color: var(--zeroship-switch-track-bg-checked);
   box-shadow: inset 0 0 0 0.0625rem transparent;
 }
 
 /* ─── focus ring on the track itself ────────────────────────────────── */
 [data-slot="switch"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
 [data-slot="switch"][data-disabled] {
-  background-color: var(--zs-fill-tertiary);
-  box-shadow: inset 0 0 0 0.0625rem var(--zs-fill-tertiary);
+  background-color: var(--zeroship-fill-tertiary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zeroship-fill-tertiary);
   cursor: not-allowed;
 }
 /* Mix the accent INTO an opaque fill (not transparent) so the
  * glass-surface invariant holds — same gray-with-accent-hint pattern
  * the destructive-button-disabled fix used (slice-4 review fix item 4). */
 [data-slot="switch"][data-disabled][data-checked] {
-  background-color: color-mix(in oklch, var(--zs-accent) 45%, var(--zs-fill-secondary));
+  background-color: color-mix(in oklch, var(--zeroship-accent) 45%, var(--zeroship-fill-secondary));
 }
 
 /* ─── readonly ──────────────────────────────────────────────────────── *
@@ -188,14 +188,14 @@
   cursor: default;
 }
 [data-slot="switch"][data-readonly]:not([data-checked]) {
-  background-color: var(--zs-selection-bg-readonly);
+  background-color: var(--zeroship-selection-bg-readonly);
 }
 [data-slot="switch"][data-readonly][data-checked] {
-  background-color: var(--zs-selection-bg-readonly);
-  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent);
+  background-color: var(--zeroship-selection-bg-readonly);
+  box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent);
 }
 [data-slot="switch"][data-readonly][data-checked] [data-slot="switch-thumb"] {
-  background-color: var(--zs-accent);
+  background-color: var(--zeroship-accent);
 }
 
 /* ─── thumb ─────────────────────────────────────────────────────────── *
@@ -211,53 +211,53 @@
  */
 [data-slot="switch-thumb"] {
   position: absolute;
-  inset-block-start: var(--zs-switch-inset);
-  inset-inline-start: var(--zs-switch-inset);
-  inline-size: var(--zs-switch-thumb-md);
-  block-size: var(--zs-switch-thumb-md);
-  border-radius: var(--zs-radius-full);
-  background-color: var(--zs-switch-thumb-bg);
-  box-shadow: var(--zs-switch-thumb-shadow);
+  inset-block-start: var(--zeroship-switch-inset);
+  inset-inline-start: var(--zeroship-switch-inset);
+  inline-size: var(--zeroship-switch-thumb-md);
+  block-size: var(--zeroship-switch-thumb-md);
+  border-radius: var(--zeroship-radius-full);
+  background-color: var(--zeroship-switch-thumb-bg);
+  box-shadow: var(--zeroship-switch-thumb-shadow);
   transition:
-    translate var(--zs-motion-fast) var(--zs-motion-ease),
-    inline-size var(--zs-motion-fast) var(--zs-motion-ease);
+    translate var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    inline-size var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="switch"][data-size="sm"] [data-slot="switch-thumb"] {
-  inline-size: var(--zs-switch-thumb-sm);
-  block-size: var(--zs-switch-thumb-sm);
+  inline-size: var(--zeroship-switch-thumb-sm);
+  block-size: var(--zeroship-switch-thumb-sm);
 }
 [data-slot="switch"][data-size="lg"] [data-slot="switch-thumb"] {
-  inline-size: var(--zs-switch-thumb-lg);
-  block-size: var(--zs-switch-thumb-lg);
+  inline-size: var(--zeroship-switch-thumb-lg);
+  block-size: var(--zeroship-switch-thumb-lg);
 }
 
 /*
  * The translation amount: track width − thumb size − 2 × inset, applied
  * along the INLINE axis. CSS `translate` on a logical axis isn't a
- * thing yet, so we set the value once via `--zs-switch-thumb-offset`
+ * thing yet, so we set the value once via `--zeroship-switch-thumb-offset`
  * and let two direction-conditional rules apply the correct sign —
  * LTR moves positive (toward the end / right), RTL moves negative
  * (toward the end / left).
  */
 [data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
   /* md track: 2rem − 0.875rem − 2·0.125rem = 0.875rem */
-  --zs-switch-thumb-offset: calc(
-    var(--zs-switch-track-w-md) - var(--zs-switch-thumb-md) - (2 * var(--zs-switch-inset))
+  --zeroship-switch-thumb-offset: calc(
+    var(--zeroship-switch-track-w-md) - var(--zeroship-switch-thumb-md) - (2 * var(--zeroship-switch-inset))
   );
-  translate: var(--zs-switch-thumb-offset) 0;
+  translate: var(--zeroship-switch-thumb-offset) 0;
 }
 [data-slot="switch"][data-size="sm"][data-checked] [data-slot="switch-thumb"] {
-  --zs-switch-thumb-offset: calc(
-    var(--zs-switch-track-w-sm) - var(--zs-switch-thumb-sm) - (2 * var(--zs-switch-inset))
+  --zeroship-switch-thumb-offset: calc(
+    var(--zeroship-switch-track-w-sm) - var(--zeroship-switch-thumb-sm) - (2 * var(--zeroship-switch-inset))
   );
-  translate: var(--zs-switch-thumb-offset) 0;
+  translate: var(--zeroship-switch-thumb-offset) 0;
 }
 [data-slot="switch"][data-size="lg"][data-checked] [data-slot="switch-thumb"] {
-  --zs-switch-thumb-offset: calc(
-    var(--zs-switch-track-w-lg) - var(--zs-switch-thumb-lg) - (2 * var(--zs-switch-inset))
+  --zeroship-switch-thumb-offset: calc(
+    var(--zeroship-switch-track-w-lg) - var(--zeroship-switch-thumb-lg) - (2 * var(--zeroship-switch-inset))
   );
-  translate: var(--zs-switch-thumb-offset) 0;
+  translate: var(--zeroship-switch-thumb-offset) 0;
 }
 
 /*
@@ -269,7 +269,7 @@
  */
 [dir="rtl"] [data-slot="switch"][data-checked] [data-slot="switch-thumb"],
 [data-slot="switch"][dir="rtl"][data-checked] [data-slot="switch-thumb"] {
-  translate: calc(-1 * var(--zs-switch-thumb-offset)) 0;
+  translate: calc(-1 * var(--zeroship-switch-thumb-offset)) 0;
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
@@ -317,7 +317,7 @@
    * checked at line 174, readonly-unchecked at line 190, readonly-checked
    * at lines 193+197) WIN inside forced-colors mode because they have
    * more selectors than the bare `.zs-switch[data-checked]` rule above,
-   * and `background-color: var(--zs-…)` would override the `Highlight`/
+   * and `background-color: var(--zeroship-…)` would override the `Highlight`/
    * `Canvas`/`GrayText` system colors. Mirror each higher-specificity
    * rule with the matching forced-colors paint so the system-color
    * surface always wins.

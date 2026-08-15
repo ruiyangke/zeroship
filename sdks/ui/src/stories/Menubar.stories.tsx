@@ -107,7 +107,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic menubar">
+    <div className="zeroship-story-row" role="group" aria-label="Basic menubar">
       <Menubar data-testid="menubar-basic">
         <Menu>
           <MenubarMenuTrigger label="File" testId="menubar-basic-file" />
@@ -177,7 +177,7 @@ export const WithSubmenus: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With submenus">
+    <div className="zeroship-story-row" role="group" aria-label="With submenus">
       <Menubar data-testid="menubar-submenus">
         <Menu>
           <MenubarMenuTrigger label="File" testId="menubar-submenus-file" />
@@ -253,7 +253,7 @@ export const WithCheckboxItem: Story = {
     const [showGrid, setShowGrid] = useState(false);
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="With checkbox items"
       >
@@ -318,7 +318,7 @@ export const WithRadioGroup: Story = {
   render: function RadioStory() {
     const [theme, setTheme] = useState<string>("system");
     return (
-      <div className="zs-story-row" role="group" aria-label="With radio group">
+      <div className="zeroship-story-row" role="group" aria-label="With radio group">
         <Menubar data-testid="menubar-radio">
           <Menu>
             <MenubarMenuTrigger label="Theme" testId="menubar-radio-theme" />
@@ -382,7 +382,7 @@ export const KeyboardNav: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Keyboard navigation">
+    <div className="zeroship-story-row" role="group" aria-label="Keyboard navigation">
       <Menubar data-testid="menubar-keyboard">
         <Menu>
           <MenubarMenuTrigger label="File" testId="menubar-keyboard-file" />
@@ -454,7 +454,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled trigger">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled trigger">
       <Menubar data-testid="menubar-disabled">
         <Menu>
           <MenubarMenuTrigger label="File" testId="menubar-disabled-file" />
@@ -511,7 +511,7 @@ export const WithIcons: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With icons">
+    <div className="zeroship-story-row" role="group" aria-label="With icons">
       <Menubar data-testid="menubar-icons">
         <Menu>
           <MenubarMenuTrigger label="File" testId="menubar-icons-file" />
@@ -571,7 +571,7 @@ export const RoleLock: Story = {
     const bypass = { role: "presentation" } as Record<string, unknown>;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Menubar role lock"
       >
@@ -639,7 +639,7 @@ export const RenderInjectionLock: Story = {
     } as Record<string, unknown>;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Menubar render injection"
       >
@@ -700,7 +700,7 @@ export const NonModalDefault: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Menubar modal default"
     >
@@ -785,7 +785,7 @@ export const AriaOrientationLock: Story = {
     >;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Menubar aria-orientation lock"
       >
@@ -829,7 +829,7 @@ export const Rtl: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL menubar"
       dir="rtl"
@@ -860,7 +860,7 @@ export const Vertical: Story = {
   name: "Vertical orientation",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical menubar"
     >
@@ -916,7 +916,7 @@ export const RootDisabled: Story = {
   name: "Root disabled",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Root disabled menubar"
     >

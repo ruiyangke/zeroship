@@ -90,7 +90,7 @@ export function createTooltipHandle<
   Payload = unknown,
 >(): TooltipHandle<Payload> {
   const handle = BaseTooltip.createHandle<Payload>() as TooltipHandle<Payload>;
-  const id = `zs-tooltip-${Math.random().toString(36).slice(2, 10)}`;
+  const id = `zeroship-tooltip-${Math.random().toString(36).slice(2, 10)}`;
   Object.defineProperty(handle, "popupId", {
     value: id,
     writable: false,

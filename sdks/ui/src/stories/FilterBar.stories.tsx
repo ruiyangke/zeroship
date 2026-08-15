@@ -61,7 +61,7 @@ export const Default: Story = {
       { id: "owner", label: "Owner: Me", onRemove: removeOwnerSpy },
     ];
     return (
-      <div style={{ padding: "var(--zs-space-4)" }}>
+      <div style={{ padding: "var(--zeroship-space-4)" }}>
         <FilterBar
           {...args}
           data-testid="filter-bar"
@@ -129,7 +129,7 @@ export const SearchOnly: Story = {
   render: (args) => {
     const [value, setValue] = useState("");
     return (
-      <div style={{ padding: "var(--zs-space-4)" }}>
+      <div style={{ padding: "var(--zeroship-space-4)" }}>
         <FilterBar
           {...args}
           data-testid="filter-bar"
@@ -176,7 +176,7 @@ export const FiltersOnly: Story = {
       { id: "color", label: "Color: Blue", onRemove: fn() },
     ];
     return (
-      <div style={{ padding: "var(--zs-space-4)" }}>
+      <div style={{ padding: "var(--zeroship-space-4)" }}>
         <FilterBar
           {...args}
           data-testid="filter-bar"
@@ -215,7 +215,7 @@ export const Empty: Story = {
     },
   },
   render: () => (
-    <div style={{ padding: "var(--zs-space-4)" }}>
+    <div style={{ padding: "var(--zeroship-space-4)" }}>
       <FilterBar data-testid="filter-bar" />
     </div>
   ),

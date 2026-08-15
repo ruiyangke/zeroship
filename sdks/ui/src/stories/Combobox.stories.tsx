@@ -42,8 +42,8 @@ export const Basic: Story = {
   render: function BasicRender() {
     const [value, setValue] = useState<string | null>(null);
     return (
-      <div className="zs-story-row" role="group" aria-label="Basic">
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Basic">
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Combobox
             value={value}
             onValueChange={(v) => setValue(v)}
@@ -104,8 +104,8 @@ export const Multiple: Story = {
   render: function MultipleRender() {
     const [value, setValue] = useState<string[]>(["apple", "orange"]);
     return (
-      <div className="zs-story-row" role="group" aria-label="Multiple">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Multiple">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Combobox
             multiple
             value={value}
@@ -165,14 +165,14 @@ export const AllSizes: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
       {(["sm", "md", "lg"] as const).map((size) => (
-        <div className="zs-story-cell" key={size} style={{ minWidth: "16rem" }}>
-          <span className="zs-story-label">{size.toUpperCase()}</span>
+        <div className="zeroship-story-cell" key={size} style={{ minWidth: "16rem" }}>
+          <span className="zeroship-story-label">{size.toUpperCase()}</span>
           <Combobox
             size={size}
             placeholder="Type"
@@ -205,13 +205,13 @@ export const AllVariants: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All variants"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
-        <span className="zs-story-label">Default</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Default</span>
         <Combobox
           variant="default"
           placeholder="Default"
@@ -225,8 +225,8 @@ export const AllVariants: Story = {
           )}
         </Combobox>
       </div>
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
-        <span className="zs-story-label">Outline</span>
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
+        <span className="zeroship-story-label">Outline</span>
         <Combobox
           variant="outline"
           placeholder="Outline"
@@ -260,8 +260,8 @@ export const Empty: Story = {
   render: function EmptyRender() {
     const [value, setValue] = useState<string | null>(null);
     return (
-      <div className="zs-story-row" role="group" aria-label="Empty">
-        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Empty">
+        <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
           <Combobox
             value={value}
             onValueChange={(v) => setValue(v)}
@@ -310,8 +310,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Favorite fruit</Field.Label>
           <Combobox
@@ -347,8 +347,8 @@ export const Required: Story = {
   },
   render: function RequiredRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Required">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Form onSubmit={(e) => e.preventDefault()}>
             <Field required>
               <Field.Label>
@@ -412,8 +412,8 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required combobox (invalid)">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required combobox (invalid)">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Form onSubmit={(e) => e.preventDefault()} data-testid="combobox-required-invalid-form">
             <Field required>
               <Field.Label>
@@ -464,8 +464,8 @@ export const LongList: Story = {
   render: () => {
     const items = Array.from({ length: 100 }, (_, i) => `option-${i + 1}`);
     return (
-      <div className="zs-story-row" role="group" aria-label="Long list">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Long list">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Combobox
             placeholder="Type to filter"
             items={items}
@@ -495,8 +495,8 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Combobox
           disabled
           placeholder="Disabled"
@@ -537,8 +537,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL">
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL">
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Combobox
           placeholder="הקלד פרי"
           items={["תפוח", "תפוז", "בננה", "לימון"]}
@@ -575,11 +575,11 @@ export const AriaPropagation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Aria propagation"
     >
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Combobox
           placeholder="Type a fruit"
           items={FRUITS as unknown as string[]}
@@ -628,11 +628,11 @@ export const FieldAriaAutowiring: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field aria autowiring"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Favorite fruit (field-wired)</Field.Label>
           <Combobox
@@ -698,11 +698,11 @@ export const PlaceholderFallback: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placeholder fallback"
     >
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Combobox
           placeholder="Search fruits"
           items={FRUITS as unknown as string[]}

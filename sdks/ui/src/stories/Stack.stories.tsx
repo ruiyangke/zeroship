@@ -9,10 +9,10 @@ const box = (label: string) => (
   <div
     key={label}
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-3)",
-      borderRadius: "var(--zs-radius-2)",
-      minInlineSize: "var(--zs-space-10)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-3)",
+      borderRadius: "var(--zeroship-radius-2)",
+      minInlineSize: "var(--zeroship-space-10)",
       textAlign: "center",
     }}
   >
@@ -38,7 +38,7 @@ export const Column: Story = {
       description: {
         story:
           "Default `direction=\"column\"` stacks children vertically. " +
-          "`gap` comes from the `--zs-space-*` scale — no arbitrary spacing.",
+          "`gap` comes from the `--zeroship-space-*` scale — no arbitrary spacing.",
       },
     },
   },
@@ -101,7 +101,7 @@ export const AlignJustify: Story = {
       align="center"
       justify="between"
       data-testid="stack-align"
-      style={{ minBlockSize: "var(--zs-space-10)" }}
+      style={{ minBlockSize: "var(--zeroship-space-10)" }}
     >
       {box("Start")}
       {box("End")}
@@ -127,7 +127,7 @@ export const Wrap: Story = {
       gap={2}
       wrap
       data-testid="stack-wrap"
-      style={{ maxInlineSize: "var(--zs-container-sm)" }}
+      style={{ maxInlineSize: "var(--zeroship-container-sm)" }}
     >
       {Array.from({ length: 8 }, (_, i) => box(`Item ${i + 1}`))}
     </Stack>
@@ -179,9 +179,9 @@ export const RowChildContained: Story = {
         <div
           style={{
             margin: 0,
-            background: "var(--zs-fill-secondary)",
-            padding: "var(--zs-space-3)",
-            borderRadius: "var(--zs-radius-2)",
+            background: "var(--zeroship-fill-secondary)",
+            padding: "var(--zeroship-space-3)",
+            borderRadius: "var(--zeroship-radius-2)",
           }}
         >
           A very long sentence of ordinary breakable words that would

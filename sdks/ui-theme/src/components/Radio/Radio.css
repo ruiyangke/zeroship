@@ -46,38 +46,38 @@
 
 /* ─── component-local tokens ────────────────────────────────────────── */
 [data-slot="radio"] {
-  /* Derived from --zs-control-h-{sm,md,lg} (half-height) so the chip
+  /* Derived from --zeroship-control-h-{sm,md,lg} (half-height) so the chip
      scales with the Input rhythm rather than living as a separate
      hand-tuned scale — slice-4 visual-polish item 5. Earlier the chip
      sizes were three nearly-identical hand-tuned values and the
      family read as one control with a slightly bigger chip; codex
      flagged the lack of clear visual differentiation. */
-  --zs-radio-size-sm: calc(var(--zs-control-h-sm) / 2);   /* 1rem */
-  --zs-radio-size-md: calc(var(--zs-control-h-md) / 2);   /* 1.25rem (default) */
-  --zs-radio-size-lg: calc(var(--zs-control-h-lg) / 2);   /* 1.5rem */
+  --zeroship-radio-size-sm: calc(var(--zeroship-control-h-sm) / 2);   /* 1rem */
+  --zeroship-radio-size-md: calc(var(--zeroship-control-h-md) / 2);   /* 1.25rem (default) */
+  --zeroship-radio-size-lg: calc(var(--zeroship-control-h-lg) / 2);   /* 1.5rem */
 
-  --zs-radio-bg: var(--zs-input-bg);
-  --zs-radio-bg-hover: var(--zs-input-bg-hover);
-  --zs-radio-border: var(--zs-input-border);
-  --zs-radio-border-hover: var(--zs-input-border-hover);
-  --zs-radio-fill-checked: var(--zs-accent);
-  --zs-radio-border-checked: var(--zs-accent);
-  --zs-radio-dot: var(--zs-accent-ink);
+  --zeroship-radio-bg: var(--zeroship-input-bg);
+  --zeroship-radio-bg-hover: var(--zeroship-input-bg-hover);
+  --zeroship-radio-border: var(--zeroship-input-border);
+  --zeroship-radio-border-hover: var(--zeroship-input-border-hover);
+  --zeroship-radio-fill-checked: var(--zeroship-accent);
+  --zeroship-radio-border-checked: var(--zeroship-accent);
+  --zeroship-radio-dot: var(--zeroship-accent-ink);
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
 [data-slot="radio-group"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   min-inline-size: 0;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 [data-slot="radio-group"][data-orientation="horizontal"] {
   flex-direction: row;
   flex-wrap: wrap;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
   align-items: center;
 }
 
@@ -88,16 +88,16 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-radio-size-md);
-  block-size: var(--zs-radio-size-md);
-  border-radius: var(--zs-radius-full);
-  background-color: var(--zs-radio-bg);
+  inline-size: var(--zeroship-radio-size-md);
+  block-size: var(--zeroship-radio-size-md);
+  border-radius: var(--zeroship-radius-full);
+  background-color: var(--zeroship-radio-bg);
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-radio-border),
+    inset 0 0 0 0.0625rem var(--zeroship-radio-border),
     0 0 0 0 transparent;
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   cursor: pointer;
 }
 
@@ -113,76 +113,76 @@
   inset-block-start: 50%;
   inset-inline-start: 50%;
   translate: -50% -50%;
-  min-inline-size: var(--zs-hit-target, 1.75rem);
-  min-block-size: var(--zs-hit-target, 1.75rem);
+  min-inline-size: var(--zeroship-hit-target, 1.75rem);
+  min-block-size: var(--zeroship-hit-target, 1.75rem);
   inline-size: 100%;
   block-size: 100%;
   pointer-events: auto;
 }
 @media (pointer: coarse) {
   [data-slot="radio"]::before {
-    --zs-hit-target: var(--zs-hit-min);
+    --zeroship-hit-target: var(--zeroship-hit-min);
   }
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
 [data-slot="radio"][data-size="sm"] {
-  inline-size: var(--zs-radio-size-sm);
-  block-size: var(--zs-radio-size-sm);
+  inline-size: var(--zeroship-radio-size-sm);
+  block-size: var(--zeroship-radio-size-sm);
 }
 [data-slot="radio"][data-size="lg"] {
-  inline-size: var(--zs-radio-size-lg);
-  block-size: var(--zs-radio-size-lg);
+  inline-size: var(--zeroship-radio-size-lg);
+  block-size: var(--zeroship-radio-size-lg);
 }
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
   [data-slot="radio"]:not([data-disabled]):not([data-checked]):hover {
-    background-color: var(--zs-radio-bg-hover);
+    background-color: var(--zeroship-radio-bg-hover);
     box-shadow:
-      inset 0 0 0 0.0625rem var(--zs-radio-border-hover),
+      inset 0 0 0 0.0625rem var(--zeroship-radio-border-hover),
       0 0 0 0 transparent;
   }
 }
 
 /* ─── checked: thicker accent ring + inner dot ──────────────────────── */
 [data-slot="radio"][data-checked] {
-  background-color: var(--zs-radio-bg);
+  background-color: var(--zeroship-radio-bg);
   box-shadow:
-    inset 0 0 0 0.125rem var(--zs-radio-border-checked),
+    inset 0 0 0 0.125rem var(--zeroship-radio-border-checked),
     0 0 0 0 transparent;
 }
 
 /* ─── focus ring on the chip itself ─────────────────────────────────── */
 [data-slot="radio"]:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
 [data-slot="radio"][data-disabled] {
-  background-color: var(--zs-input-bg-disabled);
+  background-color: var(--zeroship-input-bg-disabled);
   cursor: not-allowed;
   box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-radio-border),
+    inset 0 0 0 0.0625rem var(--zeroship-radio-border),
     0 0 0 0 transparent;
 }
-/* Disabled-selected ring + dot lean on `--zs-label-quaternary` so the
+/* Disabled-selected ring + dot lean on `--zeroship-label-quaternary` so the
  * "yes, this WAS selected" signal still reads at glance instead of
  * disappearing into the disabled chip. Earlier the disabled-selected
- * Radio used `--zs-fill-secondary` and codex measured the ring + dot
+ * Radio used `--zeroship-fill-secondary` and codex measured the ring + dot
  * landing visually weaker than the disabled-selected Checkbox / Switch
  * — the family's three disabled-selected states should be
  * approximately balanced. Slice-4 visual-polish item 4.
  *
- * Contingency (item 4 of the visual-polish brief): if `--zs-label-
+ * Contingency (item 4 of the visual-polish brief): if `--zeroship-label-
  * quaternary` still reads too faint after capture, escalate one step
- * to `--zs-label-tertiary` (the same strength the disabled Checkbox
+ * to `--zeroship-label-tertiary` (the same strength the disabled Checkbox
  * glyph uses). The escalation is local to this rule and the dot
  * rule below. */
 [data-slot="radio"][data-disabled][data-checked] {
   box-shadow:
-    inset 0 0 0 0.125rem var(--zs-label-quaternary),
+    inset 0 0 0 0.125rem var(--zeroship-label-quaternary),
     0 0 0 0 transparent;
 }
 
@@ -196,16 +196,16 @@
   cursor: default;
 }
 [data-slot="radio"][data-readonly]:not([data-checked]) {
-  background-color: var(--zs-selection-bg-readonly);
+  background-color: var(--zeroship-selection-bg-readonly);
 }
 [data-slot="radio"][data-readonly][data-checked] {
-  background-color: var(--zs-selection-bg-readonly);
+  background-color: var(--zeroship-selection-bg-readonly);
   box-shadow:
-    inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent),
+    inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent),
     0 0 0 0 transparent;
 }
 [data-slot="radio"][data-readonly][data-checked] [data-slot="radio-indicator"] {
-  background-color: var(--zs-accent);
+  background-color: var(--zeroship-accent);
 }
 
 /* ─── the inner dot ─────────────────────────────────────────────────── *
@@ -218,25 +218,25 @@
   display: inline-block;
   inline-size: 50%;
   block-size: 50%;
-  border-radius: var(--zs-radius-full);
-  background-color: var(--zs-radio-fill-checked);
+  border-radius: var(--zeroship-radius-full);
+  background-color: var(--zeroship-radio-fill-checked);
   transform-origin: center;
   scale: 0;
   transition:
-    scale var(--zs-motion-fast) var(--zs-motion-ease),
-    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+    scale var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 [data-slot="radio"][data-checked] [data-slot="radio-indicator"] {
   scale: 1;
 }
 /* Same strengthening as the disabled-selected ring above — the dot
- * now sits on --zs-label-quaternary (matched to the ring) instead of
- * --zs-fill-secondary, which was the faintest of the three primitives'
- * disabled-selected indicators. Contingency: escalate to --zs-label-
+ * now sits on --zeroship-label-quaternary (matched to the ring) instead of
+ * --zeroship-fill-secondary, which was the faintest of the three primitives'
+ * disabled-selected indicators. Contingency: escalate to --zeroship-label-
  * tertiary in lockstep with the ring if capture shows it still too
  * faint. Slice-4 visual-polish item 4. */
 [data-slot="radio"][data-disabled] [data-slot="radio-indicator"] {
-  background-color: var(--zs-label-quaternary);
+  background-color: var(--zeroship-label-quaternary);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
@@ -258,7 +258,7 @@
  * brand tokens. Slice-8 review red #1: the pre-fix block only mirrored
  * base/checked/disabled selectors — the hover + readonly + readonly-
  * checked rules outranked the unconditional `.zs-radio` reset on
- * specificity and leaked `--zs-*` tokens through. */
+ * specificity and leaked `--zeroship-*` tokens through. */
 @media (forced-colors: active) {
   [data-slot="radio"] {
     background-color: Canvas;

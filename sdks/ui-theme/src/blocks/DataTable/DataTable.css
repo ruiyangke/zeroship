@@ -18,10 +18,10 @@
  *                                              | td.zs-data-table__state-cell
  *     div.zs-data-table__footer   (composes the Pagination block)
  *
- * Tokens: header bg --zs-fill-secondary over the opaque table surface;
- * row separators --zs-separator; text --zs-label / header
- * --zs-label-secondary; selected-row tint an OPAQUE color-mix toward
- * --zs-surface (glass rule); hover --zs-fill-quaternary. Density changes
+ * Tokens: header bg --zeroship-fill-secondary over the opaque table surface;
+ * row separators --zeroship-separator; text --zeroship-label / header
+ * --zeroship-label-secondary; selected-row tint an OPAQUE color-mix toward
+ * --zeroship-surface (glass rule); hover --zeroship-fill-quaternary. Density changes
  * cell padding only. No raw hex/px; logical properties throughout.
  *
  * Motion: row-hover tint is a color transition only, dropped under
@@ -52,8 +52,8 @@
 /* ─── toolbar ─────────────────────────────────────────────────────────── */
 [data-slot="data-table-toolbar"] {
   inline-size: 100%;
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-1);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-1);
 }
 
 [data-slot="data-table-toolbar-start"] {
@@ -61,9 +61,9 @@
 }
 
 [data-slot="data-table-title"] {
-  color: var(--zs-label);
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
   font-weight: 600;
 }
 
@@ -74,8 +74,8 @@
 
 /* ─── footer ──────────────────────────────────────────────────────────── */
 [data-slot="data-table-footer"] {
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-1);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-1);
 }
 
 [data-slot="data-table-table"] {
@@ -83,15 +83,15 @@
      (the glass-contrast invariant: cell text + the default EmptyState
      composite on a KNOWN surface, never on the consumer's page mesh).
      The empty/error description text clears AA against this surface
-     because EmptyState/ErrorState use `--zs-label-secondary` (see their
+     because EmptyState/ErrorState use `--zeroship-label-secondary` (see their
      CSS) — the earlier transparent-root workaround that masked a
      below-floor tertiary description is gone. */
-  background: var(--zs-surface);
+  background: var(--zeroship-surface);
   inline-size: 100%;
   border-collapse: collapse;
-  color: var(--zs-label);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  color: var(--zeroship-label);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   text-align: start;
 }
 
@@ -99,36 +99,36 @@
 [data-slot="data-table-caption"] {
   caption-side: top;
   text-align: start;
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-3);
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-3);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 500;
 }
 
 /* ─── header ──────────────────────────────────────────────────────── */
 [data-slot="data-table-table"] thead th {
   /* Opaque header band computed as a single `background-color`: mix the
-     translucent --zs-fill-secondary INTO the opaque table surface so the
+     translucent --zeroship-fill-secondary INTO the opaque table surface so the
      result is a flat opaque color (no gradient/filter behind text). axe's
      contrast walk only sees an opaque `background-color`; a
      `background-image` gradient layer would defeat it. The sticky header
      scrolls rows under it, so it must stay opaque. */
   background-color: color-mix(
     in oklab,
-    var(--zs-fill-secondary),
-    var(--zs-surface)
+    var(--zeroship-fill-secondary),
+    var(--zeroship-surface)
   );
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   font-weight: 600;
   text-align: start;
   vertical-align: middle;
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
-  padding-block: var(--zs-space-2);
-  padding-inline: var(--zs-space-3);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
+  padding-block: var(--zeroship-space-2);
+  padding-inline: var(--zeroship-space-3);
 }
 
 [data-slot="data-table-column-header"][data-align="center"],
@@ -151,7 +151,7 @@
   appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   margin: 0;
   padding: 0;
   border: 0;
@@ -162,7 +162,7 @@
   letter-spacing: inherit;
   text-align: inherit;
   cursor: pointer;
-  border-radius: var(--zs-radius-1);
+  border-radius: var(--zeroship-radius-1);
 }
 
 [data-slot="data-table-column-header"][data-align="center"] [data-slot="data-table-sort-button"] {
@@ -173,13 +173,13 @@
 }
 
 [data-slot="data-table-sort-button"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 @media (hover: hover) {
   [data-slot="data-table-sort-button"]:hover {
-    color: var(--zs-label);
+    color: var(--zeroship-label);
   }
 }
 
@@ -190,7 +190,7 @@
   flex: none;
   inline-size: 0.75em;
   block-size: 0.75em;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* The governed Icon fills the wrapper (which owns the 0.75em footprint),
@@ -206,15 +206,15 @@
    distinguishes the three states; color reinforces active vs. inactive. */
 [data-slot="data-table-sort-glyph"][data-state="ascending"],
 [data-slot="data-table-sort-glyph"][data-state="descending"] {
-  color: var(--zs-accent);
+  color: var(--zeroship-accent);
 }
 
 /* ─── body cells ──────────────────────────────────────────────────── */
 :is([data-slot="data-table-cell"], [data-slot="data-table-td"]) {
-  padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-3);
+  padding-block: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-3);
   vertical-align: middle;
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
 [data-slot="data-table-table"] tbody tr:last-child :is([data-slot="data-table-cell"], [data-slot="data-table-td"]),
@@ -228,29 +228,29 @@
   /* Just wide enough for the chip + its hit-rect; the colgroup <col>
      also pins this so the column doesn't stretch with content. */
   inline-size: 3rem;
-  padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-3);
+  padding-block: var(--zeroship-space-3);
+  padding-inline: var(--zeroship-space-3);
   text-align: center;
   vertical-align: middle;
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
 [data-slot="data-table-table"] thead :is([data-slot="data-table-select-cell"], [data-slot="data-table-select-header"]) {
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
 /* ─── density ─────────────────────────────────────────────────────── */
 [data-slot="data-table-table"][data-density="compact"] :is([data-slot="data-table-cell"], [data-slot="data-table-td"]),
 [data-slot="data-table-table"][data-density="compact"] :is([data-slot="data-table-select-cell"], [data-slot="data-table-select-header"]),
 [data-slot="data-table-table"][data-density="compact"] thead th {
-  padding-block: var(--zs-space-2);
+  padding-block: var(--zeroship-space-2);
 }
 
 /* ─── row hover + selected ────────────────────────────────────────── */
 @media (hover: hover) {
   [data-slot="data-table-table"] tbody tr[data-slot="data-table-row"]:hover {
-    background-color: var(--zs-fill-quaternary);
-    transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color: var(--zeroship-fill-quaternary);
+    transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
   }
 }
 
@@ -258,27 +258,27 @@
    on a translucent overlay (glass rule). A leading inline-start marker
    reinforces selection beyond color alone. */
 [data-slot="data-table-table"] tbody tr[data-selected] {
-  background-color: color-mix(in oklab, var(--zs-accent) 12%, var(--zs-surface));
+  background-color: color-mix(in oklab, var(--zeroship-accent) 12%, var(--zeroship-surface));
 }
 
 [data-slot="data-table-table"] tbody tr[data-selected] > *:first-child {
-  box-shadow: inset var(--zs-space-1) 0 0 0 var(--zs-accent);
+  box-shadow: inset var(--zeroship-space-1) 0 0 0 var(--zeroship-accent);
 }
 
 @media (hover: hover) {
   [data-slot="data-table-table"] tbody tr[data-selected]:hover {
     background-color: color-mix(
       in oklab,
-      var(--zs-accent) 18%,
-      var(--zs-surface)
+      var(--zeroship-accent) 18%,
+      var(--zeroship-surface)
     );
   }
 }
 
 /* ─── state cell (empty / loading / error full-span) ──────────────── */
 [data-slot="data-table-state-cell"] {
-  padding-block: var(--zs-space-6);
-  padding-inline: var(--zs-space-3);
+  padding-block: var(--zeroship-space-6);
+  padding-inline: var(--zeroship-space-3);
   text-align: center;
   border-block-end: 0;
 }
@@ -306,18 +306,18 @@
  * sort caret falls back to Highlight. */
 @media (forced-colors: active) {
   [data-slot="data-table-table"] thead th {
-    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+    border-block-end: var(--zeroship-selection-hairline) solid CanvasText;
   }
   :is([data-slot="data-table-cell"], [data-slot="data-table-td"]),
   :is([data-slot="data-table-select-cell"], [data-slot="data-table-select-header"]) {
-    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+    border-block-end: var(--zeroship-selection-hairline) solid CanvasText;
   }
   [data-slot="data-table-table"] tbody tr[data-selected] {
     background-color: Highlight;
     color: HighlightText;
   }
   [data-slot="data-table-table"] tbody tr[data-selected] > *:first-child {
-    box-shadow: inset var(--zs-space-1) 0 0 0 Highlight;
+    box-shadow: inset var(--zeroship-space-1) 0 0 0 Highlight;
   }
   /* Active sort falls back to Highlight; the glyph SHAPE (ChevronUp vs
      ChevronDown, vs the ChevronsUpDown pair when unsorted) keeps the
@@ -333,12 +333,12 @@
 [data-slot="data-table-filter-row"] th {
   background-color: color-mix(
     in oklab,
-    var(--zs-fill-secondary),
-    var(--zs-surface)
+    var(--zeroship-fill-secondary),
+    var(--zeroship-surface)
   );
-  padding-block: var(--zs-space-1);
-  padding-inline: var(--zs-space-2);
-  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  padding-block: var(--zeroship-space-1);
+  padding-inline: var(--zeroship-space-2);
+  border-block-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
   vertical-align: middle;
 }
 
@@ -347,7 +347,7 @@
      stack; the header sits at 0, the filter row offsets by the header's
      intrinsic block-size (it stays glued beneath it as content scrolls). */
   position: sticky;
-  inset-block-start: var(--zs-data-table-header-offset, 2.5rem);
+  inset-block-start: var(--zeroship-data-table-header-offset, 2.5rem);
   z-index: 1;
 }
 
@@ -362,12 +362,12 @@
 [data-slot="data-table-bool"] {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-1);
-  color: var(--zs-label-secondary);
+  gap: var(--zeroship-space-1);
+  color: var(--zeroship-label-secondary);
 }
 
 [data-slot="data-table-bool"][data-value="true"] {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 
 /* The governed Icon carries this class on its svg. Scope under the bool
@@ -381,11 +381,11 @@
 }
 
 [data-slot="data-table-bool-glyph"][data-value="true"] {
-  color: var(--zs-system-green);
+  color: var(--zeroship-system-green);
 }
 
 [data-slot="data-table-bool-glyph"][data-value="false"] {
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
 }
 
 [data-slot="data-table-bool-label"] {
@@ -394,9 +394,9 @@
 
 /* link cell: accent text, underline on hover/focus; ring from focus-visible. */
 [data-slot="data-table-link"] {
-  color: var(--zs-accent);
+  color: var(--zeroship-accent);
   text-decoration: none;
-  border-radius: var(--zs-radius-1);
+  border-radius: var(--zeroship-radius-1);
 }
 
 @media (hover: hover) {
@@ -406,8 +406,8 @@
 }
 
 [data-slot="data-table-link"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
   text-decoration: underline;
 }
 
@@ -420,7 +420,7 @@
 }
 
 [data-slot="data-table-row-actions-trigger"] {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 
 [data-slot="data-table-row-actions-trigger"] svg {
@@ -430,7 +430,7 @@
 
 /* danger row-action: destructive ink on the menu item. */
 [data-slot="data-table-row-action-danger"] {
-  color: var(--zs-system-red);
+  color: var(--zeroship-system-red);
 }
 
 /* ─── cell truncation ─────────────────────────────────────────────────
@@ -447,7 +447,7 @@
 
 [data-slot="data-table-truncate"] {
   display: block;
-  min-inline-size: var(--zs-data-table-cell-min, 0);
+  min-inline-size: var(--zeroship-data-table-cell-min, 0);
   max-inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -462,7 +462,7 @@
 /* ─── forced-colors: rich-cell affordances ────────────────────────────── */
 @media (forced-colors: active) {
   [data-slot="data-table-filter-row"] th {
-    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+    border-block-end: var(--zeroship-selection-hairline) solid CanvasText;
   }
   [data-slot="data-table-bool-glyph"],
   [data-slot="data-table-bool"] {

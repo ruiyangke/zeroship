@@ -4,12 +4,12 @@
  * Anatomy:
  *   .zs-skeleton                  — a single placeholder block
  *     --text   : text-line bar (block-size keyed to a body line)
- *     --rect   : rectangle, --zs-radius-2 corners
+ *     --rect   : rectangle, --zeroship-radius-2 corners
  *     --circle : full-radius circle, square aspect
  *   .zs-skeleton-lines            — container for multi-line text (N bars)
  *
- * Paint: a base fill (--zs-fill-tertiary) with a diagonal shimmer
- * sweep painted in --zs-fill-quaternary via a moving gradient. The base
+ * Paint: a base fill (--zeroship-fill-tertiary) with a diagonal shimmer
+ * sweep painted in --zeroship-fill-quaternary via a moving gradient. The base
  * fill is ALWAYS painted — the animation only moves the highlight, so
  * disabling it (reduced motion / forced colors) leaves a visible
  * placeholder.
@@ -24,21 +24,21 @@
   /* Base placeholder fill — always visible, even with motion off. One
      step lighter than secondary so the placeholder reads soft/warm
      rather than a cold high-contrast block. */
-  background-color: var(--zs-fill-tertiary);
+  background-color: var(--zeroship-fill-tertiary);
   /* Shimmer highlight: a band of the lighter fill sweeping across the
      base. background-size 200% lets the gradient translate fully. Kept
      one step below the base so the sweep stays a subtle lift. */
   background-image: linear-gradient(
     90deg,
     transparent 0%,
-    var(--zs-fill-quaternary) 50%,
+    var(--zeroship-fill-quaternary) 50%,
     transparent 100%
   );
   background-size: 200% 100%;
   background-repeat: no-repeat;
   background-position: 0% 0;
-  border-radius: var(--zs-radius-2);
-  animation: zs-skeleton-shimmer 1.6s var(--zs-motion-ease) infinite;
+  border-radius: var(--zeroship-radius-2);
+  animation: zeroship-skeleton-shimmer 1.6s var(--zeroship-motion-ease) infinite;
 }
 
 /* ─── variants ─────────────────────────────────────────────────────── */
@@ -46,15 +46,15 @@
   /* A single line of body text. Default inline-size fills the column;
      callers override via the `width` prop. */
   inline-size: 100%;
-  block-size: var(--zs-text-body-line);
-  border-radius: var(--zs-radius-1);
+  block-size: var(--zeroship-text-body-line);
+  border-radius: var(--zeroship-radius-1);
 }
 
 :is([data-slot="skeleton"], [data-slot="skeleton-line"])[data-variant="rect"] {
   /* Defaults; consumers pass width/height. A floor keeps an unsized
      rect visible. */
   inline-size: 100%;
-  block-size: var(--zs-space-10);
+  block-size: var(--zeroship-space-10);
 }
 
 :is([data-slot="skeleton"], [data-slot="skeleton-line"])[data-variant="circle"] {
@@ -64,17 +64,17 @@
      from the constrained one rather than locking to the default and
      producing an ellipse. `block-size: auto` lets the ratio drive height
      off the inline-size; the default inline-size covers the unsized case. */
-  inline-size: var(--zs-space-10);
+  inline-size: var(--zeroship-space-10);
   block-size: auto;
   aspect-ratio: 1;
-  border-radius: var(--zs-radius-full);
+  border-radius: var(--zeroship-radius-full);
 }
 
 /* ─── multi-line text ──────────────────────────────────────────────── */
 [data-slot="skeleton"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   inline-size: 100%;
 }
 
@@ -84,7 +84,7 @@
   inline-size: 50%;
 }
 
-@keyframes zs-skeleton-shimmer {
+@keyframes zeroship-skeleton-shimmer {
   from {
     background-position: 200% 0;
   }
@@ -96,9 +96,9 @@
 /* RTL — sweep the highlight the opposite direction so the motion reads
    with the writing direction. */
 :is([data-slot="skeleton"], [data-slot="skeleton-line"]):dir(rtl) {
-  animation-name: zs-skeleton-shimmer-rtl;
+  animation-name: zeroship-skeleton-shimmer-rtl;
 }
-@keyframes zs-skeleton-shimmer-rtl {
+@keyframes zeroship-skeleton-shimmer-rtl {
   from {
     background-position: -200% 0;
   }

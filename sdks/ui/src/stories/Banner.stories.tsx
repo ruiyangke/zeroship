@@ -39,7 +39,7 @@ export const Intents: Story = {
     },
   },
   render: () => (
-    <div style={{ display: "grid", gap: "var(--zs-space-3)" }}>
+    <div style={{ display: "grid", gap: "var(--zeroship-space-3)" }}>
       {INTENTS.map((intent) => (
         <Banner
           key={intent}
@@ -199,7 +199,7 @@ export const DismissRestoresFocus: Story = {
     function Harness() {
       const [open, setOpen] = useState(true);
       return (
-        <div data-testid="banner-host" style={{ padding: "var(--zs-space-3)" }}>
+        <div data-testid="banner-host" style={{ padding: "var(--zeroship-space-3)" }}>
           {open ? (
             <Banner
               intent="info"

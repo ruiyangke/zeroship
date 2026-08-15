@@ -10,7 +10,7 @@
  *
  * The ring is a conic / border arc: a full ring in the muted fill with
  * one quadrant in the accent, rotated by a keyframe. Sized via the
- * per-size `--zs-spinner-size` custom property.
+ * per-size `--zeroship-spinner-size` custom property.
  *
  * Motion: the rotation respects `prefers-reduced-motion: reduce` — the
  * spin stops and the static arc remains painted (an acceptable
@@ -25,37 +25,37 @@
      The track width is derived from the size (1/8 of the diameter) so
      the arc proportion stays identical across sm/md/lg instead of each
      size picking a hand-tuned width that drifts the ratio. */
-  --zs-spinner-size: 1.5rem;
-  --zs-spinner-track: calc(var(--zs-spinner-size) / 8);
+  --zeroship-spinner-size: 1.5rem;
+  --zeroship-spinner-track: calc(var(--zeroship-spinner-size) / 8);
   /* Track color — the muted ring behind the accent arc. */
-  --zs-spinner-track-color: var(--zs-fill-secondary);
-  inline-size: var(--zs-spinner-size);
-  block-size: var(--zs-spinner-size);
-  color: var(--zs-accent);
+  --zeroship-spinner-track-color: var(--zeroship-fill-secondary);
+  inline-size: var(--zeroship-spinner-size);
+  block-size: var(--zeroship-spinner-size);
+  color: var(--zeroship-accent);
 }
 
 [data-slot="spinner"][data-size="sm"] {
-  --zs-spinner-size: 1rem;
+  --zeroship-spinner-size: 1rem;
   /* At 1rem the derived track is hairline-thin; lift the track contrast
      one step so the ring stays legible against the page. */
-  --zs-spinner-track-color: var(--zs-separator);
+  --zeroship-spinner-track-color: var(--zeroship-separator);
 }
 [data-slot="spinner"][data-size="lg"] {
-  --zs-spinner-size: 2.5rem;
+  --zeroship-spinner-size: 2.5rem;
 }
 
 [data-slot="spinner-ring"] {
   inline-size: 100%;
   block-size: 100%;
-  border-radius: var(--zs-radius-full);
+  border-radius: var(--zeroship-radius-full);
   /* A ring in the muted fill with the top arc in the accent (current
      color), so the spin reads as a moving highlight around the track. */
-  border: var(--zs-spinner-track) solid var(--zs-spinner-track-color);
+  border: var(--zeroship-spinner-track) solid var(--zeroship-spinner-track-color);
   border-block-start-color: currentColor;
-  animation: zs-spinner-spin 0.7s linear infinite;
+  animation: zeroship-spinner-spin 0.7s linear infinite;
 }
 
-@keyframes zs-spinner-spin {
+@keyframes zeroship-spinner-spin {
   to {
     transform: rotate(360deg);
   }

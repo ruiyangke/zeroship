@@ -39,7 +39,7 @@
   /* Indicator diameter — drives the badge size and the text column's
      starting offset; expressed once so the connector can line up to its
      centre. */
-  --zs-stepper-indicator-size: 1.75rem;
+  --zeroship-stepper-indicator-size: 1.75rem;
 }
 
 /* ─── orientation ──────────────────────────────────────────────────────
@@ -96,7 +96,7 @@
 [data-slot="stepper-trigger"] {
   display: flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   margin: 0;
   padding: 0;
   border: 0;
@@ -117,18 +117,18 @@
 [data-slot="stepper"][data-orientation="horizontal"] [data-slot="stepper-trigger"] {
   flex-direction: column;
   align-items: center;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   text-align: center;
 }
 
 [data-slot="stepper-trigger"]button {
   cursor: pointer;
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zeroship-radius-2);
 }
 
 [data-slot="stepper-trigger"]button:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── indicator ────────────────────────────────────────────────────────
@@ -139,27 +139,27 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  inline-size: var(--zs-stepper-indicator-size);
-  block-size: var(--zs-stepper-indicator-size);
-  border-radius: var(--zs-radius-full);
-  font-size: var(--zs-text-footnote-size);
+  inline-size: var(--zeroship-stepper-indicator-size);
+  block-size: var(--zeroship-stepper-indicator-size);
+  border-radius: var(--zeroship-radius-full);
+  font-size: var(--zeroship-text-footnote-size);
   line-height: 1;
   font-weight: 600;
   /* Upcoming default: muted fill, secondary ink, hairline ring so the
      badge reads as a quiet placeholder. */
-  background-color: var(--zs-fill-tertiary);
-  color: var(--zs-label-secondary);
-  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+  background-color: var(--zeroship-fill-tertiary);
+  color: var(--zeroship-label-secondary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zeroship-separator);
   transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+    background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
+    box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 /* complete → accent-filled badge carrying the white-on-accent check. */
 [data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-indicator"] {
-  background-color: var(--zs-accent);
-  color: var(--zs-accent-ink);
+  background-color: var(--zeroship-accent);
+  color: var(--zeroship-accent-ink);
   box-shadow: none;
 }
 
@@ -167,8 +167,8 @@
    "you are here" distinct from the solid-filled completed badges. */
 [data-slot="stepper-step"][data-status="current"] [data-slot="stepper-indicator"] {
   background-color: transparent;
-  color: var(--zs-accent);
-  box-shadow: inset 0 0 0 0.125rem var(--zs-accent);
+  color: var(--zeroship-accent);
+  box-shadow: inset 0 0 0 0.125rem var(--zeroship-accent);
 }
 
 [data-slot="stepper-check"] {
@@ -182,21 +182,21 @@
 [data-slot="stepper-text"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-half, 0.125rem);
+  gap: var(--zeroship-space-half, 0.125rem);
   min-inline-size: 0;
 }
 
 [data-slot="stepper-label"] {
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 500;
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 
 /* current/complete labels brighten to primary ink; upcoming stays muted. */
 [data-slot="stepper-step"][data-status="current"] [data-slot="stepper-label"],
 [data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-label"] {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
 }
 
 [data-slot="stepper-step"][data-status="current"] [data-slot="stepper-label"] {
@@ -204,9 +204,9 @@
 }
 
 [data-slot="stepper-description"] {
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
-  color: var(--zs-label-tertiary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
+  color: var(--zeroship-label-tertiary);
 }
 
 /* ─── connector ────────────────────────────────────────────────────────
@@ -219,12 +219,12 @@
 [data-slot="stepper-connector"] {
   flex: 1 1 auto;
   align-self: center;
-  background-color: var(--zs-separator);
-  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  background-color: var(--zeroship-separator);
+  transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="stepper-step"][data-status="complete"] [data-slot="stepper-connector"] {
-  background-color: var(--zs-accent);
+  background-color: var(--zeroship-accent);
 }
 
 /* horizontal: a thin inline rule linking THIS step's indicator centre to
@@ -243,13 +243,13 @@
   block-size: 0.125rem;
   /* From this indicator's centre to the next indicator's centre, inset a
      touch on each side so the rule clears the two badges. */
-  inset-inline-start: calc(50% + var(--zs-stepper-indicator-size) / 2 + var(--zs-space-2));
-  inline-size: calc(100% - var(--zs-stepper-indicator-size) - 2 * var(--zs-space-2));
+  inset-inline-start: calc(50% + var(--zeroship-stepper-indicator-size) / 2 + var(--zeroship-space-2));
+  inline-size: calc(100% - var(--zeroship-stepper-indicator-size) - 2 * var(--zeroship-space-2));
   /* Vertical centre of the indicator row (badge sits at the top of the
      trigger column): half the badge down, less half the rule thickness so
      the 0.125rem line is centred on the indicator's mid-line. */
   inset-block-start: calc(
-    var(--zs-stepper-indicator-size) / 2 - 0.0625rem
+    var(--zeroship-stepper-indicator-size) / 2 - 0.0625rem
   );
 }
 
@@ -261,17 +261,17 @@
      to run; the connector itself grows to fill it. Scoped to :not(:last-
      child) — the last step has no connector, so padding there is dead
      trailing space. */
-  padding-block-end: var(--zs-space-2);
+  padding-block-end: var(--zeroship-space-2);
 }
 
 [data-slot="stepper"][data-orientation="vertical"] [data-slot="stepper-connector"] {
   inline-size: 0.125rem;
-  min-block-size: var(--zs-space-4);
+  min-block-size: var(--zeroship-space-4);
   /* Drop the line down from the trigger and centre it under the
      indicator (half the badge, measured from the inline-start edge). */
-  margin-block-start: var(--zs-space-1);
+  margin-block-start: var(--zeroship-space-1);
   margin-inline-start: calc(
-    (var(--zs-stepper-indicator-size) - 0.125rem) / 2
+    (var(--zeroship-stepper-indicator-size) - 0.125rem) / 2
   );
 }
 

@@ -29,7 +29,7 @@ export const Horizontal: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Horizontal separator"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -63,7 +63,7 @@ export const Vertical: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical separator"
       style={{ alignItems: "center", gap: "1rem" }}
@@ -94,13 +94,13 @@ export const Hairline: Story = {
       description: {
         story:
           "Explicit `variant=\"hairline\"` (the default). Paints a " +
-          "one-device-pixel line via `--zs-selection-hairline`.",
+          "one-device-pixel line via `--zeroship-selection-hairline`.",
       },
     },
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Hairline"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -125,7 +125,7 @@ export const Thick: Story = {
     docs: {
       description: {
         story:
-          "`variant=\"thick\"` paints a `--zs-space-1` (0.25rem) bar — " +
+          "`variant=\"thick\"` paints a `--zeroship-space-1` (0.25rem) bar — " +
           "reserved for major section cuts where a hairline would read " +
           "as not-quite-finished.",
       },
@@ -133,7 +133,7 @@ export const Thick: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Thick"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -164,7 +164,7 @@ export const NotDecorative: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Semantic separator"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -208,7 +208,7 @@ export const InsideList: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="List with separators"
       style={{
@@ -262,7 +262,7 @@ export const InsideToolbar: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Toolbar separators"
       style={{ alignItems: "center", gap: "0.5rem" }}
@@ -305,7 +305,7 @@ export const RoleLock: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Role lock"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -377,7 +377,7 @@ export const RoleLockBypass: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Role lock bypass"
       style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
@@ -438,7 +438,7 @@ export const RTL: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL separators"
       dir="rtl"

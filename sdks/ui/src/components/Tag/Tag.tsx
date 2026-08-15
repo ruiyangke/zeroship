@@ -16,7 +16,7 @@
  *   2. Filter toggle (`selected` / `onSelectedChange` provided): the
  *      ROOT ITSELF is a `<button type="button" aria-pressed={selected}>`
  *      that toggles `onSelectedChange(!selected)`. The selected state
- *      paints with `--zs-accent`. There is no remove button in this mode
+ *      paints with `--zeroship-accent`. There is no remove button in this mode
  *      (a removable filter chip would nest a button inside a button).
  *
  * If BOTH `removable` and a selectable signal (`selected` /

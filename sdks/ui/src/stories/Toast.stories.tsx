@@ -23,7 +23,7 @@ function Wrap({
 }) {
   return (
     <Toast.Provider>
-      <div className="zs-story-row" role="group" aria-label="Toast demo">
+      <div className="zeroship-story-row" role="group" aria-label="Toast demo">
         {children}
       </div>
       <Toast.Viewport position={position} />
@@ -250,7 +250,7 @@ export const WithDescription: Story = {
  * the spread-through `elementProps.onClick` reached `mergeProps`). */
 declare global {
   interface Window {
-    __zsToastActionCalls?: number;
+    __zeroshipToastActionCalls?: number;
   }
 }
 
@@ -279,7 +279,7 @@ export const WithAction: Story = {
               // a re-mount story run starts from zero — the regression
               // for F2 asserts the post-click value is EXACTLY 1.
               if (typeof window !== "undefined") {
-                window.__zsToastActionCalls = 0;
+                window.__zeroshipToastActionCalls = 0;
               }
               toast({
                 id: "action-demo",
@@ -290,8 +290,8 @@ export const WithAction: Story = {
                   onClick: () => {
                     actionCountRef.current += 1;
                     if (typeof window !== "undefined") {
-                      window.__zsToastActionCalls =
-                        (window.__zsToastActionCalls ?? 0) + 1;
+                      window.__zeroshipToastActionCalls =
+                        (window.__zeroshipToastActionCalls ?? 0) + 1;
                     }
                   },
                 },
@@ -326,7 +326,7 @@ export const WithAction: Story = {
     // the default render loop spread `{...entry.actionProps}` AND Base
     // UI's `ToastAction` consumed `toast.actionProps` from root context,
     // so `mergeProps` chained the same `onClick` twice.
-    await expect(window.__zsToastActionCalls).toBe(1);
+    await expect(window.__zeroshipToastActionCalls).toBe(1);
   },
 };
 
@@ -1062,7 +1062,7 @@ export const AriaOverrideAttempt: Story = {
     }
     return (
       <Toast.Provider>
-        <div className="zs-story-row" role="group" aria-label="Toast demo">
+        <div className="zeroship-story-row" role="group" aria-label="Toast demo">
           <Trigger />
         </div>
         <Toast.Viewport position="bottom-end">
@@ -1159,7 +1159,7 @@ export const CloseLabelDefault: Story = {
     }
     return (
       <Toast.Provider>
-        <div className="zs-story-row" role="group" aria-label="Toast demo">
+        <div className="zeroship-story-row" role="group" aria-label="Toast demo">
           <Trigger />
         </div>
         <Toast.Viewport position="bottom-end">

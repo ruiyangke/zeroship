@@ -30,7 +30,7 @@
  *      sees "this is in progress" without the motion cue.
  *
  *   3. `data-status="complete"` (value === max) → the bar transitions
- *      to a success color via the `--zs-progress-color` token mapping
+ *      to a success color via the `--zeroship-progress-color` token mapping
  *      so a finished bar reads green ("done") instead of staying accent
  *      ("in progress"). The CompletionCelebrate story exercises this.
  *

@@ -4,7 +4,7 @@
  * Anatomy:
  *   .zs-preview-card-backdrop      optional scrim layer (opt-in only).
  *   .zs-preview-card-positioner    Base UI's Floating UI anchored layer
- *     └─ .zs-preview-card-popup    opaque sheet with --zs-shadow-popover
+ *     └─ .zs-preview-card-popup    opaque sheet with --zeroship-shadow-popover
  *           ├─ .zs-preview-card-arrow      optional 16×8 SVG triangle
  *           └─ children                    free composition (img, h*, p, …)
  *
@@ -14,10 +14,10 @@
  * respectful.
  *
  * Crystal material pattern: the Popup declares a computable base
- * (`--zs-surface`) so axe-core's color-contrast walk terminates inside
+ * (`--zeroship-surface`) so axe-core's color-contrast walk terminates inside
  * the popup. Material, rim, and shadow tokens are augmentation only,
  * never the sole visual signal.
- * `--zs-surface` is the same opaque token Popover.Popup paints on.
+ * `--zeroship-surface` is the same opaque token Popover.Popup paints on.
  *
  * Forced-colors mirror (Slice-5/6/7 lesson): every painting selector
  * (background / color / box-shadow / border / filter) is re-emitted
@@ -48,21 +48,21 @@
    * link's own browser default. Inline-styled because no token currently
    * captures the "focus on hovered surface" shape; the focus ring tokens
    * are sized for buttons / form controls. */
-  border-radius: var(--zs-radius-1);
+  border-radius: var(--zeroship-radius-1);
 }
 [data-slot="preview-card-trigger"]:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
+  outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
+  outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── Backdrop (opt-in) ────────────────────────────────────────────── */
 [data-slot="preview-card-backdrop"] {
   position: fixed;
   inset: 0;
-  z-index: var(--zs-z-modal);
-  background-color: var(--zs-scrim);
+  z-index: var(--zeroship-z-modal);
+  background-color: var(--zeroship-scrim);
   opacity: 1;
-  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+  transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 [data-slot="preview-card-backdrop"][data-starting-style],
 [data-slot="preview-card-backdrop"][data-ending-style] {
@@ -73,53 +73,53 @@
  *
  * Base UI's Positioner is the Floating UI anchored layer — we don't
  * paint it; it carries Floating UI's transform / x / y inline styles.
- * Stack above modal sheets with a small bump above --zs-z-modal so a
+ * Stack above modal sheets with a small bump above --zeroship-z-modal so a
  * preview card floats over a dialog if both happen to mount. */
 [data-slot="preview-card-positioner"] {
-  z-index: calc(var(--zs-z-modal) + 15);
+  z-index: calc(var(--zeroship-z-modal) + 15);
   outline: none;
 }
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
 [data-slot="preview-card-popup"] {
   /* Computable background-color + active material/rim tokens. */
-  background-color: var(--zs-surface);
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-callout-size);
-  line-height: var(--zs-text-callout-line);
+  background-color: var(--zeroship-surface);
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
+  font-size: var(--zeroship-text-callout-size);
+  line-height: var(--zeroship-text-callout-line);
 
   /* Logical sizing so RTL flows naturally. */
-  min-inline-size: min(16rem, calc(100dvw - var(--zs-space-6) * 2));
+  min-inline-size: min(16rem, calc(100dvw - var(--zeroship-space-6) * 2));
   /* Default (md). Per-size overrides below resolve via data-size. */
-  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
+  max-inline-size: min(22rem, calc(100dvw - var(--zeroship-space-6) * 2));
 
-  padding-block: var(--zs-space-4);
-  padding-inline: var(--zs-space-4);
+  padding-block: var(--zeroship-space-4);
+  padding-inline: var(--zeroship-space-4);
 
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 
-  border-radius: var(--zs-radius-3);
+  border-radius: var(--zeroship-radius-3);
   /* Popover-class elevation + hairline edge so the popup reads as a
    * defined sheet without a scrim. The inner box-shadow simulates the
    * hairline at the surface edge the brief asks for. */
   box-shadow:
-    var(--zs-shadow-popover),
+    var(--zeroship-shadow-popover),
     var(
-      --zs-popup-surface-edge,
-      inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator)
+      --zeroship-popup-surface-edge,
+      inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-separator)
     );
 
   /* The arrow's drop-shadow extends past the popup rect; keep it
    * visible. */
   overflow: visible;
 
-  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  backdrop-filter: var(--zeroship-dialog-backdrop-filter, var(--zeroship-material-regular));
   -webkit-backdrop-filter: var(
-    --zs-dialog-backdrop-filter,
-    var(--zs-material-regular)
+    --zeroship-dialog-backdrop-filter,
+    var(--zeroship-material-regular)
   );
 
   /* Explicit baseline so the open/close transition origin is portable
@@ -129,20 +129,20 @@
   isolation: isolate;
 
   transition:
-    transform var(--zs-motion-base) var(--zs-motion-ease),
-    opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zeroship-motion-base) var(--zeroship-motion-ease),
+    opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
 
 /* Per-size max-inline-size presets. Sizes match the brief: sm 16rem,
  * md 22rem (default), lg 28rem. Logical so RTL is correct. */
 [data-slot="preview-card-popup"][data-size="sm"] {
-  max-inline-size: min(16rem, calc(100dvw - var(--zs-space-6) * 2));
+  max-inline-size: min(16rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
 [data-slot="preview-card-popup"][data-size="md"] {
-  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
+  max-inline-size: min(22rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
 [data-slot="preview-card-popup"][data-size="lg"] {
-  max-inline-size: min(28rem, calc(100dvw - var(--zs-space-6) * 2));
+  max-inline-size: min(28rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
 
 /* Default styling for common children — these are presentational only,
@@ -151,9 +151,9 @@
   display: block;
   inline-size: 100%;
   block-size: auto;
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zeroship-radius-2);
   /* Drop the bottom of the image flush against the title gap above. */
-  margin-block-end: var(--zs-space-1);
+  margin-block-end: var(--zeroship-space-1);
 }
 [data-slot="preview-card-popup"] h1,
 [data-slot="preview-card-popup"] h2,
@@ -162,17 +162,17 @@
 [data-slot="preview-card-popup"] h5,
 [data-slot="preview-card-popup"] h6 {
   margin: 0;
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
-  letter-spacing: var(--zs-text-headline-tracking);
-  color: var(--zs-label);
+  font-size: var(--zeroship-text-headline-size);
+  line-height: var(--zeroship-text-headline-line);
+  font-weight: var(--zeroship-text-headline-weight);
+  letter-spacing: var(--zeroship-text-headline-tracking);
+  color: var(--zeroship-label);
 }
 [data-slot="preview-card-popup"] p {
   margin: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── enter / leave transitions ────────────────────────────────────── *
@@ -201,11 +201,11 @@
 }
 [data-slot="preview-card-popup"][data-side="top"][data-starting-style],
 [data-slot="preview-card-popup"][data-side="top"][data-ending-style] {
-  transform: scale(0.96) translateY(var(--zs-space-half));
+  transform: scale(0.96) translateY(var(--zeroship-space-half));
 }
 [data-slot="preview-card-popup"][data-side="bottom"][data-starting-style],
 [data-slot="preview-card-popup"][data-side="bottom"][data-ending-style] {
-  transform: scale(0.96) translateY(calc(-1 * var(--zs-space-half)));
+  transform: scale(0.96) translateY(calc(-1 * var(--zeroship-space-half)));
 }
 
 /* Reduced-motion mirror at equal specificity — every state selector
@@ -223,11 +223,11 @@
   [data-slot="preview-card-popup"][data-side="top"][data-ending-style],
   [data-slot="preview-card-popup"][data-side="bottom"][data-starting-style],
   [data-slot="preview-card-popup"][data-side="bottom"][data-ending-style] {
-    transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
     transform: none;
   }
   [data-slot="preview-card-backdrop"] {
-    transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+    transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
   }
 }
 
@@ -251,16 +251,16 @@
   inline-size: 1rem;
   block-size: 0.5rem;
   /* Arrow fill must match the popup's painted body so the apex reads
-   * as a continuation of the popup. The popup paints on `--zs-surface`
+   * as a continuation of the popup. The popup paints on `--zeroship-surface`
    * (opaque) per the glass invariant; the arrow tracks that token. */
-  color: var(--zs-surface);
+  color: var(--zeroship-surface);
   /* Sit behind the popup chrome so the rectangle of the arrow wrapper
    * doesn't paint over the popup body. `isolation: isolate` on
    * .zs-preview-card-popup establishes the stacking context. */
   z-index: -1;
   filter: drop-shadow(
-    0 var(--zs-selection-hairline) var(--zs-space-half)
-      color-mix(in oklch, var(--zs-label) 24%, transparent)
+    0 var(--zeroship-selection-hairline) var(--zeroship-space-half)
+      color-mix(in oklch, var(--zeroship-label) 24%, transparent)
   );
 }
 [data-slot="preview-card-arrow"] > svg {

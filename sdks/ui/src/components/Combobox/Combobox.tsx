@@ -25,7 +25,7 @@
  *   3. Multi-mode renders chips INSIDE the input row via Base UI's
  *      Chips/Chip/ChipRemove primitives.
  *
- *   4. Same popup surface as Select / Dialog. `--zs-shadow-dialog`,
+ *   4. Same popup surface as Select / Dialog. `--zeroship-shadow-dialog`,
  *      opaque Crystal base, popup cap at min(50vh, 28rem).
  *
  *   5. Required cascade from Field — same shape Select uses. The

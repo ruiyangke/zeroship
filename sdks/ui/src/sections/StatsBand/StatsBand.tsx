@@ -41,7 +41,7 @@
  *     `Grid` of stat items.
  *   - The Grid carries `columns` (2|3|4, default = stats count capped at 4) at
  *     wide widths; the `Grid` primitive ITSELF owns the collapse to a single
- *     stacked column below `--zs-bp-md`, so this band adds no local override.
+ *     stacked column below `--zeroship-bp-md`, so this band adds no local override.
  *
  * a11y:
  *   - The section header title is an `<h2>`; the `<section>` is
@@ -86,7 +86,7 @@ import type { SectionTone } from "../_tone";
 /** Header + item text alignment for the stats band. */
 export type StatsBandAlign = "center" | "start";
 
-/** Column count at wide widths (collapses to 1 below `--zs-bp-md`). */
+/** Column count at wide widths (collapses to 1 below `--zeroship-bp-md`). */
 export type StatsBandColumns = 2 | 3 | 4;
 
 /* ─── item ────────────────────────────────────────────────────────────── */
@@ -133,7 +133,7 @@ export interface StatsBandProps
 
   /**
    * Column count at wide widths — `2`, `3`, or `4`. Default = the total stat
-   * count, capped at `4`. The Grid promotes to this count at `--zs-bp-md` and
+   * count, capped at `4`. The Grid promotes to this count at `--zeroship-bp-md` and
    * up; below it the Grid primitive itself collapses to a single stacked
    * column.
    */
@@ -146,7 +146,7 @@ export interface StatsBandProps
   align?: StatsBandAlign;
 
   /**
-   * Billboard the metrics at the TOP display step (`--zs-text-display-1`,
+   * Billboard the metrics at the TOP display step (`--zeroship-text-display-1`,
    * ~3.5rem) instead of the default display-2 (~2.75rem). Use for a hero
    * proof bar where a single big number (or a tight 2–3-stat strip) is the
    * headline of the band. Default `false` (display-2). Token-pure; affects
@@ -155,7 +155,7 @@ export interface StatsBandProps
   hero?: boolean;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `lg`.
    */
   size?: ContainerSize;
@@ -166,8 +166,8 @@ export interface StatsBandProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel — a natural fit for a proof bar set off from the surrounding page.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band.
    */
   tone?: SectionTone;
 

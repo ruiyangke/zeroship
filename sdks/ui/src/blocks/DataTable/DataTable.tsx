@@ -14,7 +14,7 @@
  * The sort / filter / paginate / selection pipeline is now a TanStack
  * `useReactTable` instance — the same architecture we use elsewhere
  * (Base UI = headless engine for interactive primitives; TanStack =
- * headless engine for the table). The VISUAL layer, the `--zs-*` token
+ * headless engine for the table). The VISUAL layer, the `--zeroship-*` token
  * system, the cell-type renderers, RowActions, the Pagination/Badge/Menu/
  * Input/Checkbox/Skeleton/EmptyState composition, the `data-slot`
  * vocabulary, and every a11y wire stay OURS. TanStack only owns the
@@ -107,7 +107,7 @@
  *
  * ─── Glass rule ──────────────────────────────────────────────────────
  * The sticky header paints an OPAQUE background; the selected-row tint is
- * an opaque `color-mix(... var(--zs-surface))`, never translucent.
+ * an opaque `color-mix(... var(--zeroship-surface))`, never translucent.
  *
  * ─── Accessible name ─────────────────────────────────────────────────
  * Provide either a `caption` (a real `<caption>`) or an `aria-label`. A
@@ -840,7 +840,7 @@ function DataTableInner<T>(
    * changes — so a hardcoded offset (the old `2.5rem` fallback) leaves a
    * gap or an overlap. We measure the header `<thead>` with a
    * ResizeObserver and publish its block-size as the
-   * `--zs-data-table-header-offset` custom property on the scroll
+   * `--zeroship-data-table-header-offset` custom property on the scroll
    * container, which the filter row reads for its `inset-block-start`. */
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const theadRef = useRef<HTMLTableSectionElement | null>(null);
@@ -1144,7 +1144,7 @@ function DataTableInner<T>(
   );
   const showColumnFilters = filterable && filterableColumns.length > 0;
 
-  /* Measure the header height → publish `--zs-data-table-header-offset` on
+  /* Measure the header height → publish `--zeroship-data-table-header-offset` on
    * the scroll container so the sticky filter row pins flush beneath the
    * header band. Only needed when BOTH the header is sticky AND the filter
    * row is shown (two stacked sticky rows). SSR-safe: the effect (and the
@@ -1155,7 +1155,7 @@ function DataTableInner<T>(
     const thead = theadRef.current;
     if (!scroll || !thead) return;
     if (!(stickyHeader && showColumnFilters)) {
-      scroll.style.removeProperty("--zs-data-table-header-offset");
+      scroll.style.removeProperty("--zeroship-data-table-header-offset");
       return;
     }
     const measure = () => {
@@ -1169,7 +1169,7 @@ function DataTableInner<T>(
         thead.getBoundingClientRect().height -
         (filterRow?.getBoundingClientRect().height ?? 0);
       scroll.style.setProperty(
-        "--zs-data-table-header-offset",
+        "--zeroship-data-table-header-offset",
         `${Math.max(0, Math.round(headerHeight))}px`,
       );
     };
@@ -1199,7 +1199,7 @@ function DataTableInner<T>(
 
   const cellStyle = (column: DataTableColumn<T>): CSSProperties | undefined =>
     column.minWidth != null
-      ? ({ "--zs-data-table-cell-min": column.minWidth } as CSSProperties)
+      ? ({ "--zeroship-data-table-cell-min": column.minWidth } as CSSProperties)
       : undefined;
 
   // aria-sort for a header column: absent for non-sortable/actions; else

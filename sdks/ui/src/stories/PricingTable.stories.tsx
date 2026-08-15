@@ -97,7 +97,7 @@ export const ThreeTiers: Story = {
       description: {
         story:
           "The default band: three tiers in a responsive Grid that collapses " +
-          "to a single column below `--zs-bp-md`. The featured Pro tier reads " +
+          "to a single column below `--zeroship-bp-md`. The featured Pro tier reads " +
           "as the recommendation — a colored top accent cap, the strongest " +
           "house elevation, a static lift above its siblings, and an accent " +
           "ring — and carries a 'Most popular' badge (the AT-facing signal). " +
@@ -242,7 +242,7 @@ export const TwoTiers: Story = {
       description: {
         story:
           "Two tiers — the responsive Grid promotes to a two-column row at " +
-          "`--zs-bp-md` (one column per tier, capped at four). Proves the " +
+          "`--zeroship-bp-md` (one column per tier, capped at four). Proves the " +
           "column count derives from the tier count.",
       },
     },

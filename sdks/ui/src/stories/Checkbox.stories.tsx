@@ -32,33 +32,33 @@ export const AllStates: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All checkbox states">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Unchecked</span>
+    <div className="zeroship-story-row" role="group" aria-label="All checkbox states">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Unchecked</span>
         <Checkbox label="Unchecked" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Checked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Checked</span>
         <Checkbox label="Checked" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Indeterminate</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Indeterminate</span>
         <Checkbox label="Indeterminate" indeterminate />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — unchecked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — unchecked</span>
         <Checkbox label="Disabled" disabled />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — checked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — checked</span>
         <Checkbox label="Disabled, checked" disabled defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Disabled — indeterminate</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Disabled — indeterminate</span>
         <Checkbox label="Disabled, indeterminate" disabled indeterminate />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Read only</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Read only</span>
         <Checkbox label="Read only" readOnly defaultChecked />
       </div>
     </div>
@@ -96,17 +96,17 @@ export const AllStates: Story = {
 export const AllSizes: Story = {
   name: "All sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All checkbox sizes">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Small</span>
+    <div className="zeroship-story-row" role="group" aria-label="All checkbox sizes">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Small</span>
         <Checkbox size="sm" label="Small" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Medium</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Medium</span>
         <Checkbox size="md" label="Medium" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Large</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Large</span>
         <Checkbox size="lg" label="Large" defaultChecked />
       </div>
     </div>
@@ -117,21 +117,21 @@ export const AllSizes: Story = {
 export const AllVariants: Story = {
   name: "All variants",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All checkbox variants">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default — unchecked</span>
+    <div className="zeroship-story-row" role="group" aria-label="All checkbox variants">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default — unchecked</span>
         <Checkbox label="Default" variant="default" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Default — checked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Default — checked</span>
         <Checkbox label="Default" variant="default" defaultChecked />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted — unchecked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted — unchecked</span>
         <Checkbox label="Tinted" variant="tinted" />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Tinted — checked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Tinted — checked</span>
         <Checkbox label="Tinted" variant="tinted" defaultChecked />
       </div>
     </div>
@@ -168,8 +168,8 @@ export const WithExternalLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Checkbox with external label">
-      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Checkbox with external label">
+      <div className="zeroship-story-cell" style={{ maxWidth: "20rem" }}>
         <Field>
           <Field.Label>Subscribe to product emails</Field.Label>
           <Checkbox data-testid="checkbox-with-label" name="subscribe" />
@@ -206,11 +206,11 @@ export const Inline: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Checkbox inline label">
-      <div className="zs-story-cell">
+    <div className="zeroship-story-row" role="group" aria-label="Checkbox inline label">
+      <div className="zeroship-story-cell">
         <Checkbox label="Subscribe to product emails" name="subscribe-inline" />
       </div>
-      <div className="zs-story-cell">
+      <div className="zeroship-story-cell">
         <Checkbox label="Make profile public" name="public-inline" defaultChecked />
       </div>
     </div>
@@ -231,8 +231,8 @@ export const WithDescription: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Checkbox with description">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Checkbox with description">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>Marketing emails</Field.Label>
           <Checkbox data-testid="checkbox-with-description" name="marketing" />
@@ -261,14 +261,14 @@ export const Required: Story = {
   },
   render: function RequiredRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Required checkbox">
+      <div className="zeroship-story-row" role="group" aria-label="Required checkbox">
         {/* Base UI's <Form> coordinates submit-time validation across
             its child <Field>s. Without it, the native form's `invalid`
             event fires on the hidden input but Field's aria-invalid
             state machine doesn't observe the submission. Form is the
             piece that wires onSubmit → Field.validate → aria-invalid. */}
         <Form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             // The native onSubmit still fires if validation passes;
@@ -376,9 +376,9 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required checkbox (invalid)">
+      <div className="zeroship-story-row" role="group" aria-label="Required checkbox (invalid)">
         <Form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             e.preventDefault();
@@ -439,9 +439,9 @@ export const IndeterminateParent: Story = {
     const indeterminate = checkedCount > 0 && checkedCount < 3;
 
     return (
-      <div className="zs-story-row" role="group" aria-label="Indeterminate parent">
+      <div className="zeroship-story-row" role="group" aria-label="Indeterminate parent">
         <div
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}
         >
           <Checkbox
@@ -511,9 +511,9 @@ export const InsideForm: Story = {
   render: function InsideFormRender() {
     const [submitted, setSubmitted] = useState<string>("(not submitted)");
     return (
-      <div className="zs-story-row" role="group" aria-label="Inside a form">
+      <div className="zeroship-story-row" role="group" aria-label="Inside a form">
         <form
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
           onSubmit={(e) => {
             e.preventDefault();
@@ -569,13 +569,13 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled cascades">
-      <div className="zs-story-cell">
-        <span className="zs-story-label">disabled prop</span>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled cascades">
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">disabled prop</span>
         <Checkbox label="Hard-disabled" disabled />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">Field disabled — chip inherits</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">Field disabled — chip inherits</span>
         <Field disabled>
           <Field.Label>Pending invitation</Field.Label>
           <Checkbox name="invite" />
@@ -600,8 +600,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL checkbox row">
-      <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL checkbox row">
+      <div className="zeroship-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>אני מסכים לתנאי השימוש</Field.Label>
           <Checkbox name="agree-rtl" />
@@ -638,20 +638,20 @@ export const RTLGlyphCentering: Story = {
   render: () => (
     <div
       dir="rtl"
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL glyph centering"
     >
-      <div className="zs-story-cell">
-        <span className="zs-story-label">RTL — checked</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">RTL — checked</span>
         <Checkbox
           data-testid="checkbox-rtl-checked"
           defaultChecked
           label="RTL checked"
         />
       </div>
-      <div className="zs-story-cell">
-        <span className="zs-story-label">RTL — indeterminate</span>
+      <div className="zeroship-story-cell">
+        <span className="zeroship-story-label">RTL — indeterminate</span>
         <Checkbox
           data-testid="checkbox-rtl-indeterminate"
           indeterminate
@@ -694,13 +694,13 @@ export const IndeterminateFromGroup: Story = {
     // its indeterminate state from group context".
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Indeterminate from group"
         data-testid="indeterminate-from-group-row"
       >
         <div
-          className="zs-story-cell"
+          className="zeroship-story-cell"
           style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}
         >
           <CheckboxGroup

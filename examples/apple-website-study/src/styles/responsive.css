@@ -635,8 +635,8 @@
   }
 
   .guided-panel__copy .zs-button {
-    --zs-button-gray-bg: #1d1d1f;
-    --zs-button-gray-ink: #fff;
+    --zeroship-button-gray-bg: #1d1d1f;
+    --zeroship-button-gray-ink: #fff;
     width: 124px;
     min-width: 124px;
     height: 36px;

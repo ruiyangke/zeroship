@@ -69,7 +69,7 @@ export const ThreeUp: Story = {
         story:
           "The default band: an eyebrow + `<h2>` title + description above a " +
           "responsive Grid of three features that collapses to a single " +
-          "column below `--zs-bp-md`. Each feature is a decorative Lucide " +
+          "column below `--zeroship-bp-md`. Each feature is a decorative Lucide " +
           "icon in a tinted badge + an `<h3>` title + a muted description, " +
           "centered. The section is labelled by the real `<h2>` title.",
       },
@@ -119,7 +119,7 @@ export const FourColumns: Story = {
       description: {
         story:
           "A four-column grid (`columns={4}`) of eight features. The Grid " +
-          "promotes to four columns at `--zs-bp-md` and up; below it the Grid " +
+          "promotes to four columns at `--zeroship-bp-md` and up; below it the Grid " +
           "primitive itself collapses to a single stacked column.",
       },
     },

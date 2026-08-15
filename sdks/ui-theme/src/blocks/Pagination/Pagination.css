@@ -24,7 +24,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--zs-space-3);
+  gap: var(--zeroship-space-3);
   /* Summary anchors the start; the page-size control + page row cluster at
      the end via the auto inline-margin on the page-size (or, when it is
      absent, on the page row — see those rules). Using auto-margins rather
@@ -62,9 +62,9 @@
 
 [data-slot="pagination-summary"] {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   /* The summary should not be squeezed to multi-line before the page row
      wraps; let it hold its natural width. */
   white-space: nowrap;
@@ -77,16 +77,16 @@
 [data-slot="pagination-page-size"] {
   display: inline-flex;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   /* Sits between summary and pages on wide layouts; push toward the page
      row so the two "controls" cluster. */
   margin-inline-start: auto;
 }
 
 [data-slot="pagination-page-size-label"] {
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   white-space: nowrap;
 }
 
@@ -101,7 +101,7 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   min-inline-size: 0;
   max-inline-size: 100%;
   /* Push to the inline end so it drifts away from the start-anchored
@@ -127,15 +127,15 @@
 
 [data-slot="pagination-page"] {
   /* Match the small/medium control heights for a square numeric chip. */
-  min-inline-size: var(--zs-control-h-md);
-  padding-inline: var(--zs-space-2);
+  min-inline-size: var(--zeroship-control-h-md);
+  padding-inline: var(--zeroship-space-2);
   /* Tabular figures keep "11" and "88" the same width so the track does
      not jitter as the current page moves. */
   font-variant-numeric: tabular-nums;
 }
 
 [data-slot="pagination"][data-size="sm"] [data-slot="pagination-page"] {
-  min-inline-size: var(--zs-control-h-sm);
+  min-inline-size: var(--zeroship-control-h-sm);
 }
 
 [data-slot="pagination-chevron"] {
@@ -156,18 +156,18 @@
   display: inline-flex;
   align-items: flex-end;
   justify-content: center;
-  min-inline-size: var(--zs-space-6);
-  block-size: var(--zs-control-h-md);
-  padding-block-end: var(--zs-space-1);
-  color: var(--zs-label-tertiary);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  min-inline-size: var(--zeroship-space-6);
+  block-size: var(--zeroship-control-h-md);
+  padding-block-end: var(--zeroship-space-1);
+  color: var(--zeroship-label-tertiary);
+  font-size: var(--zeroship-text-body-size);
+  line-height: var(--zeroship-text-body-line);
   user-select: none;
 }
 
 [data-slot="pagination"][data-size="sm"] [data-slot="pagination-ellipsis"] {
-  block-size: var(--zs-control-h-sm);
-  font-size: var(--zs-text-subheadline-size);
+  block-size: var(--zeroship-control-h-sm);
+  font-size: var(--zeroship-text-subheadline-size);
 }
 
 /* ─── forced-colors ──────────────────────────────────────────────────────

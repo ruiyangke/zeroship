@@ -38,8 +38,8 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Basic">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Autocomplete
           placeholder="email@example.com"
           items={EMAIL_DOMAINS}
@@ -70,14 +70,14 @@ export const AllSizes: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="All sizes"
       style={{ flexDirection: "column", alignItems: "stretch" }}
     >
       {(["sm", "md", "lg"] as const).map((size) => (
-        <div className="zs-story-cell" key={size} style={{ minWidth: "20rem" }}>
-          <span className="zs-story-label">{size.toUpperCase()}</span>
+        <div className="zeroship-story-cell" key={size} style={{ minWidth: "20rem" }}>
+          <span className="zeroship-story-label">{size.toUpperCase()}</span>
           <Autocomplete
             size={size}
             placeholder="email@…"
@@ -109,8 +109,8 @@ export const WithLabel: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With label">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Email</Field.Label>
           <Autocomplete
@@ -142,8 +142,8 @@ export const Empty: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Empty">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Empty">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Autocomplete
           placeholder="Start typing…"
           items={[]}
@@ -168,8 +168,8 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="Disabled">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Autocomplete
           disabled
           placeholder="Disabled"
@@ -199,8 +199,8 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div dir="rtl" className="zeroship-story-row" role="group" aria-label="RTL">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Autocomplete
           placeholder="הקלד דומיין"
           items={["דוגמה@ynet.co.il", "דוגמה@walla.co.il"]}
@@ -230,8 +230,8 @@ export const WithDescription: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With description">
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+    <div className="zeroship-story-row" role="group" aria-label="With description">
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Email</Field.Label>
           <Autocomplete
@@ -269,8 +269,8 @@ export const LongList: Story = {
   render: () => {
     const items = Array.from({ length: 50 }, (_, i) => `suggestion-${i + 1}`);
     return (
-      <div className="zs-story-row" role="group" aria-label="Long list">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Long list">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Autocomplete
             placeholder="Type to filter"
             items={items}
@@ -301,8 +301,8 @@ export const Required: Story = {
   },
   render: function RequiredRender() {
     return (
-      <div className="zs-story-row" role="group" aria-label="Required autocomplete">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required autocomplete">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Form onSubmit={(e) => e.preventDefault()}>
             <Field required>
               <Field.Label>
@@ -361,8 +361,8 @@ export const RequiredInvalid: Story = {
       return () => cancelAnimationFrame(id);
     }, []);
     return (
-      <div className="zs-story-row" role="group" aria-label="Required autocomplete (invalid)">
-        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-row" role="group" aria-label="Required autocomplete (invalid)">
+        <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
           <Form
             onSubmit={(e) => {
               e.preventDefault();
@@ -422,11 +422,11 @@ export const AriaPropagation: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Aria propagation"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Autocomplete
           placeholder="email@example.com"
           items={EMAIL_DOMAINS}
@@ -468,11 +468,11 @@ export const FieldAriaAutowiring: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Field aria autowiring"
     >
-      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "20rem" }}>
         <Field>
           <Field.Label>Email (field-wired)</Field.Label>
           <Autocomplete
@@ -536,11 +536,11 @@ export const PlaceholderFallback: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Placeholder fallback"
     >
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+      <div className="zeroship-story-cell" style={{ minWidth: "16rem" }}>
         <Autocomplete
           placeholder="Search emails"
           items={EMAIL_DOMAINS}

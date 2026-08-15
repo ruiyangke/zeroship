@@ -27,20 +27,20 @@
   /* Tighten the inter-row gap below Card's content rhythm so label →
      value → delta read as one coherent metric unit rather than three
      loosely-spaced blocks. */
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
 
 [data-slot="stat-card-head"] {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
 }
 
 [data-slot="stat-card-label"] {
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  color: var(--zeroship-label-secondary);
+  font-size: var(--zeroship-text-subheadline-size);
+  line-height: var(--zeroship-text-subheadline-line);
   font-weight: 500;
 }
 
@@ -49,10 +49,10 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  color: var(--zs-label-tertiary);
+  color: var(--zeroship-label-tertiary);
   /* Sized to the subheadline label rhythm so the icon sits as a quiet
      companion to the metric name, not a competing mark. */
-  font-size: var(--zs-text-title-3-size);
+  font-size: var(--zeroship-text-title-3-size);
   line-height: 1;
 }
 
@@ -62,12 +62,12 @@
 }
 
 [data-slot="stat-card-value"] {
-  color: var(--zs-label);
+  color: var(--zeroship-label);
   /* The hero number — title-1 scale so it dominates the tile. */
-  font-size: var(--zs-text-title-1-size);
-  line-height: var(--zs-text-title-1-line);
-  font-weight: var(--zs-text-title-1-weight);
-  letter-spacing: var(--zs-text-title-1-tracking);
+  font-size: var(--zeroship-text-title-1-size);
+  line-height: var(--zeroship-text-title-1-line);
+  font-weight: var(--zeroship-text-title-1-weight);
+  letter-spacing: var(--zeroship-text-title-1-tracking);
   /* A long unbreakable value (a big number, a long currency string) must
      wrap/shrink inside the card rather than blow out the tile width.
      min-inline-size:0 releases the flex min-content floor (the value is a
@@ -80,13 +80,13 @@
 [data-slot="stat-card-delta"] {
   display: inline-flex;
   align-items: baseline;
-  gap: var(--zs-space-1);
+  gap: var(--zeroship-space-1);
   inline-size: fit-content;
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  font-size: var(--zeroship-text-footnote-size);
+  line-height: var(--zeroship-text-footnote-line);
   font-weight: 600;
   /* Default (flat / no direction match) — neutral secondary label. */
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 
 [data-slot="stat-card-delta-glyph"] {
@@ -101,21 +101,21 @@
  * flat=neutral.
  *
  * Contrast: system-green (L≈0.6) is too light to carry footnote text on
- * the card surface at 4.5:1, so the up tint is DEEPENED toward --zs-label
+ * the card surface at 4.5:1, so the up tint is DEEPENED toward --zeroship-label
  * (rectangular oklab so the hue stays green rather than rotating to teal)
  * — the same treatment Badge uses for its green/orange ink. system-red is
  * already deep enough (the crystal red is L≈0.52); using the -active step
  * gives a comfortable margin. */
 [data-slot="stat-card-delta"][data-direction="up"] {
-  color: color-mix(in oklab, var(--zs-system-green) 60%, var(--zs-label));
+  color: color-mix(in oklab, var(--zeroship-system-green) 60%, var(--zeroship-label));
 }
 
 [data-slot="stat-card-delta"][data-direction="down"] {
-  color: var(--zs-system-red-active);
+  color: var(--zeroship-system-red-active);
 }
 
 [data-slot="stat-card-delta"][data-direction="flat"] {
-  color: var(--zs-label-secondary);
+  color: var(--zeroship-label-secondary);
 }
 
 /* ─── forced-colors ───────────────────────────────────────────────────

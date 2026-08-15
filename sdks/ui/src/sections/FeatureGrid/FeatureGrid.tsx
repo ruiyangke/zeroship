@@ -47,7 +47,7 @@
  *     per `align`, capped to a readable measure) above a `Grid` of items.
  *   - The Grid carries `columns` (2|3|4, default 3) at wide widths; the
  *     `Grid` primitive ITSELF owns the collapse to a SINGLE stacked column
- *     below `--zs-bp-md` (its responsive base count is 1; `columns={{ md }}`
+ *     below `--zeroship-bp-md` (its responsive base count is 1; `columns={{ md }}`
  *     only promotes at ≥ the breakpoint), so this band adds no local
  *     collapse override.
  *
@@ -94,7 +94,7 @@ import type { SectionTone } from "../_tone";
 /** Header + item text alignment for the feature band. */
 export type FeatureGridAlign = "center" | "start";
 
-/** Column count at wide widths (collapses to 1 below `--zs-bp-md`). */
+/** Column count at wide widths (collapses to 1 below `--zeroship-bp-md`). */
 export type FeatureGridColumns = 2 | 3 | 4;
 
 /* ─── item ────────────────────────────────────────────────────────────── */
@@ -148,7 +148,7 @@ export interface FeatureGridProps
 
   /**
    * Column count at wide widths — `2`, `3` (default), or `4`. The Grid
-   * promotes to this count at `--zs-bp-md` and up; below it the Grid
+   * promotes to this count at `--zeroship-bp-md` and up; below it the Grid
    * primitive itself collapses to a single stacked column.
    */
   columns?: FeatureGridColumns;
@@ -160,7 +160,7 @@ export interface FeatureGridProps
   align?: FeatureGridAlign;
 
   /**
-   * Container width for the band body, from the `--zs-container-*` tokens.
+   * Container width for the band body, from the `--zeroship-container-*` tokens.
    * Default `lg`.
    */
   size?: ContainerSize;
@@ -171,8 +171,8 @@ export interface FeatureGridProps
    * - `default` (default): transparent; inherits the page backdrop.
    * - `muted`: a subtle full-bleed surface fill so the band reads as its own
    *   panel.
-   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
-   *   `--zs-accent-ink` — the bold contrast band.
+   * - `accent`: an `--zeroship-accent` fill with the inner ink remapped to
+   *   `--zeroship-accent-ink` — the bold contrast band.
    */
   tone?: SectionTone;
 

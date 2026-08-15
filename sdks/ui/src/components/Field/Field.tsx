@@ -96,7 +96,7 @@ export interface FieldProps extends Omit<BaseFieldRootProps, "className"> {
   /**
    * Visual size — cascades via FieldContext to a contained Input that
    * doesn't set its own size. There is intentionally no
-   * `--zs-field-control-size` CSS custom property (descendants read
+   * `--zeroship-field-control-size` CSS custom property (descendants read
    * size from React context, then choose their own size tokens).
    */
   size?: FieldSize;
@@ -336,7 +336,7 @@ export interface FieldRequiredProps extends ComponentPropsWithoutRef<"span"> {
  * what screen readers announce — duplicating it as text is noise.
  *
  * Default children: an asterisk `*`. The brief proposed a
- * `--zs-field-required-symbol` CSS custom property, but no CSS
+ * `--zeroship-field-required-symbol` CSS custom property, but no CSS
  * actually reads it — the glyph is React children, so consumers
  * override per-instance with `<Field.Required>†</Field.Required>`.
  *

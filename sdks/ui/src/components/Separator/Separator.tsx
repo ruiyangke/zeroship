@@ -23,7 +23,7 @@
  *      a consumer wants a gap above/below, they wrap with a Box.
  *
  *   2. The line itself is rendered via `border-*` so it stays exactly
- *      one device pixel (the `--zs-selection-hairline` token resolves
+ *      one device pixel (the `--zeroship-selection-hairline` token resolves
  *      to 0.0625rem which devicePixelRatio rounds correctly). The
  *      `hairline` variant matches the inset hairlines on Card / Dialog
  *      so a Separator across a Card edge reads coherent.
@@ -75,8 +75,8 @@ export interface SeparatorProps extends Omit<
   orientation?: SeparatorOrientation;
   /**
    * Line weight. `hairline` (default) paints a one-device-pixel
-   * divider using `--zs-selection-hairline`. `thick` paints a
-   * `--zs-space-1` (0.25rem) bar — reserved for major section cuts.
+   * divider using `--zeroship-selection-hairline`. `thick` paints a
+   * `--zeroship-space-1` (0.25rem) bar — reserved for major section cuts.
    */
   variant?: SeparatorVariant;
   /**

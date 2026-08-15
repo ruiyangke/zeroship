@@ -40,7 +40,7 @@ async function waitForDrawerClosed(
 export const Basic: Story = {
   name: "Basic (end side)",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic drawer">
+    <div className="zeroship-story-row" role="group" aria-label="Basic drawer">
       <Drawer>
         <Drawer.Trigger
           render={<Button data-testid="drawer-trigger">Open drawer</Button>}
@@ -83,7 +83,7 @@ export const Basic: Story = {
 export const LeftSide: Story = {
   name: "Start side (left in LTR)",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Start-side drawer">
+    <div className="zeroship-story-row" role="group" aria-label="Start-side drawer">
       <Drawer>
         <Drawer.Trigger
           render={
@@ -130,7 +130,7 @@ export const LeftSide: Story = {
 export const Top: Story = {
   name: "Top",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Top drawer">
+    <div className="zeroship-story-row" role="group" aria-label="Top drawer">
       <Drawer>
         <Drawer.Trigger
           render={
@@ -181,7 +181,7 @@ export const Top: Story = {
 export const Bottom: Story = {
   name: "Bottom",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Bottom drawer">
+    <div className="zeroship-story-row" role="group" aria-label="Bottom drawer">
       <Drawer>
         <Drawer.Trigger
           render={
@@ -223,7 +223,7 @@ export const Bottom: Story = {
 export const Sizes: Story = {
   name: "Sizes",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="All drawer sizes">
+    <div className="zeroship-story-row" role="group" aria-label="All drawer sizes">
       {(["sm", "md", "lg", "full"] as const).map((size) => (
         <Drawer key={size}>
           <Drawer.Trigger
@@ -295,7 +295,7 @@ export const SizesVertical: Story = {
   name: "Sizes (vertical: top × sm, bottom × lg)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Vertical drawer sizes"
     >
@@ -390,7 +390,7 @@ function ControlledStory() {
   const [open, setOpen] = useState(false);
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Controlled drawer"
     >
@@ -455,7 +455,7 @@ export const WithForm: Story = {
   name: "With form",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Drawer containing a form"
     >
@@ -522,7 +522,7 @@ export const WithLongContent: Story = {
   name: "With long content (scrolls)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Drawer with scrolling body"
     >
@@ -579,12 +579,12 @@ export const Nested: Story = {
   name: "Nested (drawer alongside main content)",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Drawer inside main content"
     >
       {/* A labeled <section>, not a <main>: Storybook's story decorator
-          already wraps every story in <main class="zs-story-main">, so a
+          already wraps every story in <main class="zeroship-story-main">, so a
           second <main> here would trip axe's landmark-no-duplicate-main
           AND landmark-main-is-top-level (a main nested in another
           landmark). A section with an accessible name conveys the same
@@ -593,13 +593,13 @@ export const Nested: Story = {
       <section
         aria-label="Main content"
         style={{
-          padding: "var(--zs-space-6)",
+          padding: "var(--zeroship-space-6)",
           minBlockSize: "60dvh",
-          background: "var(--zs-fill-secondary)",
-          color: "var(--zs-label)",
+          background: "var(--zeroship-fill-secondary)",
+          color: "var(--zeroship-label)",
           display: "flex",
           flexDirection: "column",
-          gap: "var(--zs-space-4)",
+          gap: "var(--zeroship-space-4)",
         }}
       >
         <h2 style={{ margin: 0 }}>Main content</h2>
@@ -680,7 +680,7 @@ export const RTL: Story = {
     <DirectionProvider direction="rtl">
       <div
         dir="rtl"
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Drawer RTL"
       >
@@ -759,7 +759,7 @@ function CloseAsChildStory() {
   };
   return (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Drawer close asChild"
     >
@@ -792,7 +792,7 @@ function CloseAsChildStory() {
                 // Wrapper `...rest` props that MUST forward to the
                 // child via Slot (review-fix item 4): a custom
                 // className suffix and a data-* hook.
-                className="zs-drawer-close-aschild-extra"
+                className="zeroship-drawer-close-aschild-extra"
                 data-side-effect="wrapper-rest-forwarded"
                 // Wrapper-level onClick — composes with the child's
                 // own onClick below and with Base UI's close handler.
@@ -836,7 +836,7 @@ export const CloseAsChild: Story = {
       "data-side-effect",
       "wrapper-rest-forwarded",
     );
-    await expect(done).toHaveClass("zs-drawer-close-aschild-extra");
+    await expect(done).toHaveClass("zeroship-drawer-close-aschild-extra");
     await userEvent.click(done);
     await waitForDrawerClosed(canvasElement, /custom close target/i);
     // Both child + wrapper onClick fired and composed in order.

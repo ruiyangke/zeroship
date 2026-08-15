@@ -1,22 +1,22 @@
 /* Storybook-only surfaces shared by the component stories. */
-.zs-story-main {
+.zeroship-story-main {
   min-height: 100vh;
-  padding: clamp(var(--zs-space-4), 5vw, var(--zs-space-7));
-  background: var(--zs-story-backdrop, var(--zs-surface-bg, var(--zs-surface)));
-  color: var(--zs-label);
-  font-family: var(--zs-font-system);
+  padding: clamp(var(--zeroship-space-4), 5vw, var(--zeroship-space-7));
+  background: var(--zeroship-story-backdrop, var(--zeroship-surface-bg, var(--zeroship-surface)));
+  color: var(--zeroship-label);
+  font-family: var(--zeroship-font-system);
   display: grid;
   place-items: center;
 }
 
 /* Keep autodocs previews compact enough to leave the prop table visible. */
-.docs-story .zs-story-main {
+.docs-story .zeroship-story-main {
   min-height: auto;
-  padding: var(--zs-space-5);
+  padding: var(--zeroship-space-5);
 }
 
-.docs-story .zs-story-row {
-  inline-size: min(100%, var(--zs-story-docs-row-max-inline-size, 40rem));
+.docs-story .zeroship-story-row {
+  inline-size: min(100%, var(--zeroship-story-docs-row-max-inline-size, 40rem));
 }
 
 .sbdocs-content :has(> .docblock-argstable) {
@@ -24,60 +24,60 @@
   overflow-x: auto;
 }
 
-.docs-story .zs-story-main:has(> [data-section-band]) {
+.docs-story .zeroship-story-main:has(> [data-section-band]) {
   justify-items: stretch;
 }
 
-.docs-story .zs-story-main > [data-section-band] {
+.docs-story .zeroship-story-main > [data-section-band] {
   max-inline-size: 100%;
 }
 
 .docs-story .zs-scroll-rail {
-  --zs-scroll-rail-edge: var(--zs-scroll-rail-pad, var(--zs-space-6));
+  --zeroship-scroll-rail-edge: var(--zeroship-scroll-rail-pad, var(--zeroship-space-6));
 
   inline-size: 100%;
   max-inline-size: 100%;
   margin-inline: 0;
 }
 
-.zs-story-row {
+.zeroship-story-row {
   position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
   box-sizing: border-box;
   inline-size: fit-content;
   max-inline-size: 100%;
-  padding: clamp(var(--zs-space-4), 4vw, var(--zs-space-6));
-  background-color: var(--zs-story-surface, var(--zs-surface));
-  backdrop-filter: var(--zs-material-regular);
-  -webkit-backdrop-filter: var(--zs-material-regular);
-  border-radius: var(--zs-story-surface-radius, var(--zs-radius-6));
+  padding: clamp(var(--zeroship-space-4), 4vw, var(--zeroship-space-6));
+  background-color: var(--zeroship-story-surface, var(--zeroship-surface));
+  backdrop-filter: var(--zeroship-material-regular);
+  -webkit-backdrop-filter: var(--zeroship-material-regular);
+  border-radius: var(--zeroship-story-surface-radius, var(--zeroship-radius-6));
   box-shadow:
-    var(--zs-story-surface-edge, var(--zs-card-surface-edge)),
-    var(--zs-shadow-1);
+    var(--zeroship-story-surface-edge, var(--zeroship-card-surface-edge)),
+    var(--zeroship-shadow-1);
 }
 
-.zs-story-row.zs-story-row--wide {
-  inline-size: min(100%, var(--zs-story-row-wide-max-inline-size, var(--zs-container-wide)));
+.zeroship-story-row.zeroship-story-row--wide {
+  inline-size: min(100%, var(--zeroship-story-row-wide-max-inline-size, var(--zeroship-container-wide)));
   align-items: stretch;
 }
 
-.zs-story-label {
-  font-size: var(--zs-text-caption-1-size);
-  line-height: var(--zs-text-caption-1-line);
-  color: var(--zs-label-secondary);
+.zeroship-story-label {
+  font-size: var(--zeroship-text-caption-1-size);
+  line-height: var(--zeroship-text-caption-1-line);
+  color: var(--zeroship-label-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: var(--zs-space-2);
+  margin-bottom: var(--zeroship-space-2);
 }
 
-.zs-story-cell {
+.zeroship-story-cell {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   box-sizing: border-box;
   min-width: 0 !important;
   min-inline-size: 0;

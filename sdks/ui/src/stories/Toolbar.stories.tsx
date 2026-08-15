@@ -96,7 +96,7 @@ export const Basic: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Basic toolbar">
+    <div className="zeroship-story-row" role="group" aria-label="Basic toolbar">
       <Toolbar data-testid="toolbar-basic">
         <Toolbar.Button data-testid="toolbar-basic-cut">Cut</Toolbar.Button>
         <Toolbar.Button data-testid="toolbar-basic-copy">Copy</Toolbar.Button>
@@ -135,7 +135,7 @@ export const WithSeparator: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With separator">
+    <div className="zeroship-story-row" role="group" aria-label="With separator">
       <Toolbar data-testid="toolbar-with-separator">
         <Toolbar.Button>Cut</Toolbar.Button>
         <Toolbar.Button>Copy</Toolbar.Button>
@@ -169,7 +169,7 @@ export const WithToggleGroup: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With Toggle.Group">
+    <div className="zeroship-story-row" role="group" aria-label="With Toggle.Group">
       <Toolbar data-testid="toolbar-with-togglegroup">
         <Toolbar.Button>Cut</Toolbar.Button>
         <Toolbar.Button>Copy</Toolbar.Button>
@@ -219,7 +219,7 @@ export const WithIconButtons: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With icon-only buttons">
+    <div className="zeroship-story-row" role="group" aria-label="With icon-only buttons">
       <Toolbar data-testid="toolbar-with-icon-buttons">
         <Toolbar.Button aria-label="Bold">
           <BoldGlyph />
@@ -250,7 +250,7 @@ export const Vertical: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Vertical toolbar">
+    <div className="zeroship-story-row" role="group" aria-label="Vertical toolbar">
       <Toolbar
         orientation="vertical"
         data-testid="toolbar-vertical"
@@ -306,7 +306,7 @@ export const WithGroups: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="With groups">
+    <div className="zeroship-story-row" role="group" aria-label="With groups">
       <Toolbar data-testid="toolbar-with-groups">
         <Toggle.Group
           multiple
@@ -375,7 +375,7 @@ export const Disabled: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Disabled toolbar">
+    <div className="zeroship-story-row" role="group" aria-label="Disabled toolbar">
       <Toolbar disabled data-testid="toolbar-disabled">
         <Toolbar.Button disabled>Cut</Toolbar.Button>
         <Toolbar.Button disabled>Copy</Toolbar.Button>
@@ -421,7 +421,7 @@ export const Rtl: Story = {
   },
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="RTL toolbar"
       dir="rtl"
@@ -464,7 +464,7 @@ export const RoleLock: Story = {
     const bypass = { role: "navigation" } as Record<string, unknown>;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Role lock"
       >
@@ -502,7 +502,7 @@ export const Roving: Story = {
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Roving toolbar">
+    <div className="zeroship-story-row" role="group" aria-label="Roving toolbar">
       <button type="button" data-testid="toolbar-roving-before">
         Before
       </button>
@@ -544,7 +544,7 @@ export const LinkAndInput: Story = {
   name: "Link and input items",
   render: () => (
     <div
-      className="zs-story-row"
+      className="zeroship-story-row"
       role="group"
       aria-label="Toolbar link and input"
     >
@@ -599,7 +599,7 @@ export const AriaOrientationLock: Story = {
     >;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="aria-orientation lock"
       >
@@ -667,7 +667,7 @@ export const SeparatorOrientationLock: Story = {
     } as Record<string, unknown>;
     return (
       <div
-        className="zs-story-row"
+        className="zeroship-story-row"
         role="group"
         aria-label="Separator orientation lock"
       >

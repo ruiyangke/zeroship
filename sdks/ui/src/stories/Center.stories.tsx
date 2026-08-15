@@ -5,9 +5,9 @@ import { Center } from "../layouts";
 const card = (label: string) => (
   <div
     style={{
-      background: "var(--zs-fill-secondary)",
-      padding: "var(--zs-space-4)",
-      borderRadius: "var(--zs-radius-3)",
+      background: "var(--zeroship-fill-secondary)",
+      padding: "var(--zeroship-space-4)",
+      borderRadius: "var(--zeroship-radius-3)",
       textAlign: "center",
     }}
   >
@@ -121,9 +121,9 @@ export const WideChildContained: Story = {
       <Center minHeight="20dvh" data-testid="center-wide">
         <div
           style={{
-            background: "var(--zs-fill-secondary)",
-            padding: "var(--zs-space-3)",
-            borderRadius: "var(--zs-radius-2)",
+            background: "var(--zeroship-fill-secondary)",
+            padding: "var(--zeroship-space-3)",
+            borderRadius: "var(--zeroship-radius-2)",
             overflowWrap: "anywhere",
           }}
         >

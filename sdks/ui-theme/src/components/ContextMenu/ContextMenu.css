@@ -15,16 +15,16 @@
   display: block;
   /* No padding / margin — the trigger is a wrapper; layout pressure
    * comes from the consumer's content. */
-  border-radius: var(--zs-radius-2);
+  border-radius: var(--zeroship-radius-2);
   outline: none;
   /* Stamp a focus ring when the trigger gets keyboard focus so a
    * keyboard user knows where Shift+F10 will open the menu. */
-  transition: box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+  transition: box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
 [data-slot="contextmenu-trigger"]:focus-visible {
   box-shadow:
-    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 
 /* ─── Forced-colors mirror ─────────────────────────────────────────── */

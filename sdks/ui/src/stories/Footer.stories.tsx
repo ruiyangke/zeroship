@@ -157,18 +157,18 @@ export const Default: Story = {
     // ─── Regression: the column link's focus ring resolves to the design
     // focus-ring COLOR, and its color transition actually parses ───────────
     //
-    // The link's `:focus-visible` rule was authored against `--zs-focus-ring`
-    // (undefined — the token is `--zs-focus-ring-color`), so the outline
+    // The link's `:focus-visible` rule was authored against `--zeroship-focus-ring`
+    // (undefined — the token is `--zeroship-focus-ring-color`), so the outline
     // resolved to its initial value (the UA default `currentColor`) and the
     // keyboard focus target had no design color. The `transition` shorthand
-    // referenced two more undefined tokens (`--zs-duration-1`/`--zs-ease-out`),
+    // referenced two more undefined tokens (`--zeroship-duration-1`/`--zeroship-ease-out`),
     // so the whole shorthand was invalid and DROPPED — the link had no
-    // transition at all. Both are now fixed (`--zs-focus-ring-color`,
-    // `--zs-motion-fast`/`--zs-motion-ease`).
+    // transition at all. Both are now fixed (`--zeroship-focus-ring-color`,
+    // `--zeroship-motion-fast`/`--zeroship-motion-ease`).
 
     // The transition shorthand now PARSES to a valid value (asserted in the
     // resting state). Pre-fix it referenced undefined tokens
-    // (`--zs-duration-1`/`--zs-ease-out`) so the whole shorthand was invalid
+    // (`--zeroship-duration-1`/`--zeroship-ease-out`) so the whole shorthand was invalid
     // and DROPPED, leaving `transition-property: all` (the initial value).
     // Post-fix it resolves to the scoped `color … 150ms` transition — EXCEPT
     // the test-runner emulates `prefers-reduced-motion: reduce` for the whole

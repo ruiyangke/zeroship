@@ -18,12 +18,12 @@
  *      paint chips, labels, focus rings.
  *
  *   2. Vertical (default) stacks via `flex-direction: column` and
- *      `gap: var(--zs-space-2)` — same rhythm as a column of Field
+ *      `gap: var(--zeroship-space-2)` — same rhythm as a column of Field
  *      controls so a CheckboxGroup nested in a Field reads as a single
  *      cluster.
  *
  *   3. Horizontal becomes `flex-direction: row` + `flex-wrap: wrap`,
- *      using the wider `--zs-space-4` gap so adjacent checkbox rows
+ *      using the wider `--zeroship-space-4` gap so adjacent checkbox rows
  *      breathe. Wrap is intentional: horizontal groups that overflow
  *      the inline axis flow to the next row rather than clipping.
  *
@@ -44,15 +44,15 @@
 [data-slot="checkbox-group"] {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-2);
+  gap: var(--zeroship-space-2);
   min-inline-size: 0;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
+  font-family: var(--zeroship-font-system);
+  color: var(--zeroship-label);
 }
 
 [data-slot="checkbox-group"][data-orientation="horizontal"] {
   flex-direction: row;
   flex-wrap: wrap;
-  gap: var(--zs-space-4);
+  gap: var(--zeroship-space-4);
   align-items: center;
 }

@@ -30,12 +30,12 @@ export interface ScrollRailProps extends ComponentPropsWithoutRef<"div"> {
 }
 
 const RAIL_MAX_WIDTH: Record<ContainerSize, string> = {
-  sm: "var(--zs-container-sm)",
-  md: "var(--zs-container-md)",
-  lg: "var(--zs-container-lg)",
-  xl: "var(--zs-container-xl)",
-  product: "var(--zs-container-product)",
-  wide: "var(--zs-container-wide)",
+  sm: "var(--zeroship-container-sm)",
+  md: "var(--zeroship-container-md)",
+  lg: "var(--zeroship-container-lg)",
+  xl: "var(--zeroship-container-xl)",
+  product: "var(--zeroship-container-product)",
+  wide: "var(--zeroship-container-wide)",
   full: "100vw",
 };
 
@@ -58,9 +58,9 @@ export const ScrollRail = forwardRef<HTMLDivElement, ScrollRailProps>(
     ref,
   ) {
     const railVars: CSSProperties = {
-      "--zs-scroll-rail-max-width": RAIL_MAX_WIDTH[size],
-      "--zs-scroll-rail-gap": spaceVar(gap),
-      "--zs-scroll-rail-pad": spaceVar(padX),
+      "--zeroship-scroll-rail-max-width": RAIL_MAX_WIDTH[size],
+      "--zeroship-scroll-rail-gap": spaceVar(gap),
+      "--zeroship-scroll-rail-pad": spaceVar(padX),
       ...style,
     } as CSSProperties;
 
