@@ -53,20 +53,20 @@
 #   - Nothing here proves the runtime BEHAVES correctly without the file. It
 #     proves the file is not present and not read.
 #
-# Runs without Postgres and without a six-binary build: it needs a built
-# `zeroship` binary and node.
+# Runs without Postgres and without a six-binary build: it needs a current
+# debug `zeroship` binary, the Vite plugin's installed dependencies, and node.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-BIN="${ZEROSHIP_BIN:-$ROOT/target/release/zeroship}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/zeroship"
+BIN="${ZEROSHIP_BIN:-$ROOT/target/debug/zeroship}"
 FIXTURE="$ROOT/tests/fixtures/project-config/zeroship.jsonc"
 MINIMAL_FIXTURE="$ROOT/tests/fixtures/project-config/zeroship-minimal.jsonc"
 SCHEMA="$ROOT/schema/project-v1.json"
 TS_DUMP="$ROOT/sdks/vite-plugin/scripts/project-config-dump.ts"
+VITE_PLUGIN="$ROOT/sdks/vite-plugin"
 PROBE="$ROOT/tests/lib/project_config_pack_probe.mjs"
 CODEGEN_PROBE="$ROOT/tests/lib/project_config_codegen_probe.mjs"
 WORK="$(mktemp -d)"
@@ -80,10 +80,97 @@ for f in "$SCHEMA" "$FIXTURE" "$MINIMAL_FIXTURE" "$TS_DUMP" "$PROBE" "$CODEGEN_P
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 if [ ! -x "$BIN" ]; then
-  echo "FAIL: no zeroship binary at $BIN (cargo build -p zeroship, or set ZEROSHIP_BIN)"
+  echo "FAIL: no zeroship binary at $BIN"
+  echo "      Run: cargo build -p zeroship --bin zeroship"
   exit 1
 fi
-NODE_RUN=(node --import tsx)
+DEPFILE="$BIN.d"
+if [ ! -f "$DEPFILE" ]; then
+  echo "FAIL: no Cargo dependency record at $DEPFILE; the binary cannot be verified"
+  echo "      Run: cargo build -p zeroship --bin zeroship"
+  exit 1
+fi
+
+# Cargo's dep-info names the exact source and embedded-asset inputs used to
+# build this executable. Include each local package manifest plus workspace
+# inputs that Cargo does not put in the file, then refuse any older binary.
+if ! node - "$DEPFILE" "$ROOT" >"$WORK/binary-inputs" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [depfile, root] = process.argv.slice(2);
+const line = fs.readFileSync(depfile, "utf8").split("\n", 1)[0];
+const separator = line.indexOf(": ");
+if (separator < 0) throw new Error(`invalid Cargo dependency record: ${depfile}`);
+const words = [];
+let word = "";
+let escaped = false;
+for (const char of line.slice(separator + 2)) {
+  if (escaped) {
+    word += char;
+    escaped = false;
+  } else if (char === "\\") {
+    escaped = true;
+  } else if (/\s/.test(char)) {
+    if (word) words.push(word), word = "";
+  } else {
+    word += char;
+  }
+}
+if (word) words.push(word);
+const inputs = new Set([
+  path.join(root, "Cargo.toml"),
+  path.join(root, "Cargo.lock"),
+  path.join(root, "schema/project-v1.json"),
+]);
+for (const raw of words) {
+  const input = path.resolve(root, raw);
+  inputs.add(input);
+  for (let dir = path.dirname(input); dir.startsWith(root); dir = path.dirname(dir)) {
+    const manifest = path.join(dir, "Cargo.toml");
+    if (fs.existsSync(manifest)) {
+      inputs.add(manifest);
+      break;
+    }
+    if (dir === root) break;
+  }
+}
+process.stdout.write([...inputs].sort().join("\n") + "\n");
+NODE
+then
+  echo "FAIL: could not read Cargo dependency record $DEPFILE"
+  echo "      Run: cargo build -p zeroship --bin zeroship"
+  exit 1
+fi
+
+STALE_INPUT=""
+MISSING_INPUT=""
+while IFS= read -r input; do
+  if [ ! -e "$input" ]; then
+    MISSING_INPUT="$input"
+    break
+  fi
+  if [ "$input" -nt "$BIN" ]; then
+    STALE_INPUT="$input"
+    break
+  fi
+done <"$WORK/binary-inputs"
+if [ -n "$MISSING_INPUT" ]; then
+  echo "FAIL: $BIN was built from an input that no longer exists: $MISSING_INPUT"
+  echo "      Run: cargo build -p zeroship --bin zeroship"
+  exit 1
+fi
+if [ -n "$STALE_INPUT" ]; then
+  echo "FAIL: stale zeroship binary: ${STALE_INPUT#"$ROOT"/} is newer than $BIN"
+  echo "      Run: cargo build -p zeroship --bin zeroship"
+  exit 1
+fi
+
+if [ ! -e "$VITE_PLUGIN/node_modules/tsx" ]; then
+  echo "FAIL: $VITE_PLUGIN does not have its declared tsx dependency installed"
+  echo "      Run: pnpm install --frozen-lockfile"
+  exit 1
+fi
+NODE_RUN=(pnpm --dir "$VITE_PLUGIN" exec node --import tsx)
 
 echo "== 0. CI runs this gate =="
 CI_INVOCATIONS=$(grep -Ec '^[[:space:]]*run: bash tests/project_config_gate\.sh[[:space:]]*$' \
