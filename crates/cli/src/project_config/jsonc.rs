@@ -1,14 +1,13 @@
 //! A minimal JSONC reader: comments and trailing commas, nothing else.
 //!
-//! WHY NOT A CRATE. `jsonc-parser` and `json_spanned_value` exist and the
-//! proposal expected one of them (2026-08-14-project-config.md 5.2). Two things
-//! made a ~120-line module the better trade:
+//! WHY NOT A CRATE. `jsonc-parser` and `json_spanned_value` exist, but two
+//! requirements made a ~120-line module the better trade:
 //!
-//! 1. The scope invariant (proposal 1.2) wants the parser confined to
-//!    `crates/cli`, and `tests/project_config_gate.sh` asserts it. A dependency
+//! 1. The parser must remain confined to `crates/cli`, and
+//!    `tests/project_config_gate.sh` asserts it. A dependency
 //!    that no crate declares is a stronger form of "confined" than one declared
 //!    in exactly one Cargo.toml, and it cannot be pulled in by indirection.
-//! 2. The writeback (5.2) is splice-only and needs BYTE SPANS in the ORIGINAL
+//! 2. The writeback is splice-only and needs BYTE SPANS in the ORIGINAL
 //!    text, not in a normalised parse tree. Blanking comments in place gives
 //!    that for free: every offset in the stripped text is the same offset in the
 //!    file, so a span found in one is a span in the other.

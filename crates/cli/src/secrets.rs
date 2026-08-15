@@ -144,7 +144,7 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 /// `--contrl=` was silently ignored, which used to mean "fall back to
 /// localhost" and would now mean "silently use whatever the file says". Adding
 /// a config layer to a command that swallows typos makes a wrong target MORE
-/// reachable, not less (proposal 2.4), so the gate lands with the layer.
+/// reachable, not less, so the gate lands with the layer.
 const ENV_KNOWN_FLAGS: &[&str] = &[
     "--app", "--control", "--token", "--expose", "--config", "--env",
 ];

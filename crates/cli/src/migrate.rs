@@ -8,8 +8,7 @@
 //! The path comes from `zeroship.jsonc`'s `migrations.out` unless a positional
 //! overrides it. There is NO compiled default: the build decides where it
 //! writes the recorded migration set, and a Rust constant guessing the same
-//! string is how the two came to disagree in the first place (see
-//! `docs/proposals/2026-08-14-project-config.md` 2.1 and 7.3).
+//! string is how the two came to disagree in the first place.
 //!
 //! The file is the request body verbatim - the CLI
 //! does not build, parse or rewrite it, because recording a `.ts` migration
@@ -92,7 +91,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     let loaded = file.as_deref().map(ProjectConfig::load).transpose()?;
     let resolved = match (&loaded, flag_str(args, "--env=")) {
         (Some(cfg), env) => Some(cfg.resolve(env.as_deref())?),
-        // NO IMPLICIT ENVIRONMENT (proposal 9.2): `--env=` without a file is a
+        // NO IMPLICIT ENVIRONMENT: `--env=` without a file is a
         // typo, not a request, and silently ignoring it would run against the
         // wrong target with the creator believing otherwise.
         (None, Some(env)) => {

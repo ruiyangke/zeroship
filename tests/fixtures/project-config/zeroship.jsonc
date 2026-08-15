@@ -1,6 +1,6 @@
 // tests/fixtures/project-config/zeroship.jsonc
 //
-// The round-trip fixture for `tests/project_config_gate.sh` check 3: BOTH
+// The round-trip fixture for `tests/project_config_gate.sh`: BOTH
 // readers parse this file and dump the resolved config as canonical JSON, and
 // the two dumps must be byte-equal.
 //
@@ -19,7 +19,7 @@
 //     not mistake for the top-level one
 //
 // EVERY CROSS-TOOL KEY IS EXPLICIT, which is not decoration either: the Rust
-// reader has no defaults (proposal 7.3), so an omitted key would make it error
+// reader has no defaults, so an omitted key would make it error
 // while the TypeScript reader produced the schema default. That asymmetry is
 // tested on purpose by the gate's mutation, not by this file.
 {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zeroship.ai/schema/project-v1.json",
   "title": "zeroship.jsonc",
-  "description": "The canonical creator project configuration. Read by the zeroship CLI and by the build toolchain; NEVER by the runtime, and never packed into a .zship. See docs/reference/project-config.md and docs/proposals/2026-08-14-project-config.md section 1.2.",
+  "description": "The canonical creator project configuration. Read by the zeroship CLI and by the build toolchain; NEVER by the runtime, and never packed into a .zship. See docs/reference/project-config.md.",
   "x-config-filename": "zeroship.jsonc",
   "x-config-env-var": "ZEROSHIP_CONFIG",
   "x-forbidden-key-names": [
@@ -41,7 +41,7 @@
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
       "x-cli-read": true,
-      "description": "RESERVED. The runtime does not branch on it and no compatibility mechanism exists (proposal section 6). The format is validated so the habit of writing it is established before the first gated behaviour change."
+      "description": "RESERVED. The runtime does not branch on it and no compatibility mechanism exists. The format is validated so the habit of writing it is established before the first gated behaviour change."
     },
     "build": {
       "$ref": "#/$defs/build",

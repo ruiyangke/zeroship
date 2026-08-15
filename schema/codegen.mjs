@@ -2,13 +2,12 @@
 // schema/codegen.mjs
 //
 // Generate the TWO readers of `zeroship.jsonc` from `schema/project-v1.json`,
-// which is the single source of truth (proposal 2026-08-14-project-config.md,
-// section 7.2 Option B).
+// which is the single source of truth.
 //
 //   node schema/codegen.mjs            # write both generated files
 //   node schema/codegen.mjs --check    # regenerate in memory, diff, exit 1 on drift
 //
-// WHAT IS ASYMMETRIC, ON PURPOSE (section 7.3). The TypeScript file carries
+// WHAT IS ASYMMETRIC, ON PURPOSE. The TypeScript file carries
 // every `default` from the schema, because the Vite plugin must work with
 // `zeroship()` and NO file at all. The Rust file carries NONE: a key the CLI
 // reads and the file omits is an error naming the key. That is what makes it
@@ -176,7 +175,7 @@ function tsSource() {
   L.push("/** Fields the Rust CLI also reads. The `config` escape hatch may not touch these. */");
   L.push(`export const CLI_READ_FIELDS: readonly string[] = ${jsonLit(cliReadFields)};`);
   L.push("");
-  L.push("/** Key names that must never appear anywhere in the file (proposal 8.4). */");
+  L.push("/** Key names that must never appear anywhere in the file. */");
   L.push(`export const FORBIDDEN_KEY_NAMES: readonly string[] = ${jsonLit(schema["x-forbidden-key-names"])};`);
   L.push("");
   for (const o of objects) {
@@ -223,7 +222,7 @@ function rsSource() {
   const L = [];
   for (const line of BANNER_LINES) L.push(line ? `//! ${line}` : "//!");
   L.push("//!");
-  L.push("//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point (proposal 7.3).");
+  L.push("//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point.");
   L.push("//! Every default lives in `schema/project-v1.json` and reaches exactly one");
   L.push("//! reader, the TypeScript one. A key the CLI reads and the file omits is an");
   L.push("//! error naming the key -- so the two readers cannot hold different values for");
@@ -239,7 +238,7 @@ function rsSource() {
   L.push("/// Fields the CLI reads. The Vite `config` escape hatch may not touch these.");
   L.push(`pub const CLI_READ_FIELDS: &[&str] = &[${cliReadFields.map(jsonLit).join(", ")}];`);
   L.push("");
-  L.push("/// Key names that must never appear anywhere in the file (proposal 8.4).");
+  L.push("/// Key names that must never appear anywhere in the file.");
   L.push(`pub const FORBIDDEN_KEY_NAMES: &[&str] = &[${schema["x-forbidden-key-names"].map(jsonLit).join(", ")}];`);
   L.push("");
   for (const o of objects) {

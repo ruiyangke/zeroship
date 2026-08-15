@@ -69,8 +69,8 @@ writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 //
 // `runtime_date` is NOT stamped with today's date, and that is a decision.
 // Stamping it would make two creators who scaffold on different days receive
-// different files, and `tests/golden_path.sh` step 10a - which re-runs THIS
-// scaffolder and requires byte equality against `examples/scaffold-app` -
+// different files, and the golden-path harness re-runs THIS scaffolder and
+// requires byte equality against `examples/scaffold-app`. The comparison
 // could then never hold. The date buys nothing that pays for that: nothing
 // reads `runtime_date`, and its whole stated value is that projects are in the
 // habit of carrying one. The template's date does that. When a dated behaviour

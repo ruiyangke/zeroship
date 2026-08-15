@@ -32,7 +32,7 @@ per developer machine, plus the three levers that point at the file.
 | --- | --- | --- |
 | `devServerPort` | `3001` | Port for the zeroship dev runtime. |
 | `devAuth` | `true` in dev | Dev-tier auth. See below. |
-| `configPath` | auto-discovery | Path to `zeroship.jsonc`, absolute or relative to the Vite root. Step 1 of the file precedence; the others are `ZEROSHIP_CONFIG` and `zeroship.jsonc` in the app root. A path that does not exist throws. |
+| `configPath` | auto-discovery | Path to `zeroship.jsonc`, absolute or relative to the Vite root. An explicit path takes precedence over `ZEROSHIP_CONFIG` and app-root auto-discovery. A path that does not exist throws. |
 | `env` | none | Selects a named entry from the file's `environments` block - the plugin's equivalent of the CLI's `--env=`. There is no implicit environment and no `ZEROSHIP_ENV`. |
 | `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `app`, `control`, `runtime_date`, `build.output`, `migrations.dir` or `migrations.out`; attempting to is an error naming the field. |
 

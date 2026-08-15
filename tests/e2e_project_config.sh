@@ -12,15 +12,13 @@
 # only producer of the per-app role the runtime `SET LOCAL ROLE`s to, so an
 # env.db call that returns data is a receipt for the whole chain.
 #
-# THE PRE-FIX HALF MATTERS AS MUCH AS THE GREEN HALF (stage 6). The defect this
-# file removes is four independent derivations of two paths
-# (docs/proposals/2026-08-14-project-config.md 2.1), and the sharpest of them
-# was a Rust constant, `DEFAULT_IR_PATH = "generated/zeroship/migrations.ir.json"`,
-# that the CLI used when no positional path was given. A project whose build
-# wrote anywhere else got a `failed to read` from a path it never chose. Stage 6
-# builds exactly that project - `migrations.out` pointed somewhere else - and
-# shows the deleted constant's literal failing on it while the config-driven
-# resolution succeeds. Same project, same command, one variable.
+# THE REGRESSION PROBE MATTERS AS MUCH AS THE GREEN PATH. This harness proves
+# both halves of the fix on one project: config-driven migration-path resolution
+# succeeds, while the removed hardcoded path fails. Previously, the CLI used
+# `DEFAULT_IR_PATH = "generated/zeroship/migrations.ir.json"` when no positional
+# path was given, so a project whose build wrote anywhere else got a
+# `failed to read` from a path it never chose. Same project, same command, one
+# variable.
 #
 # WHAT THIS DOES NOT PROVE:
 #   - It does not exercise `--env=`; the environments overlay is covered by the
@@ -90,7 +88,7 @@ mkdir -p "$WORK/blobs" "$WORK/blob-cache"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 1: ephemeral Postgres + platform migrations ==="
+echo "=== prepare Postgres and apply platform migrations ==="
 docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
   -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
@@ -114,7 +112,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: control + migrated + worker + gateway ==="
+echo "=== start control, migrated, worker, and gateway ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
@@ -155,7 +153,7 @@ boot gate $ZEROSHIP_GATEWAY_PORT -- "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWA
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 3: admin PAT + an app to own ==="
+echo "=== mint an admin PAT and create its app ==="
 POLICY_JSON='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
 POLICY_HASH="$(node -e '
 const {createHash}=require("crypto");
@@ -204,13 +202,14 @@ SQL
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 4: the creator project, with a zeroship.jsonc and nothing else ==="
+echo "=== prepare the creator project from zeroship.jsonc ==="
 # A COPY of examples/db-todos, so the repo's own tree is untouched and the
 # `app` id can be written into the file the way a creator would.
 #
 # `migrations.out` is DELIBERATELY NOT the default: `generated/elsewhere`.
 # With the deleted `DEFAULT_IR_PATH` this project was unreachable by
-# `zeroship migrate` without typing the path, which is the defect (stage 6).
+# `zeroship migrate` without typing the path, which is the defect this harness
+# guards against.
 APP_DIR="$WORK/project"
 mkdir -p "$APP_DIR"
 cp -a "$SRC_APP/dist" "$APP_DIR/dist"
@@ -280,7 +279,7 @@ sleep 5   # route + version sync to gateway + worker
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 5: a database-backed RPC returns real rows ==="
+echo "=== verify database-backed RPC reads and writes ==="
 zs_frame() {
   node -e '
 const fs = require("fs");
@@ -323,11 +322,11 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 6: the pre-fix failure, reproduced on the same project ==="
+echo "=== verify the hardcoded migration path stays removed ==="
 # ONE VARIABLE. Same project, same working directory, same command; the only
 # difference is where the migration set is looked up.
 #
-#   A) the config-driven path            -> the file exists   (stage 4 proved it applies)
+#   A) the config-driven path -> the file exists and was applied above
 #   B) the deleted DEFAULT_IR_PATH literal -> the file does NOT exist
 #
 # B is what `zeroship migrate` did before this change whenever no positional
@@ -348,9 +347,9 @@ fi
 OLD_OUT="$( cd "$APP_DIR" && "$BIN/zeroship" migrate "$OLD_CONST" 2>&1 )"; OLD_RC=$?
 echo "  old-constant path -> rc=$OLD_RC: $(head -c 160 <<<"$OLD_OUT")"
 if [ "$OLD_RC" != 0 ] && grep -q "failed to read" <<<"$OLD_OUT"; then
-  pass "B: driving the old hardcoded path FAILS on this project (the pre-fix behaviour)"
+  pass "B: driving the removed hardcoded path FAILS on this project"
 else
-  fail "B: the old path did not fail (rc=$OLD_RC) - stage 6 is not measuring the defect"
+  fail "B: the old path did not fail (rc=$OLD_RC) - the regression probe is invalid"
 fi
 
 # ...and with NO config file at all, the CLI REFUSES rather than guessing that

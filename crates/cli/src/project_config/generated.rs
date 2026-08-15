@@ -3,7 +3,7 @@
 //! Regenerate with `node schema/codegen.mjs`; `tests/project_config_gate.sh`
 //! fails the build when this file drifts from the schema.
 //!
-//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point (proposal 7.3).
+//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point.
 //! Every default lives in `schema/project-v1.json` and reaches exactly one
 //! reader, the TypeScript one. A key the CLI reads and the file omits is an
 //! error naming the key -- so the two readers cannot hold different values for
@@ -19,7 +19,7 @@ pub const SCHEMA_ID: &str = "https://zeroship.ai/schema/project-v1.json";
 /// Fields the CLI reads. The Vite `config` escape hatch may not touch these.
 pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out"];
 
-/// Key names that must never appear anywhere in the file (proposal 8.4).
+/// Key names that must never appear anywhere in the file.
 pub const FORBIDDEN_KEY_NAMES: &[&str] = &["password", "token", "secret", "key", "apiKey", "credentials"];
 
 pub const ROOT_KNOWN_KEYS: &[&str] = &["$schema", "name", "app", "control", "runtime_date", "build", "migrations", "secrets", "environments"];
