@@ -560,8 +560,12 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
 
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
+    // TWO ENVELOPES, because the schema()/data() split refuses one that mixes
+    // DDL with DML (`Load(MixedDdlAndDml)`). The DML half is what this test is
+    // about; the DDL half only has to land first and seed the logical column
+    // contracts the per-row destinations are validated against.
     let authored: MigrationIr = serde_json::from_str(
-        r#"{"ir_version":1,"name":"pg_per_row_generators","ops":[
+        r#"{"ir_version":1,"name":"pg_per_row_generators_schema","ops":[
           {"op":"createTable","name":"samples","columns":[
             {"name":"id","type":"bigInt","nullable":false},
             {"name":"uuid4","type":"uuid"},
@@ -569,19 +573,10 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
             {"name":"ulid","type":"text","valueFormat":"ulid"},
             {"name":"plain_text","type":"text"}
-          ],"primaryKey":["id"]},
-          {"op":"insert","table":"samples","columns":["id"],
-           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
-          {"op":"backfill","table":"samples","name":"fill_per_row_ids",
-           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
-             "uuid4":{"perRow":"uuidV4"},
-             "uuid7":{"perRow":"uuidV7"},
-             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
-             "ulid":{"perRow":"ulid"}
-           }}
+          ],"primaryKey":["id"]}
         ]}"#,
     )
-    .expect("parse per-row IR fixture");
+    .expect("parse per-row schema fixture");
     let resolved =
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve no-inject table policy");
@@ -592,21 +587,64 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         SqlDialect::Postgres,
         &support::no_inject("app"),
     );
+    let guard_cfg = GuardConfig::from_policy(
+        support::no_inject(&cfg.project_schema),
+        SqlDialect::Postgres,
+    );
     let artifact = author
         .load_and_lower_guarded(
             &ir,
             "app_test",
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(
-                support::no_inject(&cfg.project_schema),
-                SqlDialect::Postgres,
-            ),
+            &guard_cfg,
         )
-        .expect("declared perRow destination formats must lower on PostgreSQL");
+        .expect("the declaring schema envelope must lower on PostgreSQL");
     MigrationEngine::new()
         .apply_plan(
             &artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "postgres-per-row-generator-schema",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the schema envelope applies on live PostgreSQL");
+
+    // The data envelope lowers against the contracts the schema envelope just
+    // declared. A per-row destination is proved from the LOGICAL column
+    // contract, not from the live catalog — the catalog cannot carry a TypeID
+    // prefix — so an empty `LiveSchema` here is refused for an undeclared
+    // destination, correctly.
+    let mut declared_live = LiveSchema::default();
+    declared_live.tables.insert("samples".into());
+    declared_live
+        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .expect("the applied schema envelope seeds its logical column contracts");
+
+    let data_ir = r#"{"ir_version":1,"name":"pg_per_row_generators_data","irreversible":"overwrites generated identifiers in place without recording their pre-images","ops":[
+          {"op":"insert","table":"samples","columns":["id"],
+           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
+          {"op":"backfill","table":"samples","name":"fill_per_row_ids",
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
+             "uuid4":{"perRow":"uuidV4"},
+             "uuid7":{"perRow":"uuidV7"},
+             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
+             "ulid":{"perRow":"ulid"}
+           }}
+        ]}"#;
+    // The data envelope must prove ownership from the REGISTRY: unlike the schema
+    // envelope, it contains no `createTable` to establish it.
+    let registry: BTreeMap<String, String> = [("samples".to_string(), "app_test".to_string())]
+        .into_iter()
+        .collect();
+    let data_artifact = author
+        .load_and_lower_guarded(data_ir, "app_test", &registry, &declared_live, &guard_cfg)
+        .expect("declared perRow destination formats must lower on PostgreSQL");
+    MigrationEngine::new()
+        .apply_plan(
+            &data_artifact.plan.steps,
             Approval::Approved,
             &backend,
             &cfg,
@@ -6457,20 +6495,14 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     let backend = PostgresBackend::new_generic(&session);
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     let authored: MigrationIr = serde_json::from_str(
-        r#"{"ir_version":1,"name":"pg_per_row_resume","ops":[
+        r#"{"ir_version":1,"name":"pg_per_row_resume_schema","ops":[
           {"op":"createTable","name":"samples","columns":[
             {"name":"id","type":"bigInt","nullable":false},
             {"name":"uuid4","type":"uuid"}
-          ],"primaryKey":["id"]},
-          {"op":"insert","table":"samples","columns":["id"],
-           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
-          {"op":"backfill","table":"samples","name":"fill_ids",
-           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
-             "uuid4":{"perRow":"uuidV4"}
-           }}
+          ],"primaryKey":["id"]}
         ]}"#,
     )
-    .expect("parse the per-row resume fixture");
+    .expect("parse the per-row resume schema fixture");
     let resolved =
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve no-inject table policy");
@@ -6481,20 +6513,61 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
         SqlDialect::Postgres,
         &support::no_inject("app"),
     );
-    let artifact = author
+    let guard_cfg = GuardConfig::from_policy(
+        support::no_inject(&cfg.project_schema),
+        SqlDialect::Postgres,
+    );
+    let schema_artifact = author
         .load_and_lower_guarded(
             &ir,
             "app_test",
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(
-                support::no_inject(&cfg.project_schema),
-                SqlDialect::Postgres,
-            ),
+            &guard_cfg,
+        )
+        .expect("the declaring schema envelope lowers");
+
+    // The DDL and the DML are separate envelopes under the schema()/data() split.
+    // Only the DATA plan is re-applied below: re-running it is the resume this
+    // test measures, and the table must already exist for that to mean anything.
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &schema_artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "per-row-resume-schema",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the schema envelope applies");
+
+    let mut declared_live = LiveSchema::default();
+    declared_live.tables.insert("samples".into());
+    declared_live
+        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .expect("the applied schema envelope seeds its logical column contracts");
+    let registry: BTreeMap<String, String> = [("samples".to_string(), "app_test".to_string())]
+        .into_iter()
+        .collect();
+    let artifact = author
+        .load_and_lower_guarded(
+            r#"{"ir_version":1,"name":"pg_per_row_resume_data","irreversible":"overwrites generated identifiers in place without recording their pre-images","ops":[
+          {"op":"insert","table":"samples","columns":["id"],
+           "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
+          {"op":"backfill","table":"samples","name":"fill_ids",
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
+             "uuid4":{"perRow":"uuidV4"}
+           }}
+        ]}"#,
+            "app_test",
+            &registry,
+            &declared_live,
+            &guard_cfg,
         )
         .expect("the per-row plan lowers");
 
-    let engine = MigrationEngine::new();
     let apply = || {
         engine.apply_plan(
             &artifact.plan.steps,
