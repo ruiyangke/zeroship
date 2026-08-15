@@ -67,6 +67,12 @@ readers then diverge on purpose:
   always had**, so `zeroship deploy ./dist/app.zship --app=... --control=...`
   still works with no file present.
 
+Once a file is selected, its directory is the project root for every relative
+path stored in that file. This is also true for an external `configPath`,
+`--config`, or `ZEROSHIP_CONFIG` file: the command's working directory roots
+the selector, never `build.*` or `migrations.*` inside the selected file.
+Explicit positional paths remain relative to the command's working directory.
+
 ## Key reference
 
 `type` and `default` come from `schema/project-v1.json`. **Defaults are applied

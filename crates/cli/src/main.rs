@@ -388,7 +388,7 @@ fn cmd_deploy(args: &[String]) {
     let app_source = app.source.clone();
     let (app, control_url) = (app.value, control_url.value);
 
-    let input_path = PathBuf::from(&input);
+    let input_path = input;
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", input_path.display());
         eprintln!("Run `vite build` (with @zeroship/vite-plugin) to produce a .zship archive.");
@@ -439,7 +439,7 @@ type DeployTarget = (
     Option<project_config::Resolved>,
     project_config::Sourced,
     project_config::Sourced,
-    String,
+    PathBuf,
 );
 
 /// Resolve the deploy target and the artifact to upload.
@@ -492,9 +492,9 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
 
     let input = match args.get(2).filter(|a| !a.starts_with("--")) {
-        Some(p) => p.clone(),
+        Some(p) => PathBuf::from(p),
         None => match resolved.as_ref() {
-            Some(cfg) => cfg.require("build.output")?.to_string(),
+            Some(cfg) => cfg.require_path("build.output")?,
             None => {
                 return Err(
                     "Usage: zeroship deploy <path-to-.zship> --app=<name> \
@@ -554,15 +554,14 @@ fn record_created_app(
     }
 }
 
-/// After a successful deploy, name the migrate step when this working directory
+/// After a successful deploy, name the migrate step when the selected project
 /// has migrations to apply.
 ///
 /// DELIBERATELY A CLIENT-SIDE HINT, and a weak one. It fires on the presence of
-/// the build's own artifact in the CURRENT directory, which is where `pnpm build
-/// && zeroship deploy ./dist/app.zship` leaves it - so it is silent for a deploy
-/// run from somewhere else, and it does not know whether the app's migrations
-/// are already applied. It cannot tell you that you FORGOT; only that there is
-/// something to run.
+/// the build's own artifact beside the selected project config, including when
+/// deploy was invoked from another directory. It does not know whether the
+/// app's migrations are already applied. It cannot tell you that you FORGOT;
+/// only that there is something to run.
 ///
 /// The check that could tell you is server-side: the deploy handler knows
 /// whether the bundle carries a `runtime_descriptor` (i.e. the app uses
@@ -578,10 +577,10 @@ fn print_migrate_reminder(
     // The reminder now reads the SAME `migrations.out` the build wrote to.
     // Before this it read a hardcoded const, so a project that moved its
     // generated dir got silence from the one hint it had.
-    let Some(out) = resolved.and_then(|r| r.str("migrations.out")) else {
+    let Some(out) = resolved.and_then(|r| r.resolve_path("migrations.out")) else {
         return;
     };
-    let ir = PathBuf::from(out).join(migrate::IR_FILENAME);
+    let ir = out.join(migrate::IR_FILENAME);
     if !ir.is_file() {
         return;
     }
