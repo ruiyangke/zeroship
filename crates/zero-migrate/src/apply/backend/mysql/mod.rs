@@ -816,6 +816,13 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         }
     }
 
+    async fn unresolved_rollback_markers(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<String>, JournalError> {
+        journal_sql::unresolved_rollback_markers(self.conn, cfg).await
+    }
+
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
         journal_sql::applied(self.conn, cfg).await
     }

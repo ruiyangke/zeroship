@@ -497,6 +497,19 @@ pub trait MigrationBackend {
     /// Bootstrap the journal + immutability constructs (idempotent).
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError>;
 
+    /// Versions with an unresolved backend-specific rollback marker.
+    ///
+    /// MySQL uses a durable side-table because its `down` DDL auto-commits and an
+    /// interrupted unwind can leave an unverified partially-reverted shape.
+    /// Transactional rollback backends have no such artifact and inherit the
+    /// empty result.
+    async fn unresolved_rollback_markers(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<String>, JournalError> {
+        Ok(Vec::new())
+    }
+
     /// The net-applied + lone-`started` journal entries (the drift/pending input).
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError>;
 

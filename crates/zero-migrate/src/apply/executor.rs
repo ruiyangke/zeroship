@@ -38,7 +38,7 @@
 //! Runs out-of-band at deploy. The apply futures are driven by the host
 //! (the napi `block_on` worker + JS host) — ZERO tokio, ZERO compio.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -173,6 +173,23 @@ pub enum ApplyError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// MySQL records that this version's `down` began, but no successful outcome
+    /// was journaled. The live schema may therefore be partially reverted, so an
+    /// already-applied version must not be reported as a clean skip.
+    #[error(
+        "mysql migration {version} has a rollback marker from an interrupted unwind; its \
+         `down` auto-committed an unknown number of statements, so the live shape is not the \
+         one this `up` expects. Inspect the live schema against the migration's `down`, finish \
+         or undo the partial revert yourself, then clear the marker with DELETE FROM \
+         `{meta_schema}`.schema_migrations_rollback_inflight WHERE version = '{version}' and \
+         run apply again"
+    )]
+    UnresolvedRollbackMarker {
+        /// The supplied migration version carrying the unresolved marker.
+        version: String,
+        /// The MySQL meta database containing the rollback marker table.
+        meta_schema: String,
+    },
     /// A dialect-level backend error whose message is already the intended
     /// operator-facing text. Use [`ApplyError::Db`] /
     /// [`ApplyError::MigrationFailed`] for structured driver/transport failures.
@@ -901,6 +918,24 @@ async fn apply_locked<B: MigrationBackend>(
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
     backend.ensure_journal(cfg).await?;
+
+    // MySQL `down` DDL auto-commits, so an interrupted unwind can leave both an
+    // applied journal event and an unverified partially-reverted live shape. The
+    // ordinary pending calculation would call that version `skipped`. Refuse it
+    // before partitioning whenever its durable marker intersects the FULL set
+    // supplied to this apply. PostgreSQL and SQLite inherit the empty hook.
+    let supplied_versions: HashSet<&str> = migrations.iter().map(|m| m.version.as_str()).collect();
+    if let Some(version) = backend
+        .unresolved_rollback_markers(cfg)
+        .await?
+        .into_iter()
+        .find(|version| supplied_versions.contains(version.as_str()))
+    {
+        return Err(ApplyError::UnresolvedRollbackMarker {
+            version,
+            meta_schema: cfg.pg.meta_schema.clone(),
+        });
+    }
 
     // PRE-FLIGHT over the FULL supplied set, before the
     // partition or any apply, rejecting malformed repeatable/versioned combinations

@@ -518,6 +518,27 @@ pub(crate) async fn net_rolled_back_versions<D: SqlSession>(
         .collect()
 }
 
+/// Return every version whose MySQL `down` started without a recorded outcome.
+pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<String>, JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT version
+                   FROM {meta}.schema_migrations_rollback_inflight
+                  ORDER BY version COLLATE utf8mb4_bin"
+            ),
+            &[],
+        )
+        .await?;
+    rows.into_iter()
+        .map(|row| row.try_get("version").map_err(JournalError::from))
+        .collect()
+}
+
 /// The versions covered by a net-applied squash (the MySQL analogue of
 /// [`crate::apply::journal::superseded_versions`]). Only a GENUINE recorded squash
 /// (latest event `applied` AND `kind='squash'`) can supersede.
