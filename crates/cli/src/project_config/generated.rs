@@ -13,7 +13,7 @@ pub const CONFIG_ENV_VAR: &str = "ZEROSHIP_CONFIG";
 pub const SCHEMA_ID: &str = "https://zeroship.ai/schema/project-v1.json";
 
 /// Fields the CLI reads. The Vite `config` escape hatch may not touch these.
-pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out"];
+pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out", "protected"];
 
 /// Key names that must never appear anywhere in the file.
 pub const FORBIDDEN_KEY_NAMES: &[&str] = &["password", "token", "secret", "key", "apiKey", "credentials"];

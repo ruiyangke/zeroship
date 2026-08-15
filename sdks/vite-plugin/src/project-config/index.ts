@@ -379,8 +379,9 @@ export function applyProjectConfigOverride(
 ): ResolvedProjectConfig {
   if (override == null) return resolved;
   const baseline = structuredClone(resolved);
-  const partial = typeof override === "function" ? override(resolved) : override;
-  const next: Json = { ...(resolved as unknown as Json) };
+  const working = structuredClone(resolved);
+  const partial = typeof override === "function" ? override(working) : override;
+  const next: Json = { ...(working as unknown as Json) };
   for (const [k, v] of Object.entries(partial as Json)) {
     next[k] = k === "build" || k === "migrations" ? deepMergeBlock(next[k], v) : v;
   }

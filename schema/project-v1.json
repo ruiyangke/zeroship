@@ -70,6 +70,7 @@
           "control": { "type": "string", "x-cli-read": true },
           "protected": {
             "type": "boolean",
+            "x-cli-read": true,
             "description": "`zeroship migrate` against a protected environment requires --yes."
           },
           "build": { "$ref": "#/$defs/build" },
