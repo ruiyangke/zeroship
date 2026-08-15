@@ -3,7 +3,7 @@
 {% block body %}
 <h2>Authorize device</h2>
 {% if let Some(err) = error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 <form id="device-approve-form" method="POST" action="/device">
   <label>Device code
