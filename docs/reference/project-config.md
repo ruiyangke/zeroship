@@ -279,6 +279,8 @@ two tools back into the disagreement this file removes. Change those in
 Overridable: `secrets`, `build.mode`, `build.serverEntry`, `build.dist`.
 The denial is on **change**, not on presence, because the idiom above spreads
 `app` and `control` into its own result every time.
+Writable-path safety checks run after this override, so an accepted
+`build.dist` change still cannot move the build over the project or its config.
 
 ## The writeback, and starting a project with no app yet
 

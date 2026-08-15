@@ -340,6 +340,20 @@ describe("resolution", () => {
 });
 
 describe("the config escape hatch", () => {
+  test("the reader rejects a callback that moves build.dist over the project", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    try {
+      assert.throws(
+        () => readProjectConfig(root, {
+          override: (config) => ({ build: { ...config.build, dist: "." } }),
+        }),
+        /build\.dist.*zeroship\.jsonc/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a field only the build reads is overridable", () => {
     const base = resolveProjectConfig(parsed());
     const out = applyProjectConfigOverride(base, (c) => ({
