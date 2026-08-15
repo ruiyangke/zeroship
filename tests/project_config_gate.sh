@@ -209,6 +209,68 @@ $FIXTURE|staging|full fixture --env=staging
 $MINIMAL_FIXTURE||all optional fields omitted
 EOF
 
+# The main fixture is deliberately readable, so generate the awkward encoding
+# cases here. This keeps the repository files themselves ASCII-clean while the
+# readers still see the literal bytes and characters at runtime.
+EDGE_FIXTURE="$WORK/edge.jsonc"
+node - "$MINIMAL_FIXTURE" "$EDGE_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+const text = fs.readFileSync(source, "utf8")
+  .replace('"name": "minimal-config-fixture"', '"\\u006eame": "minimal-\\u0063onfig-fixture"')
+  .replace("// Every", "// Every\f")
+  .replaceAll("\n", "\r\n");
+fs.writeFileSync(target, text);
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$EDGE_FIXTURE" ) \
+  >"$WORK/edge-ts.json" 2>"$WORK/edge-ts.err"
+edge_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$EDGE_FIXTURE" ) \
+  >"$WORK/edge-rs.json" 2>"$WORK/edge-rs.err"
+edge_rs_rc=$?
+if [ "$edge_ts_rc" = 0 ] && [ "$edge_rs_rc" = 0 ] \
+    && diff -q "$WORK/edge-ts.json" "$WORK/edge-rs.json" >/dev/null; then
+  pass "TypeScript and Rust agree on CRLF, Unicode escapes and form feed inside a comment"
+else
+  fail "the readers disagree on the generated CRLF/escape/comment fixture (ts=$edge_ts_rc rs=$edge_rs_rc)"
+fi
+
+BOM_FIXTURE="$WORK/bom.jsonc"
+node - "$MINIMAL_FIXTURE" "$BOM_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+fs.writeFileSync(target, "\uFEFF" + fs.readFileSync(source, "utf8"));
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BOM_FIXTURE" ) \
+  >"$WORK/bom-ts.json" 2>"$WORK/bom-ts.err"
+bom_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$BOM_FIXTURE" ) \
+  >"$WORK/bom-rs.json" 2>"$WORK/bom-rs.err"
+bom_rs_rc=$?
+if [ "$bom_ts_rc" != 0 ] && [ "$bom_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject a leading BOM"
+else
+  fail "the readers disagree on a leading BOM (ts=$bom_ts_rc rs=$bom_rs_rc)"
+fi
+
+FORM_FEED_FIXTURE="$WORK/form-feed.jsonc"
+node - "$MINIMAL_FIXTURE" "$FORM_FEED_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+fs.writeFileSync(target, fs.readFileSync(source, "utf8").replace("{", "{\f"));
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$FORM_FEED_FIXTURE" ) \
+  >"$WORK/form-feed-ts.json" 2>"$WORK/form-feed-ts.err"
+form_feed_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$FORM_FEED_FIXTURE" ) \
+  >"$WORK/form-feed-rs.json" 2>"$WORK/form-feed-rs.err"
+form_feed_rs_rc=$?
+if [ "$form_feed_ts_rc" != 0 ] && [ "$form_feed_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject raw form feed outside comments"
+else
+  fail "the readers disagree on raw form feed (ts=$form_feed_ts_rc rs=$form_feed_rs_rc)"
+fi
+
 # MUTATION A. Remove a cross-tool key from a file that exists. NEITHER reader
 # may quietly supply a value: the schema requires it, so both must refuse and
 # both must name it. A run where one of them answered with a path would be the

@@ -364,6 +364,110 @@ fn a_missing_app_with_no_file_is_an_error_not_a_panic() {
 }
 
 // ---------------------------------------------------------------------------
+// JSONC preservation cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn jsonc_comments_trailing_commas_and_string_markers_parse() {
+    let text = r#"{
+      // URL and comment markers inside strings remain data.
+      "name": "demo-app",
+      "control": "https://control.zeroship.ai",
+      "runtime_date": "2026-08-14",
+      "build": {
+        "mode": "full",
+        "serverEntry": "src/x\"/*y*/,}.ts",
+        "dist": "dist",
+        "output": "dist/app.zship",
+      },
+      "migrations": { "dir": "migrations", "out": "generated/zeroship", },
+    }"#;
+    let resolved = cfg(text).resolve(None).expect("JSONC must resolve");
+    assert_eq!(resolved.str("control"), Some("https://control.zeroship.ai"));
+    assert_eq!(resolved.str("build.serverEntry"), Some("src/x\"/*y*/,}.ts"));
+}
+
+#[test]
+fn crlf_jsonc_parses() {
+    let text = FULL.replace('\n', "\r\n");
+    let resolved = cfg(&text).resolve(None).expect("CRLF JSONC must resolve");
+    assert_eq!(resolved.str("name"), Some("demo-app"));
+}
+
+#[test]
+fn unicode_escaped_keys_and_values_parse() {
+    let text = FULL
+        .replacen("\"name\": \"demo-app\"", "\"\\u006eame\": \"demo-app\"", 1)
+        .replacen(
+            "\"mode\": \"full\"",
+            "\"mode\": \"full\", \"server\\u0045ntry\": \"caf\\u00e9-\\ud83d\\ude00.ts\"",
+            1,
+        );
+    let resolved = cfg(&text).resolve(None).expect("escaped JSON must resolve");
+    assert_eq!(resolved.str("name"), Some("demo-app"));
+    assert_eq!(
+        resolved.str("build.serverEntry"),
+        Some("caf\u{e9}-\u{1f600}.ts")
+    );
+}
+
+#[test]
+fn bom_is_rejected() {
+    let text = format!("\u{feff}{FULL}");
+    ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("a leading BOM was rejected by the existing reader");
+}
+
+#[test]
+fn raw_form_feed_outside_comment_is_rejected() {
+    let text = FULL.replacen("{\n", "{\u{000c}\n", 1);
+    ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("raw form feed is not JSON whitespace");
+}
+
+#[test]
+fn raw_form_feed_inside_comment_is_accepted() {
+    let text = FULL.replacen("// A comment", "// A\u{000c} comment", 1);
+    let resolved = cfg(&text).resolve(None).expect("comment content is ignored");
+    assert_eq!(resolved.str("name"), Some("demo-app"));
+}
+
+#[test]
+fn loose_json_extensions_are_rejected() {
+    let cases = [
+        ("unquoted property", FULL.replacen("\"name\":", "name:", 1)),
+        (
+            "missing comma",
+            FULL.replacen(
+                "\"name\": \"demo-app\",\n  \"app\"",
+                "\"name\": \"demo-app\"\n  \"app\"",
+                1,
+            ),
+        ),
+        (
+            "single-quoted string",
+            FULL.replacen("\"demo-app\"", "'demo-app'", 1),
+        ),
+    ];
+    for (label, text) in cases {
+        ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+            .expect_err(label);
+    }
+}
+
+#[test]
+fn proto_key_is_rejected() {
+    let text = FULL.replacen(
+        "{\n",
+        "{\n  \"__proto__\": { \"control\": \"https://attacker.invalid\" },\n",
+        1,
+    );
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("unknown __proto__ must not disappear during parsing");
+    assert!(err.contains("__proto__"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
 // Writeback
 // ---------------------------------------------------------------------------
 
@@ -403,5 +507,37 @@ fn write_app_refuses_to_insert_a_missing_member() {
     let c = ProjectConfig::load(&path).unwrap();
     assert_eq!(c.write_app("44444444-4444-4444-8444-444444444444").unwrap(), WriteOutcome::PrintInstead);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the file must be untouched");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
+    let text = FULL
+        .replacen(
+            "// A comment, which is the whole reason the format is JSONC.",
+            "// caf\u{e9}-\u{1f600}",
+            1,
+        )
+        .replacen("  \"app\":", "  \"\\u0061pp\":", 1)
+        .replace('\n', "\r\n");
+    let dir = std::env::temp_dir().join(format!("zs-pc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("splice-original-span.jsonc");
+    std::fs::write(&path, &text).unwrap();
+
+    let config = ProjectConfig::load(&path).unwrap();
+    assert_eq!(
+        config
+            .write_app("55555555-5555-4555-8555-555555555555")
+            .unwrap(),
+        WriteOutcome::Spliced
+    );
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    let expected = text.replace(
+        "\"11111111-1111-4111-8111-111111111111\"",
+        "\"55555555-5555-4555-8555-555555555555\"",
+    );
+    assert_eq!(after, expected, "only the original app value span may change");
     std::fs::remove_file(&path).ok();
 }
