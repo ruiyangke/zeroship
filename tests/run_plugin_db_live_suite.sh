@@ -94,7 +94,9 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # The three `missing_role` tests cover contextual session setup, generic pool
 # reconnect classification, and the fixed wire message. Counting them in the
 # floor ensures all three run in CI rather than only when invoked by hand.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-113}"
+# The three real-Runtime unmigrated-path tests added to `native_transaction`
+# raise the measured full-suite census from 113 to 116.
+PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-116}"
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather

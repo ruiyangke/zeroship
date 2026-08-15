@@ -247,7 +247,12 @@ async function _zsFetch(request) {
 export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
-fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) {
+fn dispatch_zs_for_app(
+    url: &str,
+    source: &str,
+    name: &str,
+    app_id: Option<&str>,
+) -> (u16, serde_json::Value) {
     init_v8();
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
@@ -258,7 +263,25 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
         None,
         "native-transaction-test-worker",
     ))];
-    let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
+    let mut env_vars = std::collections::HashMap::new();
+    if let Some(app_id) = app_id {
+        env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    }
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .env_vars(env_vars)
+        .plugins(plugins)
+        .build();
+    if app_id.is_some() {
+        // Production schema bootstrap initializes this backend handle without
+        // applying app migrations. Transactions read the handle directly.
+        zeroship_plugin_db::set_db_url_for_tests(url);
+        block_on(async {
+            zeroship_plugin_db::init_pool_async()
+                .await
+                .expect("initialize the production Postgres backend");
+        });
+    }
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url_ep = format!("http://localhost/__zeroship/v1/{name}");
@@ -272,6 +295,24 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
     );
     let (status, body) = match outcome {
         FetchOutcome::Response { status, body, .. } => (status, body),
+        FetchOutcome::Stream {
+            status,
+            body_reader,
+            ..
+        } => block_on(async {
+            runtime.start_pump();
+            let mut body = Vec::new();
+            loop {
+                while let Some(chunk) = body_reader.pop() {
+                    body.extend_from_slice(&chunk);
+                }
+                if body_reader.is_done() {
+                    break;
+                }
+                body_reader.wait_for_data().await;
+            }
+            (status, body)
+        }),
         FetchOutcome::Pending { rx, cancel: _ } => {
             block_on(async {
                 runtime.start_pump();
@@ -281,16 +322,39 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
                     .expect("settled error");
                 match settled {
                     SettledFetch::Response { status, body, .. } => (status, body),
-                    _ => panic!("expected Response variant"),
+                    SettledFetch::Stream {
+                        status,
+                        body_reader,
+                        ..
+                    } => {
+                        let mut body = Vec::new();
+                        loop {
+                            while let Some(chunk) = body_reader.pop() {
+                                body.extend_from_slice(&chunk);
+                            }
+                            if body_reader.is_done() {
+                                break;
+                            }
+                            body_reader.wait_for_data().await;
+                        }
+                        (status, body)
+                    }
+                    SettledFetch::WebSocketUpgrade { .. } => {
+                        panic!("unexpected WebSocketUpgrade variant")
+                    }
                 }
             })
         }
-        _ => panic!("unexpected outcome variant"),
+        FetchOutcome::WebSocketUpgrade { .. } => panic!("unexpected WebSocketUpgrade variant"),
     };
     let body = String::from_utf8_lossy(&body).into_owned();
     let json: serde_json::Value =
         serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
     (status, json)
+}
+
+fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) {
+    dispatch_zs_for_app(url, source, name, None)
 }
 
 /// `_procedures` declaring `setup` (registerModel) plus the per-test
@@ -328,6 +392,119 @@ setup.config = {{ kind: "action" }};
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn unmigrated_app_autocommit_response_names_migrate() {
+    let url = require_pg();
+    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let src = build_src(
+        r#"
+function autocommitBeforeMigrate(_input, _ctx) {
+    return env.db.collection("notes").find({}, {});
+}
+autocommitBeforeMigrate.config = { kind: "action" };
+const _procedures = { autocommitBeforeMigrate };
+"#,
+    );
+
+    let (status, body) = dispatch_zs_for_app(
+        &url,
+        &src,
+        "autocommitBeforeMigrate",
+        Some(&app_id),
+    );
+    assert_eq!(status, 500, "missing role must be a 500 response; body={body}");
+    assert_eq!(
+        body.get("code").and_then(|v| v.as_str()),
+        Some("schema_not_provisioned"),
+        "autocommit must preserve the provisioning classification; body={body}"
+    );
+    assert!(
+        body.get("message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|message| message.contains("zeroship migrate")),
+        "autocommit response must name the creator remediation; body={body}"
+    );
+}
+
+#[test]
+fn unmigrated_app_transaction_response_names_migrate() {
+    let url = require_pg();
+    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let src = build_src(
+        r#"
+async function transactionBeforeMigrate(_input, _ctx) {
+    return await env.db.transaction(async () => "unreachable");
+}
+transactionBeforeMigrate.config = { kind: "action" };
+const _procedures = { transactionBeforeMigrate };
+"#,
+    );
+
+    let (status, body) = dispatch_zs_for_app(
+        &url,
+        &src,
+        "transactionBeforeMigrate",
+        Some(&app_id),
+    );
+    assert_eq!(status, 500, "missing role must be a 500 response; body={body}");
+    assert_eq!(
+        body.get("code").and_then(|v| v.as_str()),
+        Some("schema_not_provisioned"),
+        "transaction setup must preserve the provisioning classification; body={body}"
+    );
+    assert!(
+        body.get("message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|message| message.contains("zeroship migrate")),
+        "transaction response must name the creator remediation; body={body}"
+    );
+}
+
+#[test]
+fn unmigrated_app_streaming_response_names_migrate() {
+    let url = require_pg();
+    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let src = [
+        r#"import { env } from "zeroship";"#,
+        include_str!("../../../sdks/bootstrap/dist/fetch-handler.js"),
+        r#"
+globalThis.__zsDispatch = async (rpc, name, input, ctx) => rpc[name](input, ctx);
+
+async function* streamBeforeMigrate(_input, _ctx) {
+    await env.db.collection("notes").find({}, {});
+    yield "unreachable";
+}
+streamBeforeMigrate.config = { kind: "stream" };
+const _procedures = { streamBeforeMigrate };
+const _fetch = createFetchHandler(async () => ({
+    userDefault: {},
+    fetch: undefined,
+    rpc: _procedures,
+}));
+export default { fetch: _fetch, rpc: _procedures };
+"#,
+    ]
+    .join("\n");
+
+    let (status, body) =
+        dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
+    assert_eq!(status, 200, "SSE errors stay inside a 200 stream; body={body}");
+    let text = body.as_str().expect("SSE body must be text");
+    assert!(
+        text.contains("schema_not_provisioned")
+            || text.contains("SCHEMA_NOT_PROVISIONED"),
+        "streaming response must preserve the provisioning code; body={text}"
+    );
+    assert!(
+        text.contains("zeroship migrate"),
+        "streaming response must name the creator remediation; body={text}"
+    );
+    assert!(
+        !text.contains("internal error"),
+        "streaming response must not replace the remediation; body={text}"
+    );
+}
 
 /// Commit on resolve: the callback inserts a row and resolves; the row
 /// persists and is visible after the transaction commits.
