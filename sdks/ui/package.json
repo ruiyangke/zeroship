@@ -1,7 +1,7 @@
 {
   "name": "@zeroship/ui",
   "version": "0.1.0",
-  "description": "zeroship governed React design system: semantic tokens, themes, and core primitives.",
+  "description": "Headless React components: Base UI behaviour, accessibility contracts and data-* state hooks. Ships NO CSS -- styling is @zeroship/ui-theme or your own.",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
@@ -11,15 +11,13 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./styles.css": "./dist/styles.css",
-    "./tailwind.css": "./dist/tailwind.css"
+    }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup && node scripts/copy-css.mjs",
+    "build": "tsup",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "test:story-copy": "node scripts/check-story-copy.mjs",
@@ -55,6 +53,7 @@
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
+    "@zeroship/ui-theme": "workspace:*",
     "axe-playwright": "^2.2.2",
     "concurrently": "^9.2.1",
     "http-server": "^14.1.1",

@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import "@zeroship/ui/styles.css";
+import "@zeroship/ui-theme/styles.css";
 import { App } from "./App";
 import "./styles.css";
 

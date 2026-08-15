@@ -5,7 +5,11 @@
  * plus the styled components, layout primitives, and composed blocks that
  * have landed so far.
  */
-import "./styles.css";
+// NO CSS IMPORT. This barrel used to pull the whole 19k-line stylesheet into
+// every consumer that touched a single component, which is what made the
+// library styled rather than headless -- apps could not take the behaviour
+// without the look. Styling is now opt-in: `@zeroship/ui-theme/styles.css`,
+// or your own.
 
 export {
   DEFAULT_THEME,

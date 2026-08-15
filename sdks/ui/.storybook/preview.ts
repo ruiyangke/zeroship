@@ -1,7 +1,10 @@
 import type { Preview } from "@storybook/react";
 import { createElement } from "react";
 import { withThemeByDataAttribute } from "@storybook/addon-themes";
-import "../src/styles.css";
+// The library ships no CSS. Storybook loads the theme package so the stories
+// have a look to show -- and so the 49 computed-style assertions in play()
+// blocks have something to measure.
+import "@zeroship/ui-theme/styles.css";
 import "../src/stories/story.css";
 
 const preview: Preview = {

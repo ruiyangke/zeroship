@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@zeroship/ui": "workspace:*",
+    "@zeroship/ui-theme": "workspace:*",
     "lucide-react": "^1.8.0",
     "react": "catalog:",
     "react-dom": "catalog:"

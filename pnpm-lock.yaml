@@ -125,6 +125,9 @@ importers:
       '@zeroship/ui':
         specifier: workspace:*
         version: link:../../sdks/ui
+      '@zeroship/ui-theme':
+        specifier: workspace:*
+        version: link:../../sdks/ui-theme
       lucide-react:
         specifier: ^1.8.0
         version: 1.14.0(@types/react@19.2.14)(react@19.2.5)
@@ -695,6 +698,9 @@ importers:
       '@zeroship/ui':
         specifier: workspace:*
         version: link:../../sdks/ui
+      '@zeroship/ui-theme':
+        specifier: workspace:*
+        version: link:../../sdks/ui-theme
       react:
         specifier: 'catalog:'
         version: 19.2.5
@@ -1616,6 +1622,9 @@ importers:
       '@types/react-dom':
         specifier: 'catalog:'
         version: 19.2.3(@types/react@19.2.14)
+      '@zeroship/ui-theme':
+        specifier: workspace:*
+        version: link:../ui-theme
       axe-playwright:
         specifier: ^2.2.2
         version: 2.2.2(playwright@1.58.2)
@@ -1655,6 +1664,8 @@ importers:
       wait-on:
         specifier: ^9.0.0
         version: 9.0.10(debug@4.4.3(supports-color@8.1.1))(supports-color@8.1.1)
+
+  sdks/ui-theme: {}
 
   sdks/vite-plugin:
     dependencies:

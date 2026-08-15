@@ -1,0 +1,15 @@
+{
+  "name": "@zeroship/ui-theme",
+  "version": "0.1.0",
+  "description": "The styling for @zeroship/ui: component skin, foundation tokens and the four themes. Opt-in, so the component library itself ships no CSS.",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./styles.css": "./dist/styles.css"
+  },
+  "scripts": {
+    "build": "node copy-css.mjs"
+  }
+}

@@ -3,7 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, "..");
+// This script now sits at the PACKAGE root, not in scripts/, so root is here.
+const root = here;
 
 await mkdir(join(root, "dist"), { recursive: true });
 

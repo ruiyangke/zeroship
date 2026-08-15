@@ -24,6 +24,7 @@
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/ui": "workspace:*",
+    "@zeroship/ui-theme": "workspace:*",
     "react": "catalog:",
     "react-dom": "catalog:",
     "react-router-dom": "catalog:"
