@@ -133,7 +133,7 @@
   letter-spacing: 0;
 }
 
-.section-header .zs-button {
+.section-header [data-slot="button"] {
   flex: 0 0 auto;
   margin-top: 16px;
 }
@@ -156,7 +156,7 @@
   flex: 0 0 372px;
 }
 
-.product-card.zs-card {
+[data-slot="card"].product-card {
   width: 372px;
   height: 707px;
   min-height: 707px;
@@ -170,7 +170,7 @@
     opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.product-card.zs-card:hover {
+[data-slot="card"].product-card:hover {
   transform: none;
 }
 
@@ -192,7 +192,7 @@
   transition: transform 320ms ease;
 }
 
-.product-card.zs-card:hover .product-card__media img {
+[data-slot="card"].product-card:hover .product-card__media img {
   transform: scale(1.025);
 }
 
@@ -235,7 +235,7 @@
   border-radius: 999px;
 }
 
-.product-card .zs-card__title,
+.product-card [data-slot="card-title"],
 .product-card h3 {
   display: grid;
   align-items: end;
@@ -248,7 +248,7 @@
   letter-spacing: 0;
 }
 
-.product-card .zs-card__description {
+.product-card [data-slot="card-description"] {
   display: grid;
   justify-items: center;
   max-width: 290px;
@@ -300,12 +300,12 @@
   margin-top: 40px;
 }
 
-.product-card__actions .zs-button--filled {
+.product-card__actions [data-slot="button"] {
   width: 131px;
   min-width: 131px;
 }
 
-.product-card__actions .zs-button--plain {
+.product-card__actions [data-slot="button"] {
   width: 40px;
   min-width: 40px;
   padding: 0;
@@ -398,12 +398,12 @@
   letter-spacing: 0;
 }
 
-.privacy-panel__copy .zs-button {
+.privacy-panel__copy [data-slot="button"] {
   --zeroship-button-gray-bg: #fff;
   --zeroship-button-gray-ink: #1d1d1f;
 }
 
-.guided-panel__copy .zs-button {
+.guided-panel__copy [data-slot="button"] {
   --zeroship-button-gray-bg: #1d1d1f;
   --zeroship-button-gray-ink: #fff;
   width: 154px;
@@ -453,7 +453,7 @@
   margin-top: 0;
 }
 
-.buying-section .section-header .zs-button {
+.buying-section .section-header [data-slot="button"] {
   width: 108px;
   min-width: 108px;
   height: 20px;
@@ -495,7 +495,7 @@
   padding-bottom: 0;
 }
 
-.incentive-card.zs-card {
+[data-slot="card"].incentive-card {
   position: relative;
   flex: 0 0 372px;
   width: 372px;
@@ -510,7 +510,7 @@
   box-shadow: none;
 }
 
-.incentive-card .zs-card__header {
+.incentive-card [data-slot="card-header"] {
   position: relative;
   z-index: 2;
   gap: 0;
@@ -535,7 +535,7 @@
   line-height: 32px;
 }
 
-.incentive-card .zs-card__description {
+.incentive-card [data-slot="card-description"] {
   max-width: 308px;
   margin-top: 14px;
   color: #1d1d1f;
@@ -563,7 +563,7 @@
   object-position: center bottom;
 }
 
-.apple-demo .incentive-card__more.zs-button {
+.apple-demo [data-slot="button"].incentive-card__more {
   position: absolute;
   right: 20px;
   bottom: 20px;
@@ -586,7 +586,7 @@
   padding-top: 10px;
 }
 
-.apple-demo--buying-expanded .incentive-card.zs-card {
+.apple-demo--buying-expanded [data-slot="card"].incentive-card {
   height: 576px;
   min-height: 576px;
 }
@@ -600,7 +600,7 @@
   margin-top: -30px;
 }
 
-.buying-detail-dialog.zs-dialog-popup {
+:is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"]).buying-detail-dialog {
   width: min(816px, calc(100vw - 48px));
   max-inline-size: min(816px, calc(100vw - 48px));
   border: 0;
@@ -609,7 +609,7 @@
   box-shadow: 0 28px 88px rgb(0 0 0 / 0.24);
 }
 
-.buying-detail-dialog__header.zs-dialog__header {
+:is([data-slot="alertdialog-header"], [data-slot="dialog-header"]).buying-detail-dialog__header {
   padding: 54px 60px 20px;
 }
 
@@ -622,7 +622,7 @@
   line-height: 24px;
 }
 
-.buying-detail-dialog .zs-dialog__title {
+.buying-detail-dialog [data-slot="dialog-title"] {
   max-width: 650px;
   color: #1d1d1f;
   font-size: 48px;
@@ -631,7 +631,7 @@
   letter-spacing: 0;
 }
 
-.buying-detail-dialog__body.zs-dialog__body {
+:is([data-slot="alertdialog-body"], [data-slot="dialog-body"]).buying-detail-dialog__body {
   padding: 0 60px 18px;
 }
 
@@ -671,13 +671,13 @@
   content: "";
 }
 
-.buying-detail-dialog__footer.zs-dialog__footer {
+:is([data-slot="alertdialog-footer"], [data-slot="dialog-footer"]).buying-detail-dialog__footer {
   justify-content: space-between;
   padding: 24px 60px 54px;
   border-top: 0;
 }
 
-.buying-detail-dialog__footer .zs-button {
+.buying-detail-dialog__footer [data-slot="button"] {
   white-space: normal;
 }
 
@@ -693,7 +693,7 @@
   margin: 24px auto 0;
 }
 
-.apple-demo .carousel-paddle.zs-button {
+.apple-demo [data-slot="button"].carousel-paddle {
   width: 36px;
   min-width: 36px;
   height: 36px;
@@ -707,7 +707,7 @@
     background-color 140ms ease;
 }
 
-.apple-demo .carousel-paddle.zs-button:hover {
+.apple-demo [data-slot="button"].carousel-paddle:hover {
   background: rgb(190 190 195 / 0.86);
   transform: scale(1.04);
 }
@@ -733,7 +733,7 @@
   padding-bottom: 0;
 }
 
-.consider-card.zs-card {
+[data-slot="card"].consider-card {
   position: relative;
   flex: 0 0 372px;
   width: 372px;
@@ -786,7 +786,7 @@
   transform: scale(1.025);
 }
 
-.consider-card .zs-card__header {
+.consider-card [data-slot="card-header"] {
   position: relative;
   z-index: 2;
   gap: 0;
@@ -821,7 +821,7 @@
   color: #1d1d1f;
 }
 
-.apple-demo .consider-card__more.zs-button {
+.apple-demo [data-slot="button"].consider-card__more {
   position: absolute;
   right: 20px;
   bottom: 20px;
@@ -918,7 +918,7 @@
   letter-spacing: 0;
 }
 
-.privacy-panel__copy .zs-button {
+.privacy-panel__copy [data-slot="button"] {
   width: 131px;
   min-width: 131px;
 }
@@ -945,7 +945,7 @@
   margin-top: 0;
 }
 
-.essentials-section .section-header .zs-button {
+.essentials-section .section-header [data-slot="button"] {
   width: 182px;
   min-width: 182px;
   height: 20px;
@@ -956,7 +956,7 @@
   line-height: 25px;
 }
 
-.essential-card.zs-card {
+[data-slot="card"].essential-card {
   position: relative;
   height: 626px;
   min-height: 626px;
@@ -969,7 +969,7 @@
   box-shadow: none;
 }
 
-.essential-card .zs-card__header {
+.essential-card [data-slot="card-header"] {
   position: relative;
   z-index: 2;
   align-items: center;
@@ -1018,7 +1018,7 @@
   line-height: 21px;
 }
 
-.essential-card .zs-button {
+.essential-card [data-slot="button"] {
   width: auto;
   min-width: 0;
   height: 21px;
@@ -1028,12 +1028,12 @@
   color: #06c;
 }
 
-.essential-card .zs-button svg {
+.essential-card [data-slot="button"] svg {
   width: 16px;
   height: 16px;
 }
 
-.essential-card .zs-card__description {
+.essential-card [data-slot="card-description"] {
   max-width: 400px;
   margin-inline: auto;
   color: #515154;
@@ -1647,7 +1647,7 @@
 
 .product-scroller .motion-reveal,
 .product-scroller .motion-reveal.is-visible,
-.product-scroller .product-card.zs-card:hover,
+.product-scroller [data-slot="card"].product-card:hover,
 .incentive-rail .motion-reveal,
 .incentive-rail .motion-reveal.is-visible,
 .consider-rail .motion-reveal,

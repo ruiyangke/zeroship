@@ -46,7 +46,7 @@
   white-space: nowrap;
 }
 
-.apple-demo .country-banner__continue.zs-button {
+.apple-demo [data-slot="button"].country-banner__continue {
   height: 36px;
   min-height: 36px;
   border: 0;
@@ -166,7 +166,7 @@
   display: none;
 }
 
-.apple-demo .apple-demo-nav-icon.zs-button {
+.apple-demo [data-slot="button"].apple-demo-nav-icon {
   width: 28px;
   min-width: 28px;
   height: 28px;
@@ -177,7 +177,7 @@
   color: rgb(29 29 31 / 0.82);
 }
 
-.apple-demo .apple-demo-nav-icon.zs-button:hover {
+.apple-demo [data-slot="button"].apple-demo-nav-icon:hover {
   background: rgb(29 29 31 / 0.06);
   color: #000;
 }
@@ -355,13 +355,13 @@
 }
 
 .apple-demo-ribbon a,
-.apple-demo .zs-button--plain {
+.apple-demo [data-slot="button"] {
   color: #0066cc;
 }
 
 .apple-demo-ribbon a,
-.apple-demo .zs-button--plain > .zs-button__inner > .zs-button__label,
-.apple-demo .zs-button--plain .zs-button__label > a {
+.apple-demo [data-slot="button"] > [data-slot="button-inner"] > [data-slot="button-label"],
+.apple-demo [data-slot="button"] [data-slot="button-label"] > a {
   display: inline-flex;
   align-items: center;
   gap: 2px;
