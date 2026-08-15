@@ -526,6 +526,27 @@ describe("emitZship", () => {
     }
   });
 
+  test("rejects a dist symlink that resolves to the project root", async () => {
+    const fix = await makeFixture({
+      "zeroship.jsonc": "{\"name\":\"creator-project\"}\n",
+      "index.html": "<!doctype html><p>creator source</p>\n",
+    });
+    await fs.symlink(".", resolve(fix.root, "dist"));
+    try {
+      await assert.rejects(
+        () => emitZship({
+          root: fix.root,
+          outputPath: resolve(fix.root, "app.zship"),
+          builtAt: "2026-04-29T00:00:00Z",
+          silent: true,
+        }),
+        /distDir.*project root/,
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("emits correct routing rules for /favicon.ico when present", async () => {
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html>",

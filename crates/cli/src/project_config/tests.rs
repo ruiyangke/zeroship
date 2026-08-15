@@ -8,8 +8,7 @@
 //! - They do not exercise `locate` against a real `ZEROSHIP_CONFIG`, because
 //!   setting process environment in a threaded test runner races every other
 //!   test in the binary. The env arm is covered by the shell gate.
-//! - `write_app` is tested on a temp file; it does not prove the splice is safe
-//!   under a concurrent editor.
+//! - `write_app` is tested on temp files, including a real disk edit after load.
 
 use super::*;
 
@@ -110,21 +109,24 @@ fn an_absent_cross_tool_key_errors_naming_it_rather_than_defaulting() {
     assert!(err.contains("no default"), "{err}");
 }
 
-/// EVERY field the schema gives a default AND the CLI reads must produce an
-/// error here, not a value. This checks the rule against the generated tables
-/// rather than against a list somebody typed: add a `default` to a CLI-read
-/// property in the schema and this test starts failing until the Rust side is
-/// still fallback-free.
+/// Every CLI-read default not explicitly marked safe must produce an error
+/// here, not a value. This checks the rule against the generated tables rather
+/// than against a second hand-maintained field list.
 ///
 /// It is the intersection that matters. `build.mode` has a default and is NOT
 /// CLI-read, so a TypeScript-only default there is correct and this test says
 /// nothing about it.
 #[test]
-fn no_cli_read_field_has_a_rust_side_default() {
+fn unsafe_cli_read_defaults_do_not_reach_rust() {
     let stripped: Vec<&str> = generated::SCHEMA_DEFAULTED_FIELDS
         .iter()
         .copied()
         .filter(|f| generated::CLI_READ_FIELDS.contains(f))
+        .filter(|f| {
+            !generated::RESOLVED_OPTIONAL_DEFAULTS_JSON
+                .iter()
+                .any(|(path, _)| path == f)
+        })
         .collect();
     assert!(
         !stripped.is_empty(),
@@ -149,6 +151,13 @@ fn no_cli_read_field_has_a_rust_side_default() {
         let err = r.require(field).expect_err("must not default");
         assert!(err.contains(field), "{err}");
     }
+}
+
+#[test]
+fn absent_secrets_resolve_to_the_schema_safe_empty_default() {
+    let text = FULL.replace("  \"secrets\": [\"STRIPE_SECRET_KEY\"],\n", "");
+    let resolved = cfg(&text).resolve(None).unwrap();
+    assert_eq!(resolved.get("secrets"), Some(&Value::Array(Vec::new())));
 }
 
 /// A `$schema` naming a different contract is refused rather than validated
@@ -211,6 +220,69 @@ fn build_dist_cannot_be_the_project_root_or_one_of_its_ancestors() {
         assert!(err.contains("build.dist"), "{err}");
         assert!(err.contains("ancestor"), "{err}");
         assert!(err.contains("zeroship.jsonc"), "{err}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn build_dist_cannot_symlink_to_the_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let linked_root = dir.path().join("linked-root");
+    std::os::unix::fs::symlink(".", &linked_root).unwrap();
+    let text = FULL.replace("\"dist\": \"dist\"", "\"dist\": \"linked-root\"");
+
+    let err = ProjectConfig::parse_with_root(config_path, text, dir.path())
+        .expect_err("a symlinked dist containing zeroship.jsonc must not parse");
+    assert!(err.contains("build.dist"), "{err}");
+    assert!(err.contains("zeroship.jsonc"), "{err}");
+}
+
+#[test]
+fn build_output_cannot_target_the_project_root_an_ancestor_or_an_existing_source_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let source_path = dir.path().join("src/main.rs");
+    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    std::fs::write(&source_path, "fn main() {}\n").unwrap();
+
+    for output in [".", "..", CONFIG_FILENAME, "src/main.rs"] {
+        let text = FULL.replace(
+            "\"output\": \"dist/app.zship\"",
+            &format!("\"output\": {}", serde_json::to_string(output).unwrap()),
+        );
+        std::fs::write(&config_path, &text).unwrap();
+        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+            .expect_err("an output that can overwrite creator data must not parse");
+        assert!(err.contains("build.output"), "{err}");
+    }
+}
+
+#[test]
+fn build_output_may_replace_an_existing_generated_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+    let output_path = dir.path().join("dist/app.zship");
+    std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    std::fs::write(&output_path, "old artifact").unwrap();
+
+    ProjectConfig::parse_with_root(config_path, FULL.to_string(), dir.path())
+        .expect("an existing generated artifact remains a valid output");
+}
+
+#[test]
+fn migrations_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join(CONFIG_FILENAME);
+
+    for out in [".", "..", "generated/zeroship/../..", "/tmp"] {
+        let text = FULL.replace(
+            "\"out\": \"generated/zeroship\"",
+            &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
+        );
+        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+            .expect_err("a gen-types directory containing creator files must not parse");
+        assert!(err.contains("migrations.out"), "{err}");
     }
 }
 
@@ -567,6 +639,34 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
             .str("app"),
         Some("44444444-4444-4444-8444-444444444444"),
         "the Rust reader must accept the written file"
+    );
+}
+
+#[test]
+fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
+    let original = FULL.replace(
+        "  \"app\": \"11111111-1111-4111-8111-111111111111\",\n",
+        "",
+    );
+    let creator_edit = original.replace(
+        "// A comment, which is the whole reason the format is JSONC.",
+        "// A concurrent creator edit that must survive.",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILENAME);
+    std::fs::write(&path, &original).unwrap();
+
+    let config = ProjectConfig::load(&path).unwrap();
+    std::fs::write(&path, &creator_edit).unwrap();
+    let error = config
+        .write_app("99999999-9999-4999-8999-999999999999")
+        .expect_err("writeback must refuse a file edited after load");
+
+    assert!(error.contains("changed since it was loaded"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        creator_edit,
+        "the concurrent creator edit must remain byte-for-byte intact"
     );
 }
 

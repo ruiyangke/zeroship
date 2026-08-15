@@ -3,17 +3,16 @@
 //! Regenerate with `node schema/codegen.mjs`; `tests/project_config_gate.sh`
 //! fails the build when this file drifts from the schema.
 //!
-//! THERE ARE NO DEFAULTS FOR CLI-READ FACTS IN THIS FILE.
-//! A key the CLI operationally reads and the file omits is an error naming the
-//! key. Optional non-CLI defaults are generated below from the same schema so
-//! both readers still produce byte-identical resolved JSON.
+//! CLI-read defaults are absent unless the schema explicitly marks them safe.
+//! Optional defaults generated below keep both readers byte-identical without
+//! inventing a cross-tool scalar fact.
 
 pub const CONFIG_FILENAME: &str = "zeroship.jsonc";
 pub const CONFIG_ENV_VAR: &str = "ZEROSHIP_CONFIG";
 pub const SCHEMA_ID: &str = "https://zeroship.ai/schema/project-v1.json";
 
 /// Fields the CLI reads. The Vite `config` escape hatch may not touch these.
-pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out", "protected"];
+pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out", "secrets", "protected"];
 
 /// Key names that must never appear anywhere in the file.
 pub const FORBIDDEN_KEY_NAMES: &[&str] = &["password", "token", "secret", "key", "apiKey", "credentials"];
@@ -50,6 +49,6 @@ pub const FIELD_ENUMS: &[(&str, &[&str])] = &[
 /// exists" instead of a deliberate resolution rule.
 pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets"];
 
-/// Optional, non-CLI-read defaults applied to a present file's resolved view.
+/// Optional defaults explicitly safe for a present file's resolved view.
 /// Values are JSON so arrays and future object defaults stay schema-generated.
 pub const RESOLVED_OPTIONAL_DEFAULTS_JSON: &[(&str, &str)] = &[("secrets", "[]")];

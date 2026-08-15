@@ -105,7 +105,7 @@
           "type": "string",
           "default": "dist/app.zship",
           "x-cli-read": true,
-          "description": "The .zship path the packer writes and `zeroship deploy` uploads."
+          "description": "The .zship path the packer writes and `zeroship deploy` uploads. Both readers resolve it and reject the project root, an ancestor, a symlink, or an existing non-.zship path."
         }
       }
     },
@@ -123,13 +123,15 @@
           "type": "string",
           "default": "generated/zeroship",
           "x-cli-read": true,
-          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json. `zeroship migrate` posts <out>/migrations.ir.json."
+          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json. `zeroship migrate` posts <out>/migrations.ir.json. Both readers resolve it and reject the project root or an ancestor; the emitter refuses to overwrite unknown existing targets."
         }
       }
     },
     "secrets": {
       "type": "array",
       "default": [],
+      "x-cli-read": true,
+      "x-rust-resolved-default": true,
       "items": {
         "type": "string",
         "pattern": "^[A-Z][A-Z0-9_]{0,63}$"

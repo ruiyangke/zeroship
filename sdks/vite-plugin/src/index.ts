@@ -92,7 +92,7 @@ export interface ZeroshipOptions {
    * A partial object (shallow-merged) or a function applied AFTER the file
    * loads and after environment selection. It MAY NOT change any field the
    * Rust CLI also reads (`name`, `app`, `control`, `runtime_date`, `build.output`,
-   * `migrations.dir`, `migrations.out`) - the CLI cannot run a JavaScript
+   * `migrations.dir`, `migrations.out`, `secrets`) - the CLI cannot run a JavaScript
    * function, so an override there would reintroduce the exact drift the file
    * removes. The deny-list is generated from the schema, so it cannot fall
    * behind. Attempting one is an error naming the field.
