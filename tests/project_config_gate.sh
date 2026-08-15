@@ -67,6 +67,7 @@ MINIMAL_FIXTURE="$ROOT/tests/fixtures/project-config/zeroship-minimal.jsonc"
 SCHEMA="$ROOT/schema/project-v1.json"
 TS_DUMP="$ROOT/sdks/vite-plugin/scripts/project-config-dump.ts"
 PROBE="$ROOT/tests/lib/project_config_pack_probe.mjs"
+CODEGEN_PROBE="$ROOT/tests/lib/project_config_codegen_probe.mjs"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -74,7 +75,7 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
-for f in "$SCHEMA" "$FIXTURE" "$MINIMAL_FIXTURE" "$TS_DUMP" "$PROBE"; do
+for f in "$SCHEMA" "$FIXTURE" "$MINIMAL_FIXTURE" "$TS_DUMP" "$PROBE" "$CODEGEN_PROBE"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 if [ ! -x "$BIN" ]; then
@@ -83,6 +84,16 @@ if [ ! -x "$BIN" ]; then
 fi
 NODE_RUN=(node --import tsx)
 
+echo "== 0. CI runs this gate =="
+CI_INVOCATIONS=$(grep -Ec '^[[:space:]]*run: bash tests/project_config_gate\.sh[[:space:]]*$' \
+  "$ROOT/.github/workflows/ci.yml" || true)
+if [ "$CI_INVOCATIONS" = "1" ]; then
+  pass "CI invokes tests/project_config_gate.sh exactly once"
+else
+  fail "CI invokes tests/project_config_gate.sh $CI_INVOCATIONS times (expected exactly once)"
+fi
+
+echo
 echo "== 1. codegen drift =="
 if node "$ROOT/schema/codegen.mjs" --check >"$WORK/codegen.log" 2>&1; then
   pass "both generated readers match $(basename "$SCHEMA")"
@@ -90,6 +101,19 @@ else
   fail "generated readers drifted from the schema"
   sed 's/^/       /' "$WORK/codegen.log"
 fi
+
+for kind in root environment; do
+  answer=$(node "$CODEGEN_PROBE" "$kind" 2>"$WORK/codegen-$kind.err")
+  rc=$?
+  if [ "$rc" = 0 ] && [ "$answer" = "REJECTED" ]; then
+    pass "schema mutation: an uncovered $kind leaf cannot be regenerated and blessed"
+  elif [ "$rc" = 0 ] && [ "$answer" = "BLESSED" ]; then
+    fail "schema mutation: codegen BLESSED an uncovered $kind leaf"
+  else
+    fail "schema mutation probe for $kind did not run cleanly (rc=$rc answer=$answer)"
+    sed 's/^/       /' "$WORK/codegen-$kind.err" | head -8
+  fi
+done
 
 echo
 echo "== 2. no Rust defaults for cross-tool facts =="

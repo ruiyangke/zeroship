@@ -76,6 +76,19 @@ const leaves = [];
 /** @type {{path:string,known:string[],required:string[]}[]} */
 const objects = [];
 
+function recordLeaf(leaf) {
+  const prior = leaves.find((candidate) => candidate.path === leaf.path);
+  if (prior == null) {
+    leaves.push(leaf);
+    return;
+  }
+  const comparable = (value) => JSON.stringify({ ...value, cliRead: false });
+  if (comparable(prior) !== comparable(leaf)) {
+    unsupported(leaf.path, "root and environment definitions disagree");
+  }
+  prior.cliRead ||= leaf.cliRead;
+}
+
 function walkObject(node, path) {
   assertKnownKeywords(node, path || "<root>");
   if (node.type !== "object") unsupported(path, `expected type object, got ${node.type}`);
@@ -100,19 +113,19 @@ function walkObject(node, path) {
         break;
       case "array":
         if (child.items?.type !== "string") unsupported(childPath, "array items must be strings");
-        leaves.push({
+        recordLeaf({
           path: childPath, type: "string[]", default: child.default,
           cliRead, itemPattern: child.items.pattern,
         });
         break;
       case "string":
-        leaves.push({
+        recordLeaf({
           path: childPath, type: "string", default: child.default,
           enum: child.enum, pattern: child.pattern, cliRead,
         });
         break;
       case "boolean":
-        leaves.push({ path: childPath, type: "boolean", default: child.default, cliRead });
+        recordLeaf({ path: childPath, type: "boolean", default: child.default, cliRead });
         break;
       default:
         unsupported(childPath, `type ${child.type}`);
@@ -139,6 +152,69 @@ const envEntry = envNode.additionalProperties;
 assertKnownKeywords(envEntry, "environments.*");
 const envKnown = Object.keys(envEntry.properties);
 const envRequired = envEntry.required ?? [];
+
+function walkEnvironmentShape(rawNode, path) {
+  const node = deref(rawNode, path);
+  assertKnownKeywords(node, path);
+  const cliRead = node["x-cli-read"] === true;
+  switch (node.type) {
+    case "object":
+      for (const [key, child] of Object.entries(node.properties ?? {})) {
+        walkEnvironmentShape(child, path ? `${path}.${key}` : key);
+      }
+      break;
+    case "array":
+      if (node.items?.type !== "string") unsupported(path, "array items must be strings");
+      recordLeaf({
+        path, type: "string[]", default: node.default, cliRead,
+        itemPattern: node.items.pattern,
+      });
+      break;
+    case "string":
+      recordLeaf({
+        path, type: "string", default: node.default, enum: node.enum,
+        pattern: node.pattern, cliRead,
+      });
+      break;
+    case "boolean":
+      recordLeaf({ path, type: "boolean", default: node.default, cliRead });
+      break;
+    default:
+      unsupported(path, `type ${node.type}`);
+  }
+}
+
+for (const [key, child] of Object.entries(envEntry.properties)) {
+  walkEnvironmentShape(child, key);
+}
+
+const TS_RESOLVED_INTERFACE_FIELDS = new Set([
+  "name", "app", "control", "runtime_date", "build.mode", "build.serverEntry",
+  "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets",
+  "protected",
+]);
+const RUST_VALIDATOR_FIELDS = new Set([
+  "$schema", "name", "app", "control", "runtime_date", "build.mode",
+  "build.serverEntry", "build.dist", "build.output", "migrations.dir",
+  "migrations.out", "secrets", "protected",
+]);
+
+function assertReaderCoverage(reader, schemaFields, implementedFields) {
+  const uncovered = [...schemaFields].filter((field) => !implementedFields.has(field));
+  const stale = [...implementedFields].filter((field) => !schemaFields.has(field));
+  if (uncovered.length || stale.length) {
+    throw new Error(
+      `schema/codegen.mjs: reader coverage gap in ${reader}: ` +
+        `uncovered=[${uncovered.join(", ")}], stale=[${stale.join(", ")}]. ` +
+        `Update the reader and its coverage declaration together.`,
+    );
+  }
+}
+
+const allLeafPaths = new Set(leaves.map((leaf) => leaf.path));
+const resolvedLeafPaths = new Set(leaves.map((leaf) => leaf.path).filter((path) => path !== "$schema"));
+assertReaderCoverage("TypeScript ResolvedProjectConfig", resolvedLeafPaths, TS_RESOLVED_INTERFACE_FIELDS);
+assertReaderCoverage("Rust validator", allLeafPaths, RUST_VALIDATOR_FIELDS);
 
 const cliReadFields = leaves.filter((l) => l.cliRead).map((l) => l.path);
 const withDefaults = leaves.filter((l) => l.default !== undefined);
