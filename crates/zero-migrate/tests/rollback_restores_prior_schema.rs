@@ -13,9 +13,18 @@
 //! text — captured before the apply and compared after the rollback. Comparing
 //! table NAMES alone would pass a rollback that left a column or an index behind.
 //!
-//! Ops without a `down` are deliberately absent: the `drop*` family renders
-//! `down: None` by design, because rollback for declarative DDL is a re-diff
-//! toward the desired snapshot rather than a stored reversing statement.
+//! WHAT IS NOT COVERED, stated rather than implied. Of the ops that render a
+//! `down`, this exercises `createTable`, `addColumn`, `createIndex` and
+//! `renameTable`. `addConstraint`, `setColumnNotNull` and `dropColumnNotNull`
+//! are absent because SQLite REFUSES them (`SqliteRebuildOnly`,
+//! `NativeAlterColumn`), so reaching them needs a PostgreSQL arm and a live
+//! database — worth adding, not done here.
+//!
+//! Ops without a `down` are deliberately absent for a different reason: the
+//! `drop*` family renders `down: None` by design, because rollback for
+//! declarative DDL is a re-diff toward the desired snapshot rather than a stored
+//! reversing statement. Including them would manufacture a failure and then
+//! "fix" it by inventing a `down` the architecture does not want.
 
 mod support;
 use std::collections::BTreeMap;
@@ -43,6 +52,15 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
             "createTable",
             r#"{"op":"createTable","name":"t2","columns":[{"name":"c0","type":"bigInt","nullable":false}],"primaryKey":["c0"]}"#,
             false,
+        ),
+        // A rename's reverse is the one most likely to be subtly wrong: the down
+        // has to rename BACK, and a down that re-runs the forward direction, or
+        // renames to the wrong side, still leaves exactly one table standing.
+        // Only the stored DDL text distinguishes the two.
+        (
+            "renameTable",
+            r#"{"op":"renameTable","table":"t1","to":"t1_renamed"}"#,
+            true,
         ),
         (
             "addColumn",
