@@ -16,7 +16,7 @@
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join, posix, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import {
   brotliCompress,
   constants as zlibConstants,
@@ -30,6 +30,7 @@ import mime from "mime";
 import {
   RUNTIME_DESCRIPTOR_FILE,
 } from "./gen-types/index.js";
+import { CONFIG_FILENAME } from "./project-config/generated.js";
 
 const brotliCompressAsync = promisify(brotliCompress);
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -290,6 +291,17 @@ export async function emitZship(
   const log = options.silent
     ? () => {}
     : (msg: string) => console.log(`[zeroship:zship] ${msg}`);
+
+  const rootFromDist = relative(distDir, root);
+  const distContainsRoot =
+    rootFromDist === "" ||
+    (rootFromDist !== ".." && !rootFromDist.startsWith(`..${sep}`) && !isAbsolute(rootFromDist));
+  if (distContainsRoot) {
+    throw new Error(
+      `zship: distDir must be a descendant of the project root; got ${distDir}. ` +
+        `A dist directory containing the project root can pack ${CONFIG_FILENAME}.`,
+    );
+  }
 
   if (!(await pathExists(distDir))) {
     throw new Error(`zship: dist dir not found at ${distDir}`);

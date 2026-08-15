@@ -197,6 +197,24 @@ fn a_bad_runtime_date_is_refused_and_a_good_one_is_not() {
 }
 
 #[test]
+fn build_dist_cannot_be_the_project_root_or_one_of_its_ancestors() {
+    for dist in [".", "..", "../..", "dist/..", "/tmp"] {
+        let text = FULL.replace(
+            "\"dist\": \"dist\"",
+            &format!("\"dist\": {}", serde_json::to_string(dist).unwrap()),
+        );
+        let err = ProjectConfig::parse(
+            PathBuf::from("/tmp/project/zeroship.jsonc"),
+            text,
+        )
+        .expect_err("a dist containing zeroship.jsonc must not parse");
+        assert!(err.contains("build.dist"), "{err}");
+        assert!(err.contains("ancestor"), "{err}");
+        assert!(err.contains("zeroship.jsonc"), "{err}");
+    }
+}
+
+#[test]
 fn an_unknown_top_level_key_names_the_known_ones() {
     let text = FULL.replace("\"name\": \"demo-app\",", "\"name\": \"demo-app\", \"rpcEndpoint\": \"/_rpc\",");
     let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)

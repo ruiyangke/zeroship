@@ -38,6 +38,7 @@ pub const ENVIRONMENT_REQUIRED_KEYS: &[&str] = &["app", "control"];
 pub const FIELD_PATTERNS: &[(&str, &str)] = &[
     ("name", "^[a-z0-9][a-z0-9-]{0,62}$"),
     ("runtime_date", "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"),
+    ("build.dist", "^(?!\\.{1,2}$).+$"),
     ("secrets[]", "^[A-Z][A-Z0-9_]{0,63}$"),
 ];
 

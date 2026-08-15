@@ -96,8 +96,9 @@
         },
         "dist": {
           "type": "string",
+          "pattern": "^(?!\\.{1,2}$).+$",
           "default": "dist",
-          "description": "The directory the client build writes, and the only directory the packer walks."
+          "description": "The directory the client build writes, and the only directory the packer walks. The schema rejects the direct root and parent spellings; both readers additionally resolve the path and reject any directory containing zeroship.jsonc."
         },
         "output": {
           "type": "string",

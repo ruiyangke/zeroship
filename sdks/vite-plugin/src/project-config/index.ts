@@ -16,7 +16,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { stripJsonc } from "./jsonc.js";
 import {
@@ -204,7 +204,33 @@ function checkString(path: string, value: unknown, at: string, dotted: string): 
     throw new Error(`${path}: \`${at}\` must be one of ${rule.enum.join(" | ")} (got \`${value}\`)`);
   }
   if (rule?.pattern && !new RegExp(rule.pattern).test(value)) {
+    if (dotted === "build.dist") {
+      throw new Error(
+        `${path}: \`${at}\` cannot resolve to the project root or an ancestor containing ` +
+          `${CONFIG_FILENAME}`,
+      );
+    }
     throw new Error(`${path}: \`${at}\` must match ${rule.pattern} (got \`${value}\`)`);
+  }
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function assertDistDoesNotContainConfig(
+  root: string,
+  configPath: string,
+  config: ResolvedProjectConfig,
+): void {
+  const distDir = resolve(root, config.build.dist);
+  const absoluteConfig = resolve(configPath);
+  if (pathContains(distDir, resolve(root)) || pathContains(distDir, absoluteConfig)) {
+    throw new Error(
+      `${configPath}: \`build.dist\` (${config.build.dist}) cannot resolve to the project root or ` +
+        `an ancestor containing ${CONFIG_FILENAME}`,
+    );
   }
 }
 
@@ -415,6 +441,7 @@ export function readProjectConfig(
   const path = locateProjectConfig(root, opts.configPath);
   const base =
     path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
+  if (path != null) assertDistDoesNotContainConfig(root, path, base);
   return { config: applyProjectConfigOverride(base, opts.override), path };
 }
 
