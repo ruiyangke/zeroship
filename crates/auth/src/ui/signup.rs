@@ -112,7 +112,7 @@ pub async fn post(
 
     // 2. Password length (NIST 800-63B Rev 4: 15 char minimum). We count
     // characters, not bytes, so multibyte passphrases aren't penalised.
-    if form.password.chars().count() < 15 {
+    if form.password.chars().count() < crate::identity::password::MIN_PASSWORD_CHARS {
         return render_signup_error(&return_to, "password must be at least 15 characters");
     }
 

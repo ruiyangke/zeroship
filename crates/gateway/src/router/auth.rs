@@ -2437,15 +2437,35 @@ mod tests {
         let state =
             build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
 
-        let aud = "myapp.zeroship.ai";
-        let sub = format!("usr_{}", Uuid::new_v4().simple());
-        // One OP token whose client_id claim is app A; the route binds
-        // on client_id, so present it at app A and (separately) app B.
+        // A fresh global sub per run: this test WRITES a revocation marker, and
+        // a fixed sub would leave a row that makes the next run's "not revoked"
+        // arm depend on the previous run.
+        let sub = Uuid::new_v4().to_string();
+
+        // Two genuinely distinct apps, built with the same `op_app_binding`
+        // helper the sibling per-app tests use.
+        //
+        // This test used to hand the arm the placeholder strings "oac_app_a" /
+        // "oac_app_b" and a resource audience of "http://api.zeroship.localhost".
+        // Neither is what the arm accepts: a per-app client_id is
+        // `oac_<base62(app uuid)>`, which the arm PARSES back to an app id
+        // before it consults revocation at all, and `aud` must carry that app's
+        // `app:{app_id}` resource audience. So both tokens were refused on the
+        // shape check ("route client_id is not a per-app OAuth client"), which
+        // failed the app B assertion outright AND made the app A assertion pass
+        // for the wrong reason - the token was rejected as malformed, not as
+        // revoked. The property this test claims to prove was never exercised.
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
+        assert_ne!(resource_aud_a, resource_aud_b);
+
+        // One user, two apps: same global sub, each token bound to ITS app.
         let token_a = sign_op_access_jwt(
             &jwks_signing,
             &sub,
-            Some("oac_app_a"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_a),
+            serde_json::json!([resource_aud_a]),
             "user@example.com",
             "OP User",
             3600,
@@ -2453,14 +2473,14 @@ mod tests {
         let token_b = sign_op_access_jwt(
             &jwks_signing,
             &sub,
-            Some("oac_app_b"),
-            serde_json::json!(["http://api.zeroship.localhost"]),
+            Some(&client_b),
+            serde_json::json!([resource_aud_b]),
             "user@example.com",
             "OP User",
             3600,
         );
-        let req_a = bearer_req(&token_a, aud);
-        let req_b = bearer_req(&token_b, aud);
+        let req_a = bearer_req(&token_a, "app-a.zeroship.ai");
+        let req_b = bearer_req(&token_b, "app-b.zeroship.ai");
         let request_id = Uuid::new_v4();
 
         // Batch A fix 3: the marker is keyed on `(client_id, pws_)` — the SAME
@@ -2474,30 +2494,35 @@ mod tests {
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
-            zeroship_authz::wrapper_revocation::revoke_family(&conn, "oac_app_a", &pws_a)
+            zeroship_authz::wrapper_revocation::revoke_family(&conn, &client_a, &pws_a)
                 .await
                 .expect("revoke_family app A");
         }
         // R1d: bust the same-node cache entry the pre-revocation read warmed,
         // mirroring the real gateway writer; otherwise the negative entry would
         // serve through its TTL and mask the just-written marker.
-        state.revocation_cache.invalidate("oac_app_a", &pws_a);
+        state.revocation_cache.invalidate(&client_a, &pws_a);
 
         // App A token: revoked → Invalid. (Sector present so the arm derives
         // the SAME pws_a the marker was written under.)
+        //
+        // This arm only means something because the UNREVOKED app B arm below
+        // Allows on the same fixture. Without that partner, an Invalid here is
+        // equally consistent with the token being rejected for any reason at
+        // all - which is exactly how this test passed while proving nothing.
         assert!(
             matches!(
                 resolve_bearer_user_header(
                     &req_a,
                     &state,
                     &request_id,
-                    Some("oac_app_a"),
+                    Some(&client_a),
                     Some(sector_a)
                 )
                 .await,
                 BearerOutcome::Invalid
             ),
-            "revoked (oac_app_a, pws_a) family must reject app A's token"
+            "revoked (client_a, pws_a) family must reject app A's token"
         );
         // App B token, SAME global sub but DIFFERENT pws_ (different sector) and
         // client: NOT revoked → Allowed (per-app scoping).
@@ -2507,7 +2532,7 @@ mod tests {
                     &req_b,
                     &state,
                     &request_id,
-                    Some("oac_app_b"),
+                    Some(&client_b),
                     Some(sector_b)
                 )
                 .await,

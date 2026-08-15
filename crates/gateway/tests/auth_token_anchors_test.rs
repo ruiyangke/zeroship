@@ -148,7 +148,22 @@ impl MockOP {
         self.sign_with_typ(claims, "JWT")
     }
 
-    fn id_token(&self) -> String {
+    /// The ID token returned alongside `access_token`.
+    ///
+    /// Takes the access token because the two are CRYPTOGRAPHICALLY BOUND:
+    /// `session_post` calls `verify_id_token(.., Some(&tokens.access_token), ..)`,
+    /// which makes `at_hash` mandatory and compares it against the access token
+    /// actually returned in the same body. Minting the two independently is what
+    /// made every DB-backed test in this file fail with
+    /// `at_hash missing while access token binding was requested` (400
+    /// `invalid_token`) once a database was provided - the tests could not run
+    /// without `GATEWAY_ANCHORS_DB_URL`, so nothing noticed.
+    ///
+    /// The hash comes from the REAL OP's own `oidc_at_hash` so this mock cannot
+    /// drift from the issuer it stands in for. That is not circular: the code
+    /// under test is `zeroship_core`'s verifier, a different crate, which
+    /// recomputes the hash independently.
+    fn id_token(&self, access_token: &str) -> String {
         let now = now_secs();
         self.sign(serde_json::json!({
             "iss": MOCK_ISSUER,
@@ -160,6 +175,7 @@ impl MockOP {
             "email_verified": true,
             "name": "Test User",
             "sid": self.sid.clone(),
+            "at_hash": zeroship_auth::oidc::issuer::oidc_at_hash(access_token),
         }))
     }
 
@@ -191,7 +207,9 @@ impl MockOP {
     /// `name` + `picture` so the reload-recovery test can prove the re-created
     /// gateway session sources name/avatar from the rotated ID TOKEN (BFF minor
     /// fix), not from the access JWT (which carries neither).
-    fn rotated_id_token(&self) -> String {
+    ///
+    /// Bound to its own rotated access token, for the reason on [`Self::id_token`].
+    fn rotated_id_token(&self, access_token: &str) -> String {
         let now = now_secs();
         self.sign(serde_json::json!({
             "iss": MOCK_ISSUER,
@@ -203,6 +221,7 @@ impl MockOP {
             "email_verified": true,
             "name": ROTATED_NAME,
             "picture": ROTATED_AVATAR,
+            "at_hash": zeroship_auth::oidc::issuer::oidc_at_hash(access_token),
         }))
     }
 
@@ -306,11 +325,16 @@ async fn token_endpoint(
                     .expect("current refresh token mutex");
                 *current = INITIAL_REFRESH_TOKEN.to_string();
             }
+            // One access token, hashed into the ID token AND returned in the
+            // body. Minting it twice would produce two different JWTs (the
+            // `iat`/`jti` differ), so the `at_hash` would not match.
+            let access_token = h.access_token();
+            let id_token = h.id_token(&access_token);
             web::HttpResponse::Ok()
                 .header("content-type", "application/json")
                 .body(serde_json::json!({
-                    "access_token": h.access_token(),
-                    "id_token": h.id_token(),
+                    "access_token": access_token,
+                    "id_token": id_token,
                     "refresh_token": INITIAL_REFRESH_TOKEN,
                     "token_type": "Bearer",
                     "expires_in": 3600,
@@ -362,15 +386,18 @@ async fn token_endpoint(
                     .header("content-type", "application/json")
                     .body(GARBAGE_REFRESH_BODY);
             }
+            // Same binding as the authorization_code arm above: one access
+            // token, hashed into the rotated ID token and returned in the body.
+            let access_token = h.access_token();
             let mut body = serde_json::json!({
-                "access_token": h.access_token(),
+                "access_token": access_token,
                 "refresh_token": rotated_refresh_token,
                 "token_type": "Bearer",
                 "expires_in": 3600,
                 "scope": "openid email profile offline_access",
             });
             if h.refresh_id_token.load(Ordering::SeqCst) {
-                body["id_token"] = serde_json::json!(h.rotated_id_token());
+                body["id_token"] = serde_json::json!(h.rotated_id_token(&access_token));
             }
             web::HttpResponse::Ok()
                 .header("content-type", "application/json")

@@ -729,6 +729,69 @@ mod tests {
         assert!(html.contains("Sign in with Google"));
     }
 
+    /// A failed sign-in must be ANNOUNCED, and the fields must say they are the
+    /// ones it is about.
+    ///
+    /// Measured in real Chromium against a live auth server before this landed:
+    /// the accessibility tree rendered the banner as `generic: invalid email or
+    /// password` with both inputs plain `textbox`. A screen-reader user who
+    /// submitted a wrong password got no signal that anything had failed - the
+    /// page simply changed.
+    ///
+    /// Both fields point at the ONE banner on purpose: the message deliberately
+    /// does not say which of email or password was wrong (enumeration defense),
+    /// so there is no per-field message to point at.
+    ///
+    /// WHAT THIS DOES NOT COVER: whether a given screen reader actually voices
+    /// a `role="alert"` that is already in the document at first paint, which
+    /// varies by AT and browser and cannot be asserted from a rendered string.
+    /// This pins the markup contract only. It also says nothing about the other
+    /// ten templates carrying the same banner; `template_a11y_error_banner`
+    /// below is what covers those.
+    #[test]
+    fn login_page_error_is_announced_and_describes_the_fields() {
+        let render = |error| {
+            let return_to = "/me";
+            LoginPage {
+                return_to,
+                csrf: "xyz",
+                error,
+                client_name: "Test",
+                google_enabled: false,
+                github_enabled: false,
+                google_start_href: oauth_start_href("/oauth/google/start", return_to),
+                github_start_href: oauth_start_href("/oauth/github/start", return_to),
+            }
+            .render()
+            .expect("render")
+        };
+
+        let failed = render(Some("invalid email or password"));
+        assert!(
+            failed.contains(r#"<div class="error" role="alert" id="form-error">"#),
+            "error banner must be an alert anchored by id: {failed}"
+        );
+        assert_eq!(
+            failed.matches(r#"aria-describedby="form-error""#).count(),
+            2,
+            "both email and password must point at the banner: {failed}"
+        );
+        assert_eq!(
+            failed.matches(r#"aria-invalid="true""#).count(),
+            2,
+            "both fields must report invalid: {failed}"
+        );
+
+        // The control that makes the assertions above mean something: on the
+        // CLEAN render the attributes must be ABSENT. Without this, hardcoding
+        // aria-invalid unconditionally would pass every check above while
+        // telling every first-time visitor their empty form is already wrong.
+        let clean = render(None);
+        assert!(!clean.contains("aria-invalid"), "clean render: {clean}");
+        assert!(!clean.contains("aria-describedby"), "clean render: {clean}");
+        assert!(!clean.contains(r#"role="alert""#), "clean render: {clean}");
+    }
+
     #[test]
     fn login_page_hides_section_if_no_oauth() {
         let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";

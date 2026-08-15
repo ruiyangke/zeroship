@@ -3,19 +3,26 @@
 {% block body %}
 <h2>Sign in to {{ client_name }}</h2>
 {% if let Some(err) = error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 <form method="POST" action="/login">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="return_to" value="{{ return_to }}">
+  {# On a failed sign-in the banner above is the only statement of what went
+     wrong. Without aria-invalid + aria-describedby a screen reader moving
+     through the form reads "Email, edit" with no hint that it is the field the
+     error is about. `invalid email or password` deliberately does not say WHICH
+     is wrong (enumeration defense), so both fields point at the one banner. #}
   <label>Email
-    <input type="email" name="email" autocomplete="username" required autofocus>
+    <input type="email" name="email" autocomplete="username" required autofocus
+           {% if error.is_some() %}aria-invalid="true" aria-describedby="form-error"{% endif %}>
   </label>
   <label>Password
-    <input type="password" name="password" autocomplete="current-password" required>
+    <input type="password" name="password" autocomplete="current-password" required
+           {% if error.is_some() %}aria-invalid="true" aria-describedby="form-error"{% endif %}>
   </label>
   <button type="submit">Sign in</button>
-  <p style="font-size:0.875rem;text-align:right;margin-top:0"><a href="/forgot">Forgot password?</a></p>
+  <p class="forgot-link"><a href="/forgot">Forgot password?</a></p>
 </form>
 {% if google_enabled || github_enabled %}
   <div class="oauth-divider"><span>or sign in with</span></div>
