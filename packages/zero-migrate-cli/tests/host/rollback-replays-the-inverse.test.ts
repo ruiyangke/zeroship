@@ -17,7 +17,11 @@
 // GATES: `connectLivePg` (see `live-db.ts`) and `ZERO_MIGRATE_MYSQL_URL`.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { table, t } from "zero-migrate";
 import { apply, rollback, status, type DriverConfig } from "zero-migrate-cli";
@@ -29,6 +33,8 @@ import { noInjectPolicy } from "./policy.js";
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
 const OWNER_APP = "app_rollback_inverse";
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
@@ -359,5 +365,76 @@ test("MySQL: a recorded inverse is what a rollback runs", async (ctx) => {
       .query(`DROP DATABASE IF EXISTS ${mysqlIdent(`${projectSchema}_migrations`)}`)
       .catch(() => {});
     await admin.end().catch(() => {});
+  }
+});
+
+test("SQLite: a recorded inverse is what a rollback runs", async () => {
+  // The third backend. E1 claimed all three and pinned two: PostgreSQL and
+  // MySQL had arms, SQLite had none, so the behaviour was true by measurement
+  // and untrue by coverage. SQLite runs in-process through rusqlite rather than
+  // over the host-driver seam, which is exactly the kind of separate path where
+  // "the other two work" is not evidence.
+  const dir = mkdtempSync(join(HERE, "rbinv-sqlite-"));
+  const migrations = join(dir, "migrations");
+  mkdirSync(migrations);
+  writeFileSync(join(dir, "policy.toml"), noInjectPolicy("main"));
+  writeFileSync(join(dir, "registry.json"), JSON.stringify({ acct: OWNER_APP }));
+  writeFileSync(
+    join(migrations, "20260101000000_create_acct.ts"),
+    `import { table, t } from "zero-migrate";
+export const name = "create_acct";
+export default {
+  schema() {
+    table("acct").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  },
+};
+`,
+  );
+  writeFileSync(
+    join(migrations, "20260101000001_seed_acct.ts"),
+    `import { table } from "zero-migrate";
+export const name = "seed_acct";
+export default {
+  data() { table("acct").insert({ rows: { id: 1 } }); },
+  inverse() { table("acct").delete({ where: (col) => col("id").eq(1) }); },
+};
+`,
+  );
+
+  const appPath = join(dir, "app.sqlite");
+  const run = (args: readonly string[]) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--import", "tsx", CLI_BIN, ...args,
+        "--dir", migrations,
+        "--policy", join(dir, "policy.toml"),
+        "--registry", join(dir, "registry.json"),
+        "--owner-app", OWNER_APP,
+        "--database-url", `sqlite:${appPath}`,
+      ],
+      { cwd: dir, encoding: "utf8", env: { ...process.env, DATABASE_URL: "" } },
+    );
+
+  try {
+    const applied = run(["apply", "--approve"]);
+    assert.equal(applied.status, 0, `apply: ${applied.stdout}\n${applied.stderr}`);
+
+    const rolled = run(["rollback", "--steps", "1", "--approve"]);
+    assert.equal(rolled.status, 0, `rollback: ${rolled.stdout}\n${rolled.stderr}`);
+
+    // The ROW, not the outcome line. A rollback reporting success while leaving
+    // the row in place would satisfy any check on what it printed.
+    const sqlite = await import("node:sqlite");
+    const db = new sqlite.DatabaseSync(appPath);
+    const rows = db.prepare("SELECT id FROM acct").all();
+    db.close();
+    assert.deepEqual(
+      rows,
+      [],
+      "the recorded inverse must delete exactly the row the forward inserted",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
