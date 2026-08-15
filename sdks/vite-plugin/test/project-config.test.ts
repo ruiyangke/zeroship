@@ -18,9 +18,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   applyProjectConfigOverride,
@@ -35,7 +35,6 @@ import {
   parseProjectConfig,
   readProjectConfig,
   resolveProjectConfig,
-  type ResolvedProjectConfig,
 } from "../src/project-config/index.js";
 
 const FULL = `{
@@ -70,6 +69,48 @@ function scratch(files: Record<string, string> = {}): string {
 
 function parsed(body = FULL) {
   return parseProjectConfig("zeroship.jsonc", body);
+}
+
+function schemaCliReadFields(): string[] {
+  const schema = JSON.parse(
+    readFileSync(resolve(import.meta.dirname, "..", "..", "..", "schema", "project-v1.json"), "utf8"),
+  ) as Record<string, any>;
+  const fields = new Set<string>();
+  const deref = (node: Record<string, any>) => {
+    if (node.$ref == null) return node;
+    const name = String(node.$ref).split("/").at(-1)!;
+    const { $ref: _drop, ...siblings } = node;
+    return { ...schema.$defs[name], ...siblings };
+  };
+  const visit = (raw: Record<string, any>, path: string) => {
+    const node = deref(raw);
+    if (node["x-cli-read"] === true) fields.add(path);
+    if (node.type === "object") {
+      for (const [key, child] of Object.entries(node.properties ?? {})) {
+        visit(child as Record<string, any>, path ? `${path}.${key}` : key);
+      }
+    }
+  };
+  for (const [key, child] of Object.entries(schema.properties)) {
+    if (key !== "environments") visit(child as Record<string, any>, key);
+  }
+  for (const [key, child] of Object.entries(
+    schema.properties.environments.additionalProperties.properties,
+  )) {
+    visit(child as Record<string, any>, key);
+  }
+  return [...fields].sort();
+}
+
+function valueAt(value: Record<string, any>, dotted: string): unknown {
+  return dotted.split(".").reduce((cursor, part) => cursor?.[part], value as any);
+}
+
+function setValueAt(value: Record<string, any>, dotted: string, replacement: unknown): void {
+  const parts = dotted.split(".");
+  const member = parts.pop()!;
+  const parent = parts.reduce((cursor, part) => cursor[part], value);
+  parent[member] = replacement;
 }
 
 describe("locating the file", () => {
@@ -266,52 +307,39 @@ describe("the config escape hatch", () => {
     assert.equal(out.control, base.control);
   });
 
-  test("changing a CLI-read field is refused, naming the field", () => {
-    const base = resolveProjectConfig(parsed());
-    for (const [label, partial] of [
-      ["control", { control: "https://elsewhere.example" }],
-      ["migrations.out", { migrations: { dir: "migrations", out: "somewhere/else" } }],
-      ["build.output", { build: { ...base.build, output: "other.zship" } }],
-      ["app", { app: "33333333-3333-4333-8333-333333333333" }],
-      ["name", { name: "another-app" }],
-      ["runtime_date", { runtime_date: "2027-01-01" }],
-    ] as const) {
-      assert.throws(
-        () => applyProjectConfigOverride(base, partial as never),
-        new RegExp(`may not change \\\`${label.replace(".", "\\.")}\\\``),
-        `${label} must be refused`,
-      );
-    }
-  });
-
-  test("in-place changes to CLI-read fields are refused", () => {
-    const mutations: Array<[string, (c: ResolvedProjectConfig) => void]> = [
-      ["app", (c) => { c.app = "33333333-3333-4333-8333-333333333333"; }],
-      ["migrations.out", (c) => { c.migrations.out = "somewhere/else"; }],
-      ["build.output", (c) => { c.build.output = "other.zship"; }],
-      ["control", (c) => { delete (c as unknown as Record<string, unknown>).control; }],
-    ];
-
-    for (const [field, mutate] of mutations) {
-      const base = resolveProjectConfig(parsed());
+  test("every schema-marked CLI field rejects callback mutation without mutating the original", () => {
+    for (const field of schemaCliReadFields()) {
+      const base = resolveProjectConfig(parsed(), "staging");
+      const before = canonicalJson(base);
+      const current = valueAt(base as unknown as Record<string, any>, field);
+      assert.notEqual(current, undefined, `${field} needs a stated fixture value`);
+      const replacement = typeof current === "boolean" ? !current : `${String(current)}-changed`;
       assert.throws(
         () => applyProjectConfigOverride(base, (c) => {
-          mutate(c);
+          setValueAt(c as unknown as Record<string, any>, field, replacement);
           return {};
         }),
         new RegExp(`may not change \\\`${field.replace(".", "\\.")}\\\``),
         `${field} must be refused after an in-place change`,
       );
+      assert.equal(canonicalJson(base), before, `${field} mutation escaped the callback copy`);
     }
   });
 
-  test("the deny-list is the generated one, not a list typed here", () => {
-    // Generated from the schema's `x-cli-read` markers. Asserted rather than
-    // assumed because a hand-maintained deny-list is exactly the drift the
-    // restriction exists to prevent.
-    for (const f of ["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out"]) {
-      assert.ok(CLI_READ_FIELDS.includes(f), `${f} must be in CLI_READ_FIELDS`);
-    }
+  test("the callback receives a deep copy for an accepted build-only mutation", () => {
+    const base = resolveProjectConfig(parsed());
+    const out = applyProjectConfigOverride(base, (copy) => {
+      copy.build.mode = "static";
+      return {};
+    });
+    assert.equal(base.build.mode, "full", "the callback reached the caller's object");
+    assert.equal(out.build.mode, "static", "the accepted in-place mutation must survive");
+  });
+
+  test("the deny-list exactly matches schema markers, including protected", () => {
+    const schemaFields = schemaCliReadFields();
+    assert.ok(schemaFields.includes("protected"), "protected controls Rust migrate and must be x-cli-read");
+    assert.deepEqual([...CLI_READ_FIELDS].sort(), schemaFields);
   });
 });
 
