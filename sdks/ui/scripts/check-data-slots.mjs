@@ -25,14 +25,32 @@ import ts from "typescript";
 import { classNameLiterals } from "./class-name-literals.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const files = execFileSync(
-  "git",
-  ["ls-files", "src/components", "src/layouts", "src/blocks"],
-  { encoding: "utf8", cwd: root },
-)
+
+/**
+ * Scan everything under src/ EXCEPT what is listed here.
+ *
+ * This used to name the directories to include (components, layouts, blocks)
+ * and missed real code three times: `dir/**\/*.tsx` skipped files sitting
+ * directly in a directory, the list omitted src/sections entirely, and
+ * src/theme.tsx was invisible for both reasons. src/sections holds ten
+ * EXPORTED components (Hero, Footer, PricingTable, ...) whose classes were
+ * nearly deleted as orphaned theme CSS, because nothing scanned them.
+ *
+ * An inclusion list fails silently: a directory added later simply never
+ * appears. Excluding instead fails loudly, as unexpected gaps.
+ */
+const isExcluded = (file) =>
+  file.startsWith("src/stories/") || // consumer demos: plain markup, no slot contract
+  file.endsWith(".stories.tsx") ||
+  file.endsWith("type-tests.tsx");
+
+const files = execFileSync("git", ["ls-files", "src"], {
+  encoding: "utf8",
+  cwd: root,
+})
   .trim()
   .split("\n")
-  .filter((file) => file.endsWith(".tsx"))
+  .filter((file) => file.endsWith(".tsx") && !isExcluded(file))
   .map((file) => path.join(root, file));
 
 const program = ts.createProgram(files, {
@@ -105,9 +123,9 @@ for (const t of doubled) {
 }
 // A floor, so that deleting slots wholesale fails here rather than making the
 // check above vacuously true.
-if (covered.length < 454) {
+if (covered.length < 564) {
   problems.push(
-    `only ${covered.length} slotted elements; expected at least 454`,
+    `only ${covered.length} slotted elements; expected at least 564`,
   );
 }
 

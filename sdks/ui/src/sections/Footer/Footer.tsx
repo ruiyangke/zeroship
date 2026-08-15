@@ -240,9 +240,14 @@ function renderColumn(column: ResolvedColumn) {
           ? links.map((link, index) => (
               <li
                 key={link.href + ":" + index}
+                data-slot="footer-link-item"
                 className="zs-footer__link-item"
               >
-                <a href={link.href} className="zs-footer__link">
+                <a
+                  href={link.href}
+                  data-slot="footer-link"
+                  className="zs-footer__link"
+                >
                   {link.label}
                 </a>
               </li>
@@ -337,9 +342,12 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
             Grid owns the collapse to stacked below --zs-bp-md (its responsive
             base count is 1; columns={{ md }} only promotes at ≥ the bp). */}
         {(hasBrandBlock || hasColumns) && (
-          <div className="zs-footer__top">
+          <div data-slot="footer-top" className="zs-footer__top">
             {hasBrandBlock ? (
-              <div className="zs-footer__brand-block">
+              <div
+                data-slot="footer-brand-block"
+                className="zs-footer__brand-block"
+              >
                 {brand != null ? (
                   <div data-slot="footer-brand" className="zs-footer__brand">
                     {brand}
@@ -396,9 +404,14 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
                     {legalLinks?.map((link, index) => (
                       <li
                         key={link.href + ":" + index}
+                        data-slot="footer-legal-link-item"
                         className="zs-footer__legal-link-item"
                       >
-                        <a href={link.href} className="zs-footer__legal-link">
+                        <a
+                          href={link.href}
+                          data-slot="footer-legal-link"
+                          className="zs-footer__legal-link"
+                        >
                           {link.label}
                         </a>
                       </li>

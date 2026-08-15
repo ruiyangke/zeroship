@@ -117,6 +117,7 @@ export const ResponsivePicture = forwardRef<
         src={src}
         alt={alt}
         sizes={sizes}
+        data-slot="responsive-picture-img"
         className={classnames("zs-responsive-picture__img", imageClassName)}
         style={imageStyle}
       />

@@ -339,7 +339,9 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
               </h2>
             ) : null}
             {description != null ? (
-              <p className="zs-faq__description">{description}</p>
+              <p data-slot="faq-description" className="zs-faq__description">
+                {description}
+              </p>
             ) : null}
           </Stack>
         ) : null}

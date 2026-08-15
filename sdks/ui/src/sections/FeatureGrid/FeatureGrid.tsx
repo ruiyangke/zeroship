@@ -384,7 +384,12 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
                 </h2>
               ) : null}
               {description != null ? (
-                <p className="zs-feature-grid__description">{description}</p>
+                <p
+                  data-slot="feature-grid-description"
+                  className="zs-feature-grid__description"
+                >
+                  {description}
+                </p>
               ) : null}
             </Stack>
           ) : null}

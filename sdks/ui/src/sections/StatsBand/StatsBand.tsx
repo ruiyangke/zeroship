@@ -375,7 +375,12 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
                 </h2>
               ) : null}
               {description != null ? (
-                <p className="zs-stats-band__description">{description}</p>
+                <p
+                  data-slot="stats-band-description"
+                  className="zs-stats-band__description"
+                >
+                  {description}
+                </p>
               ) : null}
             </Stack>
           ) : null}

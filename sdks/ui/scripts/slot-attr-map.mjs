@@ -30,12 +30,22 @@ import {
 const root = new URL("../", import.meta.url).pathname;
 const files = execFileSync(
   "git",
-  ["ls-files", "src/components", "src/layouts", "src/blocks"],
+  // Scan all of src/ and exclude, rather than listing what to include. The
+  // inclusion list missed src/sections (ten exported components) and
+  // src/theme.tsx, and a missing directory produces no output at all rather
+  // than an error. See the same note in check-data-slots.mjs.
+  ["ls-files", "src"],
   { encoding: "utf8", cwd: root },
 )
   .trim()
   .split("\n")
-  .filter((file) => file.endsWith(".tsx"))
+  .filter(
+    (file) =>
+      file.endsWith(".tsx") &&
+      !file.startsWith("src/stories/") &&
+      !file.endsWith(".stories.tsx") &&
+      !file.endsWith("type-tests.tsx"),
+  )
   .map((f) => path.join(root, f));
 
 const program = ts.createProgram(files, {

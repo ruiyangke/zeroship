@@ -321,14 +321,25 @@ function FeatureRow({
       <Icon
         as={included ? Check : Minus}
         size="sm"
+        data-slot="pricing-feature-icon"
         className="zs-pricing__feature-icon"
       />
-      <span className="zs-visually-hidden">
+      <span data-slot="visually-hidden" className="zs-visually-hidden">
         {included ? "Included" : "Not included"}
       </span>
-      <span className="zs-pricing__feature-label">{label}</span>
+      <span
+        data-slot="pricing-feature-label"
+        className="zs-pricing__feature-label"
+      >
+        {label}
+      </span>
       {note != null ? (
-        <span className="zs-pricing__feature-note">{note}</span>
+        <span
+          data-slot="pricing-feature-note"
+          className="zs-pricing__feature-note"
+        >
+          {note}
+        </span>
       ) : null}
     </li>
   );
@@ -382,6 +393,7 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
       <Button
         variant={featured ? "filled" : "gray"}
         onClick={onCtaClick}
+        data-slot="pricing-cta-button"
         className="zs-pricing__cta-button"
       >
         {ctaLabel}
@@ -418,17 +430,30 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
     >
       <div data-slot="pricing-tier-header" className="zs-pricing__header">
         {badgeNode != null ? (
-          <div className="zs-pricing__badge">{badgeNode}</div>
+          <div data-slot="pricing-badge" className="zs-pricing__badge">
+            {badgeNode}
+          </div>
         ) : null}
-        <Heading className="zs-pricing__name">{name}</Heading>
+        <Heading data-slot="pricing-name" className="zs-pricing__name">
+          {name}
+        </Heading>
         <p data-slot="pricing-price" className="zs-pricing__price">
-          <span className="zs-pricing__amount">{price}</span>
+          <span data-slot="pricing-amount" className="zs-pricing__amount">
+            {price}
+          </span>
           {period != null ? (
-            <span className="zs-pricing__period">{period}</span>
+            <span data-slot="pricing-period" className="zs-pricing__period">
+              {period}
+            </span>
           ) : null}
         </p>
         {description != null ? (
-          <p className="zs-pricing__description">{description}</p>
+          <p
+            data-slot="pricing-description"
+            className="zs-pricing__description"
+          >
+            {description}
+          </p>
         ) : null}
       </div>
 
@@ -436,7 +461,10 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
           beneath it — no dangling rule above an empty grow region. */}
       {features.length > 0 ? (
         <>
-          <Separator className="zs-pricing__divider" />
+          <Separator
+            data-slot="pricing-divider"
+            className="zs-pricing__divider"
+          />
           <ul data-slot="pricing-features" className="zs-pricing__features">
             {features.map((feature, index) => (
               <FeatureRow key={index} {...feature} />
@@ -599,7 +627,12 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
                 </h2>
               ) : null}
               {description != null ? (
-                <p className="zs-pricing__lead-description">{description}</p>
+                <p
+                  data-slot="pricing-lead-description"
+                  className="zs-pricing__lead-description"
+                >
+                  {description}
+                </p>
               ) : null}
             </Stack>
           ) : null}

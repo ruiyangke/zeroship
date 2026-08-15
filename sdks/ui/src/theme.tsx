@@ -100,7 +100,7 @@ export function ThemeProvider({
 
   return (
     <ThemeContext.Provider value={value}>
-      <div className="zs-theme-root" data-theme={theme}>
+      <div data-slot="theme-root" className="zs-theme-root" data-theme={theme}>
         {children}
       </div>
     </ThemeContext.Provider>
