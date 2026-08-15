@@ -52,7 +52,12 @@ fn token(tag: &str) -> String {
 ///
 /// `Ok(text)` when the whole path accepted it, `Err(reason)` when the load gate
 /// refused. Reading as text keeps the assertion away from any float.
-async fn round_trip(session: &PgDevSession, tag: &str, literal: &str) -> Result<String, String> {
+async fn round_trip(
+    session: &PgDevSession,
+    tag: &str,
+    column_type: &str,
+    literal: &str,
+) -> Result<String, String> {
     let schema = token(tag);
     let cfg = ExecutorConfig::new(
         format!("project_{schema}"),
@@ -86,9 +91,11 @@ async fn round_trip(session: &PgDevSession, tag: &str, literal: &str) -> Result<
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();
 
-    let ddl = r#"{"ir_version":1,"name":"schema","ops":[{"op":"createTable","name":"t","columns":[{"name":"c0","type":"bigInt","nullable":false},{"name":"v","type":"bigInt","nullable":true}],"primaryKey":["c0"]}]}"#;
+    let ddl = format!(
+        r#"{{"ir_version":1,"name":"schema","ops":[{{"op":"createTable","name":"t","columns":[{{"name":"c0","type":"bigInt","nullable":false}},{{"name":"v","type":"{column_type}","nullable":true}}],"primaryKey":["c0"]}}]}}"#
+    );
     let schema_artifact = author
-        .load_and_lower_guarded(ddl, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
+        .load_and_lower_guarded(&ddl, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
         .expect("the schema envelope lowers");
     MigrationEngine::new()
         .apply_plan(
@@ -105,7 +112,7 @@ async fn round_trip(session: &PgDevSession, tag: &str, literal: &str) -> Result<
     // The data envelope lowers against the contracts the schema envelope declared.
     let mut live = LiveSchema::default();
     live.tables.insert("t".into());
-    let declared: MigrationIr = serde_json::from_str(ddl).expect("the schema envelope parses");
+    let declared: MigrationIr = serde_json::from_str(&ddl).expect("the schema envelope parses");
     live.advance_logical_columns(&declared, SqlDialect::Postgres, &cfg.project_schema, None)
         .expect("seed the declared logical column contracts");
 
@@ -149,7 +156,7 @@ async fn an_integer_within_the_exact_json_range_round_trips() {
     let session = PgDevSession::connect(&url);
 
     // 2^53 - 1: the largest integer every IEEE-754 double carries exactly.
-    let stored = round_trip(&session, "safe", "9007199254740991")
+    let stored = round_trip(&session, "safe", "bigInt", "9007199254740991")
         .await
         .expect("a bare integer inside the exact range must be accepted");
     assert_eq!(
@@ -166,7 +173,7 @@ async fn an_integer_beyond_the_exact_json_range_is_refused_as_a_bare_number() {
     // 2^53 + 1. As an IEEE-754 double this IS 9007199254740992, so accepting it
     // would store a different number than the author wrote, with every layer
     // reporting success.
-    let outcome = round_trip(&session, "unsafe", "9007199254740993").await;
+    let outcome = round_trip(&session, "unsafe", "bigInt", "9007199254740993").await;
     let Err(refusal) = outcome else {
         panic!(
             "a bare JSON number beyond 2^53 was ACCEPTED and stored as {:?}. Any \
@@ -190,12 +197,63 @@ async fn the_same_integer_round_trips_exactly_in_its_string_form() {
     // The escape hatch the refusal above points at. Same number, carried as a
     // canonical decimal string, and it must arrive intact rather than merely be
     // accepted — an `int64` that parsed through a float would land on ...992.
-    let stored = round_trip(&session, "int64", r#"{"int64":"9007199254740993"}"#)
-        .await
-        .expect("the int64 form must be accepted");
+    let stored = round_trip(
+        &session,
+        "int64",
+        "bigInt",
+        r#"{"int64":"9007199254740993"}"#,
+    )
+    .await
+    .expect("the int64 form must be accepted");
     assert_eq!(
         stored, "9007199254740993",
         "the int64 form exists to carry exactly the values a JSON number cannot, so \
          landing on 9007199254740992 here would defeat its whole purpose"
+    );
+}
+
+#[compio::test]
+async fn a_timestamp_keeps_its_microseconds_and_its_zone() {
+    // Sub-second precision is the other place a migration engine loses data
+    // quietly: a path that formats through seconds, or drops the offset, still
+    // produces a valid-looking timestamp that is simply wrong.
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+
+    let stored = round_trip(
+        &session,
+        "ts",
+        "timestamp",
+        r#""2026-02-03T04:05:06.123456Z""#,
+    )
+    .await
+    .expect("a UTC timestamp with microseconds must be accepted");
+    assert_eq!(
+        stored, "2026-02-03 04:05:06.123456+00",
+        "all six fractional digits and the zone must survive. Truncating to seconds \
+         or dropping the offset still yields a plausible timestamp, which is what \
+         makes it worth asserting exactly"
+    );
+}
+
+#[compio::test]
+async fn a_uuid_round_trips_byte_identical() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+
+    // A UUIDv7, so the timestamp-ordered prefix is preserved rather than
+    // re-generated: a path that minted its own value would still return a
+    // well-formed UUID, and only comparing to the authored one catches that.
+    let stored = round_trip(
+        &session,
+        "uuid",
+        "uuid",
+        r#""0191d4f4-9c1a-7f2b-8c3d-4e5f60718293""#,
+    )
+    .await
+    .expect("a canonical UUID must be accepted");
+    assert_eq!(
+        stored, "0191d4f4-9c1a-7f2b-8c3d-4e5f60718293",
+        "the stored UUID must be the authored one, not a re-generated or re-cased value"
     );
 }
