@@ -1023,6 +1023,7 @@ async fn finalize_two_phase<D: SqlSession>(
                 applied_by,
                 exec_ms,
                 kind,
+                down: m.down.as_deref(),
             },
         )
         .await?;

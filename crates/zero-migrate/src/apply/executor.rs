@@ -2315,6 +2315,7 @@ mod order_tests {
         let supplied = vec![m(a.clone(), vec![]), m(b.clone(), vec![])];
         let entries = [
             AppliedEntry {
+                down: None,
                 version: a.as_str().to_string(),
                 checksum: "checksum-a".into(),
                 phase: Phase::Completed,
@@ -2322,6 +2323,7 @@ mod order_tests {
                 event_seq: 0,
             },
             AppliedEntry {
+                down: None,
                 version: unrelated.as_str().to_string(),
                 checksum: "checksum-unrelated".into(),
                 phase: Phase::Completed,
@@ -2425,6 +2427,7 @@ mod order_tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let pend = MigrationId::generate();
         let entry = AppliedEntry {
+            down: None,
             version: done.as_str().to_string(),
             checksum: String::new(),
             phase: Phase::Completed,

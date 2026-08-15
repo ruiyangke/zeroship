@@ -653,8 +653,8 @@ pub(crate) async fn append_completed<D: SqlSession>(
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations
-                 (event_kind, version, name, checksum, `by`, exec_ms, phase, outcome, kind)
-             VALUES ('{applied}', ?, ?, ?, ?, ?, 'completed', 'success', ?)",
+                 (event_kind, version, name, checksum, `by`, exec_ms, phase, outcome, kind, down)
+             VALUES ('{applied}', ?, ?, ?, ?, ?, 'completed', 'success', ?, ?)",
             applied = EventKind::Applied.as_str()
         ),
         &[
@@ -664,6 +664,7 @@ pub(crate) async fn append_completed<D: SqlSession>(
             rec.applied_by.into(),
             rec.exec_ms.into(),
             rec.kind.into(),
+            rec.down.map(str::to_string).into(),
         ],
     )
     .await?;

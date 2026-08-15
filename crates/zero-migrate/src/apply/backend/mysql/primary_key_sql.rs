@@ -984,6 +984,8 @@ mod tests {
                             "mig_kind".into(),
                             "event_seq".into(),
                             "phase".into(),
+                            // The applied read selects the stored reverse now.
+                            "down".into(),
                         ],
                         vec![
                             Value::Text(entry.0.clone()),
@@ -995,6 +997,7 @@ mod tests {
                             },
                             Value::Int(1),
                             Value::Text(entry.2.as_str().into()),
+                            Value::Null,
                         ],
                     )]
                 })

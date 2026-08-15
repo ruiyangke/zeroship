@@ -1875,6 +1875,7 @@ scope = "all"
             .flat_map(|artifact| artifact.plan.steps.iter())
             .filter_map(|step| match step {
                 PlanStep::Ddl(migration) => Some(AppliedEntry {
+                    down: None,
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
@@ -1962,6 +1963,7 @@ scope = "all"
             .flat_map(|artifact| artifact.plan.steps.iter())
             .filter_map(|step| match step {
                 PlanStep::Ddl(migration) => Some(AppliedEntry {
+                    down: None,
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
@@ -2049,6 +2051,7 @@ scope = "all"
             .flat_map(|artifact| artifact.plan.steps.iter())
             .filter_map(|step| match step {
                 PlanStep::Ddl(migration) => Some(AppliedEntry {
+                    down: None,
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
@@ -2669,6 +2672,7 @@ scope = "all"
             .expand
             .iter()
             .map(|migration| AppliedEntry {
+                down: None,
                 version: migration.version.as_str().to_string(),
                 checksum: migration.checksum.as_str().to_string(),
                 phase: zero_migrate::Phase::Completed,
@@ -2890,6 +2894,7 @@ scope = "all"
             .expand
             .iter()
             .map(|migration| AppliedEntry {
+                down: None,
                 version: migration.version.as_str().to_string(),
                 checksum: migration.checksum.as_str().to_string(),
                 phase: zero_migrate::Phase::Completed,
@@ -3332,6 +3337,7 @@ scope = "all"
             .steps
             .iter()
             .map(|step| AppliedEntry {
+                down: None,
                 version: step.version.as_str().to_string(),
                 checksum: step.checksum.as_str().to_string(),
                 phase: Phase::Completed,
@@ -3398,6 +3404,7 @@ scope = "all"
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
             .expect("create manifest projects");
         let started = AppliedEntry {
+            down: None,
             version: manifest.steps[0].version.as_str().to_string(),
             checksum: manifest.steps[0].checksum.as_str().to_string(),
             phase: Phase::Started,
@@ -3450,6 +3457,7 @@ scope = "all"
         let manifest = PlanStatusManifest::from_applied_plan(&create.plan, &create.depends_on)
             .expect("create manifest projects");
         let started = AppliedEntry {
+            down: None,
             version: manifest.steps[0].version.as_str().to_string(),
             checksum: manifest.steps[0].checksum.as_str().to_string(),
             phase: Phase::Started,
@@ -3528,6 +3536,7 @@ scope = "all"
             .steps
             .iter()
             .map(|step| AppliedEntry {
+                down: None,
                 version: step.version.as_str().to_string(),
                 checksum: step.checksum.as_str().to_string(),
                 phase: Phase::Completed,
@@ -3627,6 +3636,7 @@ scope = "all"
         let journal_entries = manifest.steps[..2]
             .iter()
             .map(|applied| AppliedEntry {
+                down: None,
                 version: applied.version.as_str().to_string(),
                 checksum: applied.checksum.as_str().to_string(),
                 phase: Phase::Completed,
@@ -3695,6 +3705,7 @@ scope = "all"
             .steps
             .iter()
             .map(|step| AppliedEntry {
+                down: None,
                 version: step.version.as_str().to_string(),
                 checksum: step.checksum.as_str().to_string(),
                 phase,
@@ -3759,6 +3770,7 @@ scope = "all"
 
         let manifests = prefix_gate_manifests();
         let omitted = AppliedEntry {
+            down: None,
             version: MigrationId::derive("omitted_artifact", b"step")
                 .as_str()
                 .to_string(),

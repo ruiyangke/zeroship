@@ -1204,6 +1204,7 @@ async fn finalize_non_txn<D: SqlSession>(
                 applied_by,
                 exec_ms,
                 kind,
+                down: m.down.as_deref(),
             },
         )
         .await?;

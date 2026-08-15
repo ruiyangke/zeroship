@@ -130,6 +130,7 @@ fn journal_for_the_rename() -> Vec<AppliedEntry> {
                 PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
                     .expect("manifest projects");
             manifest.steps.into_iter().map(|step| AppliedEntry {
+                down: None,
                 version: step.version.as_str().to_string(),
                 checksum: step.checksum.as_str().to_string(),
                 phase: Phase::Completed,

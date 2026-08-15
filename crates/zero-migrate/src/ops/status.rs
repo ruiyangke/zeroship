@@ -1709,6 +1709,7 @@ mod plan_status_tests {
 
     fn journal(step: &PlanStatusManifestStep, phase: Phase) -> AppliedEntry {
         AppliedEntry {
+            down: None,
             version: step.version.as_str().to_string(),
             checksum: step.checksum.as_str().to_string(),
             phase,
@@ -1767,6 +1768,7 @@ mod plan_status_tests {
             }
         };
         AppliedEntry {
+            down: None,
             version: version.as_str().to_string(),
             checksum: checksum(resolution.as_str()).as_str().to_string(),
             phase: Phase::Completed,
@@ -1781,6 +1783,7 @@ mod plan_status_tests {
             .iter()
             .enumerate()
             .map(|(ordinal, _)| AppliedEntry {
+                down: None,
                 version: crate::render::expand_contract::resolve_pending_abort_version(
                     &resolved.pending_version,
                     ordinal,
@@ -1939,6 +1942,7 @@ mod plan_status_tests {
         let entries = vec![
             journal(&plan.steps[0], Phase::Completed),
             AppliedEntry {
+                down: None,
                 version: plan.steps[1].version.as_str().to_string(),
                 checksum: checksum("edited atomic contract").as_str().to_string(),
                 phase: Phase::Completed,
@@ -2115,6 +2119,7 @@ mod plan_status_tests {
         let entries = vec![
             journal(&plan.steps[0], Phase::Completed),
             AppliedEntry {
+                down: None,
                 version: plan.steps[1].version.as_str().to_string(),
                 checksum: checksum("edited contract").as_str().to_string(),
                 phase: Phase::Completed,
@@ -2147,6 +2152,7 @@ mod plan_status_tests {
             Vec::new(),
         );
         let entries = vec![AppliedEntry {
+            down: None,
             version: plan.steps[0].version.as_str().to_string(),
             checksum: checksum("edited").as_str().to_string(),
             phase: Phase::Completed,
@@ -2166,6 +2172,7 @@ mod plan_status_tests {
         let recorded = checksum("old repeatable definition");
         let plan = repeatable_manifest("repeatable_view", expected);
         let entries = vec![AppliedEntry {
+            down: None,
             version: plan.steps[0].version.as_str().to_string(),
             checksum: recorded.as_str().to_string(),
             phase: Phase::Completed,
@@ -2196,6 +2203,7 @@ mod plan_status_tests {
         );
 
         let repeatable_as_once = vec![AppliedEntry {
+            down: None,
             version: repeatable.steps[0].version.as_str().to_string(),
             checksum: anchor.as_str().to_string(),
             phase: Phase::Completed,
@@ -2203,6 +2211,7 @@ mod plan_status_tests {
             event_seq: 0,
         }];
         let once_as_repeatable = vec![AppliedEntry {
+            down: None,
             version: once_only.steps[0].version.as_str().to_string(),
             checksum: anchor.as_str().to_string(),
             phase: Phase::Completed,
@@ -2345,6 +2354,7 @@ mod plan_status_tests {
     #[test]
     fn unexpected_completed_and_inflight_versions_and_rollbacks_are_retained() {
         let completed = AppliedEntry {
+            down: None,
             version: id("unexpected_completed").as_str().to_string(),
             checksum: checksum("unexpected completed").as_str().to_string(),
             phase: Phase::Completed,
@@ -2352,6 +2362,7 @@ mod plan_status_tests {
             event_seq: 0,
         };
         let inflight = AppliedEntry {
+            down: None,
             version: id("unexpected_inflight").as_str().to_string(),
             checksum: checksum("unexpected inflight").as_str().to_string(),
             phase: Phase::Started,

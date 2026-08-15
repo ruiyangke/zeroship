@@ -1395,6 +1395,10 @@ async fn append_completed_journal<D: SqlSession>(
                     applied_by,
                     exec_ms,
                     kind: "apply",
+                    // A backfill's reverse is not a statement this path derives;
+                    // a data migration unwinds through its recorded inverse plan,
+                    // never through textual down SQL.
+                    down: None,
                 },
             )
             .await

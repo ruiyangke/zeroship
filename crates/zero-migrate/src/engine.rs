@@ -3818,6 +3818,7 @@ mod tests {
             preconditions: &[],
         });
         let journal = vec![AppliedEntry {
+            down: None,
             version: version.as_str().to_string(),
             checksum: expected.as_str().to_string(),
             phase: Phase::Completed,

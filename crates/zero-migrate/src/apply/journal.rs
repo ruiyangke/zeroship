@@ -1203,6 +1203,11 @@ pub struct CompletedRecord<'a> {
     /// supersession edges are honored by [`superseded_versions`] (#4 restricts to
     /// `kind = 'squash'`).
     pub kind: &'a str,
+    /// The reverse this apply produced, stored so a later rollback REPLAYS it
+    /// rather than re-deriving one with whatever engine is installed then
+    /// (F654/F658). `None` for a migration with no reverse; the rollback path
+    /// then reconstructs and says so.
+    pub down: Option<&'a str>,
 }
 
 /// Finalize a non-transactional migration (phase 2): insert the immutable

@@ -481,6 +481,7 @@ async fn recover_inflight_locked<D: SqlSession>(
                         applied_by: recovered_by,
                         exec_ms: 0,
                         kind,
+                        down: migration.down.as_deref(),
                     },
                 )
                 .await?;
@@ -1450,6 +1451,9 @@ mod render_tests {
                                 "mig_kind".into(),
                                 "event_seq".into(),
                                 "phase".into(),
+                                // The applied read selects the stored reverse now,
+                                // so a canned row without it cannot be parsed.
+                                "down".into(),
                             ],
                             vec![
                                 Value::Text(version.clone()),
@@ -1457,6 +1461,7 @@ mod render_tests {
                                 Value::Text("apply".into()),
                                 Value::Int(1),
                                 Value::Text("completed".into()),
+                                Value::Null,
                             ],
                         )]
                     })
@@ -5224,7 +5229,11 @@ mod render_tests {
         let binds = rec.binds.borrow();
         assert!(
             binds.iter().any(|params| {
-                params.len() == 6 && params.last() == Some(&Bind::Text("repeatable".to_string()))
+                // The applied insert now carries the stored reverse as a 7th
+                // bind (NULL for a migration with none), so the kind is the
+                // second-to-last parameter rather than the last.
+                params.len() == 7
+                    && params.get(5) == Some(&Bind::Text("repeatable".to_string()))
             }),
             "the completed event must remain visible to latest_completed_checksums: {binds:?}"
         );

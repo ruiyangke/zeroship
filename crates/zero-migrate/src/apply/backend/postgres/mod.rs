@@ -978,6 +978,9 @@ mod recording_session_genericity {
                 "mig_kind".to_string(),
                 "event_seq".to_string(),
                 "phase".to_string(),
+                // The applied read now selects the stored reverse too, so a canned
+                // row without the column is a row the reader cannot parse.
+                "down".to_string(),
             ],
             vec![
                 Value::Text(version.to_string()),
@@ -985,6 +988,7 @@ mod recording_session_genericity {
                 Value::Text("apply".to_string()),
                 Value::Int(1),
                 Value::Text("completed".to_string()),
+                Value::Null,
             ],
         )
     }
