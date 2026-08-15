@@ -1196,7 +1196,7 @@ function clientStreamStub(name: string, methodName: string, kind: string): strin
   return `export const ${name} = __zsRpc.stream(${JSON.stringify(methodName)});`;
 }
 
-export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
+export function transformPlugin(state: TransformState): Plugin {
   const { serverFunctionMap } = state;
   let root = "";
   // Track legacy-server-path files we've already warned about so HMR

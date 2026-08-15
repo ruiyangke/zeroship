@@ -8,8 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const CLIENT_ID: &str = "zeroship-cli";
-const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
-const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write";
+const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write secrets:read";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,17 +81,30 @@ pub fn cmd_login(args: &[String]) -> Result<(), String> {
     let provider = parse_provider(args)?;
     match provider {
         CliDeviceFlow::Supabase | CliDeviceFlow::Platform => {
-            let control_url = crate::flag_str(args, "--control=")
-                .or_else(|| flag_value(args, "--control"))
-                .or_else(|| {
-                    zeroship_core::declared_env!(
-                        cli,
-                        "ZEROSHIP_CONTROL_URL",
-                        crate::ZeroshipCliConsumer
-                    )
-                })
-                .unwrap_or_else(|| DEFAULT_CONTROL_URL.into());
-            login_control_device_flow(&control_url, true)
+            let cwd = std::env::current_dir()
+                .map_err(|e| format!("cannot read the working directory: {e}"))?;
+            let file = crate::project_config::locate(args, &cwd)?;
+            let config = file
+                .as_deref()
+                .map(crate::project_config::ProjectConfig::load)
+                .transpose()?;
+            let resolved = match (&config, crate::flag_str(args, "--env=")) {
+                (Some(cfg), env) => Some(cfg.resolve(env.as_deref())?),
+                (None, Some(env)) => {
+                    return Err(format!(
+                        "--env={env} needs a {} in this directory to read the environment from",
+                        crate::project_config::CONFIG_FILENAME
+                    ))
+                }
+                (None, None) => None,
+            };
+            let control_url =
+                crate::project_config::resolve_control(args, resolved.as_ref())?;
+            crate::project_config::print_provenance(
+                "login",
+                &[("control", &control_url)],
+            );
+            login_control_device_flow(&control_url.value, true)
         }
     }
 }

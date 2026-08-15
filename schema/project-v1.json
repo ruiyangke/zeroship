@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroship.ai/schema/project-v1.json",
+  "title": "zeroship.jsonc",
+  "description": "The canonical creator project configuration. Read by the zeroship CLI and by the build toolchain; the file itself is NEVER read by the runtime or packed into a .zship. The build copies only runtime_date into the manifest, where it remains inert. See docs/reference/project-config.md.",
+  "x-config-filename": "zeroship.jsonc",
+  "x-config-env-var": "ZEROSHIP_CONFIG",
+  "x-forbidden-key-names": [
+    "password",
+    "token",
+    "secret",
+    "key",
+    "apiKey",
+    "credentials"
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "control", "runtime_date", "build", "migrations"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor hint. Ignored by both readers."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "x-cli-read": true,
+      "description": "The project name. Used as the app name when `zeroship deploy` auto-creates."
+    },
+    "app": {
+      "type": "string",
+      "x-cli-read": true,
+      "description": "The deploy target's app id (uuid) or name. Absent on a fresh project: the first `zeroship deploy` auto-creates the app and appends its id here."
+    },
+    "control": {
+      "type": "string",
+      "x-cli-read": true,
+      "description": "Control-plane base URL. There is NO Rust-side fallback: an absent key is an error naming the key, never a silent http://localhost:9090."
+    },
+    "runtime_date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "x-cli-read": true,
+      "description": "The scaffold stamps the current UTC date and the build carries it into the manifest. The runtime does not branch on it and no compatibility mechanism exists yet."
+    },
+    "build": {
+      "$ref": "#/$defs/build",
+      "x-required-members": ["mode", "dist", "output"],
+      "description": "The build shape. `output` crosses the tool boundary (the packer writes it, `zeroship deploy` reads it); the rest is plugin-only."
+    },
+    "migrations": {
+      "$ref": "#/$defs/migrations",
+      "x-required-members": ["dir", "out"],
+      "description": "Where migrations are authored and where the fold is written. Both cross the tool boundary; both are x-cli-read."
+    },
+    "secrets": {
+      "$ref": "#/$defs/secrets",
+      "description": "Secret NAMES only. Values live in .env (dev) and `zeroship secret set` (deployed); deploy warns when a declared deployed value is absent. An array of strings has nowhere to put a value."
+    },
+    "environments": {
+      "type": "object",
+      "description": "Named deploy targets, selected with --env=<name>. There is no implicit environment and no ZEROSHIP_ENV fallback.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["app", "control"],
+        "description": "`app` and `control` are NON-INHERITABLE: an environment that names a control and inherits the root app is exactly the silent cross-targeting this rule exists to prevent. Everything else inherits, per member.",
+        "properties": {
+          "app": { "type": "string", "x-cli-read": true },
+          "control": { "type": "string", "x-cli-read": true },
+          "protected": {
+            "type": "boolean",
+            "x-cli-read": true,
+            "description": "`zeroship migrate` against a protected environment requires --yes."
+          },
+          "build": { "$ref": "#/$defs/build" },
+          "migrations": { "$ref": "#/$defs/migrations" },
+          "secrets": { "$ref": "#/$defs/secrets" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["full", "static"],
+          "default": "full",
+          "description": "\"full\" emits manifest.worker; \"static\" is an SSG-only deploy with no worker."
+        },
+        "serverEntry": {
+          "type": "string",
+          "description": "Server entry relative to the project root. Omit for auto-detection."
+        },
+        "dist": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}$).+$",
+          "default": "dist",
+          "description": "The directory the client build writes, and the only directory the packer walks. The schema rejects the direct root and parent spellings; both readers additionally resolve the path and reject any directory containing zeroship.jsonc."
+        },
+        "output": {
+          "type": "string",
+          "default": "dist/app.zship",
+          "x-cli-read": true,
+          "description": "The .zship path the packer writes and `zeroship deploy` uploads."
+        }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "type": "string",
+          "default": "migrations",
+          "x-cli-read": true,
+          "description": "Migration sources, relative to the project root."
+        },
+        "out": {
+          "type": "string",
+          "default": "generated/zeroship",
+          "x-cli-read": true,
+          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json. `zeroship migrate` posts <out>/migrations.ir.json."
+        }
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+      }
+    }
+  }
+}

@@ -18,14 +18,29 @@
 /// <reference path="./client-manifest.d.ts" />
 
 import type { Plugin } from "vite";
-import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 import { transformPlugin, type TransformState } from "./transform.js";
+import {
+  createProjectConfigHolder,
+  type ProjectConfigHolder,
+  type ProjectConfigInput,
+  type ProjectConfigOverride,
+} from "./project-config/index.js";
 import { devServerPlugin } from "./dev-server.js";
 import { buildPlugin } from "./build.js";
 import { nodeCompatPlugin, nodeInjectPlugin } from "./node-compat.js";
 import { zeroshipModulePlugin, zeroshipBootstrapResolverPlugin } from "./zeroship-module.js";
 
-/** One configured dev-auth user (all fields optional; sensible defaults). */
+/**
+ * One configured dev-auth user (all fields optional; sensible defaults).
+ *
+ * There is no `password` field. The dev login form prefills + validates a
+ * password DERIVED from `id` (`devPasswordFor` in
+ * `sdks/bootstrap/src/dev-auth.ts`): `"dev-"` + the first 8 characters of the
+ * id after `pws_`, e.g. `pws_alice000000000000000` -> `dev-alice000`. It is
+ * not a secret; it only makes the dev credential check (and its failure path)
+ * real, and it is deliberately short enough that the deployed platform's
+ * signup policy refuses it.
+ */
 export interface DevAuthUser {
   /** Opaque per-app pairwise subject. Defaults to a stable `pws_dev…`. */
   id?: string;
@@ -35,33 +50,54 @@ export interface DevAuthUser {
   avatar?: string | null;
   /** Granted scopes. Defaults to `["openid","profile","email"]`. */
   scopes?: string[];
-  /**
-   * Password the dev login form prefills + validates for this user. Defaults
-   * to the well-known dev password (`"dev"`). Not a secret — it only makes the
-   * dev credential check (and its failure path) real.
-   */
-  password?: string;
 }
 
+/**
+ * The plugin's option bag.
+ *
+ * IT IS SMALL ON PURPOSE. `rpcEndpoint`, `serverEntry`, `mode` and
+ * `migrations.*` used to live here and are now in `zeroship.jsonc`, because
+ * every one of them was a fact the Rust CLI also needed and could not read.
+ * What remains varies per developer machine (`devServerPort`, `devAuth`) plus
+ * three levers that point AT the file rather than duplicating it (`configPath`,
+ * `env`, `config`). Cloudflare's Vite plugin converged on the same split.
+ */
 export interface ZeroshipOptions {
-  /** RPC endpoint path (default: "/_rpc") */
-  rpcEndpoint?: string;
-  /** Server entry point (auto-detected if not specified) */
-  serverEntry?: string;
   /** Port for the zeroship dev server (default: 3001) */
   devServerPort?: number;
   /**
-   * Build mode.
+   * Path to `zeroship.jsonc`, absolute or relative to the Vite root.
    *
-   * - `"full"` (default): client + SSR builds; emits `worker` in the manifest.
-   * - `"static"`: SSG-only deploy. Skips the SSR Rollup sub-build, and
-   *   tells Vite that an empty `rollupOptions.input` is OK so users don't
-   *   have to ship a placeholder `vite.empty.js`. The emitter walks `dist/`
-   *   for HTML / CSS / images / etc. and packs them as assets; manifest's
-   *   `worker` is omitted. Useful for static-site generators that copy
-   *   prerendered HTML into `dist/` themselves.
+   * An explicit `configPath` takes precedence over `ZEROSHIP_CONFIG` and
+   * auto-discovery in the app root. A path that does not exist THROWS - only
+   * auto-discovery may come up empty.
    */
-  mode?: "full" | "static";
+  configPath?: string;
+  /**
+   * Select a named entry from the file's `environments` block.
+   *
+   * The plugin's equivalent of the CLI's `--env=`. There is no implicit
+   * environment and no `ZEROSHIP_ENV`: a variable that silently switched which
+   * target a build was shaped for is the same hazard as one that switched
+   * which database got migrated.
+   */
+  env?: string;
+  /**
+   * Escape hatch: customise the resolved config programmatically.
+   *
+   * ```ts
+   * zeroship({ config: (c) => ({ ...c, build: { ...c.build, mode: process.env.SSG ? "static" : "full" } }) })
+   * ```
+   *
+   * A partial object (shallow-merged) or a function applied AFTER the file
+   * loads and after environment selection. It MAY NOT change any field the
+   * Rust CLI also reads (`name`, `app`, `control`, `runtime_date`, `build.output`,
+   * `migrations.dir`, `migrations.out`) - the CLI cannot run a JavaScript
+   * function, so an override there would reintroduce the exact drift the file
+   * removes. The deny-list is generated from the schema, so it cannot fall
+   * behind. Attempting one is an error naming the field.
+   */
+  config?: ProjectConfigOverride;
   /**
    * Dev-tier auth (the `pnpm dev` impl of the platform auth contract — the
    * peer of `env.db`→SQLite / `env.kv`→redb). When enabled the dev runtime
@@ -82,31 +118,9 @@ export interface ZeroshipOptions {
    * `.zship` build.
    */
   devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
-  /**
-   * Migration-first type generation. The plugin records migration `.ts` sources
-   * in-process (via the `gen-types` library — no subprocess) and folds them into
-   * the typed `env.db` surface (`env.db.ts` + `schema.runtime.json`):
-   *  - in dev, on any change under the migrations dir (fire-and-forget,
-   *    log-on-error, never crashes the dev server);
-   *  - at build, once in `buildStart`, with a `--check` generated-artifact check in
-   *    production (stale generated artifacts fail the build).
-   *
-   * The artifacts are emitted into a COMMITTED dir (default
-   * `generated/zeroship/`). Include `generated/zeroship/env.db.ts` in the app
-   * tsconfig; it is the single canonical `Env.db` augmentation. Do not add the
-   * retired `@zeroship/db/env` + `zeroship-schema` alias path.
-   */
-  migrations?: {
-    /** Migrations dir relative to root (default `migrations`). */
-    dir?: string;
-    /** gen-types output dir relative to root (default `generated/zeroship`). */
-    genTypesOut?: string;
-  };
 }
 
 export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
-  const rpcEndpoint = options.rpcEndpoint ?? DEFAULT_RPC_ENDPOINT;
-
   // Shared state across plugins
   const state: TransformState = {
     serverFunctionMap: new Map(),
@@ -115,18 +129,25 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     discoveredWorkflows: [],
   };
 
+  // ONE reader, shared by the build and dev-server plugins. Two independent
+  // reads of the same file is how the two halves of one tool come to disagree,
+  // which is the shape this whole change exists to remove -- so the holder
+  // memoises per root and both plugins take the same instance.
+  const input: ProjectConfigInput = {
+    configPath: options.configPath,
+    environment: options.env,
+    override: options.config,
+  };
+  const project: ProjectConfigHolder = createProjectConfigHolder(input);
+
   return [
     nodeCompatPlugin(),
     nodeInjectPlugin(),
     zeroshipModulePlugin(),
     zeroshipBootstrapResolverPlugin(),
-    transformPlugin(rpcEndpoint, state),
-    ...devServerPlugin(options, state),
-    buildPlugin(state, {
-      serverEntry: options.serverEntry,
-      mode: options.mode ?? "full",
-      migrations: options.migrations,
-    }),
+    transformPlugin(state),
+    ...devServerPlugin(options, state, project),
+    buildPlugin(state, project),
   ];
 }
 

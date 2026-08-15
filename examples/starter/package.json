@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "deploy": "zeroship deploy",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1014,6 +1014,8 @@ jobs:
             -p zeroship-gateway -p zeroship --bins
           cargo build --release -p zeroship-migrate-adapter \
             --features platform-cli --bin zeroship-platform-migrate
+      - name: Project config contract
+        run: bash tests/project_config_gate.sh
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
       # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is

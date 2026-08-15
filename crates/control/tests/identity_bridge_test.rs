@@ -185,6 +185,7 @@ async fn first_login_creates_principal_link_and_default_grants() {
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
+            "secrets:read".to_string(),
         ]
     );
 
@@ -223,6 +224,7 @@ async fn idempotent_relogin_returns_same_principal_without_duplicate_rows() {
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
+            "secrets:read".to_string(),
         ]
     );
 
@@ -287,6 +289,7 @@ async fn unverified_email_collision_creates_distinct_principal_not_victim_takeov
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
+            "secrets:read".to_string(),
         ]
     );
 
@@ -323,6 +326,7 @@ async fn concurrent_first_logins_for_same_subject_collapse_to_one_link() {
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
+            "secrets:read".to_string(),
         ]
     );
 

@@ -1,0 +1,57 @@
+// zeroship.jsonc - this project's tooling configuration. COMMITTED.
+//
+// It is read by the `zeroship` CLI and by the build. The file itself is NEVER
+// read by the runtime or packed. Its runtime_date is copied into the manifest
+// as inert metadata.
+//
+// NO SECRETS. This file is tracked, and a plaintext secret in a tracked file is
+// unrecoverable once committed. Declare NAMES under `secrets`; put the values
+// in `.env` (local dev, git-ignored) or `zeroship secret set` (deployed).
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+
+  "name": "zeroship-app",
+
+  // Where `zeroship deploy` and `zeroship migrate` send things.
+  //
+  // `app` is ABSENT on purpose: your first `zeroship deploy` creates the app
+  // and appends its id here. After that, `deploy`, `migrate`,
+  // `secret` and `var` all read it and you never type `--app=` again.
+  "control": "https://control.zeroship.ai",
+
+  // Stamped with today's UTC date by the scaffolder and carried in the manifest.
+  // The runtime does not branch on it yet.
+  "runtime_date": "2026-08-14",
+
+  "build": {
+    // "full" builds a worker (server code + RPC). "static" is an SSG-only
+    // deploy: no worker, just the files in `dist`.
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+
+  // Every key is written out rather than left to a default. The CLI has NO
+  // fallbacks for these: if the file is silent it errors naming the key, which
+  // is what stops it and the build from quietly disagreeing about a path.
+  "migrations": {
+    "dir": "migrations",
+    "out": "generated/zeroship"
+  },
+
+  // Secret NAMES only. `zeroship deploy` can then tell you which ones the
+  // deployed app is still missing.
+  "secrets": []
+
+  // Named deploy targets, selected with --env=<name>. Both `app` and `control`
+  // must be stated in each one - an environment that names a staging control
+  // and inherits the production app is the mistake this rule exists to stop.
+  //
+  // "environments": {
+  //   "staging": {
+  //     "app": "<staging app id>",
+  //     "control": "https://control.zeroship.ai",
+  //     "protected": true
+  //   }
+  // }
+}

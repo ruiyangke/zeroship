@@ -72,7 +72,7 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
 describe("lazy detection — transform.ts", () => {
   test("fn.config.lazy = true is recorded on the discovered record", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -93,7 +93,7 @@ wizard.config = { id: "wizard", kind: "mutation", lazy: true };
 
   test("wrapper-form: mutation(handler, { lazy: true }) is recorded", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -108,7 +108,7 @@ export const heavyOp = mutation(async (x) => x, { id: "heavyOp", lazy: true });
 
   test("eager default: omitting lazy → record has no lazy flag", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -128,7 +128,7 @@ fast.config = { id: "fast" };
 
   test("lazy: false explicitly → record stays eager", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -143,7 +143,7 @@ export const op = mutation(async (x) => x, { lazy: false });
 
   test("non-literal lazy expression: warns + falls back to eager", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
@@ -170,7 +170,7 @@ op.config = { id: "op", lazy: useLazy };
     // matches the overall config-merge precedence the transform uses
     // for `id` / `kind` / etc.
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";

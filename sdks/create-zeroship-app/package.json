@@ -6,6 +6,9 @@
   "bin": {
     "create-zeroship-app": "bin/create.js"
   },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'"
+  },
   "publishConfig": {
     "registry": "http://localhost:4873"
   },

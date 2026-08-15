@@ -714,8 +714,8 @@ Gateway, control, and worker all read from a shared `LocalDiskBlobStore`; **no S
 | S3BlobStore / CachedBlobStore | 🔵 | internal | `crates/bundle/src/blob.rs` | `docs/architecture/blob-store.md` | — | Comment-referenced only; no impl. |
 | sha256_hex() / validate_hash_format() | 🟢 | internal | `crates/bundle/src/blob.rs` | — | `crates/bundle/tests/blob_test.rs` | pub re-exported. |
 | BundleStore trait + LocalFs (legacy VFS) | 🟡 | internal (plugin-storage) | `crates/bundle/src/store.rs` | — | `crates/bundle/tests/store_test.rs` | Predates BlobStore; blocking std::fs; no remote. |
-| CLI deploy command | 🟢 | `zeroship deploy <path>.zship --app=<id>` | `crates/cli/src/main.rs` | — | — | curl wrapper; token 3-priority chain. |
-| CLI migrate command | 🟢 | `zeroship migrate [ir.json] --app=<id>` | `crates/cli/src/migrate.rs` | — | — | Same token chain; posts the build's recorded IR through control to migrated. |
+| CLI deploy command | 🟢 | `zeroship deploy` (path/app/control from `zeroship.jsonc`; flags override) | `crates/cli/src/main.rs` | `docs/reference/project-config.md` | — | curl wrapper; token 3-priority chain; splices an auto-created app id back into the file. |
+| CLI migrate command | 🟢 | `zeroship migrate` (posts `<migrations.out>/migrations.ir.json`) | `crates/cli/src/migrate.rs` | `docs/reference/project-config.md` | — | Same token chain; positional path overrides; no compiled default path. |
 | middleware list on ResourceEntry | 🟡 | internal | `crates/bundle/src/rule.rs` | — | — | Wire+compile ship; dispatch target not implemented. |
 | idempotent / idempotency_ttl_hours | 🟢 | internal | `crates/bundle/src/rule.rs` | — | `crates/gateway/src/idempotency.rs` | TTL [1,168]; gateway implements dedup. |
 | max_input_bytes on ResourceEntry | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Gateway enforces. |
@@ -729,7 +729,7 @@ Gateway, control, and worker all read from a shared `LocalDiskBlobStore`; **no S
 dev and build time. It handles server-procedure discovery via `"use server"` transforms,
 synthetic SSR-entry generation, Node.js compat shims (unenv@2), a Vite Environment API bridge
 to the real V8 runtime in dev, and `.zship` archive emission. There are no separate CSR/SSR/SSG
-plugins — the `mode` option selects the build posture.
+plugins. The `build.mode` field in `zeroship.jsonc` selects the build posture.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -746,7 +746,7 @@ plugins — the `mode` option selects the build posture.
 | Manifest extras computation | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/manifest-resources.test.ts` | snake_case rename; secure-by-default. |
 | defineApp resources from config.ts | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | — | `sdks/vite-plugin/test/manifest-resources.test.ts` | new Function() eval; computed exprs error. |
 | Production build pipeline (client + SSR) | 🟢 | internal (buildPlugin) | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SSR target webworker; strips 'use server'. |
-| Static / SSG build mode | 🟢 | `zeroship({ mode: 'static' })` | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/ssg-docs/vite.config.ts` | Stub input injected then deleted. |
+| Static / SSG build mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input injected then deleted. |
 | .zship archive emitter | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | `sdks/vite-plugin/test/zship.test.ts` | brotli default; validates hash refs. |
 | SSR vs SPA catch-all detection | 🟢 | internal (probeUserDefaultExport) | `sdks/vite-plugin/src/build.ts` | — | — | Conservative default true (SSR). |
 | virtual:zeroship/client-manifest | 🟢 | `import manifest from 'virtual:zeroship/client-manifest'` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | Reads dist/.vite/manifest.json. |
@@ -761,12 +761,12 @@ plugins — the `mode` option selects the build posture.
 | Dev RPC registry | 🟢 | internal (__registerModule/__lookup) | `sdks/vite-plugin/src/dev-bootstrap/rpc-registry.ts` | — | `sdks/vite-plugin/test/dev-bootstrap-rpc-registry.test.ts` | Module-scoped ownership; HMR prune. |
 | Dev-tier auth provider config | 🟢 | `zeroship({ devAuth: ... })` | `sdks/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per start; dev-only by construction. |
 | Dev SQLite database fallback | 🟢 | internal | `sdks/vite-plugin/src/dev-db.ts` | `docs/reference/vite-environment-api.md` | — | shell > .env > sqlite:.zeroship/dev.sqlite. |
-| Server-entry auto-detection | 🟢 | internal (findServerEntry) | `sdks/vite-plugin/src/build.ts` | — | — | Fixed candidate list; serverEntry override. |
+| Server-entry auto-detection | 🟢 | internal (findServerEntry) | `sdks/vite-plugin/src/build.ts` | — | — | Fixed candidate list; `build.serverEntry` in `zeroship.jsonc` overrides. |
 | client-manifest TypeScript type shim | 🟢 | `@zeroship/vite-plugin/types` | `sdks/vite-plugin/src/client-manifest.d.ts` | — | `examples/ssr-blog/vite.config.ts` | Mirrors Vite Manifest shape. |
 | CSR build support | 🟢 | `zeroship()` (default full) | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SPA fallback catch-all when no default.fetch. |
 | SSR build support | 🟢 | `zeroship()` + build.manifest:true | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | User must set manifest:true. |
-| SSG build support | 🟢 | `zeroship({ mode: 'static' })` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssg-docs/vite.config.ts` | HTML pre-render is user's responsibility. |
-| rpcEndpoint option | ⚫ | `zeroship({ rpcEndpoint })` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | _rpcEndpoint unused; stubs use fixed path. |
+| SSG build support | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | HTML pre-render is user's responsibility. |
+| zeroship.jsonc reader (build side) | 🟢 | `zeroship({ configPath, env, config })` | `sdks/vite-plugin/src/project-config/` | `docs/reference/project-config.md` | `examples/starter/zeroship.jsonc` | Generated from `schema/project-v1.json`; holds every schema default. `config` may not change a CLI-read field. |
 
 ---
 
@@ -965,8 +965,8 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | zeroship serve | 🟢 | `zeroship serve <file> [--port] [...]` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | `examples/http-handler.js` | .js path only; registers db/storage/auth/kv. |
-| zeroship deploy | 🟢 | `zeroship deploy <path.zship> --app=<id>` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | — | curl POST; prints deploy_hash. Does NOT apply migrations. |
-| zeroship migrate | 🟢 | `zeroship migrate [migrations.ir.json] --app=<id>` | `crates/cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | POSTs to control, which forwards to migrated; required after deploy for env.db apps. |
+| zeroship deploy | 🟢 | `zeroship deploy [path.zship] [--app] [--control] [--env] [--config]` | `crates/cli/src/main.rs` | `docs/reference/project-config.md` | — | curl POST; prints deploy_hash and the provenance of app/control. Does NOT apply migrations. |
+| zeroship migrate | 🟢 | `zeroship migrate [migrations.ir.json] [--app] [--control] [--env] [--config] [--yes]` | `crates/cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | POSTs to control, which forwards to migrated; required after deploy for env.db apps. `"protected": true` needs `--yes`. |
 | zeroship login (Device Grant) | 🟢 | `zeroship login [--auth-url]` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | RFC 8628; token.json mode 0600. |
 | zeroship logout | 🟢 | `zeroship logout` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /oauth2/revoke; deletes creds. |
 | zeroship whoami | 🟢 | `zeroship whoami` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /userinfo; transparent refresh. |
@@ -975,7 +975,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Bearer token resolution | 🟢 | internal | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | `crates/cli/src/main.rs` | flag > env > saved creds. |
 | create-zeroship-app scaffolder | 🟢 | `npm create zeroship-app <name>` | `sdks/create-zeroship-app/bin/create.js` | — | `sdks/create-zeroship-app/template/` | _gitignore → .gitignore; private registry. |
 | create-zeroship-app template | 🟢 | @zeroship/vite-plugin + rpc/server | `sdks/create-zeroship-app/template/src/index.ts` | — | `sdks/create-zeroship-app/template/` | Notes CRUD + storage + kv + React. |
-| Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/vite.config.ts` | mode full/static; rpc.strict not effectful. |
+| Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/vite.config.ts` | Five options: devServerPort, devAuth, configPath, env, config. Build shape lives in `zeroship.jsonc`. |
 | Vite plugin — dev server spawn + proxy | 🟢 | internal | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-plugin.md` | `examples/db-todos` | Spawns zeroship serve; crash-restart. |
 | Vite plugin — Vite Environment API | 🟢 | internal | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | /__zeroship_fetch + /__zeroship_hmr_check. |
 | Vite plugin — dev HMR poll | 🟢 | internal (V8 polls) | `sdks/vite-plugin/src/dev-bootstrap/hmr.ts` | — | — | 500ms; transitive importer walk. |
@@ -990,7 +990,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Vite plugin — node compat shims | 🟢 | internal | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | unenv@2 + custom; @rollup/plugin-inject. |
 | Vite plugin — production build (.zship) | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/build.ts` | `docs/reference/zship.md` | `examples/db-todos` | rolldown SSR; strips 'use server'. |
 | Vite plugin — .zship packing + precompress | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | — | brotli default; canonical JSON. |
-| Vite plugin — static mode | 🟢 | `zeroship({ mode: 'static' })` | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | — | Stub input then deleted. |
+| Vite plugin — static mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input then deleted. |
 | Vite plugin — client-manifest virtual module | 🟢 | `virtual:zeroship/client-manifest` | `sdks/vite-plugin/src/build.ts` | — | — | Graceful {} fallback. |
 | Vite plugin — dev-bootstrap | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner; deps reoptimize rebuild. |
 | CLI serve — dev KV backend (redb/Redis) | 🟢 | ZEROSHIP_KV_URL / ZEROSHIP_KV_PATH | `crates/cli/src/main.rs` | — | — | URL→Redis, else redb. |
@@ -998,7 +998,8 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
 | zeroship build | ⚫ | (removed) | `crates/cli/src/main.rs` | — | — | Build path is @zeroship/vite-plugin. |
 | zeroship inspect | ⚫ | (removed) | `crates/cli/src/main.rs` | — | — | Removed in artifact-layout redesign. |
-| Vite plugin — rpcEndpoint option | 🟠 | `ZeroshipOptions.rpcEndpoint` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | — | Accepted but non-effectful. |
+| zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `tests/project_config_gate.sh` | Canonical JSON of the resolved file; byte-compared against the TS reader's dump. |
+| zeroship.jsonc reader (CLI side) | 🟢 | `--config=<path>` / `ZEROSHIP_CONFIG` / auto-discovery | `crates/cli/src/project_config/` | `docs/reference/project-config.md` | `crates/cli/src/project_config/tests.rs` | No defaults on this side: a key the file omits is an error naming it. Writeback splices the root `app` only; `login` reads `control` softly. |
 | subscription procedures | 🟡 | `subscription(handler, config)` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Server discovered; client UNIMPLEMENTED. |
 
 ---
@@ -1158,7 +1159,7 @@ recount and run low):
 - ⚫ `zeroship build` / `zeroship inspect` CLI commands — removed in the artifact-layout redesign (build path is `@zeroship/vite-plugin`).
 - ⚫ `manifest.exports.schema` / `ManifestExports.handlers` — deprecated Stage 5c; kept on the wire for archive upgrade only.
 - ⚫ Worker WebSocket-upgrade-via-/dispatch — returns 500 (gateway uses a separate WS path).
-- ⚫ `rpcEndpoint` Vite option — accepted but non-effectful; stubs use the fixed `/__zeroship/v1/<id>` path.
+- (gone) `rpcEndpoint` Vite option - it was accepted and non-effectful (stubs use the fixed `/__zeroship/v1/<id>` path), so it was deleted rather than moved to `zeroship.jsonc`. `serverEntry`, `mode` and `migrations.*` left `ZeroshipOptions` in the same change and are now `build.serverEntry`, `build.mode` and `migrations.*` in the project file.
 - 🟡 App suspension (control) — flag is written but the gateway does not act on it; a suspended app keeps serving.
 - 🟡 Gateway WS subscription proxy (multi-node) — returns 501; affinity selection runs but proxy not wired (use `zeroship serve` single-tenant).
 - 🟠 Sandbox cold-boot endpoint (501) and per-token share revoke (501) - both in the standalone `zeroship-sandbox` project, not this repo.

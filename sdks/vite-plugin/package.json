@@ -57,6 +57,7 @@
     "@zeroship/bootstrap": "workspace:*",
     "@zeroship/db": "workspace:*",
     "esbuild": "^0.28.0",
+    "jsonc-parser": "3.3.1",
     "magic-string": "^0.30.21",
     "mime": "^3.0.0",
     "tar": "^7.5.13",

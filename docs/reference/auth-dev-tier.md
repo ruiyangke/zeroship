@@ -91,8 +91,9 @@ The dev provider serves exactly four routes (`dev-auth.ts`, the `path ===`
 arms): `/__zeroship/auth/` `authorize`, `popup-callback`, `session`, `signout`.
 The string `signup` does not appear in the file. Deployed, `POST /signup` is a
 real route (`crates/auth/src/server.rs`). Dev users come from **configuration** —
-a `users` list, a `defaultUserId`, and a `passwords` map — never from a creation
-flow.
+a `users` list and a `defaultUserId` -- never from a creation flow. Their
+passwords are not configured at all; the provider derives a `passwords` map from
+the ids (see the `devAuth` section below).
 
 What this means when you build:
 
@@ -238,15 +239,15 @@ tier lives exclusively in the dev runtime; no dev/prod flag exists in app code.
 ```ts
 zeroship({
   // default in dev: the built-in dev user (pws_dev… / dev@localhost /
-  //   scopes openid profile email / password "dev")
+  //   scopes openid profile email)
   devAuth: true,
 
-  // one configured user (password defaults to "dev" when omitted)
-  devAuth: { user: { email: "alice@localhost", scopes: ["openid", "admin"], password: "s3cret" } },
+  // one configured user
+  devAuth: { user: { email: "alice@localhost", scopes: ["openid", "admin"] } },
 
   // multiple users (the login form renders an email dropdown at /authorize)
   devAuth: { users: [{ id: "pws_a", name: "A", email: "a@x" },
-                     { id: "pws_b", name: "B", email: "b@x", password: "bee" }],
+                     { id: "pws_b", name: "B", email: "b@x" }],
              defaultUserId: "pws_a" },
 
   // off — /__zeroship/auth/* falls through; env.auth.getUser() is anonymous
@@ -254,11 +255,21 @@ zeroship({
 })
 ```
 
-The login form **prefills + validates** each user's `password` (default `"dev"`,
-overridable per user) — sign-in is one click, but it is not auto-login and the
-`invalid_credentials` failure arm is real. The `password` is *not* a secret: it
-is prefilled in the page and never enters the `{user}` identity projection /
+There is **no `password` field**. The login form **prefills + validates** a
+password *derived* from each user's `id` -- `"dev-"` plus the first 8 characters
+of the id after `pws_`, so `pws_alice000000000000000` signs in with
+`dev-alice000`. Sign-in is one click, but it is not auto-login and the
+`invalid_credentials` failure arm is real. The password is *not* a secret: it is
+prefilled in the page and never enters the `{user}` identity projection /
 session cookie.
+
+Deriving it rather than configuring it keeps a property the dev-vs-deployed
+harnesses measure: the derived password is always under 15 characters, and the
+deployed platform refuses any password shorter than that
+(`crates/auth/src/ui/signup.rs`). So a dev credential works locally and
+**cannot exist in production** -- `tests/e2e_dev_vs_deployed_login.sh` asserts
+exactly that in its `policy.short_password` row. The authority is
+`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`.
 
 The plugin serializes the resolved config into `ZEROSHIP_DEV_AUTH` and mints a
 fresh `ZEROSHIP_DEV_AUTH_SECRET`, both passed to the spawned `zeroship serve`

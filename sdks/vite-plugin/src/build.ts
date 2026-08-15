@@ -4,7 +4,6 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformPlugin, type TransformState } from "./transform.js";
 import { nodeCompatPlugin } from "./node-compat.js";
-import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 import { emitZship } from "./zship.js";
 import {
   rpcRegistryPlugin,
@@ -19,30 +18,14 @@ import {
   zeroshipBootstrapResolverPlugin,
   zeroshipModulePlugin,
 } from "./zeroship-module.js";
-import { genTypesFromMigrations, GEN_TYPES_OUT_DEFAULT } from "./gen-types/index.js";
+import { genTypesFromMigrations } from "./gen-types/index.js";
+import {
+  defaultProjectConfig,
+  type ProjectConfigHolder,
+  type ResolvedProjectConfig,
+} from "./project-config/index.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
-
-/** The migration sub-options the build pipeline accepts. */
-export interface BuildMigrationsOptions {
-  dir?: string;
-  genTypesOut?: string;
-}
-
-export interface EmitMigrationsOptions {
-  dir?: string;
-  genTypesOut?: string;
-}
-
-/** Forward only descriptor-relevant migration settings to `.zship` emission. */
-export function migrationsForEmit(
-  opts: BuildMigrationsOptions | undefined,
-): EmitMigrationsOptions {
-  return {
-    dir: opts?.dir,
-    genTypesOut: opts?.genTypesOut,
-  };
-}
 
 /** Public specifier for the client manifest virtual module. */
 export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
@@ -65,7 +48,7 @@ export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
  *
  * Exposed (and exported) so tests can verify the shape without spinning
  * up a real Vite environment. Notable invariants:
- *   - `publicDir: false` — the SSR outDir is `dist/server/`, and Vite's
+ *   - `publicDir: false` - the SSR outDir is `<build.dist>/server/`, and Vite's
  *     default would copy `public/*` into it. Those copies then end up
  *     cataloged as `worker.modules` entries, which is wrong: public
  *     files are static assets, not worker code. The client build keeps
@@ -412,19 +395,14 @@ export function findServerEntry(root: string, explicit?: string): string | null 
 
 export function buildPlugin(
   state: TransformState,
-  options: {
-    serverEntry?: string;
-    /** "static" → skip the SSR sub-build entirely. */
-    mode?: "full" | "static";
-    /** Migration-first gen-types. See `ZeroshipOptions.migrations`. */
-    migrations?: {
-      dir?: string;
-      genTypesOut?: string;
-    };
-  } = {}
+  project: ProjectConfigHolder,
 ): Plugin {
   const { serverFunctionMap } = state;
-  const mode = options.mode ?? "full";
+  // Every build shape now comes from `zeroship.jsonc` (or its schema defaults
+  // when there is no file). `mode`, `serverEntry`, `migrations.dir` and
+  // `migrations.out` used to be plugin options; three of the four were also
+  // needed by the Rust CLI, which cannot read `vite.config.ts`.
+  let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
   let root = "";
   let isDev = false;
   // The client build's `outDir` (resolved). Read in configResolved so the
@@ -452,8 +430,8 @@ export function buildPlugin(
   let logger: { warn: (msg: string) => void } | undefined;
 
   /**
-   * Run the SSR server sub-build (`virtual:zeroship/_server-entry` →
-   * `dist/server/index.js`) exactly once per Vite invocation.
+   * Run the SSR server sub-build (`virtual:zeroship/_server-entry` to
+   * `<build.dist>/server/index.js`) exactly once per Vite invocation.
    *
    * Invoked from BOTH `writeBundle` and `closeBundle`. `writeBundle`
    * fires per emitted client output bundle — but a SERVER-ONLY app (no
@@ -467,12 +445,12 @@ export function buildPlugin(
     if (serverBuilt) return;
     // Static-mode: skip the SSR sub-build entirely. closeBundle still
     // runs the emitter, which walks dist/ as-is.
-    if (mode === "static") {
+    if (projectConfig.build.mode === "static") {
       serverBuilt = true;
       return;
     }
 
-    const entry = findServerEntry(root, options.serverEntry);
+    const entry = findServerEntry(root, projectConfig.build.serverEntry);
     if (!entry) {
       console.warn("[zeroship] no server entry found — skipping server bundle");
       // We still want to emit a static-only .zship in this case,
@@ -501,7 +479,7 @@ export function buildPlugin(
     // — that virtual module imports the user's entry, re-exports its
     // bindings, and provides our own `default.{ fetch, rpc }`.
     // Rolldown collapses everything into a single ESM file at
-    // `dist/server/index.js`. The synthetic entry's `_procedures`
+    // `<build.dist>/server/index.js`. The synthetic entry's `_procedures`
     // dispatch table is built at module-init time by iterating the
     // user namespace's exports — no global registry, no side effects.
     //
@@ -517,7 +495,7 @@ export function buildPlugin(
     const ssrConfig = buildSsrInlineConfig({
       root,
       ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
-      outDir: "dist/server",
+      outDir: resolve(clientOutDir, "server"),
       ssrPlugins: [
         // node-compat MUST come first so its `resolve.id` returns
         // the polyfill path before Vite tries to load `node:crypto`
@@ -541,7 +519,7 @@ export function buildPlugin(
         // emitter. It does NOT inject any registry side-effects any
         // more — the synthetic SSR entry discovers procedures at
         // module-init time from the user namespace's exports.
-        transformPlugin(DEFAULT_RPC_ENDPOINT, state),
+        transformPlugin(state),
         // The synthetic server entry side-effect-imports
         // @zeroship/bootstrap so the runtime can resolve its dynamic
         // imports from the bundled worker. That package is
@@ -572,7 +550,7 @@ export function buildPlugin(
     // globals (process, Buffer, setImmediate, etc.) are installed by
     // the Rust runtime on every isolate before any user module
     // evaluates — see `crates/runtime/src/core/init.rs`.
-    const bundlePath = resolve(root, "dist/server/index.js");
+    const bundlePath = resolve(clientOutDir, "server", "index.js");
     try {
       const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));
       writeFileSync(bundlePath, stripped, "utf8");
@@ -623,12 +601,12 @@ export function buildPlugin(
      */
     async buildStart() {
       if (isDev) return;
-      const migrationsRel = options.migrations?.dir ?? "migrations";
+      const migrationsRel = projectConfig.migrations.dir;
       const migrationsAbs = resolve(root, migrationsRel);
       // No migrations dir → nothing to generate (an app may ship none).
       if (!existsSync(migrationsAbs)) return;
 
-      const outDir = resolve(root, options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
+      const outDir = resolve(root, projectConfig.migrations.out);
       const isProd = viteMode === "production";
       try {
         // Production: generated-artifact check (a HARD drift gate — no binary to be
@@ -667,6 +645,11 @@ export function buildPlugin(
      *     index.html`.
      */
     config(userConfig: any) {
+      // The FIRST hook with a root. Vite resolves it as `config.root || cwd`,
+      // and so do we -- reading the file under a different root than Vite ends
+      // up using is how a build silently uses a sibling app's settings.
+      root = resolve(userConfig?.root ?? process.cwd());
+      projectConfig = project.load(root);
       const hasExplicitInput =
         userConfig?.build?.rollupOptions?.input != null;
       if (hasExplicitInput) return;
@@ -718,6 +701,7 @@ export function buildPlugin(
 
     configResolved(config: any) {
       root = config.root;
+      projectConfig = project.load(root);
       isDev = config.command === "serve";
       logger = config.logger;
       // Vite's ResolvedConfig.mode reflects the `--mode` flag
@@ -730,6 +714,22 @@ export function buildPlugin(
       // `dist`; user can override via `build.outDir`.
       const buildOutDir = config.build?.outDir ?? "dist";
       clientOutDir = resolve(root, buildOutDir);
+      // ONE dist dir, not two. `build.dist` in zeroship.jsonc is what the
+      // packer walks and what any other tool would read; Vite's
+      // `build.outDir` is what the client build writes. If they disagree the
+      // packer walks a directory the build did not fill, and the failure is a
+      // `.zship` that is missing assets rather than an error -- so this is an
+      // error, named on both sides. Only checked when a file was actually
+      // found: with no file both sides are "dist" by construction.
+      if (project.path() != null && resolve(root, projectConfig.build.dist) !== clientOutDir) {
+        throw new Error(
+          "[zeroship] build.dist in " + project.path() + " is " +
+            JSON.stringify(projectConfig.build.dist) +
+            " but Vite build.outDir resolves to " + JSON.stringify(relative(root, clientOutDir)) +
+            ". The packer walks build.dist and Vite fills build.outDir; two spellings of one " +
+            "directory is how a .zship ends up missing every asset. Make them the same.",
+        );
+      }
     },
 
     async writeBundle() {
@@ -830,7 +830,12 @@ export function buildPlugin(
 
         await emitZship({
           root,
+          runtimeDate: projectConfig.runtime_date,
           distDir: clientOutDir,
+          // The path the CLI will upload. It is x-cli-read: the packer writes
+          // it and `zeroship deploy` reads it, which is exactly the
+          // producer/consumer split that put it in the file.
+          outputPath: resolve(root, projectConfig.build.output),
           compiler: getCompilerId(),
           userHasDefaultFetch,
           rpcExtras: {
@@ -843,7 +848,10 @@ export function buildPlugin(
           // Carry the generated runtime schema descriptor (`schema.runtime.json`)
           // the buildStart gen-types step emitted. Migration documents are
           // applied through the migration service and are not packed into .zship.
-          migrations: migrationsForEmit(options.migrations),
+          migrations: {
+            dir: projectConfig.migrations.dir,
+            genTypesOut: projectConfig.migrations.out,
+          },
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

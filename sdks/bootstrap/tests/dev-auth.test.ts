@@ -20,12 +20,16 @@ import { dirname, resolve } from "node:path";
 
 import {
   createDevAuthProvider,
+  devPasswordFor,
   parseDevAuthConfig,
   signDevSession,
   verifyDevSession,
 } from "../src/dev-auth.js";
 
 const SECRET = "test-dev-secret-0123456789abcdef";
+/** The built-in default user's id, and the password derived from it. */
+const DEFAULT_DEV_USER_ID = "pws_dev00000000000000000";
+const DEV_USER_PASSWORD = devPasswordFor(DEFAULT_DEV_USER_ID);
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
 /** Build a provider whose env returns our fixed secret + config. */
@@ -78,7 +82,7 @@ async function devLogin(
     state,
     redirect_uri: `${ORIGIN}/__zeroship/auth/popup-callback`,
     email: opts.email ?? "dev@localhost",
-    password: opts.password ?? "dev",
+    password: opts.password ?? DEV_USER_PASSWORD,
   });
   return p.handle(
     new Request(`${ORIGIN}/__zeroship/auth/authorize`, {
@@ -112,6 +116,64 @@ async function devSessionCookie(
   return token;
 }
 
+describe("devPasswordFor -- the derived dev credential", () => {
+  /** Every dev user id that actually exists in this tree. */
+  const TREE_IDS = [
+    DEFAULT_DEV_USER_ID, // sdks/bootstrap/src/dev-auth.ts DEFAULT_DEV_USER
+    "pws_alice000000000000000", // examples/auth-notes-db + auth-uploads-kv
+    "pws_bob00000000000000000", // examples/auth-notes-db + auth-uploads-kv
+    "pws_probealpha0000000000", // examples/auth-probe
+    "pws_probebeta00000000000", // examples/auth-probe
+  ];
+
+  test("is deterministic and matches the documented worked examples", () => {
+    assert.equal(devPasswordFor("pws_alice000000000000000"), "dev-alice000");
+    assert.equal(devPasswordFor("pws_probealpha0000000000"), "dev-probealp");
+    // Pure: same input, same output, no hidden state.
+    assert.equal(devPasswordFor("pws_alice000000000000000"), devPasswordFor("pws_alice000000000000000"));
+    // The longest input assertPairwiseSubject admits (pws_ + exactly 20 chars)
+    // is still truncated to 8.
+    assert.equal(devPasswordFor(`pws_${"z".repeat(20)}`), "dev-zzzzzzzz");
+  });
+
+  test("the ids in this tree get FIVE distinct passwords", () => {
+    const derived = TREE_IDS.map(devPasswordFor);
+    assert.equal(new Set(derived).size, TREE_IDS.length, `not distinct: ${derived.join(",")}`);
+  });
+
+  test("every derived password stays UNDER 15 characters", () => {
+    // Load-bearing, not cosmetic. crates/auth/src/ui/signup.rs refuses any
+    // password under 15 characters, and tests/e2e_dev_vs_deployed_login.sh's
+    // `policy.short_password` row asserts the DEV password is REFUSED by the
+    // platform OP -- i.e. that a dev credential works locally and cannot exist
+    // in production. A derivation of >= 15 chars would let the signup succeed
+    // and silently invert that measurement into a vacuous pass.
+    //
+    // This test asserts LENGTH ONLY, on purpose. Distinctness and the exact
+    // derived values are asserted by the two tests above, so a mutation that
+    // widens the result fails HERE and a mutation that collapses every id to
+    // one constant does NOT -- which is what makes this row a measurement of
+    // the bound rather than of the function in general.
+    for (const id of TREE_IDS) {
+      const pw = devPasswordFor(id);
+      assert.ok(pw.length < 15, `devPasswordFor(${id}) = ${pw} is ${pw.length} chars, must be < 15`);
+    }
+    // The bound holds for ANY id assertPairwiseSubject admits (pws_ + exactly
+    // 20 chars), not just the five above: the body is truncated to 8.
+    const longest = devPasswordFor(`pws_${"z".repeat(20)}`);
+    assert.ok(longest.length < 15, `the longest admissible id derives ${longest.length} chars, must be < 15`);
+  });
+
+  test("a short id with no pws_ prefix is passed through, not padded or thrown on", () => {
+    // Not reachable through parseDevAuthConfig (assertPairwiseSubject rejects
+    // these first), but the function is exported and must be total.
+    assert.equal(devPasswordFor("abc"), "dev-abc");
+    assert.equal(devPasswordFor("pws_ab"), "dev-ab");
+    assert.equal(devPasswordFor(""), "dev-");
+    assert.equal(devPasswordFor("pws_"), "dev-");
+  });
+});
+
 describe("dev-auth provider — config", () => {
   test("absent/'1'/'true' → built-in default user; '0'/'false' → disabled", () => {
     assert.equal(parseDevAuthConfig(undefined)?.users[0].email, "dev@localhost");
@@ -135,15 +197,26 @@ describe("dev-auth provider — config", () => {
     assert.deepEqual(cfg?.users[1].scopes, ["openid", "admin"]);
   });
 
-  test("passwords default to the well-known dev password, overridable per user", () => {
-    // No password → the well-known default.
-    assert.equal(parseDevAuthConfig("1")?.passwords["pws_dev00000000000000000"], "dev");
-    // Per-user override is preserved; siblings still default.
+  test("every password is DERIVED from its user id, and a configured one is ignored", () => {
+    // Built-in default user.
+    assert.equal(parseDevAuthConfig("1")?.passwords[DEFAULT_DEV_USER_ID], "dev-dev00000");
+    // Distinct ids get distinct passwords, with no per-user knob. A stray
+    // `password` key in the JSON is inert: the field was deleted from
+    // DevUserConfig, so it must NOT come back through the untyped env JSON.
     const cfg = parseDevAuthConfig(
-      JSON.stringify({ users: [{ id: "pws_aaaa0000000000000000", email: "a@x", password: "hunter2" }, { id: "pws_bbbb0000000000000000", email: "b@x" }] }),
+      JSON.stringify({
+        users: [
+          { id: "pws_aaaa0000000000000000", email: "a@x", password: "hunter2" },
+          { id: "pws_bbbb0000000000000000", email: "b@x" },
+        ],
+      }),
     );
-    assert.equal(cfg?.passwords["pws_aaaa0000000000000000"], "hunter2");
-    assert.equal(cfg?.passwords["pws_bbbb0000000000000000"], "dev");
+    assert.equal(cfg?.passwords["pws_aaaa0000000000000000"], "dev-aaaa0000");
+    assert.equal(cfg?.passwords["pws_bbbb0000000000000000"], "dev-bbbb0000");
+    assert.notEqual(
+      cfg?.passwords["pws_aaaa0000000000000000"],
+      cfg?.passwords["pws_bbbb0000000000000000"],
+    );
   });
 
   test("id-only users get UNIQUE synthesized emails (no collision on the shared default)", () => {
@@ -190,7 +263,9 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.match(html, /name="csrf"/);
     // Prefilled credentials (one-click) + the original state carried through.
     assert.match(html, /value="dev@localhost"/);
-    assert.match(html, /value="dev"/);
+    // The prefilled password is the DERIVED one, matched exactly (`value="dev"`
+    // would also match `value="dev-dev00000"` as a substring and prove nothing).
+    assert.match(html, new RegExp(`name="password"[^>]*value="${DEV_USER_PASSWORD}"`));
     assert.match(html, /name="state" value="st123"/);
     // It is NOT auto-submitted (no inline form.submit()).
     assert.doesNotMatch(html, /\.submit\(\)/);
@@ -228,7 +303,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
       state: "s",
       redirect_uri: "https://evil.example/steal", // cross-origin → must be refused
       email: "dev@localhost",
-      password: "dev",
+      password: DEV_USER_PASSWORD,
     });
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/authorize", {
@@ -259,7 +334,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
       state: "s",
       redirect_uri: "http://localhost:3001/app/steal-code", // same origin, wrong path
       email: "dev@localhost",
-      password: "dev",
+      password: DEV_USER_PASSWORD,
     });
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/authorize", {
@@ -282,7 +357,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
       csrf: "attacker-supplied",
       state: "s",
       email: "dev@localhost",
-      password: "dev",
+      password: DEV_USER_PASSWORD,
     });
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/authorize", {
@@ -429,7 +504,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
       JSON.stringify({
         users: [
           { id: "pws_aaaa0000000000000000", name: "A" },
-          { id: "pws_bbbb0000000000000000", name: "B", password: "bee" },
+          { id: "pws_bbbb0000000000000000", name: "B" },
         ],
         defaultUserId: "pws_aaaa0000000000000000",
       }),
@@ -469,12 +544,13 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
   test("multi-user: selecting the OTHER user (its mapped password) signs that user in", async () => {
     // The onchange script's email→password map is the source of truth for the
     // re-prefill. Submitting the other user's email + its mapped password must
-    // sign THAT user in (per-user password, unique synthesized email).
+    // sign THAT user in. The two passwords differ because they are DERIVED from
+    // two different ids, not because either was configured.
     const p = makeProvider(
       JSON.stringify({
         users: [
           { id: "pws_aaaa0000000000000000", name: "A" },
-          { id: "pws_bbbb0000000000000000", name: "B", password: "bee" },
+          { id: "pws_bbbb0000000000000000", name: "B" },
         ],
       }),
     );
@@ -482,7 +558,11 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
     const html = await getRes.text();
     const map = JSON.parse(/var M=(\{.*?\});/.exec(html)![1]) as Record<string, string>;
-    assert.equal(map["pws_bbbb0000000000000000@localhost"], "bee");
+    assert.equal(map["pws_bbbb0000000000000000@localhost"], "dev-bbbb0000");
+    assert.notEqual(
+      map["pws_bbbb0000000000000000@localhost"],
+      map["pws_aaaa0000000000000000@localhost"],
+    );
     const body = new URLSearchParams({
       csrf,
       state: "s",

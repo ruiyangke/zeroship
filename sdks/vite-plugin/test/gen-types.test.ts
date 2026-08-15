@@ -25,8 +25,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { GEN_TYPES_OUT_DEFAULT } from "../src/gen-types/index.js";
+import { DEFAULTS } from "../src/project-config/generated.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
 /** A real op.* migration `.ts` (the recorder resolves `@zeroship/migrate`). */
@@ -95,10 +96,7 @@ function bootDevServer(root: string) {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
   };
-  const plugins = devServerPlugin(
-    { migrations: { dir: "migrations", genTypesOut: "generated/zeroship" } } as any,
-    state,
-  );
+  const plugins = devServerPlugin({}, state, createProjectConfigHolder({}));
   const [envPlugin, devPlugin] = plugins as any[];
   hook(envPlugin, "configResolved")({ root, command: "serve" });
   hook(devPlugin, "configureServer")(makeServerStub(root));
@@ -173,7 +171,10 @@ describe("dev-server → in-process gen-types", () => {
     }
   });
 
-  test("the default gen-types output dir is generated/zeroship", () => {
-    assert.equal(GEN_TYPES_OUT_DEFAULT, "generated/zeroship");
+  // The default now has exactly ONE holder in the whole tree: schema/project-v1.json,
+  // from which DEFAULTS is generated. This assertion is what notices if a
+  // second one reappears in TypeScript.
+  test("the default gen-types output dir is generated/zeroship, held by the schema", () => {
+    assert.equal(DEFAULTS["migrations.out"], "generated/zeroship");
   });
 });

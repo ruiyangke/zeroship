@@ -12,6 +12,11 @@ import { zeroship } from "@zeroship/vite-plugin";
 // comparison exists to find. Change a value here and you MUST change the
 // matching claim in that script (it re-asserts the pair on every run).
 //
+// The dev sign-in password is NOT declared here - it is derived from each id by
+// `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts): "dev-" + the first 8
+// characters after "pws_". So alpha signs in with "dev-probealp" and beta with
+// "dev-probebet". The e2e harnesses derive it the same way from the ids below.
+//
 // alpha carries a non-null avatar, beta carries a null one. That is the
 // one-variable control pair for the `avatar` field: the gateway's WorkerUser
 // declares `#[serde(skip_serializing_if = "Option::is_none")]` on `avatar`
@@ -33,7 +38,6 @@ export default defineConfig({
             name: "Probe Alpha",
             avatar: "https://probe.zeroship.test/a.png",
             scopes: SCOPES,
-            password: "probe-pw",
           },
           {
             id: "pws_probebeta00000000000",
@@ -41,7 +45,6 @@ export default defineConfig({
             name: "Probe Beta",
             avatar: null,
             scopes: SCOPES,
-            password: "probe-pw",
           },
         ],
         defaultUserId: "pws_probealpha0000000000",

@@ -646,7 +646,7 @@ zeroship({
 - Accepts a **partial object** (shallow-merged over the loaded file) or a
   **function** `(resolved) => partial`, applied **after** the file loads and
   after environment selection, so it sees exactly what the tooling resolved.
-- **It may not override any field the CLI also reads.** That is `app`, `control`,
+- **It may not override any field the CLI also reads.** That is `name`, `app`, `control`,
   `migrations.dir`, `migrations.out`, `build.output`, and `runtime_date`.
   Attempting to set one is an **error naming the field**, not a silent drop.
 

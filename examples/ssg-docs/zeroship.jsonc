@@ -1,0 +1,27 @@
+// zeroship.jsonc - tooling configuration for examples/ssg-docs. COMMITTED.
+//
+// This is the one example whose build SHAPE differs, and it is the reason
+// `build.mode` moved out of `vite.config.ts`: "static" means the .zship
+// carries no worker at all. A creator debugging "why does my deploy 404 on
+// /api" can now see that fact in a file every tool reads, instead of having to
+// open a plugin argument.
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+
+  "name": "ssg-docs",
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-08-14",
+
+  "build": {
+    "mode": "static",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+
+  "migrations": {
+    "dir": "migrations",
+    "out": "generated/zeroship"
+  },
+
+  "secrets": []
+}

@@ -67,10 +67,11 @@ function ssgContentPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     ssgContentPlugin(),
-    // mode: "static" tells the plugin to skip the SSR sub-build and
-    // inject the no-op stub input so Vite doesn't error on an empty
-    // build. The emitter then walks dist/ (after content copy) and
-    // packs the HTML files as assets.
-    zeroship({ mode: "static" }),
+    // `build.mode: "static"` in zeroship.jsonc tells the plugin to skip the
+    // SSR sub-build and inject the no-op stub input so Vite does not error on
+    // an empty build. The emitter then walks dist/ (after content copy) and
+    // packs the HTML files as assets. It lives in that file rather than here
+    // because the shape of the deploy is a fact more than one tool needs.
+    zeroship(),
   ],
 });

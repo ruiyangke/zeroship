@@ -110,8 +110,12 @@ fi
 echo "  [ok]   $URL is serving auth-notes-db (anon notes.list gated with 401)"
 
 echo "[0] sign in as two distinct dev users"
-login alice alice@localhost alice
-login bob   bob@localhost   bob
+# The dev password is DERIVED from the user id, not declared in vite.config.ts:
+# `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts, the authority) returns
+# "dev-" + the first 8 characters of the id after "pws_". The ids in
+# vite.config.ts are pws_alice000000000000000 and pws_bob00000000000000000.
+login alice alice@localhost dev-alice000
+login bob   bob@localhost   dev-bob00000
 ALICE_ID=$(curl -sS -b "$JAR_DIR/alice.jar" "${AUTH}/session" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 BOB_ID=$(curl -sS -b "$JAR_DIR/bob.jar" "${AUTH}/session" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "  alice = ${ALICE_ID:-<none>}"

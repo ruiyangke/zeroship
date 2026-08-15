@@ -45,7 +45,7 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
 describe('helper + procedure coexistence in a single "use server" file', () => {
   test("only wrapped exports are RPC; helpers remain private", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -96,7 +96,7 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
 
   test("re-export of an internal helper does NOT publish it (no `export *` footgun)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -126,7 +126,7 @@ export const real = procedure(async () => 42);
 
   test("default export is ignored — only the wrapped named exports become RPCs", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
