@@ -209,7 +209,10 @@ test("doc-gate REGRESSION WITNESS: a rotted snippet IS rejected by the gate", ()
 /** The other docs carrying DSL examples, found by a survey of every fenced typed
  *  block in `docs/`. They ride the same harness as the two arms above; they were
  *  simply never named, so a rename that rotted them broke nothing in CI. */
-const OTHER_DSL_DOCS = ["architecture.md", "concepts.md"] as const;
+// upgrading.md is here because its whole purpose is showing an author the shape
+// to convert TO. An example that does not compile in a conversion guide is worse
+// than no guide: it is a wrong answer delivered with authority.
+const OTHER_DSL_DOCS = ["architecture.md", "concepts.md", "upgrading.md"] as const;
 
 for (const file of OTHER_DSL_DOCS) {
   test(`doc-gate: every DSL example in ${file} typechecks against the real package`, () => {
