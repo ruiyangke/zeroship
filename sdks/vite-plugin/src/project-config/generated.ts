@@ -4,9 +4,9 @@
  * Regenerate with `node schema/codegen.mjs`; `tests/project_config_gate.sh`
  * fails the build when this file drifts from the schema.
  *
- * This is the side that HAS defaults. The Rust reader has none, on purpose:
- * the plugin must work with `zeroship()` and no file at all, while a CLI that
- * guessed a control URL would deploy to the wrong place in silence.
+ * The plugin applies every default when there is no file. For a present file,
+ * optional non-CLI defaults are also generated into Rust so the readers agree.
+ * Defaults for CLI-read facts never reach Rust: silence there is an error.
  */
 
 export const CONFIG_FILENAME = "zeroship.jsonc";

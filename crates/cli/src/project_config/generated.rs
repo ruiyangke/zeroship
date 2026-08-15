@@ -3,14 +3,10 @@
 //! Regenerate with `node schema/codegen.mjs`; `tests/project_config_gate.sh`
 //! fails the build when this file drifts from the schema.
 //!
-//! THERE ARE NO DEFAULTS IN THIS FILE, and that is the point.
-//! Every default lives in `schema/project-v1.json` and reaches exactly one
-//! reader, the TypeScript one. A key the CLI reads and the file omits is an
-//! error naming the key -- so the two readers cannot hold different values for
-//! the same fact, which is the bug `zeroship.jsonc` exists to remove.
-//!
-//! `tests/project_config_gate.sh` asserts the absence: a `default` literal
-//! appearing here fails the gate.
+//! THERE ARE NO DEFAULTS FOR CLI-READ FACTS IN THIS FILE.
+//! A key the CLI operationally reads and the file omits is an error naming the
+//! key. Optional non-CLI defaults are generated below from the same schema so
+//! both readers still produce byte-identical resolved JSON.
 
 pub const CONFIG_FILENAME: &str = "zeroship.jsonc";
 pub const CONFIG_ENV_VAR: &str = "ZEROSHIP_CONFIG";
@@ -47,9 +43,13 @@ pub const FIELD_ENUMS: &[(&str, &[&str])] = &[
     ("build.mode", &["full", "static"]),
 ];
 
-/// Dotted paths the schema gives a default and this reader deliberately does NOT.
+/// Every dotted path carrying a schema default.
 ///
 /// Named rather than merely absent so the gate can assert the list is the exact
-/// complement of the schema's `default` set -- an omission here would read as
-/// "no default exists" instead of "we chose not to have one".
+/// complete schema `default` set -- an omission here would read as "no default
+/// exists" instead of a deliberate resolution rule.
 pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets"];
+
+/// Optional, non-CLI-read defaults applied to a present file's resolved view.
+/// Values are JSON so arrays and future object defaults stay schema-generated.
+pub const RESOLVED_OPTIONAL_DEFAULTS_JSON: &[(&str, &str)] = &[("secrets", "[]")];
