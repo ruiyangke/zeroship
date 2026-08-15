@@ -97,21 +97,21 @@ mysql = "portable"
 kind = "setColumnNotNull"
 variant = "base"
 pg = "portable"
-sqlite = "portable"
-mysql = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
 
 [[row]]
 kind = "dropColumnNotNull"
 variant = "base"
 pg = "portable"
-sqlite = "portable"
-mysql = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
 
 [[row]]
 kind = "dropColumnDefault"
 variant = "base"
 pg = "portable"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
