@@ -333,6 +333,15 @@ export const unmigratedTransactionProbe = mutation(
   { id: "diagnostics.unmigratedTransaction" },
 );
 
+export const unmigratedStreamProbe = stream(
+  async function* () {
+    const result = await db.users.find({});
+    if (result.error) throw result.error;
+    yield result.data;
+  },
+  { id: "diagnostics.unmigratedStream" },
+);
+
 /** Flatten an error to the two fields that are comparable across tiers.
  *  Deliberately keeps `message` VERBATIM: a backend-specific string is
  *  exactly the kind of divergence this leg exists to surface. */

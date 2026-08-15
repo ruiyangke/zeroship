@@ -367,9 +367,9 @@ else
 fi
 
 zs_unmigrated_frame "$WORK/frame-unmigrated-stream.bin" POST \
-  "http://db-todos-e2e.localhost/__zeroship/v1/todos.subscribe" \
-  '{"json":{"userId":"user_missing"}}' 'text/event-stream'
-STREAM_RESP="$(curl -sS -N -w '\n%{http_code}' -X POST \
+  "http://db-todos-e2e.localhost/__zeroship/v1/diagnostics.unmigratedStream" \
+  '{"json":null}' 'text/event-stream'
+STREAM_RESP="$(curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
   -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
   -H 'content-type: application/octet-stream' \
