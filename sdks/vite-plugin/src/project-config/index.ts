@@ -15,8 +15,8 @@
  * for the two readers to disagree.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   getNodeValue,
   parseTree,
@@ -227,19 +227,66 @@ function pathContains(parent: string, child: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-function assertDistDoesNotContainConfig(
+function resolveExistingPath(path: string): string {
+  const missing: string[] = [];
+  let cursor = resolve(path);
+  while (true) {
+    try {
+      return resolve(realpathSync(cursor), ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw error;
+      missing.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+export function resolvedPathContains(parent: string, child: string): boolean {
+  return pathContains(resolveExistingPath(parent), resolveExistingPath(child));
+}
+
+function assertWritablePathIsSafe(
+  root: string,
+  configPath: string,
+  field: string,
+  configuredPath: string,
+  existingArtifactExtension?: string,
+): void {
+  const candidate = resolve(root, configuredPath);
+  const absoluteConfig = resolve(configPath);
+  if (resolvedPathContains(candidate, root) || resolvedPathContains(candidate, absoluteConfig)) {
+    throw new Error(
+      `${configPath}: \`${field}\` (${configuredPath}) cannot resolve to the project root or ` +
+        `an ancestor containing ${CONFIG_FILENAME}`,
+    );
+  }
+  if (existingArtifactExtension == null) return;
+
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || extname(candidate) !== existingArtifactExtension) {
+    throw new Error(
+      `${configPath}: \`${field}\` (${configuredPath}) resolves to existing non-artifact file ` +
+        `${candidate}; refusing to overwrite creator data`,
+    );
+  }
+}
+
+function assertWritablePathsAreSafe(
   root: string,
   configPath: string,
   config: ResolvedProjectConfig,
 ): void {
-  const distDir = resolve(root, config.build.dist);
-  const absoluteConfig = resolve(configPath);
-  if (pathContains(distDir, resolve(root)) || pathContains(distDir, absoluteConfig)) {
-    throw new Error(
-      `${configPath}: \`build.dist\` (${config.build.dist}) cannot resolve to the project root or ` +
-        `an ancestor containing ${CONFIG_FILENAME}`,
-    );
-  }
+  assertWritablePathIsSafe(root, configPath, "build.dist", config.build.dist);
+  assertWritablePathIsSafe(root, configPath, "build.output", config.build.output, ".zship");
+  assertWritablePathIsSafe(root, configPath, "migrations.out", config.migrations.out);
 }
 
 function checkMembers(path: string, map: Json, at: string, isRoot: boolean): void {
@@ -405,7 +452,7 @@ export function applyProjectConfigOverride(
           `run a JavaScript function. Overriding it here would make the two disagree - which is the ` +
           `drift ${CONFIG_FILENAME} exists to remove. Change it in ${CONFIG_FILENAME}, or use an ` +
           `\`environments\` entry and \`--env=\`.\n` +
-          `Fields the build alone reads (build.mode, build.serverEntry, build.dist, secrets) ` +
+          `Fields the build alone reads (build.mode, build.serverEntry, build.dist) ` +
           `are overridable here.`,
       );
     }
@@ -450,8 +497,9 @@ export function readProjectConfig(
   const path = locateProjectConfig(root, opts.configPath);
   const base =
     path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
-  if (path != null) assertDistDoesNotContainConfig(root, path, base);
-  return { config: applyProjectConfigOverride(base, opts.override), path };
+  const config = applyProjectConfigOverride(base, opts.override);
+  assertWritablePathsAreSafe(root, path ?? resolve(root, CONFIG_FILENAME), config);
+  return { config, path };
 }
 
 /**

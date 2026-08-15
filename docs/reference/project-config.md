@@ -84,10 +84,10 @@ column therefore says what the *build* assumes when the key is missing.
 | `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | build (transport only). The scaffold stamps the current UTC date; the build copies it into the manifest; the runtime ignores it. See [`runtime_date`](#runtime_date-is-transported-but-inert). |
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` emits `manifest.worker`; `"static"` is an SSG-only deploy with no worker. |
 | `build.serverEntry` | string | auto-detected | build (dev server and production build). Omit for auto-detection. |
-| `build.dist` | string | `"dist"` | build. The directory the client build writes and the only directory the packer walks. |
-| `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). |
+| `build.dist` | string | `"dist"` | build. The directory the client build writes and the only directory the packer walks. Its resolved path, including existing symlinks, cannot contain the project root. |
+| `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). The resolved path cannot be the project root, an ancestor, a symlink, or an existing non-`.zship` path. |
 | `migrations.dir` | string | `"migrations"` | build: the Vite build, the dev server, `gen-types-all`, `zeroship-dev-migrate`. |
-| `migrations.out` | string | `"generated/zeroship"` | build (writes `env.db.ts`, `schema.runtime.json`, `migrations.ir.json` there) and CLI `migrate` (posts `<out>/migrations.ir.json`). |
+| `migrations.out` | string | `"generated/zeroship"` | build (writes `env.db.ts`, `schema.runtime.json`, `migrations.ir.json` there) and CLI `migrate` (posts `<out>/migrations.ir.json`). Its resolved directory, including existing symlinks, cannot contain the project root; gen-types overwrites only recognized ZeroShip artifacts. |
 | `secrets` | string[], each `^[A-Z][A-Z0-9_]{0,63}$` | `[]` | CLI `deploy` checks the declared names before upload. See [Secrets](#secrets). |
 | `environments.<name>` | object | - | see [Environments](#environments). |
 
@@ -104,10 +104,12 @@ Unknown keys are refused at every level, with the known set in the message.
 ### The keys the CLI reads
 
 `name`, `app`, `control`, `runtime_date`, `build.output`, `migrations.dir`,
-`migrations.out` and environment-only `protected` are marked `x-cli-read` in
-the schema. That marking means two things: the CLI has no compiled default for
-them, and the plugin's `config` escape hatch may not change them. The deny-list
-is generated from the schema, so it cannot fall behind the fact it protects.
+`migrations.out`, `secrets` and environment-only `protected` are marked
+`x-cli-read` in the schema. The plugin's `config` escape hatch may not change
+them. Cross-tool scalar facts have no CLI default. `secrets` is the explicit
+exception: omission and `[]` are operationally identical, so its schema-marked
+safe empty default is applied by both readers. The deny-list is generated from
+the schema, so it cannot fall behind the fact it protects.
 
 ## Precedence
 
@@ -269,16 +271,18 @@ zeroship({
 ```
 
 **It may not change any field the CLI also reads** - `name`, `app`, `control`,
-`runtime_date`, `build.output`, `migrations.dir`, `migrations.out`, or
-environment-only `protected`. Trying to is an error naming the field. The
+`runtime_date`, `build.output`, `migrations.dir`, `migrations.out`, `secrets`,
+or environment-only `protected`. Trying to is an error naming the field. The
 reason is structural: a `config` function runs inside Vite, and the Rust CLI
 cannot execute JavaScript and never will, so an override there would put the
 two tools back into the disagreement this file removes. Change those in
 `zeroship.jsonc`, or use an `environments` entry and `--env=`.
 
-Overridable: `secrets`, `build.mode`, `build.serverEntry`, `build.dist`.
+Overridable: `build.mode`, `build.serverEntry`, `build.dist`.
 The denial is on **change**, not on presence, because the idiom above spreads
 `app` and `control` into its own result every time.
+Writable-path safety checks run after this override, so an accepted
+`build.dist` change still cannot move the build over the project or its config.
 
 ## The writeback, and starting a project with no app yet
 
@@ -313,6 +317,9 @@ preserves comments, key order, interior blank lines, trailing commas, CRLF line
 endings, and multibyte text. It may normalise extra blank lines immediately
 after the root `{` or immediately before its `}`; no other formatting is
 normalised. The CLI re-parses the complete project config before it writes.
+Immediately before writing, it also re-reads the file as bytes. If the bytes
+changed since load, writeback leaves them untouched and prints the app id with
+an instruction to add it by hand.
 
 ```
 created app my-app (11111111-1111-4111-8111-111111111111)

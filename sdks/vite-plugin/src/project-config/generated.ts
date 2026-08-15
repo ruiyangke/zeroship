@@ -6,7 +6,7 @@
  *
  * The plugin applies every default when there is no file. For a present file,
  * optional non-CLI defaults are also generated into Rust so the readers agree.
- * Defaults for CLI-read facts never reach Rust: silence there is an error.
+ * CLI-read defaults reach Rust only when the schema marks them safe.
  */
 
 export const CONFIG_FILENAME = "zeroship.jsonc";
@@ -14,7 +14,7 @@ export const CONFIG_ENV_VAR = "ZEROSHIP_CONFIG";
 export const SCHEMA_ID = "https://zeroship.ai/schema/project-v1.json";
 
 /** Fields the Rust CLI also reads. The `config` escape hatch may not touch these. */
-export const CLI_READ_FIELDS: readonly string[] = ["name","app","control","runtime_date","build.output","migrations.dir","migrations.out","protected"];
+export const CLI_READ_FIELDS: readonly string[] = ["name","app","control","runtime_date","build.output","migrations.dir","migrations.out","secrets","protected"];
 
 /** Key names that must never appear anywhere in the file. */
 export const FORBIDDEN_KEY_NAMES: readonly string[] = ["password","token","secret","key","apiKey","credentials"];

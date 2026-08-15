@@ -18,7 +18,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -225,6 +232,70 @@ describe("validation", () => {
       }
     }
   });
+
+  test("build.output cannot target the project root, an ancestor, or an existing source file", () => {
+    const cases = [
+      { output: ".", files: {} },
+      { output: "..", files: {} },
+      { output: CONFIG_FILENAME, files: {} },
+      { output: "src/main.ts", files: { "src/main.ts": "export default {};\n" } },
+    ];
+    for (const { output, files } of cases) {
+      const body = FULL.replace('"output": "dist/app.zship"', `"output": ${JSON.stringify(output)}`);
+      const root = scratch({ [CONFIG_FILENAME]: body, ...files });
+      try {
+        assert.throws(
+          () => readProjectConfig(root),
+          /build\.output/,
+          `build.output=${JSON.stringify(output)} must be refused`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("build.output may replace an existing generated artifact", () => {
+    const root = scratch({
+      [CONFIG_FILENAME]: FULL,
+      "dist/app.zship": "old artifact",
+    });
+    try {
+      assert.equal(readProjectConfig(root).config.build.output, "dist/app.zship");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("build.output rejects a dangling symlink", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    mkdirSync(join(root, "dist"), { recursive: true });
+    symlinkSync("../creator-source.ts", join(root, "dist/app.zship"));
+    try {
+      assert.throws(() => readProjectConfig(root), /build\.output.*non-artifact/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("migrations.out cannot target the project root or one of its ancestors", () => {
+    for (const out of [".", "..", "generated/zeroship/../..", "/tmp"]) {
+      const body = FULL.replace(
+        '"out": "generated/zeroship"',
+        `"out": ${JSON.stringify(out)}`,
+      );
+      const root = scratch({ [CONFIG_FILENAME]: body });
+      try {
+        assert.throws(
+          () => readProjectConfig(root),
+          /migrations\.out/,
+          `migrations.out=${JSON.stringify(out)} must be refused`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("resolution", () => {
@@ -287,6 +358,35 @@ describe("resolution", () => {
 });
 
 describe("the config escape hatch", () => {
+  test("the reader rejects a callback that moves build.dist over the project", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    try {
+      assert.throws(
+        () => readProjectConfig(root, {
+          override: (config) => ({ build: { ...config.build, dist: "." } }),
+        }),
+        /build\.dist.*zeroship\.jsonc/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the reader rejects a callback that symlinks build.dist over the project", () => {
+    const root = scratch({ [CONFIG_FILENAME]: FULL });
+    symlinkSync(".", join(root, "linked-root"));
+    try {
+      assert.throws(
+        () => readProjectConfig(root, {
+          override: (config) => ({ build: { ...config.build, dist: "linked-root" } }),
+        }),
+        /build\.dist.*zeroship\.jsonc/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a field only the build reads is overridable", () => {
     const base = resolveProjectConfig(parsed());
     const out = applyProjectConfigOverride(base, (c) => ({
@@ -336,10 +436,20 @@ describe("the config escape hatch", () => {
     assert.equal(out.build.mode, "static", "the accepted in-place mutation must survive");
   });
 
-  test("the deny-list exactly matches schema markers, including protected", () => {
-    const schemaFields = schemaCliReadFields();
-    assert.ok(schemaFields.includes("protected"), "protected controls Rust migrate and must be x-cli-read");
-    assert.deepEqual([...CLI_READ_FIELDS].sort(), schemaFields);
+  test("the deny-list and schema markers match the explicit Rust-read contract", () => {
+    const expected = [
+      "app",
+      "build.output",
+      "control",
+      "migrations.dir",
+      "migrations.out",
+      "name",
+      "protected",
+      "runtime_date",
+      "secrets",
+    ];
+    assert.deepEqual(schemaCliReadFields(), expected);
+    assert.deepEqual([...CLI_READ_FIELDS].sort(), expected);
   });
 });
 
