@@ -411,11 +411,18 @@ fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool 
 /// A reference into a target absent from this map may still be proved against
 /// the live catalog's own format evidence by `catalog_proves_reference_format`,
 /// which confirms an authored expectation rather than supplying a contract.
+/// FIELD ORDER IS LOAD-BEARING, not cosmetic. The derived `Ord` orders the map,
+/// and every hot lookup here asks for "the declarations of this table, or of
+/// this table's column, under whatever schema spelling". Ordering table-first
+/// makes each of those groups one CONTIGUOUS range, so they can be found with
+/// `range` instead of a scan of the whole map. Ordering schema-first scatters
+/// the members of a group across the map and forces a full traversal per
+/// declared column, which is quadratic in total column count (F665).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalColumnKey {
-    pub schema: Option<String>,
     pub table: String,
     pub column: String,
+    pub schema: Option<String>,
 }
 
 /// Logical column contract retained across ordered migration artifacts.
@@ -625,11 +632,27 @@ fn declare_logical_column(
     id_prefix: Option<String>,
     candidate_key_sources: CandidateKeySources,
 ) {
-    declared.retain(|candidate, _| {
-        candidate.table != table
-            || candidate.column != column
-            || !schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-    });
+    // Supersede any prior declaration of this same logical column. Only entries
+    // sharing this exact table and column can match, and the key orders
+    // table-first, so they are one contiguous run: walk that run rather than the
+    // whole map. Scanning every entry here costs a full traversal per declared
+    // column, which is quadratic in TOTAL COLUMNS, not in op count (F665).
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: column.to_string(),
+        schema: None,
+    };
+    let superseded: Vec<LogicalColumnKey> = declared
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table && candidate.column == column)
+        .filter(|(candidate, _)| {
+            schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        })
+        .map(|(candidate, _)| candidate.clone())
+        .collect();
+    for key in superseded {
+        declared.remove(&key);
+    }
     let candidate_keys = candidate_key_sources.tuples();
     declared.insert(
         LogicalColumnKey {
