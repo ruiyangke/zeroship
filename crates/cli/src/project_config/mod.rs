@@ -139,8 +139,7 @@ impl ProjectConfig {
     }
 
     fn parse_with_root(path: PathBuf, text: String, project_root: &Path) -> Result<Self, String> {
-        let stripped = jsonc::strip(&text);
-        let value: Value = serde_json::from_str(&stripped)
+        let value: Value = jsonc::parse(&text)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let root = match value {
             Value::Object(map) => map,
@@ -373,8 +372,7 @@ impl ProjectConfig {
     /// member sit under, what indentation, before or after the blank line - so
     /// the CLI refuses and hands the creator the exact line.
     pub fn write_app(&self, app_id: &str) -> Result<WriteOutcome, String> {
-        let stripped = jsonc::strip(&self.text);
-        let Some((start, end)) = jsonc::top_level_value_span(&stripped, "app") else {
+        let Some((start, end)) = jsonc::top_level_value_span(&self.text, "app") else {
             return Ok(WriteOutcome::PrintInstead);
         };
         let mut next = String::with_capacity(self.text.len() + app_id.len());
