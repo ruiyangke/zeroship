@@ -433,6 +433,26 @@ fn raw_form_feed_inside_comment_is_accepted() {
 }
 
 #[test]
+fn raw_control_character_inside_string_is_rejected() {
+    let text = FULL.replacen(
+        "https://control.zeroship.ai",
+        "https://control.\nzeroship.ai",
+        1,
+    );
+    ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("raw newlines are not valid inside JSON strings");
+    super::jsonc::parse(r#"{"value":"line\nbreak"}"#)
+        .expect("the escaped form remains valid JSON");
+}
+
+#[test]
+fn non_json_unicode_whitespace_is_rejected() {
+    let text = FULL.replacen("{\n", "{\u{00a0}\n", 1);
+    ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("non-breaking space is not JSON whitespace");
+}
+
+#[test]
 fn loose_json_extensions_are_rejected() {
     let cases = [
         ("unquoted property", FULL.replacen("\"name\":", "name:", 1)),
@@ -452,6 +472,12 @@ fn loose_json_extensions_are_rejected() {
     for (label, text) in cases {
         ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
             .expect_err(label);
+    }
+    for (label, text) in [
+        ("hexadecimal number", r#"{"value":0x10}"#),
+        ("unary plus", r#"{"value":+1}"#),
+    ] {
+        super::jsonc::parse(text).expect_err(label);
     }
 }
 

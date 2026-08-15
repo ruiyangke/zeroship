@@ -398,11 +398,25 @@ describe("JSONC edge cases the two readers must agree on", () => {
     assert.equal(resolveProjectConfig(parsed(body)).name, "demo-app");
   });
 
+  test("raw control characters inside strings are rejected", () => {
+    const body = FULL.replace(
+      "https://control.zeroship.ai",
+      "https://control.\nzeroship.ai",
+    );
+    assert.throws(() => parsed(body), /UnexpectedEndOfString/);
+  });
+
+  test("non-JSON Unicode whitespace is rejected", () => {
+    assert.throws(() => parsed(FULL.replace("{", "{\u00a0")));
+  });
+
   test("loose JSON extensions are rejected", () => {
     const cases = [
       FULL.replace('"name":', "name:"),
       FULL.replace('"name": "demo-app",\n  "app"', '"name": "demo-app"\n  "app"'),
       FULL.replace('"demo-app"', "'demo-app'"),
+      FULL.replace('"demo-app"', "0x10"),
+      FULL.replace('"demo-app"', "+1"),
     ];
     for (const body of cases) assert.throws(() => parsed(body));
   });

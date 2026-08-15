@@ -271,6 +271,26 @@ else
   fail "the readers disagree on raw form feed (ts=$form_feed_ts_rc rs=$form_feed_rs_rc)"
 fi
 
+RAW_CONTROL_FIXTURE="$WORK/raw-control.jsonc"
+node - "$MINIMAL_FIXTURE" "$RAW_CONTROL_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+const text = fs.readFileSync(source, "utf8")
+  .replace("https://control.zeroship.ai", "https://control.\nzeroship.ai");
+fs.writeFileSync(target, text);
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$RAW_CONTROL_FIXTURE" ) \
+  >"$WORK/raw-control-ts.json" 2>"$WORK/raw-control-ts.err"
+raw_control_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$RAW_CONTROL_FIXTURE" ) \
+  >"$WORK/raw-control-rs.json" 2>"$WORK/raw-control-rs.err"
+raw_control_rs_rc=$?
+if [ "$raw_control_ts_rc" != 0 ] && [ "$raw_control_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject a raw control character inside a string"
+else
+  fail "the readers disagree on a raw string control (ts=$raw_control_ts_rc rs=$raw_control_rs_rc)"
+fi
+
 # MUTATION A. Remove a cross-tool key from a file that exists. NEITHER reader
 # may quietly supply a value: the schema requires it, so both must refuse and
 # both must name it. A run where one of them answered with a path would be the
