@@ -8,6 +8,7 @@
 //!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
 //!   zeroship config show [--config=PATH] [--env=NAME]
 //!   zeroship config path [--config=PATH]
+//!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
@@ -471,15 +472,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
         }),
         _ => Err(e),
     })?;
-    let control_url = project_config::resolve_value(
-        args,
-        "--control",
-        Some("ZEROSHIP_CONTROL_URL"),
-        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
-        resolved.as_ref(),
-        "control",
-        Some("http://localhost:9090"),
-    )?;
+    let control_url = project_config::resolve_control(args, resolved.as_ref())?;
 
     let input = match args.get(2).filter(|a| !a.starts_with("--")) {
         Some(p) => p.clone(),
@@ -920,7 +913,7 @@ fn print_usage() {
     eprintln!("  zeroship config   show [--config=PATH] [--env=NAME]");
     eprintln!("  zeroship config   path [--config=PATH]");
     eprintln!("                   Show the resolved project config or its selected path.");
-    eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase]");
+    eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase] [--config=PATH] [--env=NAME]");
     eprintln!("                   Sign in with the platform device flow.");
     eprintln!("  zeroship whoami");
     eprintln!("                   Show the signed-in account.");

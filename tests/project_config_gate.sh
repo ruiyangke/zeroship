@@ -160,6 +160,28 @@ else
 fi
 
 echo
+echo "== 2b. operational control defaults use one resolver =="
+if grep -q '^pub const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";$' \
+  crates/cli/src/project_config/mod.rs \
+  && ! grep -q '^const DEFAULT_CONTROL_URL:' crates/cli/src/auth.rs; then
+  pass "the compiled control fallback has one shared declaration"
+else
+  fail "the compiled control fallback is not declared once in project_config"
+fi
+
+missing_control_resolver=""
+for source in main.rs migrate.rs secrets.rs auth.rs; do
+  if ! grep -q 'project_config::resolve_control(' "crates/cli/src/$source"; then
+    missing_control_resolver="$missing_control_resolver $source"
+  fi
+done
+if [ -z "$missing_control_resolver" ]; then
+  pass "deploy, migrate, secrets and login all use the shared control resolver"
+else
+  fail "operational callers bypass the shared control resolver:$missing_control_resolver"
+fi
+
+echo
 echo "== 3. round trip: the two readers agree byte for byte =="
 while IFS='|' read -r fixture ENVSEL label; do
   envflag=()

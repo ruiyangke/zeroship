@@ -112,15 +112,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         "app",
         None,
     )?;
-    let control_url = project_config::resolve_value(
-        args,
-        "--control",
-        Some("ZEROSHIP_CONTROL_URL"),
-        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
-        resolved.as_ref(),
-        "control",
-        Some("http://localhost:9090"),
-    )?;
+    let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
     let input = resolve_ir_path(args, resolved.as_ref())?;

@@ -199,16 +199,8 @@ fn common(resource: &str, args: &[String]) -> (String, String, String) {
 
     let app = project_config::resolve_value(args, "--app", None, None, resolved.as_ref(), "app", None)
         .unwrap_or_else(|e| die(e));
-    let control_url = project_config::resolve_value(
-        args,
-        "--control",
-        Some("ZEROSHIP_CONTROL_URL"),
-        zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer),
-        resolved.as_ref(),
-        "control",
-        Some("http://localhost:9090"),
-    )
-    .unwrap_or_else(|e| die(e));
+    let control_url = project_config::resolve_control(args, resolved.as_ref())
+        .unwrap_or_else(|e| die(e));
     let token = resolve_bearer_token(args).unwrap_or_else(|e| die(e));
 
     project_config::print_provenance(label, &[("app", &app), ("control", &control_url)]);
