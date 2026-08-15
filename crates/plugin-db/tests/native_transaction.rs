@@ -272,6 +272,15 @@ fn dispatch_zs_for_app(
         .env_vars(env_vars)
         .plugins(plugins)
         .build();
+    if app_id.is_some() {
+        // Production schema bootstrap initializes this backend handle without
+        // applying app migrations. Transactions read the handle directly.
+        block_on(async {
+            zeroship_plugin_db::init_pool_async()
+                .await
+                .expect("initialize the production Postgres backend");
+        });
+    }
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url_ep = format!("http://localhost/__zeroship/v1/{name}");
