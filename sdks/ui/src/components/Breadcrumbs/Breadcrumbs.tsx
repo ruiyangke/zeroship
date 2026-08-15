@@ -359,6 +359,7 @@ function EllipsisCrumb({
   return (
     <li
       data-slot="breadcrumbs-item"
+      data-ellipsis=""
       className="zs-breadcrumbs__item zs-breadcrumbs__item--ellipsis"
     >
       <button

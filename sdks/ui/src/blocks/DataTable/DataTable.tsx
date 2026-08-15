@@ -1580,6 +1580,7 @@ function DataTableInner<T>(
                                 data-column={column.key}
                                 data-align={align}
                                 data-type={column.type}
+                                data-truncate={column.truncate || undefined}
                                 style={cellStyle(column)}
                                 className={classnames(
                                   "zs-data-table__td",

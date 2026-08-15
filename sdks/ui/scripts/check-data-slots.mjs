@@ -204,6 +204,31 @@ if (process.argv.includes("--list-slots")) {
   process.exit(0);
 }
 
+// `--map-classes` prints `class<TAB>slot` for every classed element, which is
+// the table the theme translation needs.
+//
+// Deriving the slot from the class name does NOT work: they drifted. The <th>
+// carries zs-data-table__th but slot "data-table-column-header", and
+// PricingTable's root is zs-pricing with slot "pricing-table". Sixteen
+// selectors disagree that way, and a derived name would target nothing --
+// silently, because a selector matching no element still builds and ships.
+//
+// Every hand-rolled attempt to recover this pairing by searching lines around
+// the class was wrong: data-slot can sit before OR after className in the same
+// tag, so a backwards scan reported six elements as having no slot when the
+// AST says every one of them has one. The parser knows which attributes belong
+// to which tag; line proximity does not.
+if (process.argv.includes("--map-classes")) {
+  const pairs = new Set();
+  for (const t of tags) {
+    for (const c of t.classes) {
+      for (const n of t.names) pairs.add(`${c}\t${n}`);
+    }
+  }
+  for (const p of [...pairs].sort()) console.log(p);
+  process.exit(0);
+}
+
 const uncovered = tags.filter((t) => t.classes.length > 0 && t.slots === 0);
 const doubled = tags.filter((t) => t.slots > 1);
 const covered = tags.filter((t) => t.slots === 1);
