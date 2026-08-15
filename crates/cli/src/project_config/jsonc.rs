@@ -6,6 +6,7 @@
 
 use jsonc_parser::ast::Value as AstValue;
 use jsonc_parser::common::Ranged;
+use jsonc_parser::tokens::Token;
 use jsonc_parser::{
     parse_to_ast, parse_to_serde_value, CollectOptions, ParseOptions, Scanner,
     ScannerOptions,
@@ -30,13 +31,13 @@ const SCANNER_OPTIONS: ScannerOptions = ScannerOptions {
 
 /// Parse JSONC into the same `serde_json::Value` used by the rest of the CLI.
 pub fn parse(text: &str) -> Result<Value, String> {
-    reject_extended_whitespace(text)?;
+    validate_scanned_source(text)?;
     parse_to_serde_value(text, &PARSE_OPTIONS).map_err(|error| error.to_string())
 }
 
 /// Return the original UTF-8 byte span of a top-level member's value.
 pub fn top_level_value_span(text: &str, key: &str) -> Option<(usize, usize)> {
-    reject_extended_whitespace(text).ok()?;
+    validate_scanned_source(text).ok()?;
     let parsed = parse_to_ast(text, &CollectOptions::default(), &PARSE_OPTIONS).ok()?;
     let AstValue::Object(root) = parsed.value? else {
         return None;
@@ -45,19 +46,39 @@ pub fn top_level_value_span(text: &str, key: &str) -> Option<(usize, usize)> {
     Some((range.start, range.end))
 }
 
-/// `jsonc-parser` accepts JavaScript whitespace beyond JSON's four code
-/// points. Walk tokens with its scanner and reject any such skipped gaps while
-/// leaving the contents of comments and strings entirely to the library.
-fn reject_extended_whitespace(text: &str) -> Result<(), String> {
+/// Close two strict-JSON gaps in `jsonc-parser`: JavaScript whitespace beyond
+/// JSON's four code points, and raw C0 controls inside quoted strings. The
+/// scanner keeps comments distinct, so controls in comments remain harmless.
+fn validate_scanned_source(text: &str) -> Result<(), String> {
     let mut scanner = Scanner::new(text, &SCANNER_OPTIONS);
     let mut previous_end = 0;
     loop {
         let token = scanner.scan().map_err(|error| error.to_string())?;
         reject_gap(text, previous_end, scanner.token_start())?;
         match token {
+            Some(Token::String(_)) => {
+                reject_raw_string_controls(text, scanner.token_start(), scanner.token_end())?;
+                previous_end = scanner.token_end();
+            }
             Some(_) => previous_end = scanner.token_end(),
             None => return Ok(()),
         }
+    }
+}
+
+fn reject_raw_string_controls(text: &str, start: usize, end: usize) -> Result<(), String> {
+    let content_start = start + 1;
+    let content_end = end - 1;
+    let invalid = text.as_bytes()[content_start..content_end]
+        .iter()
+        .position(|byte| *byte < 0x20);
+    if let Some(offset) = invalid {
+        Err(format!(
+            "invalid raw control character in JSON string at byte {}",
+            content_start + offset
+        ))
+    } else {
+        Ok(())
     }
 }
 
