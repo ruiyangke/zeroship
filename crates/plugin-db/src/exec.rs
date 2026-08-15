@@ -320,7 +320,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
 
     let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id);
     tx.simple_query(&setup_sql).await.map_err(|e| {
-        let mut err = DbError::from_pg(&e);
+        let mut err = DbError::from_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(
             &mut err,
             "db: per-app session setup: ",

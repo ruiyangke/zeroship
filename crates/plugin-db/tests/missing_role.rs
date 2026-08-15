@@ -3,18 +3,15 @@
 //! A creator deploys an `env.db` app and skips `zeroship migrate`. The
 //! per-app role was never created, so `SET LOCAL ROLE "app_<id>_role"` in
 //! the autocommit session setup (`plugin_db::exec`) refuses before any
-//! creator SQL runs. Before this test's fix, `DbError::from_pg` had no arm
-//! for that SQLSTATE, fell through to `DbError::Internal`, stamped the code
-//! `internal` -- which is on no allow-list -- and the runtime's 5xx rail
-//! correctly blanked it to `{"message":"internal error"}`. The sanitiser
-//! did its job; the classifier lied to it.
+//! creator SQL runs. The contextual session-setup classifier turns that
+//! measured failure into a creator-facing provisioning error; generic
+//! PostgreSQL errors remain on `DbError::from_pg`.
 //!
 //! This test exists because the discriminator's unit tests in
 //! `src/error.rs` CANNOT reach `from_pg`: `compio_postgres::Error` has no
 //! public constructor, so nothing in-process can synthesise the server
-//! error. Only a live server produces it. That also makes this the only
-//! test that would fail if the arm were deleted from `from_pg` or reordered
-//! after the catch-all.
+//! error. Only a live server produces it. That also makes this the test that
+//! fails if the contextual session-setup arm is deleted.
 //!
 //! Requires: PostgreSQL at `PG_TEST_URL` (default port 5434).
 //! Run: `cargo test -p zeroship-plugin-db --test missing_role \
@@ -26,14 +23,13 @@
 //!     that is `crates/runtime/src/core/dispatch.rs`'s
 //!     `schema_not_provisioned_survives_the_5xx_rail_in_both_spellings`
 //!     and its one-variable control.
-//!   - A non-English server. `is_missing_role` matches PostgreSQL's
+//!   - A non-English server. The classifier matches PostgreSQL's
 //!     English primary message; under a translated `lc_messages` this
 //!     test's case would classify `internal` again, and so would
 //!     production. The failure mode is a false NEGATIVE (today's
 //!     behaviour), never a false positive.
 //!   - Any role-missing path that does not go through `SET LOCAL ROLE`.
-//!     42704 and 28000 are covered by reasoning and by the unit tests,
-//!     not by a live server here.
+//!     Those paths deliberately stay on the generic classifier.
 
 use compio_postgres::NoTls;
 use zeroship_plugin_db::error::DbError;
@@ -41,6 +37,107 @@ use zeroship_plugin_db::error::DbError;
 fn test_url() -> String {
     zeroship_core::test_env!("PG_TEST_URL")
         .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
+}
+
+async fn connect_test_client() -> compio_postgres::Client {
+    let url = test_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|e| panic!("live-Postgres test requires a server at PG_TEST_URL: {e}"));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    client
+}
+
+fn read_startup_packet(stream: &mut std::net::TcpStream) {
+    use std::io::Read;
+
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set fake Postgres read timeout");
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read startup packet length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "startup packet length includes its four-byte header");
+    let mut payload = vec![0_u8; length - 4];
+    stream
+        .read_exact(&mut payload)
+        .expect("read startup packet payload");
+}
+
+fn push_backend_message(out: &mut Vec<u8>, tag: u8, payload: &[u8]) {
+    out.push(tag);
+    out.extend_from_slice(&u32::try_from(payload.len() + 4).unwrap().to_be_bytes());
+    out.extend_from_slice(payload);
+}
+
+fn accept_fake_client(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for fake Postgres client"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(err) => panic!("accept fake Postgres client: {err}"),
+        }
+    }
+}
+
+fn spawn_pool_reconnect_server(role: &str) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind fake Postgres listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make fake Postgres listener nonblocking");
+    let address = listener.local_addr().expect("read fake Postgres address");
+    let server_role = role.to_string();
+
+    let server = std::thread::spawn(move || {
+        let mut warm = accept_fake_client(&listener);
+        read_startup_packet(&mut warm);
+        let mut success = Vec::new();
+        push_backend_message(&mut success, b'R', &0_u32.to_be_bytes());
+        push_backend_message(&mut success, b'Z', b"I");
+        warm
+            .write_all(&success)
+            .expect("complete warm Postgres handshake");
+
+        let mut reconnect = accept_fake_client(&listener);
+        read_startup_packet(&mut reconnect);
+        let message = format!("role \"{server_role}\" does not exist");
+        let mut fields = Vec::new();
+        for (tag, value) in [(b'S', "FATAL"), (b'V', "FATAL"), (b'C', "28000")] {
+            fields.push(tag);
+            fields.extend_from_slice(value.as_bytes());
+            fields.push(0);
+        }
+        fields.push(b'M');
+        fields.extend_from_slice(message.as_bytes());
+        fields.push(0);
+        fields.push(0);
+
+        let mut refusal = Vec::new();
+        push_backend_message(&mut refusal, b'E', &fields);
+        reconnect
+            .write_all(&refusal)
+            .expect("write FATAL role-missing response");
+    });
+
+    (
+        format!("postgres://{role}:unused@{address}/postgres?sslmode=disable"),
+        server,
+    )
 }
 
 /// Wait for a dropped direct client to finish closing its socket while this
@@ -55,15 +152,9 @@ async fn drain_pg() {
 
 /// Drive a real `SET LOCAL ROLE` against a role that does not exist and
 /// hand the resulting server error to the classifier.
-async fn classify_missing_role(role: &str) -> DbError {
-    let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
-        .await
-        .unwrap_or_else(|e| panic!("live-Postgres test requires a server at PG_TEST_URL: {e}"));
-    compio::runtime::spawn(async move {
-        let _ = connection.run().await;
-    })
-    .detach();
+async fn classify_missing_role(app_id: &str) -> DbError {
+    let client = connect_test_client().await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
 
     // Same shape as `exec::query_postgres_pool_with_autocommit_role`: the
     // SET LOCAL runs inside an explicit transaction, so the failure is the
@@ -79,7 +170,7 @@ async fn classify_missing_role(role: &str) -> DbError {
         "missing-role SET LOCAL ROLE must report the measured SQLSTATE"
     );
 
-    let classified = DbError::from_pg(&err);
+    let classified = DbError::from_pg_per_app_session_setup(&err, app_id);
     drop(client);
     drain_pg().await;
     classified
@@ -89,8 +180,9 @@ async fn classify_missing_role(role: &str) -> DbError {
 async fn missing_per_app_role_is_creator_facing_not_internal() {
     // A name no cluster will have. Shaped like `per_app_role_name` output
     // so the case is the production one.
-    let role = format!("app_{}_role", uuid::Uuid::new_v4().simple());
-    let classified = classify_missing_role(&role).await;
+    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_id);
+    let classified = classify_missing_role(&app_id).await;
 
     let op = classified.to_op_error();
     let code = match &op.kind {
@@ -194,4 +286,53 @@ async fn a_real_internal_pg_failure_is_still_internal() {
         }
         other => panic!("expected CodedError, got {other:?}"),
     }
+}
+
+#[compio::test]
+async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
+    let role = format!("app_{}_role", uuid::Uuid::new_v4().simple());
+    let (url, server) = spawn_pool_reconnect_server(&role);
+
+    let pool = compio_postgres::Pool::connect_with_config(
+        &url,
+        compio_postgres::PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            max_lifetime: std::time::Duration::ZERO,
+            ..compio_postgres::PoolConfig::default()
+        },
+    )
+    .await
+    .expect("warm pool as the temporary login role");
+
+    let err = match pool.get().await {
+        Ok(_) => panic!("expired pool entry must reconnect after its login role is dropped"),
+        Err(err) => err,
+    };
+    server.join().expect("fake Postgres server must finish");
+    assert_eq!(
+        err.code().map(|code| code.code()),
+        Some("28000"),
+        "pool reconnect must exercise the server-side FATAL role error"
+    );
+    let expected_message = format!("role \"{role}\" does not exist");
+    assert_eq!(
+        err.as_db_error().map(|db| db.message()),
+        Some(expected_message.as_str()),
+        "the reconnect error must have the same app-shaped message as session setup"
+    );
+
+    let op = DbError::from_pg(&err).to_op_error();
+    let code = match &op.kind {
+        zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => code.clone(),
+        other => panic!("expected CodedError, got {other:?}"),
+    };
+
+    drop(pool);
+    drain_pg().await;
+
+    assert_eq!(
+        code, "internal",
+        "a missing pool login role is an operator DSN failure, not an app schema state"
+    );
 }

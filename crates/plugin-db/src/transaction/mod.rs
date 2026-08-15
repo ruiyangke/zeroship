@@ -167,7 +167,7 @@ pub(crate) async fn apply_per_app_role(
     // exhaust the shared Postgres for other tenants.
     let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id);
     client.simple_query(&sql).await.map_err(|e| {
-        let mut err = crate::error::DbError::from_pg(&e);
+        let mut err = crate::error::DbError::from_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(&mut err, "db: tx session setup (per-app §17.5 + DB-1 guards): ");
         err
     })?;
