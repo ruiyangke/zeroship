@@ -179,6 +179,7 @@ pub fn validate_ir_authorized(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_authorized(op, target_dialect, op_index, ts, schema_scope, authority)?;
     }
+    validate_index_names_across_ops(ir, target_dialect, ts_locations)?;
     validate_column_references(ir, target_dialect, ts_locations)?;
     validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
     validate_per_row_destinations(ir, target_dialect, ts_locations)?;
@@ -2655,6 +2656,104 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Refuse an envelope that creates one index name twice without dropping it in
+/// between, whether the declarations arrive inline on `createTable` or as
+/// standalone `createIndex` ops.
+///
+/// The within-one-`createTable` case is caught by
+/// [`validate_index_names_are_distinct`]; this is the same fail-open reached the
+/// way authors more commonly write it, across separate operations. Both lower to
+/// `CREATE INDEX IF NOT EXISTS`, so the second is skipped with a notice and the
+/// apply succeeds without the index that was declared.
+///
+/// TRACKS LIVE NAMES RATHER THAN COUNTING OCCURRENCES. Create, drop, create again
+/// under one name is how an index definition is changed, and it must keep
+/// working; only a second creation while the first is still live is the mistake.
+/// A `dropTable` takes its indexes with it, so those names free up too.
+fn validate_index_names_across_ops(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    // name -> the table it currently belongs to.
+    let mut live: BTreeMap<String, String> = BTreeMap::new();
+
+    // A free function rather than a closure: the walk below also mutates `live`
+    // when an index or its table is dropped, and a capturing closure would hold
+    // the only mutable borrow.
+    fn claim(
+        live: &mut BTreeMap<String, String>,
+        name: &str,
+        table: &str,
+        op_index: usize,
+        target_dialect: Dialect,
+        ts_locations: &[Option<String>],
+    ) -> Result<(), AuthoringError> {
+        if live.contains_key(name) {
+            return Err(AuthoringError {
+                code: CODE_OP_INVALID.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_locations.get(op_index).cloned().flatten(),
+                dialect: target_dialect,
+                reason: format!(
+                    "index {name:?} is created twice in this migration without being \
+                     dropped in between; it renders as `CREATE INDEX IF NOT EXISTS`, so \
+                     the second is skipped and never exists"
+                ),
+                suggested_fix: Some(
+                    "give the second index its own name, or drop the first one before \
+                     recreating it"
+                        .to_string(),
+                ),
+            });
+        }
+        live.insert(name.to_string(), table.to_string());
+        Ok(())
+    }
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        match op {
+            Op::CreateTable { name, indexes, .. } => {
+                for index in indexes {
+                    if let Some(index_name) = index.name.as_deref() {
+                        claim(
+                            &mut live,
+                            index_name,
+                            name,
+                            op_index,
+                            target_dialect,
+                            ts_locations,
+                        )?;
+                    }
+                }
+            }
+            Op::CreateIndex { name, table, .. } => {
+                if let Some(index_name) = name.as_deref() {
+                    claim(
+                        &mut live,
+                        index_name,
+                        table,
+                        op_index,
+                        target_dialect,
+                        ts_locations,
+                    )?;
+                }
+            }
+            Op::DropIndex { name, .. } => {
+                live.remove(name);
+            }
+            Op::DropTable { table, .. } => {
+                live.retain(|_, owner| owner != table);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a `createTable` declaring two indexes under one name.
 ///
 /// This is a FAIL-OPEN rather than a late verdict. Both lower to

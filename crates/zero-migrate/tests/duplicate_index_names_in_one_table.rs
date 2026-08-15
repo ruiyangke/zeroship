@@ -78,3 +78,57 @@ fn one_index_is_still_allowed() {
     )
     .expect("a single index must pass");
 }
+
+// ---------------------------------------------------------------------------
+// The same fail-open across OPS, which the first fix did not cover.
+// ---------------------------------------------------------------------------
+
+fn verdict_envelope(ops: &str, dialect: Dialect) -> Result<(), String> {
+    let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    validate_ir(&ir, dialect, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+}
+
+const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"]}"#;
+
+#[test]
+fn two_create_index_ops_sharing_a_name_are_refused() {
+    // Identical fail-open to the within-table case, reached the way authors are
+    // more likely to write it: two separate operations. The first fix only
+    // examined one `createTable`'s own `indexes` list, so this route stayed open.
+    let ops = format!(
+        r#"{TABLE},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c"}}]}},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"d"}}]}}"#
+    );
+    let refusal = verdict_envelope(&ops, Dialect::Postgres).expect_err(
+        "two createIndex ops under one name lower to two CREATE INDEX IF NOT EXISTS, \
+         so the second is skipped with a notice and the apply succeeds without the \
+         index the author declared",
+    );
+    assert!(
+        refusal.to_lowercase().contains("index"),
+        "the refusal must name the index as the problem: {refusal}"
+    );
+}
+
+#[test]
+fn reusing_an_index_name_after_dropping_it_is_still_allowed() {
+    // THE CONTROL THAT SHAPES THE FIX. Create, drop, create again under the same
+    // name is a legitimate migration - it is how an index definition is changed -
+    // and a naive "no repeated name in this envelope" rule would refuse it. The
+    // check therefore tracks which names are LIVE as the ops are walked, rather
+    // than counting occurrences.
+    let ops = format!(
+        r#"{TABLE},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c"}}]}},{{"op":"dropIndex","name":"ix","table":"a"}},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"d"}}]}}"#
+    );
+    verdict_envelope(&ops, Dialect::Postgres)
+        .expect("recreating an index after dropping it must remain allowed");
+}
+
+#[test]
+fn an_index_op_colliding_with_an_inline_index_is_refused() {
+    // The two routes crossing: a name declared inline on createTable and again by
+    // a standalone createIndex.
+    let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"ix","columns":[{"kind":"column","name":"c"}]}]},{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"d"}]}"#;
+    verdict_envelope(ops, Dialect::Postgres)
+        .expect_err("an inline index and a later createIndex under one name collide the same way");
+}
