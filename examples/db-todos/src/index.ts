@@ -324,6 +324,15 @@ export const shareToWebhook = action(
 
 type TxInput = { userId: string; tag: string };
 
+export const unmigratedTransactionProbe = mutation(
+  async () => {
+    const result = await db.transaction(async () => null);
+    if (result.error) throw result.error;
+    return result.data;
+  },
+  { id: "diagnostics.unmigratedTransaction" },
+);
+
 /** Flatten an error to the two fields that are comparable across tiers.
  *  Deliberately keeps `message` VERBATIM: a backend-specific string is
  *  exactly the kind of divergence this leg exists to surface. */

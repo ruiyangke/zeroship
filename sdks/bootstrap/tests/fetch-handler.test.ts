@@ -105,6 +105,50 @@ describe("createFetchHandler — superjson wire", () => {
     });
   });
 
+  test("keeps missing-role remediation in an SSE error frame", async () => {
+    await withDispatch(async () => {
+      const message =
+        "this app's database is not provisioned: its per-app Postgres role does not " +
+        "exist. Run `zeroship migrate` for this app, then retry.";
+      const handler = createFetchHandler(async () => ({
+        userDefault: {},
+        fetch: undefined,
+        rpc: {
+          async *unmigratedStream() {
+            throw Object.assign(new Error(message), {
+              code: "SCHEMA_NOT_PROVISIONED",
+            });
+          },
+        },
+      }));
+
+      const log = console.error;
+      console.error = () => {};
+      try {
+        const res = await handler(
+          new Request("https://app.test/__zeroship/v1/unmigratedStream", {
+            method: "POST",
+            headers: { accept: "text/event-stream" },
+            body: JSON.stringify({ json: null }),
+          }),
+          {},
+          {},
+        );
+        const text = await res.text();
+        const errorLine = text.split("\n").find((line) => line.startsWith("e:"));
+        assert.ok(errorLine, `missing SSE error frame: ${text}`);
+        const body = JSON.parse(errorLine.slice(2)) as Record<string, unknown>;
+
+        assert.equal(res.status, 200);
+        assert.equal(body.code, "SCHEMA_NOT_PROVISIONED");
+        assert.equal(body.message, message);
+        assert.equal(text.includes("internal error"), false);
+      } finally {
+        console.error = log;
+      }
+    });
+  });
+
   // ISS-67: a `requireUser()`-shaped throw carries an explicit `status: 401`.
   // The fetch-handler's `statusFromError` must honor it (4xx), and because the
   // body-sanitizer only blanks 5xx, the "Authentication required" message and
