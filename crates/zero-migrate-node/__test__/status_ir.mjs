@@ -133,6 +133,8 @@ assert(status.pendingContracts[0].pendingVersion === PENDING_CONTRACT,
   'pending-contract identity was not projected');
 assert(status.pendingContracts[0].orphaned === true,
   'contract whose plan is absent should be orphaned');
+assert(status.pendingContracts[0].reason.includes('table `widgets` has an in-flight online rename'),
+  `pending-contract refusal reason missing: ${JSON.stringify(status.pendingContracts[0])}`);
 assert(Array.isArray(status.blocked) && status.blocked.length === 0,
   `blocked detail missing: ${JSON.stringify(status.blocked)}`);
 assert(status.unexpectedJournal.length === 2,
@@ -177,6 +179,9 @@ assert(orderedStatus.plans.length === 2,
   `ordered envelope plans missing: ${JSON.stringify(orderedStatus.plans)}`);
 assert(orderedStatus.plans.every((plan) => plan.state === 'pending'),
   `fresh ordered envelope plans should be pending: ${JSON.stringify(orderedStatus.plans)}`);
+assert(orderedStatus.plans.every((plan) =>
+  plan.touchedTables.length === 1 && plan.touchedTables[0] === 'status_widgets'),
+`status must preserve apply's per-plan touched set: ${JSON.stringify(orderedStatus.plans)}`);
 
 // The acquisition is the NON-WAITING pg_try_advisory_lock: a status read must not
 // sit behind a deploy that holds the lock for its whole run. The three orderings

@@ -159,7 +159,14 @@ impl MockPgDispatch {
                 ],
             )];
         }
-        let columns = ["version", "checksum", "mig_kind", "event_seq", "phase"];
+        let columns = [
+            "version",
+            "checksum",
+            "mig_kind",
+            "event_seq",
+            "phase",
+            "down",
+        ];
         vec![
             row(
                 &columns,
@@ -169,6 +176,7 @@ impl MockPgDispatch {
                     text_cell("apply"),
                     int_cell(1),
                     text_cell("completed"),
+                    null_cell(),
                 ],
             ),
             row(
@@ -179,6 +187,7 @@ impl MockPgDispatch {
                     null_cell(),
                     int_cell(2),
                     text_cell("started"),
+                    null_cell(),
                 ],
             ),
         ]

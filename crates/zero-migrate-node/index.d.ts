@@ -170,6 +170,8 @@ export interface BlockedPlanDto {
   dependency: string
   /** Outstanding obligation key on the dependency. */
   pendingVersion: string
+  /** The exact dependency refusal `apply` prints for this blocked plan. */
+  reason?: string
 }
 
 /**
@@ -600,6 +602,8 @@ export interface PendingContractStatusDto {
   pendingVersion: string
   /** Whether the supplying plan is absent from the current manifest set. */
   orphaned: boolean
+  /** The exact table-interlock refusal `apply` prints for this obligation. */
+  reason?: string
 }
 
 /** One plan in a plan-aware status reply. */
@@ -614,6 +618,11 @@ export interface PlanStatusDto {
   steps: Array<PlanStatusStepDto>
   /** Dependencies omitted from the supplied plan set. */
   missingDependencies: Array<string>
+  /**
+   * The authoritative table set apply uses for the pending-contract interlock.
+   * Present on plan-aware IR status; absent from legacy/core-only projections.
+   */
+  touchedTables?: Array<string>
 }
 
 /** One executable step in a plan-aware status reply. */

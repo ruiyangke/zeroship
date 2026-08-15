@@ -133,6 +133,39 @@ fn project_lock_busy_reply(holders: &[ProjectLockHolder]) -> StatusReply {
     }
 }
 
+fn pending_contract_status_dto(
+    contract: &zero_migrate::ops::status::PendingContractStatus,
+) -> PendingContractStatusDto {
+    PendingContractStatusDto {
+        table: contract.table.clone(),
+        pending_version: contract.pending_version.clone(),
+        orphaned: contract.orphaned,
+        reason: Some(
+            zero_migrate::PendingContractRefusal::new(
+                contract.table.clone(),
+                contract.pending_version.clone(),
+            )
+            .to_string(),
+        ),
+    }
+}
+
+fn blocked_plan_dto(blocked: &zero_migrate::ops::status::BlockedPlan) -> BlockedPlanDto {
+    BlockedPlanDto {
+        blocked: blocked.blocked.as_str().to_string(),
+        dependency: blocked.dependency.as_str().to_string(),
+        pending_version: blocked.pending_version.clone(),
+        reason: Some(
+            zero_migrate::DependencyPendingContract::new(
+                blocked.blocked.as_str(),
+                blocked.dependency.as_str(),
+                blocked.pending_version.clone(),
+            )
+            .to_string(),
+        ),
+    }
+}
+
 /// Project a [`MigrationStatus`] into the typed [`StatusReply`] (the load-bearing
 /// fields: current version + applied/pending/rolled-back version ids).
 pub fn status_reply(s: &MigrationStatus) -> StatusReply {
@@ -148,21 +181,9 @@ pub fn status_reply(s: &MigrationStatus) -> StatusReply {
         pending_contracts: s
             .pending_contracts
             .iter()
-            .map(|contract| PendingContractStatusDto {
-                table: contract.table.clone(),
-                pending_version: contract.pending_version.clone(),
-                orphaned: contract.orphaned,
-            })
+            .map(pending_contract_status_dto)
             .collect(),
-        blocked: s
-            .blocked
-            .iter()
-            .map(|blocked| BlockedPlanDto {
-                blocked: blocked.blocked.as_str().to_string(),
-                dependency: blocked.dependency.as_str().to_string(),
-                pending_version: blocked.pending_version.clone(),
-            })
-            .collect(),
+        blocked: s.blocked.iter().map(blocked_plan_dto).collect(),
         unexpected_journal: Vec::new(),
         plans: None,
         busy: false,
@@ -199,6 +220,7 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
                 .iter()
                 .map(|dependency| dependency.as_str().to_string())
                 .collect(),
+            touched_tables: None,
         })
         .collect();
     StatusReply {
@@ -226,21 +248,9 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
         pending_contracts: status
             .pending_contracts
             .iter()
-            .map(|contract| PendingContractStatusDto {
-                table: contract.table.clone(),
-                pending_version: contract.pending_version.clone(),
-                orphaned: contract.orphaned,
-            })
+            .map(pending_contract_status_dto)
             .collect(),
-        blocked: status
-            .blocked
-            .iter()
-            .map(|blocked| BlockedPlanDto {
-                blocked: blocked.blocked.as_str().to_string(),
-                dependency: blocked.dependency.as_str().to_string(),
-                pending_version: blocked.pending_version.clone(),
-            })
-            .collect(),
+        blocked: status.blocked.iter().map(blocked_plan_dto).collect(),
         unexpected_journal: status
             .unexpected_journal
             .iter()
@@ -920,6 +930,15 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
             &journal_entries,
             &resolved_contracts,
         )?;
+        let touched_by_plan: std::collections::HashMap<String, Vec<String>> = artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.plan.version.as_str().to_string(),
+                    artifact.touched_tables.clone(),
+                )
+            })
+            .collect();
         let manifests = artifacts
             .iter()
             .map(|artifact| {
@@ -946,6 +965,15 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
             .await
             .map_err(|error| error.to_string())?;
         let mut reply = plan_status_reply(&status);
+        for plan in reply.plans.iter_mut().flatten() {
+            plan.touched_tables =
+                Some(touched_by_plan.get(&plan.version).cloned().ok_or_else(|| {
+                    format!(
+                        "status returned plan {} without its lowered touched-table set",
+                        plan.version
+                    )
+                })?);
+        }
         reply.interrupted_unwinds = interrupted_unwinds;
         Ok::<StatusReply, String>(reply)
     }
@@ -1124,8 +1152,26 @@ mod status_projection_tests {
 
         assert_eq!(reply.rolled_back, ["mig_rolled_back"]);
         assert_eq!(reply.pending_contracts[0].table, "widgets");
+        assert_eq!(
+            reply.pending_contracts[0].reason,
+            Some(
+                zero_migrate::PendingContractRefusal::new("widgets", "mig_pending_contract",)
+                    .to_string()
+            )
+        );
         assert_eq!(reply.blocked[0].blocked, blocked_version.as_str());
         assert_eq!(reply.blocked[0].dependency, dependency.as_str());
+        assert_eq!(
+            reply.blocked[0].reason,
+            Some(
+                zero_migrate::DependencyPendingContract::new(
+                    blocked_version.as_str(),
+                    dependency.as_str(),
+                    "mig_pending_contract",
+                )
+                .to_string()
+            )
+        );
         assert_eq!(reply.unexpected_journal[0].state, "applied");
         assert_eq!(
             reply.unexpected_journal[0].journal_kind.as_deref(),

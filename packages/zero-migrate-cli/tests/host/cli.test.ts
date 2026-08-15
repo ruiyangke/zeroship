@@ -13,6 +13,7 @@ import {
   formatStatusJson,
   formatStatusHuman,
   hasInlinePassword,
+  migrationsForPlan,
   pendingMigrationsForPlan,
   resolveNetworkSecurity,
   resolvePendingVersion,
@@ -1275,6 +1276,131 @@ test("pendingMigrationsForPlan maps pending plan IDs to source envelopes", () =>
       ),
     /ambiguous migration name "first"/,
   );
+});
+
+test("plan partitions a pending-contract owner and table-blocked migration", () => {
+  const rename: IrEnvelope = { ir_version: 1, name: "rename_email", ops: [] };
+  const addNote: IrEnvelope = { ir_version: 1, name: "add_note", ops: [] };
+  const reason = "the exact apply refusal";
+  const reply = makeStatus({
+    pending: ["mig_rename", "mig_add_note"],
+    pendingContracts: [
+      {
+        table: "people",
+        pendingVersion: "mig_rename_trigger",
+        orphaned: false,
+        reason,
+      },
+    ],
+    plans: [
+      {
+        version: "mig_rename",
+        name: "rename_email",
+        state: "partial",
+        steps: [
+          {
+            version: "mig_rename_trigger",
+            name: "install rename trigger",
+            kind: "onlineExpand",
+            state: "applied",
+          },
+        ],
+        missingDependencies: [],
+        touchedTables: ["people"],
+      },
+      {
+        version: "mig_add_note",
+        name: "add_note",
+        state: "pending",
+        steps: [],
+        missingDependencies: [],
+        touchedTables: ["people"],
+      },
+    ],
+  });
+
+  assert.deepEqual(migrationsForPlan(reply, [rename, addNote]), {
+    pending: [],
+    blocked: [{ version: "mig_add_note", name: "add_note", reason }],
+  });
+  assert.deepEqual(pendingMigrationsForPlan(reply, [rename, addNote]), []);
+});
+
+test("plan retains explicit pending-contract dependency blocks", () => {
+  const rename: IrEnvelope = { ir_version: 1, name: "rename_users", ops: [] };
+  const widgets: IrEnvelope = { ir_version: 1, name: "create_widgets", ops: [] };
+  const dependencyReason = "the exact dependency refusal";
+  const reply = makeStatus({
+    pending: ["mig_rename", "mig_widgets"],
+    pendingContracts: [
+      {
+        table: "users",
+        pendingVersion: "mig_rename_trigger",
+        orphaned: false,
+        reason: "table refusal",
+      },
+    ],
+    blocked: [
+      {
+        blocked: "mig_widgets",
+        dependency: "mig_rename",
+        pendingVersion: "mig_rename_trigger",
+        reason: dependencyReason,
+      },
+    ],
+    plans: [
+      {
+        version: "mig_rename",
+        name: "rename_users",
+        state: "partial",
+        steps: [
+          {
+            version: "mig_rename_trigger",
+            name: "install rename trigger",
+            kind: "onlineExpand",
+            state: "applied",
+          },
+        ],
+        missingDependencies: [],
+        touchedTables: ["users"],
+      },
+      {
+        version: "mig_widgets",
+        name: "create_widgets",
+        state: "blocked",
+        steps: [],
+        missingDependencies: [],
+        touchedTables: ["widgets"],
+      },
+    ],
+  });
+
+  assert.deepEqual(migrationsForPlan(reply, [rename, widgets]), {
+    pending: [],
+    blocked: [
+      { version: "mig_widgets", name: "create_widgets", reason: dependencyReason },
+    ],
+  });
+});
+
+test("plan keeps a resumable partial migration runnable without a pending contract", () => {
+  const partial: IrEnvelope = { ir_version: 1, name: "resume_me", ops: [] };
+  const reply = makeStatus({
+    pending: ["mig_partial"],
+    plans: [
+      {
+        version: "mig_partial",
+        name: "resume_me",
+        state: "partial",
+        steps: [],
+        missingDependencies: [],
+      },
+    ],
+  });
+
+  assert.deepEqual(pendingMigrationsForPlan(reply, [partial]), [
+    { version: "mig_partial", name: "resume_me", envelope: partial },
+  ]);
 });
 
 test("pending plan envelopes feed the offline SQL renderer", () => {

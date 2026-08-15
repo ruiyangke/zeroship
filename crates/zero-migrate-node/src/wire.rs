@@ -552,6 +552,8 @@ pub struct PendingContractStatusDto {
     pub pending_version: String,
     /// Whether the supplying plan is absent from the current manifest set.
     pub orphaned: bool,
+    /// The exact table-interlock refusal `apply` prints for this obligation.
+    pub reason: Option<String>,
 }
 
 /// One plan blocked by an outstanding dependency contract.
@@ -564,6 +566,8 @@ pub struct BlockedPlanDto {
     pub dependency: String,
     /// Outstanding obligation key on the dependency.
     pub pending_version: String,
+    /// The exact dependency refusal `apply` prints for this blocked plan.
+    pub reason: Option<String>,
 }
 
 /// One journal identity absent from every supplied plan manifest.
@@ -594,6 +598,9 @@ pub struct PlanStatusDto {
     pub steps: Vec<PlanStatusStepDto>,
     /// Dependencies omitted from the supplied plan set.
     pub missing_dependencies: Vec<String>,
+    /// The authoritative table set apply uses for the pending-contract interlock.
+    /// Present on plan-aware IR status; absent from legacy/core-only projections.
+    pub touched_tables: Option<Vec<String>>,
 }
 
 /// One executable step in a plan-aware status reply.
@@ -933,7 +940,7 @@ pub struct BuildInfo {
 /// names the CONSTRAINT (`lk_t_e_key`) but not the TABLE, and an operator
 /// deciding whether to take a lock needs to know which table is going to be
 /// locked. Advisories never gate; this is information, not a verdict.
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct AdvisoryDto {
     /// The migration whose lowered DDL raised it.

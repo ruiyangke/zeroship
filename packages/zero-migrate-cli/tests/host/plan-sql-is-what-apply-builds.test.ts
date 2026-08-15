@@ -137,8 +137,12 @@ function cli(
 function previewedSql(work: string, namespace: string): string {
   const planned = cli(work, namespace, ["plan", "--json"]);
   assert.equal(planned.code, 0, `plan must succeed; ${planned.err}`);
-  const parsed = JSON.parse(planned.out) as { pending: Array<{ sql: string }> };
+  const parsed = JSON.parse(planned.out) as {
+    pending: Array<{ sql: string }>;
+    blocked: Array<unknown>;
+  };
   assert.ok(parsed.pending.length > 0, "plan must report pending work to preview");
+  assert.deepEqual(parsed.blocked, [], "ordinary runnable work has no blocked listing");
   return parsed.pending.map((entry) => entry.sql).join("\n");
 }
 

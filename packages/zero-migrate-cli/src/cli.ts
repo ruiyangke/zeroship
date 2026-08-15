@@ -1056,9 +1056,20 @@ export interface PendingMigrationPreview {
   envelope: IrEnvelope;
 }
 
+export interface BlockedMigrationPreview {
+  version: string;
+  name: string;
+  reason: string;
+}
+
+export interface PlanMigrationPreviews {
+  pending: PendingMigrationPreview[];
+  blocked: BlockedMigrationPreview[];
+}
+
 /** Correlate top-level pending logical plan IDs back to authored envelopes in
  * source order. StatusIr always returns plan detail; fail closed if it does not. */
-export function pendingMigrationsForPlan(
+function pendingMigrationCandidatesForPlan(
   reply: StatusReply,
   envelopes: readonly IrEnvelope[],
 ): PendingMigrationPreview[] {
@@ -1086,6 +1097,104 @@ export function pendingMigrationsForPlan(
     );
   }
   return result;
+}
+
+function statusReason(reason: string | undefined, subject: string): string {
+  if (reason === undefined || reason === "") {
+    throw new CliError(`status returned ${subject} without apply's refusal reason`);
+  }
+  return reason;
+}
+
+/** Partition the broad status `pending` set into work apply can run and work it
+ * would refuse. An outstanding rename's own partial plan is neither: its expand
+ * has run and its contract is completed explicitly through `resolve`. */
+export function migrationsForPlan(
+  reply: StatusReply,
+  envelopes: readonly IrEnvelope[],
+): PlanMigrationPreviews {
+  const candidates = pendingMigrationCandidatesForPlan(reply, envelopes);
+  const plans = reply.plans ?? [];
+  const plansByVersion = new Map(plans.map((plan) => [plan.version, plan]));
+
+  const contractOwners = new Set<string>();
+  for (const contract of reply.pendingContracts) {
+    const owners = plans.filter((plan) =>
+      plan.steps.some((step) => step.version === contract.pendingVersion),
+    );
+    if (!contract.orphaned && owners.length !== 1) {
+      throw new CliError(
+        `status returned pending contract ${contract.pendingVersion} without one owning source plan`,
+      );
+    }
+    for (const owner of owners) contractOwners.add(owner.version);
+  }
+
+  const dependencyBlocks = new Map(
+    reply.blocked.map((blocked) => [blocked.blocked, blocked]),
+  );
+  const pending: PendingMigrationPreview[] = [];
+  const blocked: BlockedMigrationPreview[] = [];
+
+  for (const candidate of candidates) {
+    if (contractOwners.has(candidate.version)) continue;
+
+    const plan = plansByVersion.get(candidate.version);
+    if (plan === undefined) {
+      throw new CliError(`status omitted plan detail for pending migration ${candidate.version}`);
+    }
+    if (reply.pendingContracts.length > 0 && plan.touchedTables === undefined) {
+      throw new CliError(
+        `status omitted apply's touched-table set for pending migration ${candidate.version}`,
+      );
+    }
+
+    // Apply checks the table interlock before an explicit dependency, so preserve
+    // that precedence when both describe the same migration. A NUL-prefixed
+    // touched-table entry is the lowerer's fail-closed unknown-table sentinel.
+    const touchesUnknown = plan.touchedTables?.some((table) => table.includes("\0")) ?? false;
+    const contract = reply.pendingContracts.find(
+      (entry) => touchesUnknown || plan.touchedTables?.includes(entry.table) === true,
+    );
+    if (contract !== undefined) {
+      blocked.push({
+        version: candidate.version,
+        name: candidate.name,
+        reason: statusReason(
+          contract.reason,
+          `pending contract ${contract.pendingVersion}`,
+        ),
+      });
+      continue;
+    }
+
+    const dependency = dependencyBlocks.get(candidate.version);
+    if (dependency !== undefined) {
+      blocked.push({
+        version: candidate.version,
+        name: candidate.name,
+        reason: statusReason(
+          dependency.reason,
+          `blocked migration ${candidate.version}`,
+        ),
+      });
+      continue;
+    }
+
+    pending.push(candidate);
+  }
+
+  return { pending, blocked };
+}
+
+/** Runnable authored migrations only. Kept as the focused public seam used by
+ * offline preview tests; blocked migrations are available from
+ * `migrationsForPlan`. */
+export function pendingMigrationsForPlan(
+  reply: StatusReply,
+  envelopes: readonly IrEnvelope[],
+): PendingMigrationPreview[] {
+  return migrationsForPlan(reply, envelopes).pending;
 }
 
 /** `plan` connects only for status reconciliation, then renders pending envelope
@@ -1120,7 +1229,7 @@ async function runLivePlan(args: Args): Promise<number> {
     process.stderr.write(formatStatusBusy(reply, "plan"));
     return 0;
   }
-  const pending = pendingMigrationsForPlan(reply, envelopes);
+  const { pending, blocked } = migrationsForPlan(reply, envelopes);
   const rendered = previewSql({
     envelopes: pending.map(({ envelope }) => JSON.stringify(envelope)),
     dialect: driver.kind,
@@ -1150,6 +1259,7 @@ async function runLivePlan(args: Args): Promise<number> {
             name,
             sql: rendered[index],
           })),
+          blocked,
           advisories,
         },
         null,
@@ -1160,6 +1270,11 @@ async function runLivePlan(args: Args): Promise<number> {
     const noun = pending.length === 1 ? "migration" : "migrations";
     process.stdout.write(`would apply ${pending.length} ${noun}\n`);
     for (const sql of rendered) process.stdout.write(`${sql}\n`);
+    for (const entry of blocked) {
+      process.stdout.write(
+        `blocked: ${entry.name} (${entry.version}): ${entry.reason}\n`,
+      );
+    }
     writeAdvisories(advisories);
   }
   return 0;
