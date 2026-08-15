@@ -349,6 +349,53 @@ mod tests {
         assert!(would_leave_credential(has_password, other_identities));
     }
 
+    /// Each Unlink button must name the provider it unlinks.
+    ///
+    /// The page renders one button per linked identity, and their visible text
+    /// is identical. Sighted users disambiguate from the row; a screen-reader
+    /// user tabbing the page hears "Unlink, button" once per provider with
+    /// nothing to tell them apart, and unlinking the wrong one is destructive
+    /// (it can be the account's last sign-in method - see
+    /// `refuses_unlink_when_orphans_account` above). WCAG 2.4.6.
+    ///
+    /// A blanket "every control has an accessible name" check passes on the
+    /// broken version, because "Unlink" IS a name. The property that matters is
+    /// that the names are DISTINCT, which is what this asserts.
+    ///
+    /// WHAT THIS DOES NOT COVER: that a screen reader prefers the aria-label
+    /// over the button text (it does, but that is UA behaviour), and the visual
+    /// presentation, which is deliberately unchanged.
+    #[test]
+    fn unlink_buttons_name_their_provider() {
+        use askama::Template;
+
+        let page = MePage {
+            email: "user@example.com",
+            name: "User",
+            avatar_url: None,
+            has_password: true,
+            identities: vec![
+                LinkedIdentity { provider: "google", email_at_link: "user@example.com" },
+                LinkedIdentity { provider: "github", email_at_link: "user@example.com" },
+            ],
+            csrf: "xyz",
+            error: None,
+            success: None,
+        };
+        let html = page.render().expect("render");
+
+        assert!(html.contains(r#"aria-label="Unlink google""#), "{html}");
+        assert!(html.contains(r#"aria-label="Unlink github""#), "{html}");
+        // The control: two buttons, two DISTINCT names. A single shared label
+        // would satisfy neither assertion above, but a hardcoded one would
+        // satisfy both while still being ambiguous - so count them too.
+        assert_eq!(
+            html.matches("aria-label=\"Unlink ").count(),
+            2,
+            "one label per identity: {html}"
+        );
+    }
+
     #[test]
     fn provider_path_segment_is_bounded() {
         assert!(valid_provider_path_segment("github"));

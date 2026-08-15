@@ -14,6 +14,22 @@ use std::sync::OnceLock;
 
 use crate::error::{AuthError, Result};
 
+/// Minimum password length, in CHARACTERS (not bytes, so a passphrase of
+/// non-ASCII graphemes is not penalised for its encoding).
+///
+/// One value, because this policy has to agree in four places: the `/signup`
+/// and `/reset` handlers, which are the enforcement, and the `minlength`
+/// attribute on both forms, which is the promise made to the user before they
+/// type. The two Rust sites now read this; `template_password_policy_test.rs`
+/// is what holds the two HTML attributes to it, since a template cannot import
+/// a constant.
+///
+/// A split between them is not merely untidy. If the attribute is lower than
+/// the check, the form accepts a password the server then rejects, and the user
+/// is told "at least 15 characters" by a page that just let them submit 8. If
+/// it is higher, the advertised policy is stricter than the enforced one.
+pub const MIN_PASSWORD_CHARS: usize = 15;
+
 fn argon2() -> Argon2<'static> {
     let params = Params::new(19_456, 2, 1, None).expect("argon2 params");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)

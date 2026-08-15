@@ -8,7 +8,7 @@
 <h2>Enter the code shown on your device</h2>
 {% endif %}
 {% if let Some(err) = error %}
-  <div class="error">{{ err }}</div>
+  <div class="error" role="alert" id="form-error">{{ err }}</div>
 {% endif %}
 {% if confirm %}
 <p>This app is asking for permission to:</p>
@@ -30,7 +30,8 @@
 <form method="POST" action="/device">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Device code
-    <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>
+    <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus
+           {% if error.is_some() %}aria-invalid="true" aria-describedby="form-error"{% endif %}>
   </label>
   <button type="submit">Continue</button>
 </form>
