@@ -192,3 +192,90 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
         quadratic.join("; ")
     );
 }
+
+/// F668: the op-kind sweep above still measured only ONE envelope SHAPE.
+///
+/// Every fixture in this file builds plain tables with no foreign keys, one
+/// schema, and no rows. Foreign-key-bearing envelopes took a different path and
+/// were still quadratic (4.48x) after F667: `logical_table_is_declared` and
+/// `logical_column_matches` scanned the whole declaration map once per foreign
+/// key. Measured 0.362s -> 1.623s before, 0.031s -> 0.065s after.
+///
+/// The op-kind sweep could not have caught this. Both helpers were converted
+/// SPECULATIVELY during F666 and the timings did not move by a microsecond,
+/// because that envelope had no foreign keys to reach them with -- a change that
+/// measured as worthless against the wrong fixture and was correctly reverted.
+/// The fixture, not the code, was what changed here.
+#[test]
+fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
+    fn envelope(shape: &str, n: usize) -> String {
+        let half = n / 2;
+        let mut ops: Vec<String> = Vec::new();
+        match shape {
+            // Each child table carries a foreign key into its own parent.
+            "foreignKey" => {
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"p{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}"#
+                    ));
+                }
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"k{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}},{{"name":"f0","type":"bigInt","nullable":false}}],"primaryKey":["c0"],"constraints":[{{"kind":{{"kind":"fk","columns":["f0"],"referencesTable":"p{i}","referencesColumns":["c0"]}}}}]}}"#
+                    ));
+                }
+            }
+            // Declarations spread over many schemas, so a table's group is not
+            // trivially unique and schema matching does real work.
+            "multiSchema" => {
+                for i in 0..n {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","schema":"s{}","name":"t{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}"#,
+                        i % 50
+                    ));
+                }
+            }
+            "perRow" => {
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"t{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}"#
+                    ));
+                }
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"insert","table":"t{i}","columns":["c0"],"rows":[[1]]}}"#
+                    ));
+                }
+            }
+            other => unreachable!("unhandled shape {other}"),
+        }
+        format!(r#"{{"ir_version":1,"name":"s","ops":[{}]}}"#, ops.join(","))
+    }
+
+    fn measure(shape: &str, n: usize) -> f64 {
+        let ir: MigrationIr = serde_json::from_str(&envelope(shape, n)).expect("envelope parses");
+        let start = Instant::now();
+        validate_ir(&ir, Dialect::Postgres, &[])
+            .unwrap_or_else(|e| panic!("{shape} fixture must be valid to measure anything: {e:?}"));
+        start.elapsed().as_secs_f64()
+    }
+
+    let mut quadratic = Vec::new();
+    for shape in ["foreignKey", "multiSchema", "perRow"] {
+        measure(shape, 1_000);
+        let small = measure(shape, 4_000).max(0.001);
+        let large = measure(shape, 8_000);
+        let ratio = large / small;
+        if ratio >= 3.0 {
+            quadratic.push(format!("{shape} {ratio:.1}x ({small:.3}s -> {large:.3}s)"));
+        }
+    }
+
+    assert!(
+        quadratic.is_empty(),
+        "doubling the op count multiplied validate_ir cost by ~4x for: {}. \
+         Above ~4x means a pass is scanning the whole declaration map once per op \
+         again, which is the quadratic F668 removed",
+        quadratic.join("; ")
+    );
+}

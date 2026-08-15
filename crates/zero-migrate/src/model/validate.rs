@@ -2626,12 +2626,19 @@ fn logical_column_matches<'a>(
     table: &str,
     column: &str,
 ) -> Vec<&'a LogicalColumnContract> {
+    // Ranged over the contiguous column group, not a scan: both of these are
+    // asked once per foreign key, so scanning the whole map here is quadratic in
+    // op count for FK-bearing envelopes (F668).
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: column.to_string(),
+        schema: None,
+    };
     declared
-        .iter()
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table && candidate.column == column)
         .filter(|(candidate, _)| {
-            candidate.table == table
-                && candidate.column == column
-                && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
+            schema_mode.destination_matches(candidate.schema.as_deref(), schema)
         })
         .map(|(_, contract)| contract)
         .collect()
@@ -2643,10 +2650,15 @@ fn logical_table_is_declared(
     schema: Option<&str>,
     table: &str,
 ) -> bool {
-    declared.keys().any(|candidate| {
-        candidate.table == table
-            && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
-    })
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: String::new(),
+        schema: None,
+    };
+    declared
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table)
+        .any(|(candidate, _)| schema_mode.destination_matches(candidate.schema.as_deref(), schema))
 }
 
 #[allow(clippy::too_many_arguments)]
