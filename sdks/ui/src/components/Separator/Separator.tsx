@@ -51,7 +51,6 @@
  */
 import { forwardRef, type ComponentPropsWithRef, type Ref } from "react";
 import { Separator as BaseSeparator } from "@base-ui/react/separator";
-import { classnames } from "../_classnames";
 
 export type SeparatorOrientation = "horizontal" | "vertical";
 export type SeparatorVariant = "hairline" | "thick";
@@ -112,12 +111,6 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
     },
     ref,
   ) {
-    const composedClassName = classnames(
-      "zs-separator",
-      `zs-separator--${orientation}`,
-      `zs-separator--${variant}`,
-      className,
-    );
 
     // Strip `role` / `aria-orientation` / `aria-hidden` / `render`
     // defensively in case a caller bypasses the type system (e.g.,
@@ -169,7 +162,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
         <div
           {...(restLocked as React.HTMLAttributes<HTMLDivElement>)}
           ref={ref}
-          className={composedClassName}
+          className={className}
           data-slot="separator"
           data-orientation={orientation}
           data-variant={variant}
@@ -194,7 +187,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
         {...(restLocked as BaseSeparatorProps)}
         ref={ref as Ref<HTMLDivElement>}
         orientation={orientation}
-        className={composedClassName}
+        className={className}
         data-slot="separator"
         data-orientation={orientation}
         data-variant={variant}

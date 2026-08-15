@@ -20,19 +20,19 @@
  *
  * Renders as (clickable horizontal, current = index 1):
  *
- *   <ol class="zs-stepper" data-slot="stepper" data-orientation="horizontal">
- *     <li class="zs-stepper__step" data-slot="stepper-step" data-status="complete">
- *       <button type="button" class="zs-stepper__trigger">
- *         <span class="zs-stepper__indicator" data-slot="stepper-indicator">
+ *   <ol data-slot="stepper" data-orientation="horizontal">
+ *     <li data-slot="stepper-step" data-status="complete">
+ *       <button type="button" data-slot="stepper-trigger">
+ *         <span data-slot="stepper-indicator">
  *           <Icon as={Check} aria-hidden />
  *         </span>
- *         <span class="zs-stepper__text">
- *           <span class="zs-stepper__label" data-slot="stepper-label">Account</span>
- *           <span class="zs-stepper__description" …>Your details</span>
- *           <span class="zs-visually-hidden">completed</span>
+ *         <span data-slot="stepper-text">
+ *           <span data-slot="stepper-label">Account</span>
+ *           <span data-slot="stepper-description">Your details</span>
+ *           <span data-slot="visually-hidden">completed</span>
  *         </span>
  *       </button>
- *       <span class="zs-stepper__connector" data-slot="stepper-connector" aria-hidden />
+ *       <span data-slot="stepper-connector" aria-hidden />
  *     </li>
  *     <li … data-status="current"  aria-current="step"> … </li>
  *     <li … data-status="upcoming"> … </li>
@@ -74,7 +74,6 @@ import {
   type ReactNode,
 } from "react";
 import { Check } from "lucide-react";
-import { classnames } from "../../components/_classnames";
 import { Icon } from "../../components/Icon";
 
 export type StepperOrientation = "horizontal" | "vertical";
@@ -163,7 +162,7 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
         ref={ref}
         data-slot="stepper"
         data-orientation={orientation}
-        className={classnames("zs-stepper", className)}
+        className={className}
       >
         {steps.map((step, index) => {
           // Pinned status wins; otherwise derive from position vs active.
@@ -183,7 +182,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
           const inner = (
             <>
               <span
-                className="zs-stepper__indicator"
                 data-slot="stepper-indicator"
               >
                 {isComplete ? (
@@ -193,7 +191,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   <Icon
                     as={Check}
                     size="sm"
-                    className="zs-stepper__check"
                     data-slot="stepper-check"
                   />
                 ) : (
@@ -202,13 +199,12 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   <span aria-hidden="true">{index + 1}</span>
                 )}
               </span>
-              <span className="zs-stepper__text" data-slot="stepper-text">
-                <span className="zs-stepper__label" data-slot="stepper-label">
+              <span data-slot="stepper-text">
+                <span data-slot="stepper-label">
                   {step.label}
                 </span>
                 {step.description != null ? (
                   <span
-                    className="zs-stepper__description"
                     data-slot="stepper-description"
                   >
                     {step.description}
@@ -216,7 +212,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                 ) : null}
                 {/* The non-color status carrier (WCAG 1.4.1). */}
                 <span
-                  className="zs-visually-hidden"
                   data-slot="visually-hidden"
                 >
                   {STATUS_WORD[status]}
@@ -228,7 +223,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
           return (
             <li
               key={step.id}
-              className="zs-stepper__step"
               data-slot="stepper-step"
               data-status={status}
               aria-current={status === "current" ? "step" : undefined}
@@ -236,7 +230,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
               {clickable ? (
                 <button
                   type="button"
-                  className="zs-stepper__trigger"
                   data-slot="stepper-trigger"
                   onClick={() => onStepChange?.(step.id, index)}
                 >
@@ -244,7 +237,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                 </button>
               ) : (
                 <span
-                  className="zs-stepper__trigger"
                   data-slot="stepper-trigger"
                 >
                   {inner}
@@ -255,7 +247,6 @@ export const Stepper = forwardRef<HTMLOListElement, StepperProps>(
                   already on the steps. Omitted after the last step. */}
               {!isLast ? (
                 <span
-                  className="zs-stepper__connector"
                   data-slot="stepper-connector"
                   aria-hidden="true"
                 />

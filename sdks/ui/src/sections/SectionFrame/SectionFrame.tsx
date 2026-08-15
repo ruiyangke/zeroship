@@ -13,7 +13,6 @@ import {
   type ElementType,
   type ReactNode,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { type Pad } from "../../layouts/_layout-primitives";
 import type { SectionTone } from "../_tone";
@@ -83,12 +82,11 @@ export const SectionHeader = forwardRef<HTMLDivElement, SectionHeaderProps>(
         data-align={align}
         data-layout={layout}
         data-title-size={titleSize}
-        className={classnames("zs-section-header", className)}
+        className={className}
       >
-        <div className="zs-section-header__text" data-slot="section-header-text">
+        <div data-slot="section-header-text">
           {eyebrow != null ? (
             <div
-              className="zs-section-header__eyebrow zs-section-eyebrow"
               data-slot="section-header-eyebrow"
             >
               {eyebrow}
@@ -96,7 +94,6 @@ export const SectionHeader = forwardRef<HTMLDivElement, SectionHeaderProps>(
           ) : null}
           {title != null ? (
             <Title
-              className="zs-section-header__title"
               data-slot="section-header-title"
             >
               {title}
@@ -104,7 +101,6 @@ export const SectionHeader = forwardRef<HTMLDivElement, SectionHeaderProps>(
           ) : null}
           {description != null ? (
             <p
-              className="zs-section-header__description"
               data-slot="section-header-description"
             >
               {description}
@@ -114,7 +110,6 @@ export const SectionHeader = forwardRef<HTMLDivElement, SectionHeaderProps>(
         </div>
         {actions != null ? (
           <div
-            className="zs-section-header__actions"
             data-slot="section-header-actions"
           >
             {actions}
@@ -149,13 +144,12 @@ export const SectionFrame = forwardRef<HTMLElement, SectionFrameProps>(
         data-section-band=""
         data-tone={tone}
         data-spacing={spacing}
-        className={classnames("zs-section-frame", className)}
+        className={className}
       >
         <Container
           size={size}
           padX={padX}
           data-slot="section-frame-inner"
-          className="zs-section-frame__inner"
         >
           {header != null ? header : null}
           {children}

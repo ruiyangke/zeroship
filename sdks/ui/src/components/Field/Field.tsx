@@ -35,15 +35,9 @@
  * control gets `aria-invalid` when `match` fires. We never overwrite
  * those attrs — see Input.tsx for the spread order discipline.
  *
- * ----------------------------------------------------------------------
- * `composeBaseClass` invariant (slice-2 review fix item 25):
- * ----------------------------------------------------------------------
- * Base UI's `className` prop accepts a `string | ((state) => string |
- * undefined)`. Every styled passthrough below uses `composeBaseClass`
- * so our static class always wins while preserving whatever the consumer
- * passes — string concats, callbacks wrap. Field.Required is the lone
- * exception (it's a native <span>, not a Base UI part, so its className
- * is just a string).
+ * Consumer className values pass through unchanged. Field.Control is the
+ * one merge point: it resolves a consumer state callback and combines the
+ * result with Base UI's render-prop className.
  */
 import {
   createContext,
@@ -56,7 +50,7 @@ import {
   type Ref,
 } from "react";
 import { Field as BaseField } from "@base-ui/react/field";
-import { classnames, composeBaseClass } from "../_classnames";
+import { classnames } from "../_classnames";
 
 /* ─── ref + describedby composition helpers ──────────────────────────────
  *
@@ -168,10 +162,6 @@ export function useFieldDisabledContext(): boolean {
 
 /* ─── styled wrappers around Base UI parts ───────────────────────────── */
 
-// `composeBaseClass` was hoisted to `../_classnames` (AlertDialog
-// review-fix item 10, Phase 2.C). Same shape — see file-header
-// invariant note above.
-
 type LabelProps = ComponentPropsWithoutRef<typeof BaseField.Label>;
 const FieldLabel = forwardRef<HTMLLabelElement, LabelProps>(function FieldLabel(
   { className, ...rest },
@@ -183,7 +173,7 @@ const FieldLabel = forwardRef<HTMLLabelElement, LabelProps>(function FieldLabel(
       // `HTMLLabelElement` because Label is a native <label> by
       // default. One safe widening cast keeps the public type clean.
       ref={ref as React.Ref<HTMLElement>}
-      className={composeBaseClass("zs-field__label", className)}
+      className={className}
       data-slot="field-label"
       {...rest}
     />
@@ -197,7 +187,7 @@ const FieldDescription = forwardRef<HTMLParagraphElement, DescriptionProps>(
     return (
       <BaseField.Description
         ref={ref}
-        className={composeBaseClass("zs-field__description", className)}
+        className={className}
         data-slot="field-description"
         {...rest}
       />
@@ -225,7 +215,7 @@ const FieldError = forwardRef<HTMLDivElement, ErrorProps>(function FieldError(
       role="alert"
       aria-live="polite"
       aria-atomic="true"
-      className={composeBaseClass("zs-field__error", className)}
+      className={className}
       data-slot="field-error"
       {...rest}
     />
@@ -298,11 +288,7 @@ const FieldControl = forwardRef<HTMLInputElement, ControlProps>(
               )}
               aria-describedby={mergedDescribedBy}
               aria-required={required || undefined}
-              className={classnames(
-                "zs-field__control",
-                callerClass,
-                controlProps.className,
-              )}
+              className={classnames(callerClass, controlProps.className)}
               data-slot="field-control"
             />
           );
@@ -321,7 +307,7 @@ const FieldItem = forwardRef<HTMLDivElement, ItemProps>(function FieldItem(
   return (
     <BaseField.Item
       ref={ref}
-      className={composeBaseClass("zs-field__item", className)}
+      className={className}
       data-slot="field-item"
       {...rest}
     />
@@ -354,10 +340,7 @@ export interface FieldRequiredProps extends ComponentPropsWithoutRef<"span"> {
  * actually reads it — the glyph is React children, so consumers
  * override per-instance with `<Field.Required>†</Field.Required>`.
  *
- * className uses plain `classnames` (not `composeBaseClass`) because
- * this is a native `<span>`, not a Base UI part — the callback
- * className signature doesn't apply. Asymmetric on purpose; see
- * the `composeBaseClass` invariant at the top of this file.
+ * className passes directly to this native `<span>`.
  */
 const FieldRequired = forwardRef<HTMLSpanElement, FieldRequiredProps>(
   function FieldRequired({ fallback, className, children, ...rest }, ref) {
@@ -369,11 +352,7 @@ const FieldRequired = forwardRef<HTMLSpanElement, FieldRequiredProps>(
       return (
         <span
           ref={ref}
-          className={classnames(
-            "zs-field__required",
-            "zs-field__required--fallback",
-            className,
-          )}
+          className={className}
           data-slot="field-required-fallback"
           {...rest}
         >
@@ -385,7 +364,7 @@ const FieldRequired = forwardRef<HTMLSpanElement, FieldRequiredProps>(
     return (
       <span
         ref={ref}
-        className={classnames("zs-field__required", className)}
+        className={className}
         data-slot="field-required"
         aria-hidden="true"
         {...rest}
@@ -421,12 +400,7 @@ function FieldRoot(
       <BaseField.Root
         ref={ref}
         disabled={disabled}
-        className={classnames(
-          "zs-field",
-          `zs-field--${orientation}`,
-          size ? `zs-field--${size}` : null,
-          className,
-        )}
+        className={className}
         data-slot="field"
         data-orientation={orientation}
         data-size={size}

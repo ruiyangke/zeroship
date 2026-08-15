@@ -38,7 +38,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import {
   type Gap,
   type Align,
@@ -106,7 +105,6 @@ export const Stack = forwardRef<HTMLDivElement, StackProps>(function Stack(
     }
   }
 
-  const composedClassName = classnames("zs-stack", className);
 
   // Layout values flow as inline custom properties consumed by Stack.css.
   // Only set a property when the prop is supplied so the CSS defaults win.
@@ -126,7 +124,7 @@ export const Stack = forwardRef<HTMLDivElement, StackProps>(function Stack(
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
       data-slot={dataSlot}
-      className={composedClassName}
+      className={className}
       style={layoutVars}
     >
       {children}

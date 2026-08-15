@@ -30,7 +30,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import {
   type Gap,
   type Align,
@@ -88,7 +87,6 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(
       }
     }
 
-    const composedClassName = classnames("zs-cluster", className);
 
     const layoutVars: React.CSSProperties = {
       "--cluster-gap": spaceVar(gap),
@@ -104,7 +102,7 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         data-slot={dataSlot}
-        className={composedClassName}
+        className={className}
         style={layoutVars}
       >
         {children}

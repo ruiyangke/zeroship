@@ -83,7 +83,6 @@ import {
 } from "react";
 import { Slider as BaseSlider } from "@base-ui/react/slider";
 import { useFieldContext } from "../Field";
-import { classnames } from "../_classnames";
 
 export type SliderSize = "sm" | "md" | "lg";
 export type SliderVariant = "default" | "outline";
@@ -314,7 +313,7 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
     //
     // Compute the active thumb's percentage and emit it as the
     // `--zs-slider-value-position` custom property on the Root. The
-    // value badge (`.zs-slider__value`) consumes it via
+    // value badge (`[data-slot="slider-value"]`) consumes it via
     // `inset-inline-start: var(--zs-slider-value-position, 50%)` so the
     // "60%" output floats above the thumb instead of pinning to the
     // top-right corner of the grid row.
@@ -412,13 +411,7 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
         onValueChange={handleValueChange as never}
         onValueCommitted={onValueCommitted as never}
         format={format}
-        className={classnames(
-          "zs-slider",
-          `zs-slider--${variant}`,
-          `zs-slider--${size}`,
-          `zs-slider--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="slider"
         style={mergedStyle}
         data-variant={variant}
@@ -432,21 +425,17 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
           // `for=` to the thumb input ids. The element is announced as part
           // of the slider — no extra aria needed.
           <BaseSlider.Value
-            className="zs-slider__value"
             data-slot="slider-value"
             data-testid={dataTestId ? `${dataTestId}-value` : undefined}
           />
         ) : null}
         <BaseSlider.Control
-          className="zs-slider__control"
           data-slot="slider-control"
         >
           <BaseSlider.Track
-            className="zs-slider__track"
             data-slot="slider-track"
           >
             <BaseSlider.Indicator
-              className="zs-slider__indicator"
               data-slot="slider-indicator"
             />
             {/* Per-thumb suffix labels — referenced by each thumb's
@@ -462,7 +451,6 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
                   <span
                     key={id}
                     id={id}
-                    className="zs-slider__thumb-suffix"
                     data-slot="slider-thumb-suffix"
                     style={visuallyHiddenStyle}
                   >
@@ -490,7 +478,6 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(
                 <BaseSlider.Thumb
                   key={index}
                   index={index}
-                  className="zs-slider__thumb"
                   data-slot="slider-thumb"
                   aria-label={thumbAriaLabel}
                   aria-labelledby={thumbAriaLabelledBy}

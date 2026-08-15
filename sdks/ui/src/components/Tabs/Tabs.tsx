@@ -109,7 +109,6 @@ import {
   type ReactNode,
 } from "react";
 import { Tabs as BaseTabs } from "@base-ui/react/tabs";
-import { classnames } from "../_classnames";
 
 export type TabsSize = "sm" | "md" | "lg";
 export type TabsVariant = "default" | "pill" | "card";
@@ -213,13 +212,7 @@ function TabsRootInner(
         {...rest}
         ref={ref}
         orientation={orientation}
-        className={classnames(
-          "zs-tabs",
-          `zs-tabs--${variant}`,
-          `zs-tabs--${size}`,
-          `zs-tabs--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="tabs"
         data-variant={variant}
         data-size={size}
@@ -275,13 +268,7 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
     <BaseTabs.List
       {...rest}
       ref={ref}
-      className={classnames(
-        "zs-tabs-list",
-        `zs-tabs-list--${variant}`,
-        `zs-tabs-list--${size}`,
-        `zs-tabs-list--${orientation}`,
-        className,
-      )}
+      className={className}
       data-slot="tabs-list"
       data-variant={variant}
       data-size={size}
@@ -340,13 +327,7 @@ const TabsTab = forwardRef<HTMLButtonElement, TabsTabProps>(function TabsTab(
       // TabsTabProps so a caller can't override the stamp by spreading
       // a `type="submit"` through `...rest`.
       type="button"
-      className={classnames(
-        "zs-tabs-tab",
-        `zs-tabs-tab--${ctx.variant}`,
-        `zs-tabs-tab--${size}`,
-        `zs-tabs-tab--${ctx.orientation}`,
-        className,
-      )}
+      className={className}
       data-slot="tabs-tab"
       data-variant={ctx.variant}
       data-size={size}
@@ -395,13 +376,7 @@ const TabsPanel = forwardRef<HTMLDivElement, TabsPanelProps>(function TabsPanel(
       ref={ref}
       value={value}
       keepMounted={resolvedKeepMounted}
-      className={classnames(
-        "zs-tabs-panel",
-        `zs-tabs-panel--${ctx.variant}`,
-        `zs-tabs-panel--${ctx.size}`,
-        `zs-tabs-panel--${ctx.orientation}`,
-        className,
-      )}
+      className={className}
       data-slot="tabs-panel"
       data-variant={ctx.variant}
       data-size={ctx.size}
@@ -430,13 +405,7 @@ const TabsIndicator = forwardRef<HTMLSpanElement, TabsIndicatorProps>(
       <BaseTabs.Indicator
         {...rest}
         ref={ref}
-        className={classnames(
-          "zs-tabs-indicator",
-          `zs-tabs-indicator--${variant}`,
-          `zs-tabs-indicator--${size}`,
-          `zs-tabs-indicator--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="tabs-indicator"
         data-variant={variant}
         data-size={size}

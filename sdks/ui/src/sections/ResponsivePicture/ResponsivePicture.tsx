@@ -11,7 +11,6 @@ import {
   type ComponentPropsWithoutRef,
   type CSSProperties,
 } from "react";
-import { classnames } from "../../components/_classnames";
 
 export interface ResponsivePictureSource {
   srcSet: string;
@@ -101,7 +100,7 @@ export const ResponsivePicture = forwardRef<
       data-fit={fit}
       data-radius={radius}
       data-frame={frame}
-      className={classnames("zs-responsive-picture", className)}
+      className={className}
     >
       {sources?.map((source) => (
         <source
@@ -118,7 +117,7 @@ export const ResponsivePicture = forwardRef<
         alt={alt}
         sizes={sizes}
         data-slot="responsive-picture-img"
-        className={classnames("zs-responsive-picture__img", imageClassName)}
+        className={imageClassName}
         style={imageStyle}
       />
     </picture>

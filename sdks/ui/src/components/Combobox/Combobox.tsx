@@ -46,7 +46,6 @@ import { Check, ChevronDown, X } from "lucide-react";
 import { Combobox as BaseCombobox } from "@base-ui/react/combobox";
 import { useFieldContext, type FieldSize } from "../Field";
 import { Icon } from "../Icon";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type ComboboxSize = "sm" | "md" | "lg";
 export type ComboboxVariant = "default" | "outline";
@@ -295,19 +294,13 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
       <BaseCombobox.Root {...rootProps}>
         <BaseCombobox.InputGroup
           data-testid={dataTestid}
-          className={classnames(
-            "zs-combobox-input-group",
-            `zs-combobox-input-group--${variant}`,
-            `zs-combobox-input-group--${size}`,
-            className,
-          )}
+          className={className}
           data-slot="combobox-input-group"
           data-variant={variant}
           data-size={size}
         >
           {isMultiple ? (
             <BaseCombobox.Chips
-              className="zs-combobox-chips"
               data-slot="combobox-chips"
             >
               <BaseCombobox.Value>
@@ -321,7 +314,6 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
                         ))
                       : null}
                     <BaseCombobox.Input
-                      className="zs-combobox-input"
                       data-slot="combobox-input"
                       placeholder={placeholder}
                       {...inputAriaProps}
@@ -332,14 +324,12 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
             </BaseCombobox.Chips>
           ) : (
             <BaseCombobox.Input
-              className="zs-combobox-input"
               data-slot="combobox-input"
               placeholder={placeholder}
               {...inputAriaProps}
             />
           )}
           <BaseCombobox.Icon
-            className="zs-combobox-input-group__icon"
             data-slot="combobox-input-group-icon"
             aria-hidden="true"
           >
@@ -348,22 +338,16 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
         </BaseCombobox.InputGroup>
         <BaseCombobox.Portal>
           <BaseCombobox.Positioner
-            className="zs-combobox-positioner"
             data-slot="combobox-positioner"
             align={align}
             side={placement}
             sideOffset={sideOffset}
           >
             <BaseCombobox.Popup
-              className={classnames(
-                "zs-combobox-popup",
-                `zs-combobox-popup--${size}`,
-              )}
               data-slot="combobox-popup"
               data-size={size}
             >
               <BaseCombobox.List
-                className="zs-combobox-list"
                 data-slot="combobox-list"
               >
                 {children as ReactNode}
@@ -391,19 +375,18 @@ const ComboboxItem = forwardRef<HTMLDivElement, ComboboxItemProps>(
     return (
       <BaseCombobox.Item
         ref={ref}
-        className={composeBaseClass("zs-combobox-item", className)}
+        className={className}
         data-slot="combobox-item"
         data-size={size}
         {...rest}
       >
         <BaseCombobox.ItemIndicator
-          className="zs-combobox-item__indicator"
           data-slot="combobox-item-indicator"
           keepMounted
         >
           <Icon as={Check} size="sm" />
         </BaseCombobox.ItemIndicator>
-        <span className="zs-combobox-item__text" data-slot="combobox-item-text">
+        <span data-slot="combobox-item-text">
           {children}
         </span>
       </BaseCombobox.Item>
@@ -422,7 +405,7 @@ const ComboboxEmpty = forwardRef<HTMLDivElement, ComboboxEmptyProps>(
     return (
       <BaseCombobox.Empty
         ref={ref}
-        className={composeBaseClass("zs-combobox-empty", className)}
+        className={className}
         data-slot="combobox-empty"
         {...rest}
       />
@@ -462,18 +445,16 @@ const ComboboxChip = forwardRef<HTMLDivElement, ComboboxChipProps>(
     return (
       <BaseCombobox.Chip
         ref={ref}
-        className={composeBaseClass("zs-combobox-chip", className)}
+        className={className}
         data-slot="combobox-chip"
         {...rest}
       >
         <span
-          className="zs-combobox-chip__label"
           data-slot="combobox-chip-label"
         >
           {children}
         </span>
         <BaseCombobox.ChipRemove
-          className="zs-combobox-chip__remove"
           data-slot="combobox-chip-remove"
           aria-label={removeLabel}
         >

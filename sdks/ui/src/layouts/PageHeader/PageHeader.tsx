@@ -67,7 +67,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Stack } from "../Stack";
 import { Cluster } from "../Cluster";
 import {
@@ -131,7 +130,7 @@ const PageHeaderRoot = forwardRef<HTMLDivElement, PageHeaderProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         data-slot="page-header"
-        className={classnames("zs-page-header", className)}
+        className={className}
       >
         {children}
       </Comp>
@@ -147,8 +146,8 @@ PageHeaderRoot.displayName = "PageHeader";
  * props (ergonomic `items`, compound `children`, `separator`, `maxItems`,
  * `aria-label`, `className`) pass straight through, so the band gets the
  * full trail surface — collapse, asChild router links, the dual API — for
- * free. The `zs-page-header__breadcrumbs` class is composed alongside the
- * block's own class so the band CSS can still target the region.
+ * free. Its explicit `page-header-breadcrumbs` data-slot lets the band CSS
+ * target the region.
  */
 const PageHeaderBreadcrumbs = forwardRef<
   HTMLElement,
@@ -159,7 +158,7 @@ const PageHeaderBreadcrumbs = forwardRef<
       {...rest}
       ref={ref}
       data-slot="page-header-breadcrumbs"
-      className={classnames("zs-page-header__breadcrumbs", className)}
+      className={className}
     />
   );
 });
@@ -192,7 +191,7 @@ const PageHeaderTitle = forwardRef<HTMLHeadingElement, PageHeaderTitleProps>(
           {...rest}
           ref={ref as Ref<unknown>}
           data-slot="page-header-title"
-          className={classnames("zs-page-header__title", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -205,7 +204,7 @@ const PageHeaderTitle = forwardRef<HTMLHeadingElement, PageHeaderTitleProps>(
         {...rest}
         ref={ref}
         data-slot="page-header-title"
-        className={classnames("zs-page-header__title", className)}
+        className={className}
       >
         {children}
       </h1>
@@ -225,7 +224,7 @@ const PageHeaderDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="page-header-description"
-      className={classnames("zs-page-header__description", className)}
+      className={className}
     />
   );
 });
@@ -239,16 +238,14 @@ const PageHeaderActions = forwardRef<HTMLDivElement, PageHeaderActionsProps>(
     // justified to the end). Cluster owns the layout; we pass the semantic
     // `data-slot="page-header-actions"` (Cluster honors a consumer
     // data-slot, defaulting to `"cluster"`) so the composed part owns its
-    // slot vocabulary, and add `zs-page-header__actions` via Cluster's
-    // `classnames` composition so the band's CSS + consumers can target
-    // the actions group.
+    // slot vocabulary and the band's CSS can target the actions group.
     return (
       <Cluster
         {...rest}
         ref={ref}
         justify="end"
         data-slot="page-header-actions"
-        className={classnames("zs-page-header__actions", className)}
+        className={className}
       >
         {children}
       </Cluster>
@@ -271,15 +268,14 @@ const PageHeaderText = forwardRef<HTMLDivElement, PageHeaderTextProps>(
     // Stack owns the layout; we pass the semantic
     // `data-slot="page-header-text"` (Stack honors a consumer data-slot,
     // defaulting to `"stack"`) so the composed part owns its slot
-    // vocabulary, and add `zs-page-header__text` via Stack's `classnames`
-    // composition.
+    // vocabulary.
     return (
       <Stack
         {...rest}
         ref={ref}
         gap={1}
         data-slot="page-header-text"
-        className={classnames("zs-page-header__text", className)}
+        className={className}
       >
         {children}
       </Stack>

@@ -65,7 +65,6 @@ import {
 } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
 import { Icon } from "../Icon/Icon";
-import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
 export type CheckboxSize = "sm" | "md" | "lg";
@@ -174,12 +173,6 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
     const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
     const required = requiredProp ?? fieldCtx?.required ?? false;
 
-    const chipClassName = classnames(
-      "zs-checkbox",
-      `zs-checkbox--${size}`,
-      `zs-checkbox--${variant}`,
-      className,
-    );
 
     // The visible chip is what Base UI renders as a <span>. We only
     // ever touch the className + data attributes from here; the hidden
@@ -191,7 +184,7 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
         disabled={disabled || undefined}
         required={required || undefined}
         indeterminate={indeterminate || undefined}
-        className={chipClassName}
+        className={className}
         data-slot="checkbox"
         data-size={size}
         data-variant={variant}
@@ -206,7 +199,6 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
          */}
         <BaseCheckbox.Indicator
           keepMounted
-          className="zs-checkbox__indicator"
           data-slot="checkbox-indicator"
         >
           <IndicatorCheck />
@@ -229,7 +221,6 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
         >
           {chip}
           <span
-            className="zs-checkbox-field__text"
             data-slot="checkbox-field-text"
           >
             {label}

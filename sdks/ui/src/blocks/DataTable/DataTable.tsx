@@ -151,7 +151,6 @@ import {
   Minus,
   MoreVertical,
 } from "lucide-react";
-import { classnames } from "../../components/_classnames";
 import { Badge, type BadgeIntent } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Checkbox } from "../../components/Checkbox";
@@ -504,14 +503,12 @@ function SortGlyph({ state }: { state: "ascending" | "descending" | "none" }) {
         : ChevronsUpDown;
   return (
     <span
-      className="zs-data-table__sort-glyph"
       data-slot="data-table-sort-glyph"
       aria-hidden="true"
       data-state={state}
     >
       <Icon
         as={Glyph}
-        className="zs-data-table__sort-glyph-icon"
         data-slot="data-table-sort-glyph-icon"
       />
     </span>
@@ -524,7 +521,6 @@ function BoolGlyph({ value }: { value: boolean }) {
     <Icon
       as={value ? Check : Minus}
       size="sm"
-      className="zs-data-table__bool-glyph"
       data-slot="data-table-bool-glyph"
       data-value={value ? "true" : "false"}
     />
@@ -552,7 +548,6 @@ function RowActions({ actions }: { actions: DataTableRowAction[] }) {
             size="small"
             aria-label="Row actions"
             data-slot="data-table-row-actions-trigger"
-            className="zs-data-table__row-actions-trigger"
           >
             <KebabGlyph />
           </Button>
@@ -566,9 +561,6 @@ function RowActions({ actions }: { actions: DataTableRowAction[] }) {
               disabled={action.disabled}
               data-danger={action.danger ? "" : undefined}
               data-testid={action["data-testid"]}
-              className={
-                action.danger ? "zs-data-table__row-action--danger" : undefined
-              }
               data-slot="data-table-row-action-danger"
               onClick={() => action.onSelect()}
             >
@@ -635,13 +627,11 @@ function DefaultCell<T>({
       // Glyph + a visible OR SR-only text label — never color/glyph alone.
       return (
         <span
-          className="zs-data-table__bool"
           data-slot="data-table-bool"
           data-value={b ? "true" : "false"}
         >
           <BoolGlyph value={b} />
           <span
-            className="zs-data-table__bool-label"
             data-slot="data-table-bool-label"
           >
             {label}
@@ -667,7 +657,6 @@ function DefaultCell<T>({
         column.linkRel ?? (target === "_blank" ? "noreferrer" : undefined);
       return (
         <a
-          className="zs-data-table__link"
           data-slot="data-table-link"
           href={href}
           target={target}
@@ -1191,12 +1180,6 @@ function DataTableInner<T>(
     return () => ro.disconnect();
   }, [stickyHeader, showColumnFilters, density, columns]);
 
-  const tableClassName = classnames(
-    "zs-data-table",
-    `zs-data-table--${density}`,
-    stickyHeader ? "zs-data-table--sticky" : null,
-  );
-
   // The slot is a closed set, not any string: a theme targets these two by
   // name, so widening it here would silently put a slot beyond the reach of
   // both the stylesheet and the coverage check.
@@ -1206,7 +1189,6 @@ function DataTableInner<T>(
   ) => (
     <tr data-slot={slot}>
       <td
-        className="zs-data-table__state-cell"
         data-slot="data-table-state-cell"
         colSpan={totalColumns}
       >
@@ -1237,25 +1219,22 @@ function DataTableInner<T>(
       {...rest}
       data-slot={dataSlot}
       data-density={density}
-      className={classnames("zs-data-table-shell", className)}
+      className={className}
     >
       {showToolbar ? (
         <Cluster
           gap={3}
           align="center"
           justify="between"
-          className="zs-data-table__toolbar"
           data-slot="data-table-toolbar"
         >
           <Cluster
             gap={3}
             align="center"
-            className="zs-data-table__toolbar-start"
             data-slot="data-table-toolbar-start"
           >
             {title != null ? (
               <div
-                className="zs-data-table__title"
                 data-slot="data-table-title"
               >
                 {title}
@@ -1265,7 +1244,6 @@ function DataTableInner<T>(
           <Cluster
             gap={2}
             align="center"
-            className="zs-data-table__toolbar-end"
             data-slot="data-table-toolbar-end"
           >
             {showSearch ? (
@@ -1276,7 +1254,6 @@ function DataTableInner<T>(
                 placeholder={searchPlaceholder}
                 value={globalFilter}
                 onChange={(e) => handleGlobalFilter(e.currentTarget.value)}
-                className="zs-data-table__search"
                 data-slot="data-table-search"
                 data-testid="data-table-search"
               />
@@ -1288,21 +1265,18 @@ function DataTableInner<T>(
 
       <div
         ref={scrollRef}
-        className="zs-data-table__scroll"
         data-slot="data-table-scroll"
         data-sticky={stickyHeader ? "" : undefined}
       >
         <table
           ref={ref}
           aria-label={ariaLabel}
-          className={tableClassName}
           data-slot="data-table-table"
           data-density={density}
           data-sticky={stickyHeader || undefined}
         >
           {caption != null ? (
             <caption
-              className="zs-data-table__caption"
               data-slot="data-table-caption"
             >
               {caption}
@@ -1313,7 +1287,6 @@ function DataTableInner<T>(
             <colgroup>
               {hasSelection ? (
                 <col
-                  className="zs-data-table__select-col"
                   data-slot="data-table-select-col"
                 />
               ) : null}
@@ -1336,7 +1309,6 @@ function DataTableInner<T>(
                 <th
                   scope="col"
                   data-slot="data-table-select-header"
-                  className="zs-data-table__select-cell"
                 >
                   {isMultiple ? (
                     <Checkbox
@@ -1349,7 +1321,6 @@ function DataTableInner<T>(
                     />
                   ) : (
                     <span
-                      className="zs-visually-hidden"
                       data-slot="visually-hidden"
                     >
                       Select
@@ -1370,21 +1341,15 @@ function DataTableInner<T>(
                     data-align={align}
                     data-type={column.type}
                     aria-sort={sortState}
-                    className={classnames(
-                      "zs-data-table__th",
-                      isActions ? "zs-data-table__th--actions" : null,
-                    )}
                   >
                     {column.sortable && !isActions ? (
                       <button
                         type="button"
-                        className="zs-data-table__sort-button"
                         data-slot="data-table-sort-button"
                         onClick={() => handleHeaderSort(column)}
                         data-testid={`data-table-sort-${column.key}`}
                       >
                         <span
-                          className="zs-data-table__header-label"
                           data-slot="data-table-header-label"
                         >
                           {column.header}
@@ -1393,14 +1358,12 @@ function DataTableInner<T>(
                       </button>
                     ) : isActions ? (
                       <span
-                        className="zs-visually-hidden"
                         data-slot="visually-hidden"
                       >
                         {column.header ?? "Actions"}
                       </span>
                     ) : (
                       <span
-                        className="zs-data-table__header-label"
                         data-slot="data-table-header-label"
                       >
                         {column.header}
@@ -1414,11 +1377,9 @@ function DataTableInner<T>(
             {showColumnFilters ? (
               <tr
                 data-slot="data-table-filter-row"
-                className="zs-data-table__filter-row"
               >
                 {hasSelection ? (
                   <th
-                    className="zs-data-table__select-cell"
                     data-slot="data-table-select-cell"
                     aria-hidden="true"
                   />
@@ -1433,7 +1394,6 @@ function DataTableInner<T>(
                   return (
                     <th
                       key={column.key}
-                      className="zs-data-table__filter-cell"
                       data-slot="data-table-filter-cell"
                       data-column={column.key}
                       // An ineligible column renders no filter input → the
@@ -1455,7 +1415,6 @@ function DataTableInner<T>(
                               e.currentTarget.value,
                             )
                           }
-                          className="zs-data-table__filter-input"
                           data-slot="data-table-filter-input"
                           data-testid={`data-table-filter-${column.key}`}
                         />
@@ -1480,7 +1439,6 @@ function DataTableInner<T>(
                       >
                         {hasSelection ? (
                           <td
-                            className="zs-data-table__select-cell"
                             data-slot="data-table-select-cell"
                           >
                             <Skeleton variant="text" width="1rem" />
@@ -1492,7 +1450,6 @@ function DataTableInner<T>(
                             data-align={resolveAlign(
                               column as DataTableColumn<unknown>,
                             )}
-                            className="zs-data-table__td"
                             data-slot="data-table-td"
                           >
                             <Skeleton variant="text" />
@@ -1549,7 +1506,6 @@ function DataTableInner<T>(
                         >
                           {hasSelection ? (
                             <td
-                              className="zs-data-table__select-cell"
                               data-slot="data-table-select-cell"
                             >
                               <Checkbox
@@ -1572,7 +1528,6 @@ function DataTableInner<T>(
                             ) : (
                               <DefaultCell column={column} row={row} />
                             );
-                            const isActions = column.type === "actions";
                             return (
                               <td
                                 key={column.key}
@@ -1582,19 +1537,9 @@ function DataTableInner<T>(
                                 data-type={column.type}
                                 data-truncate={column.truncate || undefined}
                                 style={cellStyle(column)}
-                                className={classnames(
-                                  "zs-data-table__td",
-                                  column.truncate
-                                    ? "zs-data-table__td--truncate"
-                                    : null,
-                                  isActions
-                                    ? "zs-data-table__td--actions"
-                                    : null,
-                                )}
                               >
                                 {column.truncate ? (
                                   <span
-                                    className="zs-data-table__truncate"
                                     data-slot="data-table-truncate"
                                     title={
                                       typeof content === "string"
@@ -1618,7 +1563,7 @@ function DataTableInner<T>(
       </div>
 
       {showPagination ? (
-        <div className="zs-data-table__footer" data-slot="data-table-footer">
+        <div data-slot="data-table-footer">
           <Pagination
             size="sm"
             page={currentPage}

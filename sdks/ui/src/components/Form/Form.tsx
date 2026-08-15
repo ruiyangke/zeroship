@@ -25,7 +25,7 @@
  *      page-level container without nesting in a Card.
  *   3. A consistent `data-variant` attribute so consumer CSS can
  *      target the surfaced vs surface-less shells without poking
- *      at our internal class names.
+ *      at implementation details.
  *
  * Anti-patterns we explicitly avoid:
  *   - No `onSuccess`/`onError` props on Form. The `onFormSubmit`
@@ -45,17 +45,11 @@
  * own submit handler focuses the first invalid field's control
  * after validation fails.
  *
- * ----------------------------------------------------------------------
- * `composeBaseClass` invariant:
- * ----------------------------------------------------------------------
- * The Base UI `className` prop accepts `string | ((state) => string |
- * undefined)`. The styled wrapper below composes via `composeBaseClass`
- * so our static class always wins while preserving consumer strings or
- * callbacks. Same shape Dialog / Field / Card use.
+ * The consumer `className` is forwarded unchanged, including Base UI's
+ * state-callback form.
  */
 import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { Form as BaseForm } from "@base-ui/react/form";
-import { composeBaseClass } from "../_classnames";
 
 export type FormVariant = "default" | "card";
 
@@ -154,10 +148,7 @@ function FormRoot<FormValues extends object = Record<string, unknown>>(
     <BaseForm
       ref={ref}
       onFormSubmit={baseOnFormSubmit}
-      className={composeBaseClass<{}>(
-        variant === "card" ? "zs-form zs-form--card" : "zs-form",
-        className,
-      )}
+      className={className}
       data-slot="form-card"
       data-variant={variant}
       {...rest}

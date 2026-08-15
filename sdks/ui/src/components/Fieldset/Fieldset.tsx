@@ -57,13 +57,7 @@
  * never overwrite the wired attrs — see the spread order
  * discipline below.
  *
- * ----------------------------------------------------------------------
- * `composeBaseClass` invariant:
- * ----------------------------------------------------------------------
- * The Base UI `className` prop accepts `string | ((state) => string |
- * undefined)`. Every styled passthrough uses `composeBaseClass` so our
- * static class always wins while preserving consumer strings or
- * callbacks. Field / Dialog / Card all share this shape.
+ * Consumer className strings and state callbacks pass through unchanged.
  */
 import {
   createContext,
@@ -73,7 +67,6 @@ import {
   type ComponentPropsWithRef,
 } from "react";
 import { Fieldset as BaseFieldset } from "@base-ui/react/fieldset";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type FieldsetSize = "sm" | "md" | "lg";
 
@@ -168,7 +161,7 @@ const FieldsetLegend = forwardRef<HTMLDivElement, FieldsetLegendProps>(
     return (
       <BaseFieldset.Legend
         ref={ref}
-        className={composeBaseClass("zs-fieldset__legend", className)}
+        className={className}
         data-slot="fieldset-legend"
         {...rest}
       />
@@ -265,13 +258,7 @@ function FieldsetRoot(
         render={(props, state) => (
           <fieldset {...props} disabled={state.disabled || undefined} />
         )}
-        className={composeBaseClass(
-          classnames(
-            "zs-fieldset",
-            size !== "md" ? `zs-fieldset--${size}` : null,
-          ),
-          className,
-        )}
+        className={className}
         data-size={size}
         data-disabled={effectiveDisabled ? "" : undefined}
         {...rest}

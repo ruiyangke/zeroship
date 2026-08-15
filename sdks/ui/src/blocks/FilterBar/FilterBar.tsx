@@ -48,7 +48,6 @@ import {
   type ReactNode,
 } from "react";
 import { Search } from "lucide-react";
-import { classnames } from "../../components/_classnames";
 import { Input } from "../../components/Input";
 import { Tag } from "../../components/Tag";
 import { Button } from "../../components/Button";
@@ -169,7 +168,7 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
         // unknown props to its <div>.)
         role={searchable ? "search" : undefined}
         data-slot="filter-bar"
-        className={classnames("zs-filter-bar", className)}
+        className={className}
       >
         {searchable ? (
           <Input
@@ -225,7 +224,6 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
         {/* Flex spacer — pushes `actions` to the inline-end edge on a
             single line; harmless (zero-size) once the row wraps. */}
         <span
-          className="zs-filter-bar__spacer"
           data-slot="filter-bar-spacer"
           aria-hidden="true"
         />

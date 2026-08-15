@@ -66,7 +66,6 @@ import {
   type Ref,
 } from "react";
 import { Avatar as BaseAvatar } from "@base-ui/react/avatar";
-import { classnames } from "../_classnames";
 
 export type AvatarSize = "xs" | "sm" | "md" | "lg" | "xl";
 export type AvatarShape = "circle" | "square" | "rounded";
@@ -117,12 +116,7 @@ const AvatarRoot = forwardRef<HTMLSpanElement, AvatarRootProps>(
       <BaseAvatar.Root
         {...(rest as BaseRootProps)}
         ref={ref as Ref<HTMLSpanElement>}
-        className={classnames(
-          "zs-avatar",
-          `zs-avatar--${size}`,
-          `zs-avatar--${shape}`,
-          className,
-        )}
+        className={className}
         data-slot="avatar"
         data-size={size}
         data-shape={shape}
@@ -169,7 +163,7 @@ const AvatarImage = forwardRef<HTMLImageElement, AvatarImageProps>(
         {...(rest as BaseImageProps)}
         ref={ref}
         alt={alt}
-        className={classnames("zs-avatar__image", className)}
+        className={className}
         data-slot="avatar-image"
       />
     );
@@ -202,7 +196,7 @@ const AvatarFallback = forwardRef<HTMLSpanElement, AvatarFallbackProps>(
       <BaseAvatar.Fallback
         {...(rest as BaseFallbackProps)}
         ref={ref as Ref<HTMLSpanElement>}
-        className={classnames("zs-avatar__fallback", className)}
+        className={className}
         data-slot="avatar-fallback"
       >
         {children}

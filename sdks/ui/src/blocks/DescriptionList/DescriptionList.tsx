@@ -36,7 +36,6 @@
  * native dl/dt/dd elements.
  */
 import { forwardRef, type ComponentPropsWithoutRef } from "react";
-import { classnames } from "../../components/_classnames";
 
 export type DescriptionListOrientation = "horizontal" | "vertical";
 
@@ -67,12 +66,7 @@ const DescriptionListRoot = forwardRef<HTMLDListElement, DescriptionListProps>(
         data-slot="description-list"
         data-orientation={orientation}
         data-divider={divider ? "" : undefined}
-        className={classnames(
-          "zs-description-list",
-          `zs-description-list--${orientation}`,
-          divider ? "zs-description-list--divided" : null,
-          className,
-        )}
+        className={className}
       />
     );
   },
@@ -96,7 +90,7 @@ const DescriptionListItem = forwardRef<
       {...rest}
       ref={ref}
       data-slot="description-list-item"
-      className={classnames("zs-description-list__item", className)}
+      className={className}
     />
   );
 });
@@ -109,7 +103,7 @@ const DescriptionListTerm = forwardRef<HTMLElement, DescriptionListTermProps>(
         {...rest}
         ref={ref}
         data-slot="description-list-term"
-        className={classnames("zs-description-list__term", className)}
+        className={className}
       />
     );
   },
@@ -125,7 +119,7 @@ const DescriptionListDetail = forwardRef<
       {...rest}
       ref={ref}
       data-slot="description-list-detail"
-      className={classnames("zs-description-list__detail", className)}
+      className={className}
     />
   );
 });

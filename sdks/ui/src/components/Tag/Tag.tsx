@@ -42,7 +42,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../_classnames";
 
 export type TagSize = "sm" | "md";
 
@@ -117,7 +116,6 @@ function RemoveButton({
     <button
       type="button"
       data-slot="tag-remove"
-      className="zs-tag__remove"
       aria-label={label}
       data-size={size}
       onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -140,7 +138,6 @@ function RemoveButton({
     >
       <span
         aria-hidden="true"
-        className="zs-tag__remove-glyph"
         data-slot="tag-remove-glyph"
       >
         {/* Multiplication sign — the canonical close glyph. */}×
@@ -224,22 +221,15 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
     }
   }
 
-  const composedClassName = classnames(
-    "zs-tag",
-    `zs-tag--${size}`,
-    isFilter && "zs-tag--filter",
-    showRemove && "zs-tag--removable",
-    className,
-  );
 
   const inner = (
     <>
       {leadingIcon != null ? (
-        <span aria-hidden="true" className="zs-tag__icon" data-slot="tag-icon">
+        <span aria-hidden="true" data-slot="tag-icon">
           {leadingIcon}
         </span>
       ) : null}
-      <span className="zs-tag__label" data-slot="tag-label">
+      <span data-slot="tag-label">
         {children}
       </span>
     </>
@@ -258,7 +248,7 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
         data-filter={isFilter || undefined}
         data-removable={showRemove || undefined}
         data-selected={isSelected ? "" : undefined}
-        className={composedClassName}
+        className={className}
         aria-pressed={isSelected}
         onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
           (
@@ -292,7 +282,7 @@ export const Tag = forwardRef<HTMLElement, TagProps>(function Tag(
       data-size={size}
       data-filter={isFilter || undefined}
       data-removable={showRemove || undefined}
-      className={composedClassName}
+      className={className}
       onClick={
         onClick as ((e: ReactMouseEvent<HTMLSpanElement>) => void) | undefined
       }

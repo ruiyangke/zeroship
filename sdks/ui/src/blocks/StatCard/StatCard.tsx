@@ -16,15 +16,15 @@
  *
  * Renders as:
  *
- *   <Card variant="elevated">           ← the composed surface
- *     <div class="zs-stat-card__head">  ← label row (+ optional icon)
- *       <div class="zs-stat-card__label">Monthly revenue</div>
- *       <div class="zs-stat-card__icon" aria-hidden>…</div>
+ *   <Card variant="elevated">
+ *     <div data-slot="stat-card-head">
+ *       <div data-slot="stat-card-label">Monthly revenue</div>
+ *       <div data-slot="stat-card-icon" aria-hidden>...</div>
  *     </div>
- *     <div class="zs-stat-card__value">$48,120</div>
- *     <div class="zs-stat-card__delta" data-direction="up">
- *       <span class="zs-stat-card__delta-glyph" aria-hidden>▲</span>
- *       <span class="zs-visually-hidden">increased </span>
+ *     <div data-slot="stat-card-value">$48,120</div>
+ *     <div data-slot="stat-card-delta" data-direction="up">
+ *       <span data-slot="stat-card-delta-glyph" aria-hidden>+</span>
+ *       <span data-slot="visually-hidden">increased </span>
  *       12%
  *     </div>
  *   </Card>
@@ -51,7 +51,6 @@ import {
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Card, type CardVariant, type CardSize } from "../../components/Card";
 
 export type StatCardDeltaDirection = "up" | "down" | "flat";
@@ -124,16 +123,15 @@ export const StatCard = forwardRef<HTMLDivElement, StatCardProps>(
         variant={variant}
         size={size}
         data-slot="stat-card"
-        className={classnames("zs-stat-card", className)}
+        className={className}
       >
-        <div className="zs-stat-card__head" data-slot="stat-card-head">
-          <div className="zs-stat-card__label" data-slot="stat-card-label">
+        <div data-slot="stat-card-head">
+          <div data-slot="stat-card-label">
             {label}
           </div>
           {icon != null ? (
             <div
               aria-hidden="true"
-              className="zs-stat-card__icon"
               data-slot="stat-card-icon"
             >
               {icon}
@@ -141,19 +139,17 @@ export const StatCard = forwardRef<HTMLDivElement, StatCardProps>(
           ) : null}
         </div>
 
-        <div className="zs-stat-card__value" data-slot="stat-card-value">
+        <div data-slot="stat-card-value">
           {value}
         </div>
 
         {delta && meta ? (
           <div
-            className="zs-stat-card__delta"
             data-slot="stat-card-delta"
             data-direction={delta.direction}
           >
             <span
               aria-hidden="true"
-              className="zs-stat-card__delta-glyph"
               data-slot="stat-card-delta-glyph"
             >
               {meta.glyph}
@@ -162,7 +158,7 @@ export const StatCard = forwardRef<HTMLDivElement, StatCardProps>(
                 makes "increased 12%" legible to assistive tech. The
                 trailing space keeps the announcement from running into
                 the value text. */}
-            <span className="zs-visually-hidden" data-slot="visually-hidden">
+            <span data-slot="visually-hidden">
               {meta.label}{" "}
             </span>
             {delta.value}

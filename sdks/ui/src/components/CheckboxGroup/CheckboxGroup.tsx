@@ -48,7 +48,6 @@ import { forwardRef, type ComponentPropsWithRef, type ReactNode } from "react";
 import { CheckboxGroup as BaseCheckboxGroup } from "@base-ui/react/checkbox-group";
 import { useFieldDisabledContext } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
-import { classnames } from "../_classnames";
 
 export type CheckboxGroupOrientation = "vertical" | "horizontal";
 export type CheckboxGroupValue = string[];
@@ -149,11 +148,7 @@ export const CheckboxGroup = forwardRef<HTMLDivElement, CheckboxGroupProps>(
         defaultValue={defaultValue}
         onValueChange={onValueChange}
         disabled={disabled || undefined}
-        className={classnames(
-          "zs-checkbox-group",
-          `zs-checkbox-group--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="checkbox-group"
         data-orientation={orientation}
       >

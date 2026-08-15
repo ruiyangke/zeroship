@@ -30,7 +30,7 @@
  *      bare track (no wrapping label) still meets the floor on coarse
  *      pointers (slice-4 review fix item 3).
  *
- *   6. Focus ring lives on the track ROOT (`.zs-switch:focus-visible`)
+ *   6. Focus ring lives on the track Root (`[data-slot="switch"]:focus-visible`)
  *      so the canonical Field-without-component-label pattern shows
  *      a ring (slice-4 review fix item 2).
  *
@@ -50,7 +50,6 @@ import {
   useFieldVisualSize,
 } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
-import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
 export type SwitchSize = "sm" | "md" | "lg";
@@ -127,11 +126,6 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
   const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
   const required = requiredProp ?? fieldCtx?.required ?? false;
 
-  const trackClassName = classnames(
-    "zs-switch",
-    `zs-switch--${size}`,
-    className,
-  );
 
   const track = (
     <BaseSwitch.Root
@@ -146,11 +140,11 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
       ref={ref as React.Ref<HTMLElement>}
       disabled={disabled || undefined}
       required={required || undefined}
-      className={trackClassName}
+      className={className}
       data-slot="switch"
       data-size={size}
     >
-      <BaseSwitch.Thumb className="zs-switch__thumb" data-slot="switch-thumb" />
+      <BaseSwitch.Thumb data-slot="switch-thumb" />
     </BaseSwitch.Root>
   );
 
@@ -164,7 +158,7 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
         fieldProps={fieldProps}
       >
         {track}
-        <span className="zs-switch-field__text" data-slot="switch-field-text">
+        <span data-slot="switch-field-text">
           {label}
         </span>
       </SelectionRow>

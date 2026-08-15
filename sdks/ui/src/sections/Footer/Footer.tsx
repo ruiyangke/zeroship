@@ -80,7 +80,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Separator } from "../../components/Separator";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
@@ -227,26 +226,22 @@ function renderColumn(column: ResolvedColumn) {
     <div
       key={column.key}
       data-slot="footer-column"
-      className="zs-footer__column"
     >
       <h3
         data-slot="footer-column-title"
-        className="zs-footer__column-title"
       >
         {title}
       </h3>
-      <ul data-slot="footer-links" className="zs-footer__links">
+      <ul data-slot="footer-links">
         {links != null
           ? links.map((link, index) => (
               <li
                 key={link.href + ":" + index}
                 data-slot="footer-link-item"
-                className="zs-footer__link-item"
               >
                 <a
                   href={link.href}
                   data-slot="footer-link"
-                  className="zs-footer__link"
                 >
                   {link.label}
                 </a>
@@ -279,7 +274,6 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
   },
   ref,
 ) {
-  const composedClassName = classnames("zs-footer", className);
 
   // ── Resolve the `columns` prop path ───────────────────────────────────
   // Keys are NAMESPACED by source surface (`prop:` / `compound:`) so a prop
@@ -322,18 +316,17 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
       data-slot={dataSlot}
       data-section-band=""
       data-tone={tone}
-      className={composedClassName}
+      className={className}
     >
       <Container size={size} data-slot="footer-container">
         {hasFootnotes ? (
-          <div data-slot="footer-footnotes" className="zs-footer__footnotes">
+          <div data-slot="footer-footnotes">
             {footnotes}
           </div>
         ) : null}
 
         {hasFootnotes && (hasBrandBlock || hasColumns) ? (
           <Separator
-            className="zs-footer__separator"
             data-slot="footer-footnotes-separator"
           />
         ) : null}
@@ -342,21 +335,19 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
             Grid owns the collapse to stacked below --zs-bp-md (its responsive
             base count is 1; columns={{ md }} only promotes at ≥ the bp). */}
         {(hasBrandBlock || hasColumns) && (
-          <div data-slot="footer-top" className="zs-footer__top">
+          <div data-slot="footer-top">
             {hasBrandBlock ? (
               <div
                 data-slot="footer-brand-block"
-                className="zs-footer__brand-block"
               >
                 {brand != null ? (
-                  <div data-slot="footer-brand" className="zs-footer__brand">
+                  <div data-slot="footer-brand">
                     {brand}
                   </div>
                 ) : null}
                 {description != null ? (
                   <p
                     data-slot="footer-description"
-                    className="zs-footer__description"
                   >
                     {description}
                   </p>
@@ -369,7 +360,6 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
                 columns={{ md: Math.min(allColumns.length, 4) }}
                 gap={6}
                 data-slot="footer-columns"
-                className="zs-footer__columns"
               >
                 {allColumns.map((column) => renderColumn(column))}
               </Grid>
@@ -380,18 +370,15 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
         {hasBottom ? (
           <>
             <Separator
-              className="zs-footer__separator"
               data-slot="footer-separator"
             />
-            <div data-slot="footer-bottom" className="zs-footer__bottom">
+            <div data-slot="footer-bottom">
               <div
                 data-slot="footer-bottom-start"
-                className="zs-footer__bottom-start"
               >
                 {copyright != null ? (
                   <div
                     data-slot="footer-copyright"
-                    className="zs-footer__copyright"
                   >
                     {copyright}
                   </div>
@@ -399,18 +386,15 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
                 {hasLegalLinks ? (
                   <ul
                     data-slot="footer-legal-links"
-                    className="zs-footer__legal-links"
                   >
                     {legalLinks?.map((link, index) => (
                       <li
                         key={link.href + ":" + index}
                         data-slot="footer-legal-link-item"
-                        className="zs-footer__legal-link-item"
                       >
                         <a
                           href={link.href}
                           data-slot="footer-legal-link"
-                          className="zs-footer__legal-link"
                         >
                           {link.label}
                         </a>
@@ -422,12 +406,10 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
               {locale != null || actions != null ? (
                 <div
                   data-slot="footer-bottom-end"
-                  className="zs-footer__bottom-end"
                 >
                   {locale != null ? (
                     <div
                       data-slot="footer-locale"
-                      className="zs-footer__locale"
                     >
                       {locale}
                     </div>
@@ -435,7 +417,6 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
                   {actions != null ? (
                     <div
                       data-slot="footer-actions"
-                      className="zs-footer__actions"
                     >
                       {actions}
                     </div>

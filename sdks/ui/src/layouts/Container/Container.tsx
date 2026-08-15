@@ -28,7 +28,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { type Pad, spaceVar } from "../_layout-primitives";
 
 export type ContainerSize =
@@ -97,7 +96,6 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
       }
     }
 
-    const composedClassName = classnames("zs-container", className);
 
     const layoutVars: React.CSSProperties = {
       "--container-max-width": CONTAINER_MAX_WIDTH[size],
@@ -114,7 +112,7 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
         ref={ref as Ref<HTMLDivElement>}
         data-slot={dataSlot}
         data-size={size}
-        className={composedClassName}
+        className={className}
         style={layoutVars}
       >
         {children}

@@ -33,7 +33,7 @@
  *     surface color so it reads as an extension of the popup, not a
  *     separate element. Base UI 1.5 stamps `data-side` on the wrapper
  *     but does NOT auto-rotate it, so Popover.css owns side-specific
- *     SVG rotation (see `.zs-popover-arrow[data-side=...] > svg`).
+ *     SVG rotation through `[data-slot="popover-arrow"][data-side] > svg`.
  *
  * Anti-patterns we explicitly avoid (mirrored from Dialog / AlertDialog):
  *   - Auto-close glyph absolutely positioned outside the popup chrome:
@@ -57,7 +57,6 @@ import {
 import { Popover as BasePopover } from "@base-ui/react/popover";
 import { Button, type ButtonProps } from "../Button";
 import { Slot, composeRefs } from "../_slot";
-import { composeBaseClass } from "../_classnames";
 
 export type PopoverSide = "top" | "right" | "bottom" | "left";
 export type PopoverAlign = "start" | "center" | "end";
@@ -155,7 +154,7 @@ const PopoverBackdrop = forwardRef<HTMLDivElement, PopoverBackdropProps>(
     return (
       <BasePopover.Backdrop
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-popover-backdrop", className)}
+        className={className}
         data-slot="popover-backdrop"
         {...rest}
       />
@@ -225,7 +224,6 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
 
     return (
       <BasePopover.Positioner
-        className="zs-popover-positioner"
         data-slot="popover-positioner"
         side={side}
         align={align}
@@ -234,7 +232,7 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
         <BasePopover.Popup
           {...rest}
           ref={composedRef as Ref<HTMLDivElement>}
-          className={composeBaseClass("zs-popover-popup", className)}
+          className={className}
           data-slot="popover-popup"
         >
           {children}
@@ -255,7 +253,7 @@ const PopoverTitle = forwardRef<HTMLHeadingElement, PopoverTitleProps>(
     return (
       <BasePopover.Title
         ref={ref}
-        className={composeBaseClass("zs-popover__title", className)}
+        className={className}
         data-slot="popover-title"
         {...rest}
       />
@@ -276,7 +274,7 @@ const PopoverDescription = forwardRef<
   return (
     <BasePopover.Description
       ref={ref}
-      className={composeBaseClass("zs-popover__description", className)}
+      className={className}
       data-slot="popover-description"
       {...rest}
     />
@@ -288,7 +286,7 @@ PopoverDescription.displayName = "Popover.Description";
  *
  * Base UI 1.5 positions the arrow wrapper and tags it with `data-side`,
  * but does NOT rotate the wrapper itself. Popover.css rotates the inner
- * SVG per side (see `.zs-popover-arrow[data-side=...] > svg`). The
+ * SVG through `[data-slot="popover-arrow"][data-side] > svg`. The
  * brief specifies `M 0,0 L 8,8 L 16,0 Z` — a 16×8 downward-pointing
  * triangle that the per-side rotation reorients so the apex always
  * points at the trigger. */
@@ -301,7 +299,7 @@ const PopoverArrow = forwardRef<HTMLDivElement, PopoverArrowProps>(
     return (
       <BasePopover.Arrow
         ref={ref}
-        className={composeBaseClass("zs-popover-arrow", className)}
+        className={className}
         data-slot="popover-arrow"
         {...rest}
       >
@@ -413,15 +411,9 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
             );
           }
 
-          // Compose our right-aligned Close marker class with the
-          // caller's optional className. `rest.className` is `string |
-          // undefined` (Button's prop type) so we can flatten via
-          // classnames() — no need to reach for composeBaseClass's
-          // callback overload here.
+          // Keep the caller's optional className explicit after the rest
+          // spread so the consumer class remains the final value.
           const callerClassName = (rest as { className?: string }).className;
-          const composedClassName = callerClassName
-            ? `zs-popover__close ${callerClassName}`
-            : "zs-popover__close";
 
           return (
             <Button
@@ -434,7 +426,7 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
               onClick={composedOnClick}
               variant={variant}
               intent={intent}
-              className={composedClassName}
+              className={callerClassName}
               data-slot="popover-close"
             >
               {children}

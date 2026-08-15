@@ -11,7 +11,6 @@ import {
   type ComponentPropsWithoutRef,
   type CSSProperties,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { type ContainerSize } from "../../layouts/Container";
 import { type Gap, type Pad, spaceVar } from "../../layouts/_layout-primitives";
 
@@ -76,7 +75,7 @@ export const ScrollRail = forwardRef<HTMLDivElement, ScrollRailProps>(
         data-slot={dataSlot}
         data-snap={snap}
         data-size={size}
-        className={classnames("zs-scroll-rail", className)}
+        className={className}
         style={railVars}
       />
     );

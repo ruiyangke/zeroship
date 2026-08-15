@@ -54,7 +54,6 @@ import {
 } from "react";
 import { CircleAlert } from "lucide-react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Icon } from "../../components/Icon/Icon";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
@@ -128,11 +127,6 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
     },
     ref,
   ) {
-    const composedClassName = classnames(
-      "zs-error-state",
-      `zs-error-state--${intent}`,
-      className,
-    );
 
     if (process.env.NODE_ENV !== "production" && title != null) {
       let hasCompoundTitle = false;
@@ -165,7 +159,6 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
     const column = (
       <Center asChild data-slot="error-state-column">
         <Stack
-          className="zs-error-state__column"
           data-slot="error-state-column"
           align="center"
           gap={3}
@@ -193,7 +186,7 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
         {...liveProps}
         {...dataProps}
         ref={ref}
-        className={composedClassName}
+        className={className}
         data-slot="error-state"
       >
         {column}
@@ -221,12 +214,11 @@ function ErrorStateIcon({ intent }: { intent: ErrorStateIntent }) {
     <div
       aria-hidden="true"
       data-slot="error-state-icon"
-      className="zs-error-state__icon"
     >
-      {/* The universal alert glyph (Lucide CircleAlert). Decorative — the
+      {/* The universal alert glyph (Lucide CircleAlert). Decorative: the
           wrapper is aria-hidden and the heading carries the meaning. Sized
-          to 1em by `.zs-error-state__icon svg` (wins on specificity over the
-          .zs-icon--md size class), preserving the prior footprint. */}
+          to 1em by `[data-slot="error-state-icon"] svg`, which wins over the
+          Icon size selector and preserves the prior footprint. */}
       <Icon as={CircleAlert} />
     </div>
   );
@@ -259,7 +251,7 @@ const ErrorStateTitle = forwardRef<HTMLHeadingElement, ErrorStateTitleProps>(
           {...rest}
           ref={ref as Ref<unknown>}
           data-slot="error-state-title"
-          className={classnames("zs-error-state__title", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -270,7 +262,7 @@ const ErrorStateTitle = forwardRef<HTMLHeadingElement, ErrorStateTitleProps>(
         {...rest}
         ref={ref}
         data-slot="error-state-title"
-        className={classnames("zs-error-state__title", className)}
+        className={className}
       >
         {children}
       </h2>
@@ -288,7 +280,7 @@ const ErrorStateDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="error-state-description"
-      className={classnames("zs-error-state__description", className)}
+      className={className}
     />
   );
 });
@@ -301,7 +293,7 @@ const ErrorStateActions = forwardRef<HTMLDivElement, ErrorStateActionsProps>(
         {...rest}
         ref={ref}
         data-slot="error-state-actions"
-        className={classnames("zs-error-state__actions", className)}
+        className={className}
       />
     );
   },

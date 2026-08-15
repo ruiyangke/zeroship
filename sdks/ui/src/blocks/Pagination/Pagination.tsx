@@ -6,15 +6,15 @@
  * (and optional `onPageSizeChange`) go out. The caller is the single
  * source of truth.
  *
- * Layout (left → right):
+ * Layout (left to right):
  *
- *   .zs-pagination                       <nav aria-label="Pagination">
- *     ├─ .zs-pagination__summary         "Showing 1–10 of 57" (optional)
- *     ├─ .zs-pagination__page-size       "Rows per page" <Select> (optional)
- *     └─ .zs-pagination__pages           the page-button row
- *          ├─ Prev button
- *          ├─ page buttons / ellipsis spans
- *          └─ Next button
+ *   [data-slot="pagination"]             <nav aria-label="Pagination">
+ *     |-- [data-slot="pagination-summary"]  summary (optional)
+ *     |-- [data-slot="pagination-page-size"] page-size Select (optional)
+ *     `-- [data-slot="pagination-pages"]    the page-button row
+ *          |-- Previous button
+ *          |-- page buttons / ellipsis spans
+ *          `-- Next button
  *
  * Composition:
  *   - Prev / Next / page buttons are real `<Button>`s (quiet `plain` for
@@ -53,7 +53,6 @@ import {
 } from "react";
 import { Button } from "../../components/Button";
 import { Select } from "../../components/Select";
-import { classnames } from "../../components/_classnames";
 
 /* ─── public types ─────────────────────────────────────────────────────── */
 
@@ -267,10 +266,10 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
         data-slot="pagination"
         data-size={size}
         aria-label={ariaLabel}
-        className={classnames("zs-pagination", className)}
+        className={className}
       >
         {summary != null ? (
-          <p data-slot="pagination-summary" className="zs-pagination__summary">
+          <p data-slot="pagination-summary">
             {summary}
           </p>
         ) : null}
@@ -278,10 +277,8 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
         {pageSizeOptions != null && pageSizeOptions.length > 0 ? (
           <label
             data-slot="pagination-page-size"
-            className="zs-pagination__page-size"
           >
             <span
-              className="zs-pagination__page-size-label"
               data-slot="pagination-page-size-label"
             >
               Rows per page
@@ -305,26 +302,23 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
           </label>
         ) : null}
 
-        <div data-slot="pagination-pages" className="zs-pagination__pages">
+        <div data-slot="pagination-pages">
           <Button
             type="button"
             variant="plain"
             size={buttonSize}
             data-slot="pagination-prev"
-            className="zs-pagination__button zs-pagination__button--prev"
             aria-label="Go to previous page"
             disabled={disabled || atStart}
             onClick={() => goTo(currentPage - 1)}
           >
             <span
               aria-hidden="true"
-              className="zs-pagination__chevron"
               data-slot="pagination-chevron"
             >
               {"‹"}
             </span>
             <span
-              className="zs-pagination__edge-label"
               data-slot="pagination-edge-label"
             >
               Prev
@@ -336,7 +330,6 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
               <span
                 key={`ellipsis-${item.key}`}
                 data-slot="pagination-ellipsis"
-                className="zs-pagination__ellipsis"
                 aria-hidden="true"
               >
                 {"…"}
@@ -349,7 +342,6 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
                 size={buttonSize}
                 data-slot="pagination-page"
                 data-active={item.page === currentPage || undefined}
-                className="zs-pagination__button zs-pagination__button--page"
                 aria-label={`Go to page ${item.page}`}
                 aria-current={item.page === currentPage ? "page" : undefined}
                 disabled={disabled}
@@ -365,20 +357,17 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
             variant="plain"
             size={buttonSize}
             data-slot="pagination-next"
-            className="zs-pagination__button zs-pagination__button--next"
             aria-label="Go to next page"
             disabled={disabled || atEnd}
             onClick={() => goTo(currentPage + 1)}
           >
             <span
-              className="zs-pagination__edge-label"
               data-slot="pagination-edge-label"
             >
               Next
             </span>
             <span
               aria-hidden="true"
-              className="zs-pagination__chevron"
               data-slot="pagination-chevron"
             >
               {"›"}

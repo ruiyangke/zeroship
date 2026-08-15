@@ -68,7 +68,6 @@ import { ToggleGroup as BaseToggleGroup } from "@base-ui/react/toggle-group";
 import { useFieldDisabledContext } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 
 export type ToggleSize = "sm" | "md" | "lg";
 export type ToggleVariant = "default" | "plain" | "tinted";
@@ -406,13 +405,7 @@ function ToggleGroupInner<Value extends string = string>(
         orientation={orientation}
         disabled={disabled || undefined}
         multiple={isMultiple}
-        className={classnames(
-          "zs-toggle-group",
-          variant ? `zs-toggle-group--${variant}` : null,
-          size ? `zs-toggle-group--${size}` : null,
-          `zs-toggle-group--${orientation}`,
-          className,
-        )}
+        className={className}
         data-orientation={orientation}
         data-size={size}
         data-variant={variant}
@@ -537,12 +530,6 @@ function ToggleInner<Value extends string = string>(
     );
   }
 
-  const composedClassName = classnames(
-    "zs-toggle",
-    `zs-toggle--${variant}`,
-    `zs-toggle--${size}`,
-    className,
-  );
 
   return (
     // Item 6 fix: pass the caller's `ref` ONLY to BaseToggle.Root. Base UI
@@ -556,7 +543,7 @@ function ToggleInner<Value extends string = string>(
       ref={ref as unknown as Ref<HTMLButtonElement>}
       disabled={disabled || undefined}
       nativeButton={nativeButton}
-      className={composedClassName}
+      className={className}
       data-slot="toggle"
       data-size={size}
       data-variant={variant}
@@ -593,7 +580,7 @@ function ToggleInner<Value extends string = string>(
           <button
             {...(baseRest as Record<string, unknown>)}
             type={bpType ?? "button"}
-            className={composedClassName}
+            className={className}
             data-slot="toggle"
             data-size={size}
             data-variant={variant}

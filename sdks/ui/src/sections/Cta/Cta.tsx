@@ -66,7 +66,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
 import { Cluster } from "../../layouts/Cluster";
@@ -178,7 +177,6 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
   },
   ref,
 ) {
-  const composedClassName = classnames("zs-cta", className);
 
   // Stable id the section uses for aria-labelledby when a `title` renders.
   // useId is SSR-safe + collision-free across multiple Ctas on a page.
@@ -197,23 +195,21 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
       align={align === "center" ? "center" : "start"}
       data-slot="cta-panel"
       data-variant={variant}
-      className="zs-cta__panel"
     >
       {eyebrow != null ? (
         <p
-          className="zs-section-eyebrow zs-cta__eyebrow"
           data-slot="cta-eyebrow"
         >
           {eyebrow}
         </p>
       ) : null}
       {titleRenders ? (
-        <h2 id={titleId} data-slot="cta-title" className="zs-cta__title">
+        <h2 id={titleId} data-slot="cta-title">
           {title}
         </h2>
       ) : null}
       {description != null ? (
-        <p className="zs-cta__description" data-slot="cta-description">
+        <p data-slot="cta-description">
           {description}
         </p>
       ) : null}
@@ -222,7 +218,6 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
           gap={3}
           justify={align === "center" ? "center" : "start"}
           data-slot="cta-actions"
-          className="zs-cta__actions"
         >
           {actions}
         </Cluster>
@@ -241,7 +236,7 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
       data-section-band=""
       data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
-      className={composedClassName}
+      className={className}
     >
       <Container size={size} data-slot="cta-container">
         {body}

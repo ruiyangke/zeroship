@@ -38,8 +38,7 @@
  *          project onto the positioner. Same trick Popover uses.
  *       2. Items / Groups / Separator / CheckboxItem / RadioGroup /
  *          RadioItem / LinkItem are leaf subparts that paint the popup
- *          contents. Each is a thin wrapper that stamps a `zs-menu-*`
- *          class so the CSS owns visuals.
+ *          contents. Each stamps its own data-slot so CSS owns visuals.
  *   - Backdrop is OPT-IN. Default is popover-feel (no Backdrop, no
  *     scroll lock). `modal` defaults to FALSE for the same reason
  *     (Base UI's MenuRoot defaults `modal: true`).
@@ -83,7 +82,6 @@ import { Menu as BaseMenu } from "@base-ui/react/menu";
 import { Check, ChevronRight } from "lucide-react";
 import { Icon } from "../Icon";
 import { Slot, composeRefs } from "../_slot";
-import { composeBaseClass } from "../_classnames";
 
 /* Physical sides + logical (RTL-flipping) sides. Base UI's Positioner
  * accepts both — `inline-start` / `inline-end` flip with `dir="rtl"`,
@@ -173,7 +171,7 @@ const MenuBackdrop = forwardRef<HTMLDivElement, MenuBackdropProps>(
     return (
       <BaseMenu.Backdrop
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-menu-backdrop", className)}
+        className={className}
         data-slot="menu-backdrop"
         {...rest}
       />
@@ -212,7 +210,6 @@ const MenuPopup = forwardRef<HTMLElement, MenuPopupProps>(function MenuPopup(
 ) {
   return (
     <BaseMenu.Positioner
-      className="zs-menu-positioner"
       data-slot="menu-positioner"
       side={side}
       align={align}
@@ -221,7 +218,7 @@ const MenuPopup = forwardRef<HTMLElement, MenuPopupProps>(function MenuPopup(
       <BaseMenu.Popup
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-menu-popup", className)}
+        className={className}
         data-slot="menu-popup"
       >
         {children}
@@ -247,7 +244,7 @@ const MenuArrow = forwardRef<HTMLDivElement, MenuArrowProps>(function MenuArrow(
   return (
     <BaseMenu.Arrow
       ref={ref}
-      className={composeBaseClass("zs-menu-arrow", className)}
+      className={className}
       data-slot="menu-arrow"
       {...rest}
     >
@@ -282,7 +279,7 @@ function ArrowGlyph() {
  * the text lane (which would otherwise land in the indicator track and
  * stack multi-word labels vertically).
  *
- * A `shortcut` prop projects into the trailing `.zs-menu-item__shortcut`
+ * A `shortcut` prop projects into `[data-slot="menu-item-shortcut"]`
  * slot. Item / LinkItem / CheckboxItem / RadioItem all accept it; the
  * Submenu trigger reserves the slot for its chevron. */
 
@@ -313,22 +310,20 @@ const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
   return (
     <BaseMenu.Item
       ref={ref as Ref<HTMLDivElement>}
-      className={composeBaseClass("zs-menu-item", className)}
+      className={className}
       data-slot="menu-item"
       label={autoLabel}
       {...rest}
     >
       <span
-        className="zs-menu-item__indicator"
         data-slot="menu-item-indicator"
         aria-hidden="true"
       />
-      <span className="zs-menu-item__text" data-slot="menu-item-text">
+      <span data-slot="menu-item-text">
         {children}
       </span>
       {shortcut !== undefined ? (
         <span
-          className="zs-menu-item__shortcut"
           data-slot="menu-item-shortcut"
           aria-hidden="true"
         >
@@ -355,7 +350,7 @@ const MenuGroup = forwardRef<HTMLDivElement, MenuGroupProps>(function MenuGroup(
   return (
     <BaseMenu.Group
       ref={ref}
-      className={composeBaseClass("zs-menu-group", className)}
+      className={className}
       data-slot="menu-group"
       {...rest}
     />
@@ -371,7 +366,7 @@ const MenuGroupLabel = forwardRef<HTMLDivElement, MenuGroupLabelProps>(
     return (
       <BaseMenu.GroupLabel
         ref={ref}
-        className={composeBaseClass("zs-menu-group-label", className)}
+        className={className}
         data-slot="menu-group-label"
         {...rest}
       />
@@ -394,7 +389,7 @@ const MenuSeparator = forwardRef<HTMLDivElement, MenuSeparatorProps>(
     return (
       <BaseMenu.Separator
         ref={ref}
-        className={composeBaseClass("zs-menu-separator", className)}
+        className={className}
         data-slot="menu-separator"
         {...rest}
       />
@@ -436,33 +431,27 @@ const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
     return (
       <BaseMenu.CheckboxItem
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass(
-          "zs-menu-item zs-menu-checkbox-item",
-          className,
-        )}
+        className={className}
         data-slot="menu-checkbox-item"
         label={autoLabel}
         {...rest}
       >
         <span
-          className="zs-menu-item__indicator"
           data-slot="menu-item-indicator"
           aria-hidden="true"
         >
           <BaseMenu.CheckboxItemIndicator
-            className="zs-menu-item__indicator-glyph"
             data-slot="menu-item-indicator-glyph"
             keepMounted
           >
             <Icon as={Check} size="sm" />
           </BaseMenu.CheckboxItemIndicator>
         </span>
-        <span className="zs-menu-item__text" data-slot="menu-item-text">
+        <span data-slot="menu-item-text">
           {children}
         </span>
         {shortcut !== undefined ? (
           <span
-            className="zs-menu-item__shortcut"
             data-slot="menu-item-shortcut"
             aria-hidden="true"
           >
@@ -489,7 +478,7 @@ const MenuRadioGroup = forwardRef<HTMLDivElement, MenuRadioGroupProps>(
     return (
       <BaseMenu.RadioGroup
         ref={ref}
-        className={composeBaseClass("zs-menu-radio-group", className)}
+        className={className}
         data-slot="menu-radio-group"
         {...rest}
       />
@@ -519,33 +508,27 @@ const MenuRadioItem = forwardRef<HTMLElement, MenuRadioItemProps>(
     return (
       <BaseMenu.RadioItem
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass(
-          "zs-menu-item zs-menu-radio-item",
-          className,
-        )}
+        className={className}
         data-slot="menu-radio-item"
         label={autoLabel}
         {...rest}
       >
         <span
-          className="zs-menu-item__indicator"
           data-slot="menu-item-indicator"
           aria-hidden="true"
         >
           <BaseMenu.RadioItemIndicator
-            className="zs-menu-item__indicator-glyph"
             data-slot="menu-item-indicator-glyph"
             keepMounted
           >
             <RadioDotGlyph />
           </BaseMenu.RadioItemIndicator>
         </span>
-        <span className="zs-menu-item__text" data-slot="menu-item-text">
+        <span data-slot="menu-item-text">
           {children}
         </span>
         {shortcut !== undefined ? (
           <span
-            className="zs-menu-item__shortcut"
             data-slot="menu-item-shortcut"
             aria-hidden="true"
           >
@@ -629,10 +612,7 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
         // (outerRef, linkProps.ref) would then invoke the caller's
         // callback ref TWICE per attach. Mirrors Dialog.Close, which
         // also composes only inside the render-prop. */
-        className={composeBaseClass(
-          "zs-menu-item zs-menu-link-item",
-          className,
-        )}
+        className={className}
         label={autoLabel}
         render={(linkProps) => {
           const linkPropsRef = (linkProps as { ref?: Ref<unknown> }).ref;
@@ -668,16 +648,14 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
               )}
             >
               <span
-                className="zs-menu-item__indicator"
                 data-slot="menu-item-indicator"
                 aria-hidden="true"
               />
-              <span className="zs-menu-item__text" data-slot="menu-item-text">
+              <span data-slot="menu-item-text">
                 {children}
               </span>
               {shortcut !== undefined ? (
                 <span
-                  className="zs-menu-item__shortcut"
                   data-slot="menu-item-shortcut"
                   aria-hidden="true"
                 >
@@ -749,22 +727,17 @@ function MenuSubmenu({
       <BaseMenu.SubmenuTrigger
         disabled={disabled}
         data-testid={dataTestid}
-        className={composeBaseClass(
-          "zs-menu-item zs-menu-submenu-trigger",
-          triggerClassName,
-        )}
+        className={triggerClassName}
         data-slot="menu-submenu-trigger"
       >
         <span
-          className="zs-menu-item__indicator"
           data-slot="menu-item-indicator"
           aria-hidden="true"
         />
-        <span className="zs-menu-item__text" data-slot="menu-item-text">
+        <span data-slot="menu-item-text">
           {trigger}
         </span>
         <span
-          className="zs-menu-submenu-trigger__chevron"
           data-slot="menu-submenu-trigger-chevron"
           aria-hidden="true"
         >
@@ -773,14 +746,12 @@ function MenuSubmenu({
       </BaseMenu.SubmenuTrigger>
       <BaseMenu.Portal>
         <BaseMenu.Positioner
-          className="zs-menu-positioner"
           data-slot="menu-positioner"
           side={side}
           align={align}
           sideOffset={sideOffset}
         >
           <BaseMenu.Popup
-            className="zs-menu-popup zs-menu-popup--submenu"
             data-slot="menu-popup-submenu"
           >
             {children}

@@ -77,7 +77,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Accordion } from "../../components/Accordion";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
@@ -221,7 +220,6 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
   },
   ref,
 ) {
-  const composedClassName = classnames("zs-faq", className);
 
   // Stable id the section uses for aria-labelledby when an optional `title`
   // lead-in renders, AND a band-unique prefix for the Accordion item values
@@ -266,7 +264,6 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
     <Accordion
       type="multiple"
       data-slot="faq-list"
-      className="zs-faq__list"
     >
       {allEntries.map((entry) => (
         <Accordion.Item
@@ -286,7 +283,6 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
       type="single"
       collapsible
       data-slot="faq-list"
-      className="zs-faq__list"
     >
       {allEntries.map((entry) => (
         <Accordion.Item
@@ -311,7 +307,7 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
       data-section-band=""
       data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
-      className={composedClassName}
+      className={className}
     >
       <Container size={size} data-slot="faq-container">
         {hasHeader ? (
@@ -319,12 +315,10 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
             gap={3}
             align="start"
             data-slot="faq-header"
-            className="zs-faq__header"
           >
             {eyebrow != null ? (
               <p
                 data-slot="faq-eyebrow"
-                className="zs-section-eyebrow zs-faq__eyebrow"
               >
                 {eyebrow}
               </p>
@@ -333,13 +327,12 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
               <h2
                 id={titleId}
                 data-slot="faq-title"
-                className="zs-faq__title"
               >
                 {title}
               </h2>
             ) : null}
             {description != null ? (
-              <p data-slot="faq-description" className="zs-faq__description">
+              <p data-slot="faq-description">
                 {description}
               </p>
             ) : null}

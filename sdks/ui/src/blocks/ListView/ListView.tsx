@@ -74,7 +74,6 @@ import {
   type MouseEventHandler,
   type ReactNode,
 } from "react";
-import { classnames } from "../../components/_classnames";
 
 export type ListViewDensity = "comfortable" | "compact";
 
@@ -161,18 +160,17 @@ function renderItem(item: ListViewItem): ReactNode {
   const main = (
     <>
       {leading != null ? (
-        <span data-slot="list-view-leading" className="zs-list-view__leading">
+        <span data-slot="list-view-leading">
           {leading}
         </span>
       ) : null}
-      <span data-slot="list-view-content" className="zs-list-view__content">
-        <span data-slot="list-view-title" className="zs-list-view__title">
+      <span data-slot="list-view-content">
+        <span data-slot="list-view-title">
           {title}
         </span>
         {description != null ? (
           <span
             data-slot="list-view-description"
-            className="zs-list-view__description"
           >
             {description}
           </span>
@@ -192,7 +190,6 @@ function renderItem(item: ListViewItem): ReactNode {
         href={href}
         data-slot="list-view-main"
         data-interactive=""
-        className="zs-list-view__main"
       >
         {main}
       </a>
@@ -204,14 +201,13 @@ function renderItem(item: ListViewItem): ReactNode {
         onClick={onClick}
         data-slot="list-view-main"
         data-interactive=""
-        className="zs-list-view__main"
       >
         {main}
       </button>
     );
   } else {
     mainEl = (
-      <div data-slot="list-view-main" className="zs-list-view__main">
+      <div data-slot="list-view-main">
         {main}
       </div>
     );
@@ -221,16 +217,15 @@ function renderItem(item: ListViewItem): ReactNode {
   // separate tab stops and never inside the row link.
   const aside =
     meta != null || trailing != null ? (
-      <span data-slot="list-view-aside" className="zs-list-view__aside">
+      <span data-slot="list-view-aside">
         {meta != null ? (
-          <span data-slot="list-view-meta" className="zs-list-view__meta">
+          <span data-slot="list-view-meta">
             {meta}
           </span>
         ) : null}
         {trailing != null ? (
           <span
             data-slot="list-view-trailing"
-            className="zs-list-view__trailing"
           >
             {trailing}
           </span>
@@ -239,7 +234,7 @@ function renderItem(item: ListViewItem): ReactNode {
     ) : null;
 
   return (
-    <li key={id} data-slot="list-view-item" className="zs-list-view__item">
+    <li key={id} data-slot="list-view-item">
       {mainEl}
       {aside}
     </li>
@@ -294,7 +289,6 @@ const ListViewRoot = forwardRef<HTMLUListElement, ListViewProps>(
       }
     }
 
-    const composedClassName = classnames("zs-list-view", className);
 
     return (
       <ul
@@ -303,7 +297,7 @@ const ListViewRoot = forwardRef<HTMLUListElement, ListViewProps>(
         data-slot={dataSlot}
         data-density={density}
         data-divided={divided ? "" : undefined}
-        className={composedClassName}
+        className={className}
       >
         {items != null ? items.map(renderItem) : children}
       </ul>
@@ -333,7 +327,7 @@ const ListViewItemPart = forwardRef<HTMLLIElement, ListItemProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-item"
-        className={classnames("zs-list-view__item", className)}
+        className={className}
       />
     );
   },
@@ -347,7 +341,7 @@ const ListViewLeading = forwardRef<HTMLSpanElement, ListViewLeadingProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-leading"
-        className={classnames("zs-list-view__leading", className)}
+        className={className}
       />
     );
   },
@@ -361,7 +355,7 @@ const ListViewContent = forwardRef<HTMLSpanElement, ListViewContentProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-content"
-        className={classnames("zs-list-view__content", className)}
+        className={className}
       />
     );
   },
@@ -375,7 +369,7 @@ const ListViewTitle = forwardRef<HTMLSpanElement, ListViewTitleProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-title"
-        className={classnames("zs-list-view__title", className)}
+        className={className}
       />
     );
   },
@@ -391,7 +385,7 @@ const ListViewDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="list-view-description"
-      className={classnames("zs-list-view__description", className)}
+      className={className}
     />
   );
 });
@@ -404,7 +398,7 @@ const ListViewMeta = forwardRef<HTMLSpanElement, ListViewMetaProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-meta"
-        className={classnames("zs-list-view__meta", className)}
+        className={className}
       />
     );
   },
@@ -418,7 +412,7 @@ const ListViewTrailing = forwardRef<HTMLSpanElement, ListViewTrailingProps>(
         {...rest}
         ref={ref}
         data-slot="list-view-trailing"
-        className={classnames("zs-list-view__trailing", className)}
+        className={className}
       />
     );
   },

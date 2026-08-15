@@ -41,7 +41,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 import type { Intent } from "../_intent";
 
 /** Badge spans the full shared {@link Intent} vocabulary. */
@@ -107,13 +106,6 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
   },
   ref,
 ) {
-  const composedClassName = classnames(
-    "zs-badge",
-    `zs-badge--${intent}`,
-    `zs-badge--${variant}`,
-    `zs-badge--${size}`,
-    className,
-  );
 
   const dataProps = {
     "data-intent": intent,
@@ -139,7 +131,7 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
         {...rest}
         {...dataProps}
         ref={ref as Ref<unknown>}
-        className={composedClassName}
+        className={className}
         data-slot="badge"
       >
         {children}
@@ -152,14 +144,14 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
       {...rest}
       {...dataProps}
       ref={ref as Ref<HTMLSpanElement>}
-      className={composedClassName}
+      className={className}
       data-slot="badge"
     >
       {/* Text rides in a block label span so `text-overflow: ellipsis`
           works (it is inert on the inline-flex root). If a consumer adds
           leading/trailing icons they sit OUTSIDE this span, so only the
           text clamps — mirrors Tag's anatomy. */}
-      <span className="zs-badge__label" data-slot="badge-label">
+      <span data-slot="badge-label">
         {children}
       </span>
     </span>

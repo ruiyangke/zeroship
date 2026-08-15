@@ -3,8 +3,8 @@
  *
  * Checkbox / Switch / Radio all wrap their visible chip plus an inline
  * label text in a `<label>` so a click on the text toggles the chip via
- * native semantics. The three blocks differed only in the `zs-X` class
- * prefix — this helper hoists the common JSX so the components carry
+ * native semantics. The three blocks differ only in their data-slot
+ * prefix, so this helper hoists the common JSX and the components carry
  * intent (which chip, what state) without re-stating the layout.
  *
  * Discipline (slice-4 review-fix items 2, 3, 10):
@@ -33,13 +33,13 @@ export type SelectionBase = "checkbox" | "switch" | "radio";
 export type SelectionSize = "sm" | "md" | "lg";
 
 export interface SelectionRowProps {
-  /** Which primitive this row wraps — drives the `zs-X-field` class prefix. */
+  /** Which primitive this row wraps; drives the `${base}-field` data-slot. */
   base: SelectionBase;
-  /** Visual size — cascades the `--size` modifier onto the row class. */
+  /** Visual size; stamps the row's `data-size` attribute. */
   size: SelectionSize;
   /** Mirror of the chip's `disabled` so the row's cursor + color flips. */
   disabled?: boolean;
-  /** Class hook for the row. */
+  /** Extra CSS class names for the row. */
   className?: string;
   /** Extra props for the wrapping `<label>`. */
   fieldProps?: ComponentPropsWithoutRef<"label">;
@@ -61,12 +61,7 @@ export const SelectionRow = forwardRef<HTMLLabelElement, SelectionRowProps>(
       <label
         ref={ref}
         {...fieldProps}
-        className={classnames(
-          `zs-${base}-field`,
-          `zs-${base}-field--${size}`,
-          className,
-          fieldProps?.className,
-        )}
+        className={classnames(className, fieldProps?.className)}
         data-slot={`${base}-field`}
         data-size={size}
         data-disabled={disabled || undefined}

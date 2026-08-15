@@ -13,7 +13,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 
 export type ButtonVariant = "filled" | "tinted" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
@@ -103,7 +102,6 @@ export interface ButtonProps extends Omit<
 function Spinner() {
   return (
     <span
-      className="zs-button__spinner"
       data-slot="button-spinner"
       aria-hidden="true"
     >
@@ -133,13 +131,6 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   },
   ref,
 ) {
-  const composedClassName = classnames(
-    "zs-button",
-    `zs-button--${variant}`,
-    `zs-button--${size}`,
-    intent === "destructive" && "zs-button--destructive",
-    className,
-  );
 
   const isBusy = loading === true;
   const isDisabled = disabled === true || isBusy;
@@ -171,17 +162,17 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   }, []);
 
   const buildInner = (labelContent: ReactNode) => (
-    <span className="zs-button__inner" data-slot="button-inner">
+    <span data-slot="button-inner">
       {startSlot != null ? (
-        <span className="zs-button__start" data-slot="button-start">
+        <span data-slot="button-start">
           {startSlot}
         </span>
       ) : null}
-      <span className="zs-button__label" data-slot="button-label">
+      <span data-slot="button-label">
         {labelContent}
       </span>
       {endSlot != null ? (
-        <span className="zs-button__end" data-slot="button-end">
+        <span data-slot="button-end">
           {endSlot}
         </span>
       ) : null}
@@ -257,7 +248,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
       <Slot
         {...rest}
         ref={localRef as Ref<unknown>}
-        className={composedClassName}
+        className={className}
         data-slot={dataSlot}
         data-variant={variant}
         data-intent={intent}
@@ -290,7 +281,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
       {...rest}
       ref={localRef as Ref<HTMLButtonElement>}
       type={type ?? "button"}
-      className={composedClassName}
+      className={className}
       data-slot={dataSlot}
       data-variant={variant}
       data-intent={intent}

@@ -145,7 +145,7 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
           state: ProgressRootRenderState,
         ) => {
           // Re-stamp `data-status` from the render-callback state so CSS
-          // attribute selectors (`.zs-progress[data-status="…"]`) light
+          // selectors on `[data-slot="progress"][data-status]` light
           // up consistently. Base UI itself only emits the per-status
           // marker attributes (`data-progressing` / `data-complete` /
           // `data-indeterminate`) on the Root — NOT a unified
@@ -155,12 +155,7 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
           return (
             <div
               {...rootProps}
-              className={classnames(
-                "zs-progress",
-                `zs-progress--${size}`,
-                className,
-                rootProps.className,
-              )}
+              className={classnames(className, rootProps.className)}
               data-slot="progress"
               data-size={size}
               data-status={state.status}
@@ -168,12 +163,10 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
             >
               {label != null || showValue ? (
                 <div
-                  className="zs-progress__header"
                   data-slot="progress-header"
                 >
                   {label != null ? (
                     <BaseProgress.Label
-                      className="zs-progress__label"
                       data-slot="progress-label"
                     >
                       {label}
@@ -181,18 +174,15 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
                   ) : null}
                   {showValue ? (
                     <BaseProgress.Value
-                      className="zs-progress__value"
                       data-slot="progress-value"
                     />
                   ) : null}
                 </div>
               ) : null}
               <BaseProgress.Track
-                className="zs-progress__track"
                 data-slot="progress-track"
               >
                 <BaseProgress.Indicator
-                  className="zs-progress__indicator"
                   data-slot="progress-indicator"
                 />
               </BaseProgress.Track>

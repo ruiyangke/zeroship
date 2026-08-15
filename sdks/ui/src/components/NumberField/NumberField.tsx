@@ -126,10 +126,10 @@ export interface NumberFieldProps extends Omit<
   /** Placeholder for the input. Base UI forwards to the inner <input>. */
   placeholder?: string;
   /**
-   * Class hook for the Root (`.zs-number-field`) — the positioning
-   * context that anchors the scrub area. The bordered shell is the
-   * inner `.zs-number-field__group`; consumers wanting to retheme just
-   * the shell should target that descendant from the Root class.
+   * Extra CSS class names for the Root positioning context that anchors
+   * the scrub area. The bordered shell is
+   * `[data-slot="number-field-group"]`; themes can target it beneath
+   * `[data-slot="number-field"]`.
    */
   className?: string;
   /**
@@ -224,7 +224,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
         // Mirrors Input.tsx:234-269. `data-disabled` already lands via
         // the `disabled={disabled || undefined}` HTML attribute on the
         // div, but we re-stamp explicitly so the CSS attribute selector
-        // `.zs-number-field[data-disabled]` fires whether disabled
+        // `[data-slot="number-field"][data-disabled]` fires whether disabled
         // comes from a bare prop, the Field cascade, or Base UI's
         // internal disabled flow.
         render={(
@@ -259,13 +259,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           return (
             <div
               {...rootProps}
-              className={classnames(
-                "zs-number-field",
-                `zs-number-field--${variant}`,
-                `zs-number-field--${size}`,
-                className,
-                rootProps.className,
-              )}
+              className={classnames(className, rootProps.className)}
               data-slot="number-field"
               data-variant={variant}
               data-size={size}
@@ -282,11 +276,9 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
       >
         {showScrub ? (
           <BaseNumberField.ScrubArea
-            className="zs-number-field__scrub"
             data-slot="number-field-scrub"
           >
             <BaseNumberField.ScrubAreaCursor
-              className="zs-number-field__scrub-cursor"
               data-slot="number-field-scrub-cursor"
             >
               {/* The cursor element gets pointer-locked while dragging.
@@ -306,21 +298,19 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           </BaseNumberField.ScrubArea>
         ) : null}
         <BaseNumberField.Group
-          className="zs-number-field__group"
           data-slot="number-field-group"
         >
           <BaseNumberField.Decrement
-            className="zs-number-field__step zs-number-field__step--dec"
             data-slot="number-field-step-dec"
             aria-label="Decrement"
           >
-            {/* Minus glyph — decorative; the button carries aria-label.
-                Sized to 1em by `.zs-number-field__step > svg` (matches the
-                prior 16×16); currentColor flows from the step's CSS state. */}
+            {/* Minus glyph - decorative; the button carries aria-label.
+                Sized to 1em by the
+                `[data-slot="number-field-step-dec"] > svg` rule; currentColor
+                flows from the step's CSS state. */}
             <Icon as={Minus} size="sm" />
           </BaseNumberField.Decrement>
           <BaseNumberField.Input
-            className="zs-number-field__input"
             data-slot="number-field-input"
             placeholder={placeholder}
             data-testid={dataTestId}
@@ -369,7 +359,6 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
             }}
           />
           <BaseNumberField.Increment
-            className="zs-number-field__step zs-number-field__step--inc"
             data-slot="number-field-step-inc"
             aria-label="Increment"
           >

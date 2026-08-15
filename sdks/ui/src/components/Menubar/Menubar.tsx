@@ -28,8 +28,8 @@
  *   - Children are wrapped `Menu` siblings from `@zeroship/ui`. The
  *     Menubar-flavored trigger / popup chrome is selected by the
  *     `data-chrome="menubar"` attribute that the Menu wrapper passes
- *     through transparently — `Menu.css` paints those variants. There
- *     is no separate `.zs-menubar-menu*` class set.
+ *     through transparently; `Menu.css` paints those variants. There
+ *     is no separate Menubar menu slot family.
  *   - Keyboard contract: Tab focuses the menubar; arrow-left/right rove
  *     between triggers; ArrowDown opens the focused menu and moves to
  *     its first item; Esc closes the open menu. Base UI implements the
@@ -76,7 +76,6 @@ import {
   type ReactNode,
 } from "react";
 import { Menubar as BaseMenubar } from "@base-ui/react/menubar";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type MenubarOrientation = "horizontal" | "vertical";
 
@@ -154,7 +153,7 @@ export interface MenubarProps extends Omit<
    * Whether the entire menubar is disabled.
    *
    * When `true`, Base UI marks every trigger inside the menubar with
-   * `data-disabled` so the chrome (`.zs-menubar` trigger paint) reads
+   * `data-disabled` so the menubar chrome reads
    * disabled across the strip, and pointer / keyboard activation no
    * longer opens any menu.
    *
@@ -233,10 +232,7 @@ const MenubarRoot = forwardRef<HTMLDivElement, MenubarProps>(
         modal={modal}
         loopFocus={loopFocus}
         disabled={disabled || undefined}
-        className={composeBaseClass(
-          classnames("zs-menubar", `zs-menubar--${orientation}`),
-          className,
-        )}
+        className={className}
         data-slot="menubar"
       >
         {children}

@@ -70,7 +70,7 @@
  *   - Main    → `<main>`    (the SINGLE main landmark of the document)
  *   - Footer  → `<footer>`  (contentinfo)
  * A skip-to-content link is BAKED IN as the first focusable child of the
- * shell: a `.zs-skip-link` anchor that is visually hidden until focused,
+ * shell: a `[data-slot="skip-link"]` anchor hidden until focused,
  * then appears pinned to the inline-start/top. Its `href` targets the
  * Main's `id` (generated with `useId`), so keyboard users can jump past
  * the header + sidebar straight to the page content. The Main `id` is
@@ -98,7 +98,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Split } from "../Split";
 import type { Side } from "../_layout-primitives";
 
@@ -243,7 +242,6 @@ const AppShellRoot = forwardRef<HTMLDivElement, AppShellProps>(
       [mainId, sidebarOpen, setSidebarOpen, sidebarSide],
     );
 
-    const composedClassName = classnames("zs-app-shell", className);
 
     const layoutVars: React.CSSProperties = {
       "--app-shell-sidebar-width": sidebarWidth,
@@ -264,10 +262,10 @@ const AppShellRoot = forwardRef<HTMLDivElement, AppShellProps>(
           data-slot="app-shell"
           data-sidebar-side={sidebarSide}
           data-sidebar-open={sidebarOpen ? "" : undefined}
-          className={composedClassName}
+          className={className}
           style={layoutVars}
         >
-          <a className="zs-skip-link" data-slot="skip-link" href={`#${mainId}`}>
+          <a data-slot="skip-link" href={`#${mainId}`}>
             {skipLinkLabel}
           </a>
           {children}
@@ -289,7 +287,7 @@ const AppShellHeader = forwardRef<HTMLElement, AppShellHeaderProps>(
         {...rest}
         ref={ref as Ref<HTMLElement>}
         data-slot="app-shell-header"
-        className={classnames("zs-app-shell__header", className)}
+        className={className}
       />
     );
   },
@@ -340,7 +338,7 @@ const AppShellSidebar = forwardRef<HTMLElement, AppShellSidebarProps>(
           data-sidebar-open={ctx?.sidebarOpen ? "" : undefined}
           inert={collapsed ? true : undefined}
           aria-hidden={collapsed ? true : undefined}
-          className={classnames("zs-app-shell__sidebar", className)}
+          className={className}
           data-slot="app-shell-sidebar"
         >
           {children}
@@ -385,7 +383,7 @@ const AppShellMain = forwardRef<HTMLElement, AppShellMainProps>(
     return (
       <Split.Main
         data-slot="app-shell-main"
-        className={classnames("zs-app-shell__main", className)}
+        className={className}
         asChild
       >
         <main {...rest} ref={ref as Ref<HTMLElement>} id={ctx?.mainId}>
@@ -406,7 +404,7 @@ const AppShellFooter = forwardRef<HTMLElement, AppShellFooterProps>(
         {...rest}
         ref={ref as Ref<HTMLElement>}
         data-slot="app-shell-footer"
-        className={classnames("zs-app-shell__footer", className)}
+        className={className}
       />
     );
   },
@@ -431,15 +429,15 @@ const AppShellBody = forwardRef<HTMLDivElement, AppShellBodyProps>(
     // Split owns the row layout + its own `data-slot="split"`; our
     // `data-sidebar-open` rides through the prop spread (Split doesn't
     // touch it) so the CSS collapse rule
-    // `.zs-app-shell__body:not([data-sidebar-open])` keys off it, and our
-    // `zs-app-shell__body` class composes via Split's `classnames`.
+    // `[data-slot="app-shell-body"]:not([data-sidebar-open])` keys off it.
+    // The explicit app-shell-body slot is forwarded through Split.
     return (
       <Split
         {...rest}
         ref={ref}
         data-slot="app-shell-body"
         data-sidebar-open={ctx?.sidebarOpen ? "" : undefined}
-        className={classnames("zs-app-shell__body", className)}
+        className={className}
         side={ctx?.sidebarSide ?? "start"}
         sideWidth="var(--app-shell-sidebar-width, 16rem)"
         collapseBelow="sm"

@@ -251,13 +251,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
           <div
             {...wrapperProps}
             style={{ ...wrapperStyle, ...(wrapperProps?.style ?? {}) }}
-            className={classnames(
-              "zs-input",
-              `zs-input--${variant}`,
-              `zs-input--${size}`,
-              wrapperClassName,
-              wrapperProps?.className,
-            )}
+            className={classnames(wrapperClassName, wrapperProps?.className)}
             data-slot="input"
             data-variant={variant}
             data-size={size}
@@ -272,7 +266,6 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               // icons themselves so semantic prefixes (currency, units)
               // stay announced. See InputProps slot-accessibility note.
               <span
-                className="zs-input__slot zs-input__slot--start"
                 data-slot="input-slot-start"
               >
                 {startSlot}
@@ -302,11 +295,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               {...controlProps}
               ref={composeRefs(ref, controlProps.ref)}
               aria-describedby={mergedDescribedBy}
-              className={classnames(
-                "zs-input__control",
-                className,
-                controlProps.className,
-              )}
+              className={classnames(className, controlProps.className)}
               data-slot="input-control"
               aria-invalid={
                 isInvalid || controlProps["aria-invalid"] || undefined
@@ -315,7 +304,6 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
             />
             {endSlot != null ? (
               <span
-                className="zs-input__slot zs-input__slot--end"
                 data-slot="input-slot-end"
               >
                 {endSlot}

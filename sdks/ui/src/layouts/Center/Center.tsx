@@ -27,7 +27,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 
 export interface CenterProps extends ComponentPropsWithoutRef<"div"> {
   /**
@@ -80,11 +79,6 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
     }
   }
 
-  const composedClassName = classnames(
-    "zs-center",
-    inline ? "zs-center--inline" : null,
-    className,
-  );
 
   const layoutVars: React.CSSProperties = {
     ...(minHeight != null ? { "--center-min-block": minHeight } : null),
@@ -99,7 +93,7 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
       ref={ref as Ref<HTMLDivElement>}
       data-slot={dataSlot}
       data-inline={inline ? "" : undefined}
-      className={composedClassName}
+      className={className}
       style={layoutVars}
     >
       {children}

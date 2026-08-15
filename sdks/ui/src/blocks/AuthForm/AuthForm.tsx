@@ -64,7 +64,6 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Card } from "../../components/Card";
 import { Form } from "../../components/Form";
 import { Field } from "../../components/Field";
@@ -273,11 +272,9 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
           align="center"
           justify="center"
           wrap
-          className="zs-auth-form__footer-default"
           data-slot="auth-form-footer-default"
         >
           <span
-            className="zs-auth-form__footer-prompt"
             data-slot="auth-form-footer-prompt"
           >
             {FOOTER_COPY[mode].prompt}
@@ -296,16 +293,15 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
 
     return (
       <Center
-        className={classnames("zs-auth-form-center", className)}
+        className={className}
         data-slot="auth-form-center"
       >
-        <Card variant="elevated" className="zs-auth-form" data-slot="auth-form">
+        <Card variant="elevated" data-slot="auth-form">
           <Form
             {...rest}
             ref={ref}
             aria-labelledby={titleId}
             onSubmit={handleSubmit}
-            className="zs-auth-form__form"
             data-slot="auth-form-form"
           >
             <Stack gap={5}>
@@ -313,14 +309,12 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
               <Stack gap={1} data-slot="auth-form-header">
                 <h2
                   id={titleId}
-                  className="zs-auth-form__title"
                   data-slot="auth-form-title"
                 >
                   {resolvedTitle}
                 </h2>
                 {description != null ? (
                   <p
-                    className="zs-auth-form__description"
                     data-slot="auth-form-description"
                   >
                     {description}
@@ -336,7 +330,6 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
                   <Banner
                     intent="danger"
                     live
-                    className="zs-auth-form__error"
                     data-slot="auth-form-error"
                   >
                     {error}
@@ -349,7 +342,6 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
                   once; `border:0;margin:0;padding:0;min-inline-size:0`
                   in CSS strips the legacy fieldset chrome. */}
               <fieldset
-                className="zs-auth-form__fieldset"
                 disabled={loading || undefined}
                 data-slot="auth-form-fields"
               >
@@ -396,7 +388,6 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
 
                   {secondaryAction != null ? (
                     <div
-                      className="zs-auth-form__secondary"
                       data-slot="auth-form-secondary"
                     >
                       {secondaryAction}
@@ -411,7 +402,6 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
                 variant="filled"
                 size="large"
                 loading={loading}
-                className="zs-auth-form__submit"
                 data-slot="auth-form-submit"
               >
                 {resolvedSubmit}
@@ -421,28 +411,23 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
               {socialActions != null ? (
                 <Stack gap={4} data-slot="auth-form-social">
                   <div
-                    className="zs-auth-form__or"
                     data-slot="auth-form-or"
                     role="presentation"
                   >
                     <Separator
-                      className="zs-auth-form__or-line"
                       data-slot="auth-form-or-line"
                     />
                     <span
-                      className="zs-auth-form__or-label"
                       data-slot="auth-form-or-label"
                     >
                       or
                     </span>
                     <Separator
-                      className="zs-auth-form__or-line"
                       data-slot="auth-form-or-line"
                     />
                   </div>
                   <Stack
                     gap={3}
-                    className="zs-auth-form__social-actions"
                     data-slot="auth-form-social-actions"
                   >
                     {socialActions}
@@ -453,7 +438,6 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
               {/* Footer — mode-switch prompt or consumer override. */}
               {footerContent != null ? (
                 <div
-                  className="zs-auth-form__footer"
                   data-slot="auth-form-footer"
                 >
                   {footerContent}

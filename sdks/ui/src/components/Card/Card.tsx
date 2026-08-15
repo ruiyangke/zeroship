@@ -62,7 +62,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 
 export type CardVariant = "surface" | "elevated" | "outline" | "ghost";
 export type CardSize = "sm" | "md" | "lg";
@@ -166,12 +165,6 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
   },
   ref,
 ) {
-  const composedClassName = classnames(
-    "zs-card",
-    `zs-card--${variant}`,
-    size !== "md" ? `zs-card--${size}` : null,
-    className,
-  );
 
   // `data-slot` defaults to `"card"` but a composing block (e.g.
   // StatCard) can override the root slot so consumers can target the
@@ -195,7 +188,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     interactive && !asChild && typeof onClick === "function";
 
   // `aria-disabled` is observed via the rest spread so the CSS rule
-  // .zs-card[data-interactive][aria-disabled="true"] (pointer-events
+  // [data-slot="card"][data-interactive][aria-disabled="true"] (pointer-events
   // none, dimmed) is paired with JS-level suppression: pointer-events
   // blocks the mouse, but keyboard activation runs JS-side, so we must
   // also short-circuit `onClick` and the Enter/Space handler.
@@ -280,7 +273,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
         {...rest}
         {...dataProps}
         ref={ref as Ref<unknown>}
-        className={composedClassName}
+        className={className}
         data-slot={dataSlot}
         onClick={handleClick}
         onKeyDown={onKeyDown}
@@ -306,7 +299,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
       {...dataProps}
       {...interactiveAriaProps}
       ref={ref as Ref<HTMLDivElement>}
-      className={composedClassName}
+      className={className}
       data-slot={dataSlot}
       tabIndex={ownsActivation ? 0 : undefined}
       onClick={handleClick}
@@ -333,15 +326,13 @@ const CardHeader = forwardRef<HTMLDivElement, CardHeaderProps>(
   function CardHeader({ className, ...rest }, ref) {
     // Rest spread BEFORE internal data-slot so callers cannot overwrite
     // the documented `data-slot="card-header"` contract via `{...rest}`
-    // (wave-7 🟢 6). ClassName stays composed via `classnames` so
-    // consumer `className` augments rather than replaces the internal
-    // class.
+    // (wave-7 item 6). Consumer className passes through unchanged.
     return (
       <div
         {...rest}
         ref={ref}
         data-slot="card-header"
-        className={classnames("zs-card__header", className)}
+        className={className}
       />
     );
   },
@@ -380,7 +371,7 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
           {...rest}
           ref={ref as Ref<unknown>}
           data-slot="card-title"
-          className={classnames("zs-card__title", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -393,7 +384,7 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
         {...rest}
         ref={ref}
         data-slot="card-title"
-        className={classnames("zs-card__title", className)}
+        className={className}
       >
         {children}
       </h3>
@@ -410,7 +401,7 @@ const CardDescription = forwardRef<HTMLParagraphElement, CardDescriptionProps>(
         {...rest}
         ref={ref}
         data-slot="card-description"
-        className={classnames("zs-card__description", className)}
+        className={className}
       />
     );
   },
@@ -425,7 +416,7 @@ const CardAction = forwardRef<HTMLDivElement, CardActionProps>(
         {...rest}
         ref={ref}
         data-slot="card-action"
-        className={classnames("zs-card__action", className)}
+        className={className}
       />
     );
   },
@@ -460,7 +451,7 @@ const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(function CardMedia(
       ref={ref}
       data-slot="card-media"
       data-side={side}
-      className={classnames("zs-card__media", className)}
+      className={className}
     />
   );
 });
@@ -474,7 +465,7 @@ const CardContent = forwardRef<HTMLDivElement, CardContentProps>(
         {...rest}
         ref={ref}
         data-slot="card-content"
-        className={classnames("zs-card__content", className)}
+        className={className}
       />
     );
   },
@@ -502,7 +493,7 @@ const CardFooter = forwardRef<HTMLDivElement, CardFooterProps>(
         data-slot="card-footer"
         data-align={align}
         data-divider={divider}
-        className={classnames("zs-card__footer", className)}
+        className={className}
       />
     );
   },

@@ -292,13 +292,7 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
           return (
             <div
               {...rootProps}
-              className={classnames(
-                "zs-otp-field",
-                `zs-otp-field--${variant}`,
-                `zs-otp-field--${size}`,
-                className,
-                rootProps.className,
-              )}
+              className={classnames(className, rootProps.className)}
               data-slot="otp-field"
               data-variant={variant}
               data-size={size}
@@ -360,7 +354,6 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
                       Character {index + 1} of {length}
                     </span>
                     <BaseOTPField.Input
-                      className="zs-otp-field__input"
                       data-slot="otp-field-input"
                       aria-labelledby={cellLabelledBy}
                       aria-describedby={cellDescribedBy}

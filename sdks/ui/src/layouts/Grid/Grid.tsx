@@ -36,7 +36,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import {
   type Gap,
   type Align,
@@ -142,11 +141,6 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
     baseColumns = columns;
   }
 
-  const composedClassName = classnames(
-    "zs-grid",
-    intrinsic ? "zs-grid--intrinsic" : "zs-grid--explicit",
-    className,
-  );
 
   // Layout values flow as inline custom properties / data-attributes
   // consumed by Grid.css. The responsive object's per-breakpoint counts
@@ -180,7 +174,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
       data-explicit={!intrinsic || undefined}
       data-intrinsic={intrinsic || undefined}
       data-responsive={responsive ? "" : undefined}
-      className={composedClassName}
+      className={className}
       style={layoutVars}
     >
       {children}

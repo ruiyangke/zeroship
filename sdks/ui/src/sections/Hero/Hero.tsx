@@ -96,7 +96,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
 import { Cluster } from "../../layouts/Cluster";
@@ -280,7 +279,6 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
   // Heroes on a page.
   const titleId = useId();
 
-  const composedClassName = classnames("zs-hero", className);
 
   // ── Recursive child normalization (single pass) ──────────────────────────
   // One walk over the flattened children (Fragments descended) does all the
@@ -380,7 +378,6 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
   const textColumn = (
     <Stack
       data-slot="hero-text"
-      className="zs-hero__text"
       gap={5}
       align={effectiveAlign === "center" ? "center" : "start"}
     >
@@ -398,13 +395,11 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
     <div
       data-slot="hero-body"
       data-layout={dataLayout}
-      className="zs-hero__body"
     >
       {textColumn}
       {hasMedia ? (
         <div
           data-slot="hero-media-column"
-          className="zs-hero__media-column"
         >
           {mediaNodes}
         </div>
@@ -424,7 +419,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
         data-tone={tone}
         data-backdrop={backdrop ? "" : undefined}
         aria-labelledby={hasHeadline ? titleId : undefined}
-        className={composedClassName}
+        className={className}
       >
         <Container size={size} data-slot="hero-container">
           {body}
@@ -448,11 +443,7 @@ const HeroEyebrow = forwardRef<HTMLDivElement, HeroEyebrowProps>(
         {...rest}
         ref={ref}
         data-slot="hero-eyebrow"
-        className={classnames(
-          "zs-section-eyebrow",
-          "zs-hero__eyebrow",
-          className,
-        )}
+        className={className}
       />
     );
   },
@@ -481,7 +472,6 @@ const HeroTitle = forwardRef<HTMLHeadingElement, HeroTitleProps>(
     // a shared label id from context — that is what made two Titles collide.
     const fallbackId = useId();
     const resolvedId = id ?? fallbackId;
-    const composedClassName = classnames("zs-hero__title", className);
 
     if (asChild) {
       // A Fragment passes `isValidElement` but cannot carry the id / className
@@ -505,7 +495,7 @@ const HeroTitle = forwardRef<HTMLHeadingElement, HeroTitleProps>(
           id={resolvedId}
           ref={ref as Ref<unknown>}
           data-slot="hero-title"
-          className={composedClassName}
+          className={className}
         >
           {children}
         </Slot>
@@ -517,7 +507,7 @@ const HeroTitle = forwardRef<HTMLHeadingElement, HeroTitleProps>(
         id={resolvedId}
         ref={ref}
         data-slot="hero-title"
-        className={composedClassName}
+        className={className}
       >
         {children}
       </h1>
@@ -537,7 +527,7 @@ const HeroDescription = forwardRef<HTMLParagraphElement, HeroDescriptionProps>(
         {...rest}
         ref={ref}
         data-slot="hero-description"
-        className={classnames("zs-hero__description", className)}
+        className={className}
       />
     );
   },
@@ -554,7 +544,7 @@ const HeroActions = forwardRef<HTMLDivElement, HeroActionsProps>(
     // Compose the Cluster primitive (wrapping inline group). It mirrors the
     // band alignment so a centered hero has centered CTAs. Cluster honors a
     // consumer data-slot (defaulting to "cluster"); we relabel it to the
-    // band's own vocabulary and compose the BEM hook via classnames.
+    // band's own vocabulary and pass the consumer className through.
     return (
       <Cluster
         {...rest}
@@ -562,7 +552,7 @@ const HeroActions = forwardRef<HTMLDivElement, HeroActionsProps>(
         gap={3}
         justify={align === "center" ? "center" : "start"}
         data-slot="hero-actions"
-        className={classnames("zs-hero__actions", className)}
+        className={className}
       >
         {children}
       </Cluster>
@@ -587,7 +577,7 @@ const HeroMedia = forwardRef<HTMLDivElement, HeroMediaProps>(
         {...rest}
         ref={ref}
         data-slot="hero-media"
-        className={classnames("zs-hero__media", className)}
+        className={className}
       />
     );
   },

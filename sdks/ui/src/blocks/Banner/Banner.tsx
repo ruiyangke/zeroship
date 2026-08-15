@@ -65,7 +65,6 @@ import {
   type ReactNode,
 } from "react";
 import { CircleAlert, CircleCheck } from "lucide-react";
-import { classnames } from "../../components/_classnames";
 import { composeRefs } from "../../components/_slot";
 import { Icon } from "../../components/Icon/Icon";
 import { Stack } from "../../layouts/Stack";
@@ -247,11 +246,6 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
     }
   }
 
-  const composedClassName = classnames(
-    "zs-banner",
-    `zs-banner--${intent}`,
-    className,
-  );
 
   // Live-region role ONLY when `live` (see the file-header note). The
   // severity picks polite vs assertive: info/success announce politely
@@ -273,14 +267,13 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
   // primitives rather than re-rolling flexbox.
   const body = (
     <Stack
-      className="zs-banner__row"
       data-slot="banner-row"
       direction="row"
       align="start"
       gap={3}
     >
       <BannerIcon intent={intent} />
-      <Stack className="zs-banner__text" data-slot="banner-text" gap={1}>
+      <Stack data-slot="banner-text" gap={1}>
         {title != null ? <BannerTitle>{title}</BannerTitle> : null}
         {description != null ? (
           <BannerDescription>{description}</BannerDescription>
@@ -292,7 +285,6 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
           type="button"
           aria-label="Dismiss"
           data-slot="banner-dismiss"
-          className="zs-banner__dismiss"
           onClick={handleDismiss}
         >
           <span aria-hidden="true">×</span>
@@ -307,7 +299,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
       {...liveProps}
       {...dataProps}
       ref={composedRef}
-      className={composedClassName}
+      className={className}
       data-slot="banner"
     >
       {body}
@@ -338,7 +330,7 @@ function BannerIcon({ intent }: { intent: BannerIntent }) {
   // intent color flows through unchanged.
   const glyph = intent === "success" ? CircleCheck : CircleAlert;
   return (
-    <div aria-hidden="true" data-slot="banner-icon" className="zs-banner__icon">
+    <div aria-hidden="true" data-slot="banner-icon">
       <Icon as={glyph} />
     </div>
   );
@@ -351,7 +343,7 @@ const BannerTitle = forwardRef<HTMLDivElement, BannerTitleProps>(
         {...rest}
         ref={ref}
         data-slot="banner-title"
-        className={classnames("zs-banner__title", className)}
+        className={className}
       />
     );
   },
@@ -367,7 +359,7 @@ const BannerDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="banner-description"
-      className={classnames("zs-banner__description", className)}
+      className={className}
     />
   );
 });
@@ -380,7 +372,7 @@ const BannerActions = forwardRef<HTMLDivElement, BannerActionsProps>(
         {...rest}
         ref={ref}
         data-slot="banner-actions"
-        className={classnames("zs-banner__actions", className)}
+        className={className}
       />
     );
   },

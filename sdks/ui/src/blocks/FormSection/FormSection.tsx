@@ -88,7 +88,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Separator } from "../../components/Separator";
 
 export type FormSectionOrientation = "stacked" | "aside";
@@ -291,11 +290,7 @@ const FormSectionRoot = forwardRef<HTMLElement, FormSectionProps>(
           aria-labelledby={hasAccessibleTitle ? titleId : undefined}
           data-slot="form-section"
           data-orientation={orientation}
-          className={classnames(
-            "zs-form-section",
-            `zs-form-section--${orientation}`,
-            className,
-          )}
+          className={className}
         >
           {ergonomicHeader}
           {ergonomicBody}
@@ -328,7 +323,7 @@ const FormSectionHeader = forwardRef<HTMLDivElement, FormSectionHeaderProps>(
         {...rest}
         ref={ref}
         data-slot="form-section-header"
-        className={classnames("zs-form-section__header", className)}
+        className={className}
       />
     );
   },
@@ -378,7 +373,7 @@ const FormSectionTitle = forwardRef<HTMLHeadingElement, FormSectionTitleProps>(
           ref={ref as Ref<unknown>}
           id={titleId}
           data-slot="form-section-title"
-          className={classnames("zs-form-section__title", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -393,7 +388,7 @@ const FormSectionTitle = forwardRef<HTMLHeadingElement, FormSectionTitleProps>(
         ref={ref}
         id={titleId}
         data-slot="form-section-title"
-        className={classnames("zs-form-section__title", className)}
+        className={className}
       >
         {children}
       </h3>
@@ -412,7 +407,7 @@ const FormSectionDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="form-section-description"
-      className={classnames("zs-form-section__description", className)}
+      className={className}
     />
   );
 });
@@ -429,7 +424,7 @@ const FormSectionBody = forwardRef<HTMLDivElement, FormSectionBodyProps>(
         {...rest}
         ref={ref}
         data-slot="form-section-body"
-        className={classnames("zs-form-section__body", className)}
+        className={className}
       />
     );
   },
@@ -466,17 +461,15 @@ const FormSectionFooter = forwardRef<HTMLDivElement, FormSectionFooterProps>(
         ref={ref}
         data-slot="form-section-footer"
         data-align={align}
-        className={classnames("zs-form-section__footer", className)}
+        className={className}
       >
         {separator ? (
           <Separator
-            className="zs-form-section__footer-divider"
             data-slot="form-section-footer-divider"
           />
         ) : null}
         <div
           data-slot="form-section-actions"
-          className="zs-form-section__actions"
         >
           {children}
         </div>

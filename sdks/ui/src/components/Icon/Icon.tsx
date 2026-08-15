@@ -18,8 +18,8 @@
  * Design guarantees encoded here (in source so they travel with the
  * code, not a sibling doc):
  *
- *   1. Token-pure sizing. The size is governed by CSS — the
- *      `zs-icon--{size}` class sets `inline-size`/`block-size` to a
+ *   1. Token-pure sizing. The size is governed by CSS: the
+ *      `[data-slot="icon"][data-size]` mapping sets its dimensions to a
  *      `--zs-icon-*` token. We deliberately do NOT forward a numeric
  *      `size` prop to the Lucide component (Lucide would stamp a raw
  *      `width`/`height="24"` px attribute on the svg). Letting CSS own
@@ -52,7 +52,6 @@ import {
   type Ref,
   type SVGProps,
 } from "react";
-import { classnames } from "../_classnames";
 
 export type IconSize = "sm" | "md" | "lg";
 
@@ -97,11 +96,6 @@ export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
   { as: Component, size = "md", label, className, ...rest },
   ref,
 ) {
-  const composedClassName = classnames(
-    "zs-icon",
-    `zs-icon--${size}`,
-    className,
-  );
 
   const meaningful = label != null && label !== "";
 
@@ -109,7 +103,7 @@ export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
     <Component
       {...rest}
       ref={ref as Ref<SVGSVGElement>}
-      className={composedClassName}
+      className={className}
       data-slot="icon"
       data-size={size}
       focusable="false"

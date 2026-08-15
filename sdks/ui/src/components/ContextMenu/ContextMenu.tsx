@@ -27,8 +27,8 @@
  *   - The subparts are re-exports — NOT re-wrapped Base UI primitives.
  *     A re-wrap would mean two source files and two CSS surfaces drift
  *     apart over time; the re-export keeps the visual contract in one
- *     place (Menu.css owns the styles). The same `.zs-menu-*` class
- *     names paint ContextMenu popups, so the forced-colors mirror,
+ *     place (Menu.css owns the styles). ContextMenu reuses the Menu
+ *     data-slot names, so the forced-colors mirror,
  *     hit-target floor, and indicator gutter all carry over for free.
  *   - Backdrop opt-in same as Menu — ContextMenu defaults to popover-
  *     feel; the modal-feel Backdrop subpart is available but never
@@ -64,7 +64,6 @@ import {
 import { ContextMenu as BaseContextMenu } from "@base-ui/react/context-menu";
 import { Menu as BaseMenu } from "@base-ui/react/menu";
 import type { BaseUIEvent } from "@base-ui/react/internals/types";
-import { composeBaseClass } from "../_classnames";
 import { Slot, composeRefs } from "../_slot";
 import {
   MenuPortal,
@@ -223,7 +222,7 @@ const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
       <BaseContextMenu.Trigger
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-contextmenu-trigger", className)}
+        className={className}
         data-slot="contextmenu-trigger"
         tabIndex={resolvedTabIndex}
         role={asChild ? role : (role ?? "button")}
@@ -267,8 +266,8 @@ ContextMenuTrigger.displayName = "ContextMenu.Trigger";
 
 /* ─── Popup ────────────────────────────────────────────────────────── *
  *
- * ContextMenu.Popup is a small wrapper that paints the shared
- * `.zs-menu-popup` class but does NOT inject Menu.Popup's `side`/
+ * ContextMenu.Popup is a small wrapper that exposes the shared
+ * `[data-slot="menu-popup"]` hook but does NOT inject Menu.Popup's `side`/
  * `align`/`sideOffset` defaults — Base UI's ContextMenu positioning
  * is pointer-anchored at the click coordinates, so the click-menu
  * defaults (`side="bottom"`, `align="start"`, `sideOffset=6`) would
@@ -303,14 +302,13 @@ const ContextMenuPopup = forwardRef<HTMLElement, ContextMenuPopupProps>(
     if (sideOffset !== undefined) positionerProps.sideOffset = sideOffset;
     return (
       <BaseContextMenu.Positioner
-        className="zs-menu-positioner"
         data-slot="menu-positioner"
         {...positionerProps}
       >
         <BaseMenu.Popup
           {...rest}
           ref={ref as Ref<HTMLDivElement>}
-          className={composeBaseClass("zs-menu-popup", className)}
+          className={className}
           data-slot="menu-popup"
         >
           {children}
@@ -323,8 +321,8 @@ ContextMenuPopup.displayName = "ContextMenu.Popup";
 
 /* ─── public namespace ─────────────────────────────────────────────── *
  *
- * Subparts mirror Menu's surface by reference. The same `zs-menu-*`
- * CSS classes paint both surfaces; ContextMenu only adds a trigger
+ * Subparts mirror Menu's surface by reference. Both surfaces reuse the
+ * same Menu data-slot names; ContextMenu only adds a trigger
  * subpart and a thin Root. */
 
 export type ContextMenuComponent = typeof ContextMenuRoot & {

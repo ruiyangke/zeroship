@@ -81,7 +81,7 @@ import {
 } from "react";
 import { PreviewCard as BasePreviewCard } from "@base-ui/react/preview-card";
 import { Slot, composeRefs } from "../_slot";
-import { classnames, composeBaseClass } from "../_classnames";
+import { classnames } from "../_classnames";
 
 /**
  * Physical and logical sides the Popup can anchor on. Derived from Base
@@ -468,10 +468,7 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
             return (
               <Slot
                 {...slotProps}
-                className={classnames(
-                  slotClassName as string | undefined,
-                  className,
-                )}
+                className={classnames(slotClassName as string | undefined, className)}
                 ref={composeRefs(ref as Ref<unknown>, triggerRef)}
               >
                 {children}
@@ -491,7 +488,7 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
         {...(resolvedDelay !== undefined ? { delay: resolvedDelay } : {})}
         closeDelay={resolvedCloseDelay}
         aria-describedby={ariaDescribedBy}
-        className={composeBaseClass("zs-preview-card-trigger", className)}
+        className={className}
         data-slot="preview-card-trigger"
         {...rest}
       >
@@ -533,7 +530,7 @@ const PreviewCardBackdrop = forwardRef<
   return (
     <BasePreviewCard.Backdrop
       ref={ref as Ref<HTMLDivElement>}
-      className={composeBaseClass("zs-preview-card-backdrop", className)}
+      className={className}
       data-slot="preview-card-backdrop"
       {...rest}
     />
@@ -561,7 +558,7 @@ const PreviewCardPositioner = forwardRef<
   return (
     <BasePreviewCard.Positioner
       ref={ref as Ref<HTMLDivElement>}
-      className={composeBaseClass("zs-preview-card-positioner", className)}
+      className={className}
       data-slot="preview-card-positioner"
       {...rest}
     />
@@ -628,7 +625,6 @@ const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
     const popupId = rootCtx?.popupId;
     return (
       <BasePreviewCard.Positioner
-        className="zs-preview-card-positioner"
         data-slot="preview-card-positioner"
         side={side}
         align={align}
@@ -639,7 +635,7 @@ const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
           ref={ref as Ref<HTMLDivElement>}
           id={popupId}
           data-size={size}
-          className={composeBaseClass("zs-preview-card-popup", className)}
+          className={className}
           data-slot="preview-card-popup"
         >
           {children}
@@ -666,7 +662,7 @@ const PreviewCardArrow = forwardRef<HTMLDivElement, PreviewCardArrowProps>(
     return (
       <BasePreviewCard.Arrow
         ref={ref}
-        className={composeBaseClass("zs-preview-card-arrow", className)}
+        className={className}
         data-slot="preview-card-arrow"
         {...rest}
       >

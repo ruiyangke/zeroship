@@ -41,7 +41,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { type Gap, type Side, spaceVar } from "../_layout-primitives";
 
 /** Which edge the fixed-size side sits on — the shared {@link Side}. */
@@ -114,7 +113,6 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
     }
   }
 
-  const composedClassName = classnames("zs-split", className);
 
   const layoutVars: React.CSSProperties = {
     "--split-side-width": sideWidth,
@@ -131,7 +129,7 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
       data-slot={dataSlot}
       data-side={side}
       data-collapse={collapseBelow}
-      className={composedClassName}
+      className={className}
       style={layoutVars}
     >
       {children}
@@ -169,7 +167,7 @@ const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         data-slot={dataSlot}
-        className={classnames("zs-split__side", className)}
+        className={className}
       >
         {children}
       </Comp>
@@ -205,7 +203,7 @@ const SplitMainEl = forwardRef<HTMLDivElement, SplitMainProps>(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         data-slot={dataSlot}
-        className={classnames("zs-split__main", className)}
+        className={className}
       >
         {children}
       </Comp>

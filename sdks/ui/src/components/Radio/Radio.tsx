@@ -71,7 +71,6 @@ import {
   useFieldVisualSize,
 } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
-import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
 export type RadioSize = "sm" | "md" | "lg";
@@ -115,8 +114,7 @@ export interface RadioGroupProps<T = string> extends Omit<
   /** Visual size — cascades to each Radio child. */
   size?: RadioSize;
 
-  /** Extra CSS class names merged onto the group `<div>` after the base
-   *  `zs-radio-group` and modifier classes. */
+  /** Extra CSS class names forwarded to the group `<div>`. */
   className?: string;
 
   /** Controlled selected value. Pair with `onValueChange`; omit for the
@@ -194,12 +192,7 @@ function RadioGroupInner<T = string>(
         ref={ref}
         disabled={disabled || undefined}
         required={required || undefined}
-        className={classnames(
-          "zs-radio-group",
-          `zs-radio-group--${orientation}`,
-          size ? `zs-radio-group--${size}` : null,
-          className,
-        )}
+        className={className}
         data-orientation={orientation}
         data-size={size}
       >
@@ -228,8 +221,7 @@ export interface RadioProps<T = string> extends Omit<
   /** Inherited from the enclosing RadioGroup / Field by default. */
   size?: RadioSize;
 
-  /** Extra CSS class names merged onto the chip `<span>` after the base
-   *  `zs-radio` and size modifier. */
+  /** Extra CSS class names forwarded to the chip `<span>`. */
   className?: string;
 
   /**
@@ -313,7 +305,6 @@ function RadioInner<T = string>(
     }
   }, [groupCtx]);
 
-  const chipClassName = classnames("zs-radio", `zs-radio--${size}`, className);
 
   // Per-option accessible name (wave10 🔴 a11y fix).
   //
@@ -351,12 +342,11 @@ function RadioInner<T = string>(
       disabled={disabled || undefined}
       required={required || undefined}
       aria-labelledby={chipAriaLabelledBy}
-      className={chipClassName}
+      className={className}
       data-slot="radio"
       data-size={size}
     >
       <BaseRadio.Indicator
-        className="zs-radio__indicator"
         data-slot="radio-indicator"
       />
     </BaseRadio.Root>
@@ -374,7 +364,6 @@ function RadioInner<T = string>(
         {chip}
         <span
           id={rowTextId}
-          className="zs-radio-field__text"
           data-slot="radio-field-text"
         >
           {label}

@@ -8,7 +8,7 @@
  *
  * Aria — the root is `role="status"` (a polite live region). The visible
  * `label` (default "Loading") is rendered inside a
- * `<span class="zs-visually-hidden">` so screen readers announce it
+ * `<span data-slot="visually-hidden">` so screen readers announce it
  * while sighted users see only the ring. The ring element itself is
  * `aria-hidden` so it isn't double-announced. `aria-live="polite"` is
  * implied by `role="status"`; we leave the implicit default.
@@ -20,7 +20,6 @@
  * `role="status"` label still conveys "loading" to AT. See Spinner.css.
  */
 import { forwardRef, useId, type ComponentPropsWithoutRef } from "react";
-import { classnames } from "../_classnames";
 
 export type SpinnerSize = "sm" | "md" | "lg";
 
@@ -65,19 +64,17 @@ export const Spinner = forwardRef<HTMLSpanElement, SpinnerProps>(
         role="status"
         data-slot="spinner"
         data-size={size}
-        className={classnames("zs-spinner", `zs-spinner--${size}`, className)}
+        className={className}
       >
         {/* The visible ring. Decorative — the consumer-supplied name (or
             the visually-hidden label below) carries the accessible name. */}
         <span
-          className="zs-spinner__ring"
           data-slot="spinner-ring"
           aria-hidden="true"
         />
         {consumerNamed ? null : (
           <span
             id={labelId}
-            className="zs-visually-hidden"
             data-slot="visually-hidden"
           >
             {label}

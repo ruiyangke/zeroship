@@ -60,7 +60,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
 
@@ -132,7 +131,6 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
       }
     }
 
-    const composedClassName = classnames("zs-empty-state", className);
 
     // The centered column. `Center` handles both-axes centering; the
     // inner `Stack` governs the icon→title→description→actions gap. The
@@ -140,7 +138,6 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
     const column = (
       <Center asChild data-slot="empty-state-column">
         <Stack
-          className="zs-empty-state__column"
           data-slot="empty-state-column"
           align="center"
           gap={3}
@@ -163,7 +160,7 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
         {...rest}
         ref={ref}
         data-slot="empty-state"
-        className={composedClassName}
+        className={className}
       >
         {column}
       </div>
@@ -192,7 +189,7 @@ const EmptyStateIcon = forwardRef<HTMLDivElement, EmptyStateIconProps>(
         {...rest}
         ref={ref}
         data-slot="empty-state-icon"
-        className={classnames("zs-empty-state__icon", className)}
+        className={className}
       />
     );
   },
@@ -228,7 +225,7 @@ const EmptyStateTitle = forwardRef<HTMLHeadingElement, EmptyStateTitleProps>(
           {...rest}
           ref={ref as Ref<unknown>}
           data-slot="empty-state-title"
-          className={classnames("zs-empty-state__title", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -239,7 +236,7 @@ const EmptyStateTitle = forwardRef<HTMLHeadingElement, EmptyStateTitleProps>(
         {...rest}
         ref={ref}
         data-slot="empty-state-title"
-        className={classnames("zs-empty-state__title", className)}
+        className={className}
       >
         {children}
       </h2>
@@ -257,7 +254,7 @@ const EmptyStateDescription = forwardRef<
       {...rest}
       ref={ref}
       data-slot="empty-state-description"
-      className={classnames("zs-empty-state__description", className)}
+      className={className}
     />
   );
 });
@@ -270,7 +267,7 @@ const EmptyStateActions = forwardRef<HTMLDivElement, EmptyStateActionsProps>(
         {...rest}
         ref={ref}
         data-slot="empty-state-actions"
-        className={classnames("zs-empty-state__actions", className)}
+        className={className}
       />
     );
   },

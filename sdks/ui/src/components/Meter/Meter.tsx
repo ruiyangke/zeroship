@@ -63,7 +63,6 @@ import {
   type ReactNode,
 } from "react";
 import { Meter as BaseMeter } from "@base-ui/react/meter";
-import { classnames } from "../_classnames";
 
 export type MeterSize = "sm" | "md" | "lg";
 export type MeterIntent = "neutral" | "success" | "warning" | "danger";
@@ -136,22 +135,16 @@ export const Meter = forwardRef<HTMLDivElement, MeterProps>(function Meter(
       {...(rest as BaseRootProps)}
       ref={ref}
       {...ariaForwarded}
-      className={classnames(
-        "zs-meter",
-        `zs-meter--${intent}`,
-        `zs-meter--${size}`,
-        className,
-      )}
+      className={className}
       data-slot="meter"
       data-intent={intent}
       data-size={size}
       data-testid={dataTestId}
     >
       {label != null || showValue ? (
-        <div className="zs-meter__header" data-slot="meter-header">
+        <div data-slot="meter-header">
           {label != null ? (
             <BaseMeter.Label
-              className="zs-meter__label"
               data-slot="meter-label"
             >
               {label}
@@ -159,15 +152,13 @@ export const Meter = forwardRef<HTMLDivElement, MeterProps>(function Meter(
           ) : null}
           {showValue ? (
             <BaseMeter.Value
-              className="zs-meter__value"
               data-slot="meter-value"
             />
           ) : null}
         </div>
       ) : null}
-      <BaseMeter.Track className="zs-meter__track" data-slot="meter-track">
+      <BaseMeter.Track data-slot="meter-track">
         <BaseMeter.Indicator
-          className="zs-meter__indicator"
           data-slot="meter-indicator"
         />
       </BaseMeter.Track>

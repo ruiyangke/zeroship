@@ -71,7 +71,6 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 
 /* ─── public types ─────────────────────────────────────────────────────── */
 
@@ -162,7 +161,7 @@ const BreadcrumbsItem = forwardRef<HTMLLIElement, BreadcrumbsItemProps>(
         {...rest}
         ref={ref}
         data-slot="breadcrumbs-item"
-        className={classnames("zs-breadcrumbs__item", className)}
+        className={className}
       />
     );
   },
@@ -195,7 +194,7 @@ const BreadcrumbsLink = forwardRef<HTMLAnchorElement, BreadcrumbsLinkProps>(
           {...rest}
           ref={ref as Ref<unknown>}
           data-slot="breadcrumbs-link"
-          className={classnames("zs-breadcrumbs__link", className)}
+          className={className}
         >
           {children}
         </Slot>
@@ -208,7 +207,7 @@ const BreadcrumbsLink = forwardRef<HTMLAnchorElement, BreadcrumbsLinkProps>(
         {...rest}
         ref={ref}
         data-slot="breadcrumbs-link"
-        className={classnames("zs-breadcrumbs__link", className)}
+        className={className}
       >
         {children}
       </a>
@@ -228,7 +227,7 @@ const BreadcrumbsPage = forwardRef<HTMLSpanElement, BreadcrumbsPageProps>(
         ref={ref}
         data-slot="breadcrumbs-page"
         aria-current="page"
-        className={classnames("zs-breadcrumbs__page", className)}
+        className={className}
       />
     );
   },
@@ -248,7 +247,7 @@ const BreadcrumbsSeparator = forwardRef<
       data-slot="breadcrumbs-separator"
       role="presentation"
       aria-hidden="true"
-      className={classnames("zs-breadcrumbs__separator", className)}
+      className={className}
     >
       {children ?? DEFAULT_SEPARATOR}
     </li>
@@ -335,7 +334,7 @@ function renderItemCrumb(
     // No href and not current → plain non-link text. Wrap in a span so
     // the crumb has a styleable hook distinct from a link.
     inner = (
-      <span data-slot="breadcrumbs-text" className="zs-breadcrumbs__text">
+      <span data-slot="breadcrumbs-text">
         {item.label}
       </span>
     );
@@ -360,20 +359,17 @@ function EllipsisCrumb({
     <li
       data-slot="breadcrumbs-item"
       data-ellipsis=""
-      className="zs-breadcrumbs__item zs-breadcrumbs__item--ellipsis"
     >
       <button
         type="button"
         data-slot="breadcrumbs-ellipsis"
         data-testid={testId}
-        className="zs-breadcrumbs__ellipsis"
         aria-expanded={expanded}
         aria-label={`Show ${hiddenCount} hidden breadcrumbs`}
         onClick={onExpand}
       >
         <span
           aria-hidden="true"
-          className="zs-breadcrumbs__ellipsis-glyph"
           data-slot="breadcrumbs-ellipsis-glyph"
         >
           {"…"}
@@ -507,9 +503,9 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
         aria-label={ariaLabel}
-        className={classnames("zs-breadcrumbs", className)}
+        className={className}
       >
-        <ol className="zs-breadcrumbs__list" data-slot="breadcrumbs-list">
+        <ol data-slot="breadcrumbs-list">
           {body}
         </ol>
       </nav>

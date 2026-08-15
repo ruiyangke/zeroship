@@ -66,8 +66,8 @@
  *     optional `title` lead-in is supplied, THEN the section is labelled
  *     by that real heading (the attr is gated on the heading rendering).
  *   - The feature list is a real `<ul>`/`<li>`. Inclusion is conveyed by
- *     an `Icon` (`Check` included / `Minus` excluded) PLUS a
- *     `.zs-visually-hidden` word ("Included" / "Not included") — NEVER by
+ *     an `Icon` (`Check` included / `Minus` excluded) PLUS a word in
+ *     `[data-slot="visually-hidden"]` ("Included" / "Not included"), never by
  *     color or icon shape alone (color-blind + SR users). The icons are
  *     decorative (no `label`) because the hidden word carries the meaning.
  *   - CTAs are real `<Button>`s with discernible text. A featured tier
@@ -97,7 +97,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Card } from "../../components/Card/Card";
 import { Button } from "../../components/Button/Button";
 import { Badge } from "../../components/Badge/Badge";
@@ -316,27 +315,23 @@ function FeatureRow({
     <li
       data-slot="pricing-feature"
       data-included={included ? "" : undefined}
-      className="zs-pricing__feature"
     >
       <Icon
         as={included ? Check : Minus}
         size="sm"
         data-slot="pricing-feature-icon"
-        className="zs-pricing__feature-icon"
       />
-      <span data-slot="visually-hidden" className="zs-visually-hidden">
+      <span data-slot="visually-hidden">
         {included ? "Included" : "Not included"}
       </span>
       <span
         data-slot="pricing-feature-label"
-        className="zs-pricing__feature-label"
       >
         {label}
       </span>
       {note != null ? (
         <span
           data-slot="pricing-feature-note"
-          className="zs-pricing__feature-note"
         >
           {note}
         </span>
@@ -394,7 +389,6 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
         variant={featured ? "filled" : "gray"}
         onClick={onCtaClick}
         data-slot="pricing-cta-button"
-        className="zs-pricing__cta-button"
       >
         {ctaLabel}
       </Button>
@@ -426,23 +420,22 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
       variant={featured ? "elevated" : "outline"}
       data-slot="pricing-tier"
       data-featured={featured ? "" : undefined}
-      className="zs-pricing__tier"
     >
-      <div data-slot="pricing-tier-header" className="zs-pricing__header">
+      <div data-slot="pricing-tier-header">
         {badgeNode != null ? (
-          <div data-slot="pricing-badge" className="zs-pricing__badge">
+          <div data-slot="pricing-badge">
             {badgeNode}
           </div>
         ) : null}
-        <Heading data-slot="pricing-name" className="zs-pricing__name">
+        <Heading data-slot="pricing-name">
           {name}
         </Heading>
-        <p data-slot="pricing-price" className="zs-pricing__price">
-          <span data-slot="pricing-amount" className="zs-pricing__amount">
+        <p data-slot="pricing-price">
+          <span data-slot="pricing-amount">
             {price}
           </span>
           {period != null ? (
-            <span data-slot="pricing-period" className="zs-pricing__period">
+            <span data-slot="pricing-period">
               {period}
             </span>
           ) : null}
@@ -450,7 +443,6 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
         {description != null ? (
           <p
             data-slot="pricing-description"
-            className="zs-pricing__description"
           >
             {description}
           </p>
@@ -463,9 +455,8 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
         <>
           <Separator
             data-slot="pricing-divider"
-            className="zs-pricing__divider"
           />
-          <ul data-slot="pricing-features" className="zs-pricing__features">
+          <ul data-slot="pricing-features">
             {features.map((feature, index) => (
               <FeatureRow key={index} {...feature} />
             ))}
@@ -478,13 +469,12 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
         // Separator (no hairline above an empty region).
         <div
           data-slot="pricing-features"
-          className="zs-pricing__features"
           aria-hidden="true"
         />
       )}
 
       {ctaNode != null ? (
-        <div data-slot="pricing-cta" className="zs-pricing__cta">
+        <div data-slot="pricing-cta">
           {ctaNode}
         </div>
       ) : null}
@@ -510,7 +500,6 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
     },
     ref,
   ) {
-    const composedClassName = classnames("zs-pricing", className);
 
     // Stable id the section uses for aria-labelledby when an optional `title`
     // lead-in renders. useId is SSR-safe + collision-free across multiple
@@ -607,7 +596,7 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
         data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
-        className={composedClassName}
+        className={className}
       >
         <Container size={size} data-slot="pricing-table-container">
           {titleRenders || description != null ? (
@@ -615,13 +604,11 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
               gap={3}
               align="center"
               data-slot="pricing-table-lead"
-              className="zs-pricing__lead"
             >
               {titleRenders ? (
                 <h2
                   id={titleId}
                   data-slot="pricing-table-title"
-                  className="zs-pricing__title"
                 >
                   {title}
                 </h2>
@@ -629,7 +616,6 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
               {description != null ? (
                 <p
                   data-slot="pricing-lead-description"
-                  className="zs-pricing__lead-description"
                 >
                   {description}
                 </p>
@@ -642,7 +628,6 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
             gap={5}
             align="stretch"
             data-slot="pricing-table-grid"
-            className="zs-pricing__grid"
           >
             {allTiers.map((tier) => renderTier(tier, headingLevel))}
           </Grid>

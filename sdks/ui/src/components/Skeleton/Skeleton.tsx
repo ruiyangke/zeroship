@@ -27,7 +27,6 @@ import {
   type ComponentPropsWithoutRef,
   type CSSProperties,
 } from "react";
-import { classnames } from "../_classnames";
 
 export type SkeletonVariant = "text" | "rect" | "circle";
 
@@ -84,14 +83,13 @@ export const Skeleton = forwardRef<HTMLDivElement, SkeletonProps>(
           data-slot="skeleton"
           data-variant="text"
           data-lines={lines}
-          className={classnames("zs-skeleton-lines", className)}
+          className={className}
           style={sizeStyle}
         >
           {Array.from({ length: lines }, (_, i) => (
             <span
               key={i}
               data-slot="skeleton-line"
-              className="zs-skeleton zs-skeleton--text"
             />
           ))}
         </div>
@@ -105,11 +103,7 @@ export const Skeleton = forwardRef<HTMLDivElement, SkeletonProps>(
         aria-hidden="true"
         data-slot="skeleton"
         data-variant={variant}
-        className={classnames(
-          "zs-skeleton",
-          `zs-skeleton--${variant}`,
-          className,
-        )}
+        className={className}
         style={sizeStyle}
       />
     );

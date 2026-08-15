@@ -80,7 +80,6 @@ import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
 import { Icon } from "../Icon";
 import { Slot, composeRefs } from "../_slot";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type DialogSize = "sm" | "md" | "lg" | "full";
 export type DialogPlacement = "center" | "top";
@@ -147,10 +146,6 @@ export interface DialogProps extends Omit<
   children?: BaseRootProps["children"];
 }
 
-/* `composeBaseClass` now lives in `../_classnames` (review-fix item 10,
- * Phase 2.C) — Dialog, AlertDialog, and Field used byte-identical
- * copies; one source of truth keeps the surface honest. */
-
 /* ─── Root ──────────────────────────────────────────────────────────── */
 
 function DialogRoot({
@@ -209,11 +204,9 @@ export type DialogTriggerProps = BaseTriggerProps;
  * caller swap the rendered element (e.g. `<a>`), so the consumer's
  * ref type must allow any DOM element (review-fix item 13).
  *
- * No internal class hook (review-fix item 20): the previous
- * `zs-dialog-trigger` class was never used by any CSS rule. The
- * Trigger is typically replaced via `render={<Button>}` and the
- * Button supplies all its own styling — adding a dead hook here only
- * costs bytes. Consumers who want a hook pass `className` via rest. */
+ * The Trigger exposes its `data-slot` hook (review-fix item 20). It is
+ * typically replaced via `render={<Button>}`, and the Button supplies
+ * all its own styling. Consumers can still pass `className` via rest. */
 const DialogTrigger = forwardRef<HTMLElement, DialogTriggerProps>(
   function DialogTrigger(props, ref) {
     // Base UI declares Trigger as HTMLButtonElement-typed; we widen to
@@ -245,7 +238,7 @@ const DialogViewport = forwardRef<HTMLDivElement, DialogViewportProps>(
     return (
       <BaseDialog.Viewport
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-dialog-viewport", className)}
+        className={className}
         data-slot="dialog-viewport"
         {...rest}
       />
@@ -293,7 +286,7 @@ const DialogBackdrop = forwardRef<HTMLElement, DialogBackdropProps>(
       <BaseDialog.Backdrop
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-dialog-backdrop", className)}
+        className={className}
         data-slot="dialog-backdrop"
         data-tint={tint}
       />
@@ -365,7 +358,7 @@ const DialogPopup = forwardRef<HTMLElement, DialogPopupProps>(
       <BaseDialog.Popup
         {...rest}
         ref={composedRef as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-dialog-popup", className)}
+        className={className}
         data-slot="dialog-popup"
         data-size={size}
         data-placement={placement}
@@ -401,19 +394,17 @@ const DialogHeader = forwardRef<HTMLDivElement, DialogHeaderProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-dialog__header", className)}
+        className={className}
         data-slot="dialog-header"
         {...rest}
       >
         <div
-          className="zs-dialog__header-content"
           data-slot="dialog-header-content"
         >
           {children}
         </div>
         {showClose ? (
           <BaseDialog.Close
-            className="zs-dialog__header-close"
             data-slot="dialog-header-close"
             aria-label={closeLabel}
           >
@@ -435,7 +426,7 @@ const DialogTitle = forwardRef<HTMLHeadingElement, DialogTitleProps>(
     return (
       <BaseDialog.Title
         ref={ref}
-        className={composeBaseClass("zs-dialog__title", className)}
+        className={className}
         data-slot="dialog-title"
         {...rest}
       />
@@ -455,7 +446,7 @@ const DialogDescription = forwardRef<
   return (
     <BaseDialog.Description
       ref={ref}
-      className={composeBaseClass("zs-dialog__description", className)}
+      className={className}
       data-slot="dialog-description"
       {...rest}
     />
@@ -471,7 +462,7 @@ const DialogBody = forwardRef<HTMLDivElement, DialogBodyProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-dialog__body", className)}
+        className={className}
         data-slot="dialog-body"
         {...rest}
       />
@@ -486,7 +477,7 @@ const DialogFooter = forwardRef<HTMLDivElement, DialogFooterProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-dialog__footer", className)}
+        className={className}
         data-slot="dialog-footer"
         {...rest}
       />

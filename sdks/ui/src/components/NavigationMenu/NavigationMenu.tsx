@@ -78,7 +78,6 @@ import {
 import { NavigationMenu as BaseNavMenu } from "@base-ui/react/navigation-menu";
 import { ChevronDown } from "lucide-react";
 import { Icon } from "../Icon/Icon";
-import { classnames, composeBaseClass } from "../_classnames";
 import { Slot, composeRefs } from "../_slot";
 
 export type NavMenuSide = "top" | "right" | "bottom" | "left";
@@ -150,10 +149,7 @@ function NavMenuRoot<Value = unknown>(props: NavigationMenuProps<Value>) {
     <BaseNavMenu.Root
       {...(rest as BaseRootProps)}
       orientation={orientation}
-      className={composeBaseClass(
-        classnames("zs-navmenu", `zs-navmenu--${orientation}`),
-        className,
-      )} data-slot="navmenu"
+      className={className} data-slot="navmenu"
       data-orientation={orientation}
     >
       {children}
@@ -181,7 +177,7 @@ const NavMenuList = forwardRef<HTMLUListElement, NavMenuListProps>(
       <BaseNavMenu.List
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-list", className)} data-slot="navmenu-list"
+        className={className} data-slot="navmenu-list"
       />
     );
   },
@@ -209,7 +205,7 @@ const NavMenuItem = forwardRef<HTMLLIElement, NavMenuItemProps>(
       <BaseNavMenu.Item
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-item", className)} data-slot="navmenu-item"
+        className={className} data-slot="navmenu-item"
       />
     );
   },
@@ -238,7 +234,7 @@ const NavMenuTrigger = forwardRef<HTMLButtonElement, NavMenuTriggerProps>(
       <BaseNavMenu.Trigger
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-trigger", className)} data-slot="navmenu-trigger"
+        className={className} data-slot="navmenu-trigger"
       />
     );
   },
@@ -268,7 +264,7 @@ const NavMenuContent = forwardRef<HTMLDivElement, NavMenuContentProps>(
       <BaseNavMenu.Content
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-content", className)} data-slot="navmenu-content"
+        className={className} data-slot="navmenu-content"
       />
     );
   },
@@ -360,12 +356,7 @@ const NavMenuLink = forwardRef<HTMLAnchorElement, NavMenuLinkProps>(
             return (
               <Slot data-slot="navmenu-link"
                 {...(linkProps as Record<string, unknown>)}
-                className={composeBaseClass(
-                  "zs-navmenu-link",
-                  // userClass on the wrapper outranks Base UI's state
-                  // class (matches the default branch order below).
-                  userClass ?? stringClass,
-                )}
+                className={userClass ?? stringClass}
                 ref={composeRefs(
                   ref as Ref<unknown>,
                   linkPropsRef,
@@ -382,7 +373,7 @@ const NavMenuLink = forwardRef<HTMLAnchorElement, NavMenuLinkProps>(
       <BaseNavMenu.Link data-slot="navmenu-link"
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-link", userClass)}
+        className={userClass}
       >
         {children}
       </BaseNavMenu.Link>
@@ -454,7 +445,7 @@ const NavMenuPositioner = forwardRef<HTMLDivElement, NavMenuPositionerProps>(
         side={side}
         align={align}
         sideOffset={sideOffset}
-        className={composeBaseClass("zs-navmenu-positioner", className)} data-slot="navmenu-positioner"
+        className={className} data-slot="navmenu-positioner"
       >
         {children}
       </BaseNavMenu.Positioner>
@@ -485,7 +476,7 @@ const NavMenuPopup = forwardRef<HTMLElement, NavMenuPopupProps>(
       <BaseNavMenu.Popup
         {...rest}
         ref={ref as Ref<HTMLElement>}
-        className={composeBaseClass("zs-navmenu-popup", className)} data-slot="navmenu-popup"
+        className={className} data-slot="navmenu-popup"
       />
     );
   },
@@ -515,7 +506,7 @@ const NavMenuViewport = forwardRef<HTMLDivElement, NavMenuViewportProps>(
       <BaseNavMenu.Viewport
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-viewport", className)} data-slot="navmenu-viewport"
+        className={className} data-slot="navmenu-viewport"
       />
     );
   },
@@ -546,7 +537,7 @@ const NavMenuArrow = forwardRef<HTMLDivElement, NavMenuArrowProps>(
       <BaseNavMenu.Arrow
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-arrow", className)} data-slot="navmenu-arrow"
+        className={className} data-slot="navmenu-arrow"
       >
         {children ?? <ArrowGlyph />}
       </BaseNavMenu.Arrow>
@@ -591,13 +582,12 @@ const NavMenuIcon = forwardRef<HTMLSpanElement, NavMenuIconProps>(
       <BaseNavMenu.Icon
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-navmenu-icon", className)} data-slot="navmenu-icon"
+        className={className} data-slot="navmenu-icon"
       >
         {/* The chevron is the governed `Icon` (Lucide chevron-down). It
-            renders directly inside the `.zs-navmenu-icon` span, so the
+            renders inside the `[data-slot="navmenu-icon"]` span, so the
             parent's `[data-popup-open]` rotation and the
-            `.zs-navmenu-icon > svg { inline-size:100%; block-size:100% }`
-            sizing rule keep matching it. */}
+            `[data-slot="navmenu-icon"] > svg` sizing rule keep matching it. */}
         {children ?? <Icon as={ChevronDown} />}
       </BaseNavMenu.Icon>
     );

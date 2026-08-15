@@ -64,7 +64,6 @@ import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
 import { Icon } from "../Icon";
 import { Slot, composeRefs } from "../_slot";
-import { classnames, composeBaseClass } from "../_classnames";
 
 /**
  * Side the drawer anchors to. Logical values flip under RTL:
@@ -164,7 +163,7 @@ const DrawerBackdrop = forwardRef<HTMLElement, DrawerBackdropProps>(
       <BaseDialog.Backdrop
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-drawer-backdrop", className)}
+        className={className}
         data-slot="drawer-backdrop"
       />
     );
@@ -204,7 +203,7 @@ const DrawerContent = forwardRef<HTMLElement, DrawerContentProps>(
       <BaseDialog.Popup
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass("zs-drawer-content", className)}
+        className={className}
         data-slot="drawer-content"
         data-side={side}
         data-size={size}
@@ -240,19 +239,17 @@ const DrawerHeader = forwardRef<HTMLDivElement, DrawerHeaderProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-drawer__header", className)}
+        className={className}
         data-slot="drawer-header"
         {...rest}
       >
         <div
-          className="zs-drawer__header-content"
           data-slot="drawer-header-content"
         >
           {children}
         </div>
         {showClose ? (
           <BaseDialog.Close
-            className="zs-drawer__header-close"
             data-slot="drawer-header-close"
             aria-label={closeLabel}
           >
@@ -276,7 +273,7 @@ const DrawerTitle = forwardRef<HTMLHeadingElement, DrawerTitleProps>(
     return (
       <BaseDialog.Title
         ref={ref}
-        className={composeBaseClass("zs-drawer__title", className)}
+        className={className}
         data-slot="drawer-title"
         {...rest}
       />
@@ -298,7 +295,7 @@ const DrawerDescription = forwardRef<
   return (
     <BaseDialog.Description
       ref={ref}
-      className={composeBaseClass("zs-drawer__description", className)}
+      className={className}
       data-slot="drawer-description"
       {...rest}
     />
@@ -315,7 +312,7 @@ const DrawerBody = forwardRef<HTMLDivElement, DrawerBodyProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-drawer__body", className)}
+        className={className}
         data-slot="drawer-body"
         {...rest}
       />
@@ -331,7 +328,7 @@ const DrawerFooter = forwardRef<HTMLDivElement, DrawerFooterProps>(
     return (
       <div
         ref={ref}
-        className={classnames("zs-drawer__footer", className)}
+        className={className}
         data-slot="drawer-footer"
         {...rest}
       />

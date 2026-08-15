@@ -86,7 +86,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
 import { Stack } from "../../layouts/Stack";
@@ -248,26 +247,22 @@ function renderItem(item: ResolvedItem) {
     <div
       key={item.key}
       data-slot="feature-grid-item"
-      className="zs-feature-grid__item"
     >
       {icon != null ? (
         <div
           data-slot="feature-grid-item-icon"
-          className="zs-feature-grid__item-icon"
         >
           {icon}
         </div>
       ) : null}
       <h3
         data-slot="feature-grid-item-title"
-        className="zs-feature-grid__item-title"
       >
         {title}
       </h3>
       {description != null ? (
         <p
           data-slot="feature-grid-item-description"
-          className="zs-feature-grid__item-description"
         >
           {description}
         </p>
@@ -296,7 +291,6 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
     },
     ref,
   ) {
-    const composedClassName = classnames("zs-feature-grid", className);
 
     // Stable id the section uses for aria-labelledby when an optional `title`
     // lead-in renders. useId is SSR-safe + collision-free across multiple
@@ -356,7 +350,7 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
         data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
-        className={composedClassName}
+        className={className}
       >
         <Container size={size} data-slot="feature-grid-container">
           {hasHeader ? (
@@ -364,12 +358,10 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
               gap={3}
               align={align === "center" ? "center" : "start"}
               data-slot="feature-grid-header"
-              className="zs-feature-grid__header"
             >
               {eyebrow != null ? (
                 <p
                   data-slot="feature-grid-eyebrow"
-                  className="zs-section-eyebrow zs-feature-grid__eyebrow"
                 >
                   {eyebrow}
                 </p>
@@ -378,7 +370,6 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
                 <h2
                   id={titleId}
                   data-slot="feature-grid-title"
-                  className="zs-feature-grid__title"
                 >
                   {title}
                 </h2>
@@ -386,7 +377,6 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
               {description != null ? (
                 <p
                   data-slot="feature-grid-description"
-                  className="zs-feature-grid__description"
                 >
                   {description}
                 </p>
@@ -398,7 +388,6 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
             columns={{ md: columns }}
             gap={7}
             data-slot="feature-grid-items"
-            className="zs-feature-grid__items"
           >
             {allItems.map((item) => renderItem(item))}
           </Grid>

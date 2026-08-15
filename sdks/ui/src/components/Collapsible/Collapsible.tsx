@@ -74,7 +74,7 @@
  *      auto-injected chevron — the caller is responsible for rendering
  *      whatever chrome they want. On Panel, `asChild` swaps the outer
  *      `<div>` for the caller's element AND drops the
- *      `.zs-collapsible-panel-inner` padding wrapper, because the
+ *      `[data-slot="collapsible-panel-inner"]` padding wrapper, because the
  *      consumer-supplied element owns its own padding.
  *
  *   8. `onOpenChange` receives Base UI's full change details object
@@ -93,7 +93,6 @@ import { Collapsible as BaseCollapsible } from "@base-ui/react/collapsible";
 import { ChevronDown } from "lucide-react";
 import { Icon } from "../Icon/Icon";
 import { Slot } from "../_slot";
-import { classnames } from "../_classnames";
 
 /* ─── Collapsible root ──────────────────────────────────────────────── */
 
@@ -181,7 +180,7 @@ const CollapsibleRoot = forwardRef<HTMLDivElement, CollapsibleRootProps>(
             : undefined
         }
         disabled={disabled}
-        className={classnames("zs-collapsible", className)}
+        className={className}
         data-slot="collapsible"
       >
         {children}
@@ -264,7 +263,7 @@ const CollapsibleTrigger = forwardRef<
         {...rest}
         ref={ref}
         nativeButton={nativeButton}
-        className={classnames("zs-collapsible-trigger", className)}
+        className={className}
         data-slot="collapsible-trigger"
         render={(triggerProps) => {
           if (!isValidElement(children)) return <></>;
@@ -295,18 +294,16 @@ const CollapsibleTrigger = forwardRef<
       // `...rest`. Mirrors the Accordion / Tabs form-safety rule.
       type="button"
       nativeButton={nativeButton}
-      className={classnames("zs-collapsible-trigger", className)}
+      className={className}
       data-slot="collapsible-trigger"
     >
       <span
-        className="zs-collapsible-trigger-label"
         data-slot="collapsible-trigger-label"
       >
         {children}
       </span>
       <Icon
         as={ChevronDown}
-        className="zs-collapsible-trigger-chevron"
         data-slot="collapsible-trigger-chevron"
       />
     </BaseCollapsible.Trigger>
@@ -329,7 +326,7 @@ export interface CollapsiblePanelProps extends Omit<
   className?: string;
   /**
    * Panel content. On the default render path this is wrapped in a
-   * `.zs-collapsible-panel-inner` padding container so the outer
+   * `[data-slot="collapsible-panel-inner"]` padding container so the outer
    * `block-size` animation can cleanly drive `0`. On the `asChild`
    * path the caller's element is rendered verbatim — the inner
    * padding wrapper is NOT injected (the consumer owns padding).
@@ -373,7 +370,7 @@ const CollapsiblePanel = forwardRef<HTMLDivElement, CollapsiblePanelProps>(
         <BaseCollapsible.Panel
           {...rest}
           ref={ref}
-          className={classnames("zs-collapsible-panel", className)}
+          className={className}
           data-slot="collapsible-panel"
           render={(panelProps) => {
             if (!isValidElement(children)) return <></>;
@@ -397,13 +394,12 @@ const CollapsiblePanel = forwardRef<HTMLDivElement, CollapsiblePanelProps>(
       <BaseCollapsible.Panel
         {...rest}
         ref={ref}
-        className={classnames("zs-collapsible-panel", className)}
+        className={className}
         data-slot="collapsible-panel"
       >
         {/* Inner wrapper carries the padding so the outer block-size
             animation cleanly drives `block-size: 0`. */}
         <div
-          className="zs-collapsible-panel-inner"
           data-slot="collapsible-panel-inner"
         >
           {children}

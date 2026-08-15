@@ -47,7 +47,6 @@ import {
 import { AlertDialog as BaseAlertDialog } from "@base-ui/react/alert-dialog";
 import { Button, type ButtonProps } from "../Button";
 import { Slot, composeRefs } from "../_slot";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type AlertDialogSize = "sm" | "md" | "lg";
 export type AlertDialogActionTone = "normal" | "destructive";
@@ -217,7 +216,7 @@ const AlertDialogTrigger = forwardRef<
   return (
     <BaseAlertDialog.Trigger
       ref={ref}
-      className={composeBaseClass("zs-alertdialog-trigger", className)}
+      className={className}
       data-slot="alertdialog-trigger"
       {...rest}
     />
@@ -247,13 +246,10 @@ const AlertDialogBackdrop = forwardRef<
   return (
     <BaseAlertDialog.Backdrop
       ref={ref as Ref<HTMLDivElement>}
-      className={composeBaseClass(
-        "zs-dialog-backdrop zs-alertdialog-backdrop",
-        className,
-      )}
+      className={className}
       data-slot="alertdialog-backdrop"
       // Alerts use the canonical scrim — no `tint` prop offered.
-      // The popup inherits `.zs-dialog-popup` forced-colors rules.
+      // The alert-dialog popup inherits the canonical forced-colors rules.
       data-tint="scrim"
       {...rest}
     />
@@ -274,10 +270,7 @@ const AlertDialogPopup = forwardRef<HTMLDivElement, AlertDialogPopupProps>(
     return (
       <BaseAlertDialog.Popup
         ref={ref as Ref<HTMLDivElement>}
-        className={composeBaseClass(
-          "zs-dialog-popup zs-alertdialog-popup",
-          className,
-        )}
+        className={className}
         data-slot="alertdialog-popup"
         data-size={size}
         {...rest}
@@ -299,15 +292,11 @@ const AlertDialogHeader = forwardRef<HTMLDivElement, AlertDialogHeaderProps>(
     return (
       <div
         ref={ref}
-        className={classnames(
-          "zs-dialog__header zs-alertdialog__header",
-          className,
-        )}
+        className={className}
         data-slot="alertdialog-header"
         {...rest}
       >
         <div
-          className="zs-dialog__header-content"
           data-slot="dialog-header-content"
         >
           {children}
@@ -326,7 +315,7 @@ const AlertDialogTitle = forwardRef<HTMLHeadingElement, AlertDialogTitleProps>(
     return (
       <BaseAlertDialog.Title
         ref={ref}
-        className={composeBaseClass("zs-dialog__title", className)}
+        className={className}
         data-slot="dialog-title"
         {...rest}
       />
@@ -347,7 +336,7 @@ const AlertDialogDescription = forwardRef<
   return (
     <BaseAlertDialog.Description
       ref={ref}
-      className={composeBaseClass("zs-dialog__description", className)}
+      className={className}
       data-slot="dialog-description"
       {...rest}
     />
@@ -362,10 +351,7 @@ const AlertDialogBody = forwardRef<HTMLDivElement, AlertDialogBodyProps>(
     return (
       <div
         ref={ref}
-        className={classnames(
-          "zs-dialog__body zs-alertdialog__body",
-          className,
-        )}
+        className={className}
         data-slot="alertdialog-body"
         {...rest}
       />
@@ -498,10 +484,7 @@ const AlertDialogFooter = forwardRef<HTMLDivElement, AlertDialogFooterProps>(
     return (
       <div
         ref={ref}
-        className={classnames(
-          "zs-dialog__footer zs-alertdialog__footer",
-          className,
-        )}
+        className={className}
         data-slot="alertdialog-footer"
         data-button-count={buttonCount}
         {...rest}

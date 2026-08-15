@@ -97,7 +97,6 @@ import {
 import { Accordion as BaseAccordion } from "@base-ui/react/accordion";
 import { ChevronDown } from "lucide-react";
 import { Icon } from "../Icon/Icon";
-import { classnames } from "../_classnames";
 
 export type AccordionOrientation = "vertical" | "horizontal";
 
@@ -316,11 +315,7 @@ function AccordionRootInner(
           orientation={orientation}
           disabled={disabled}
           keepMounted={keepMounted}
-          className={classnames(
-            "zs-accordion",
-            `zs-accordion--${orientation}`,
-            className,
-          )}
+          className={className}
           data-slot="accordion"
           data-orientation={orientation}
         >
@@ -358,11 +353,7 @@ function AccordionRootInner(
         orientation={orientation}
         disabled={disabled}
         keepMounted={keepMounted}
-        className={classnames(
-          "zs-accordion",
-          `zs-accordion--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="accordion"
         data-orientation={orientation}
       >
@@ -397,11 +388,7 @@ const AccordionItem = forwardRef<HTMLDivElement, AccordionItemProps>(
       <BaseAccordion.Item
         {...rest}
         ref={ref}
-        className={classnames(
-          "zs-accordion-item",
-          `zs-accordion-item--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="accordion-item"
         data-orientation={orientation}
       />
@@ -431,11 +418,7 @@ const AccordionHeader = forwardRef<HTMLHeadingElement, AccordionHeaderProps>(
       <BaseAccordion.Header
         {...rest}
         ref={ref}
-        className={classnames(
-          "zs-accordion-header",
-          `zs-accordion-header--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="accordion-header"
         data-orientation={orientation}
       />
@@ -471,22 +454,16 @@ const AccordionTrigger = forwardRef<HTMLButtonElement, AccordionTriggerProps>(
         // by spreading `type="submit"` through `...rest`. Mirrors the
         // Tabs.Tab form-safety rule.
         type="button"
-        className={classnames(
-          "zs-accordion-trigger",
-          `zs-accordion-trigger--${orientation}`,
-          className,
-        )}
+        className={className}
         data-orientation={orientation}
       >
         <span
-          className="zs-accordion-trigger-label"
           data-slot="accordion-trigger-label"
         >
           {children}
         </span>
         <Icon
           as={ChevronDown}
-          className="zs-accordion-trigger-chevron"
           data-slot="accordion-trigger-chevron"
         />
       </BaseAccordion.Trigger>
@@ -517,11 +494,7 @@ const AccordionPanel = forwardRef<HTMLDivElement, AccordionPanelProps>(
       <BaseAccordion.Panel
         {...rest}
         ref={ref}
-        className={classnames(
-          "zs-accordion-panel",
-          `zs-accordion-panel--${orientation}`,
-          className,
-        )}
+        className={className}
         data-slot="accordion-panel"
         data-orientation={orientation}
       >
@@ -529,7 +502,6 @@ const AccordionPanel = forwardRef<HTMLDivElement, AccordionPanelProps>(
             animation can drive `block-size: 0` cleanly (padding on the
             outer would create a layout step at the transition end). */}
         <div
-          className="zs-accordion-panel-inner"
           data-slot="accordion-panel-inner"
         >
           {children}

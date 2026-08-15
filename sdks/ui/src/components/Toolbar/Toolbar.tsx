@@ -53,7 +53,6 @@ import {
   type ReactNode,
 } from "react";
 import { Toolbar as BaseToolbar } from "@base-ui/react/toolbar";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type ToolbarOrientation = "horizontal" | "vertical";
 
@@ -145,10 +144,7 @@ const ToolbarRoot = forwardRef<HTMLDivElement, ToolbarProps>(
         ref={ref}
         orientation={orientation}
         loopFocus={loopFocus}
-        className={composeBaseClass(
-          classnames("zs-toolbar", `zs-toolbar--${orientation}`),
-          className,
-        )}
+        className={className}
         data-slot="toolbar"
       >
         {children}
@@ -178,7 +174,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(
       <BaseToolbar.Button
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-toolbar-button", className)}
+        className={className}
         data-slot="toolbar-button"
       />
     );
@@ -199,10 +195,7 @@ const ToolbarLink = forwardRef<HTMLAnchorElement, ToolbarLinkProps>(
       <BaseToolbar.Link
         {...rest}
         ref={ref}
-        className={composeBaseClass(
-          "zs-toolbar-button zs-toolbar-link",
-          className,
-        )}
+        className={className}
         data-slot="toolbar-button"
       />
     );
@@ -226,7 +219,7 @@ const ToolbarInput = forwardRef<HTMLInputElement, ToolbarInputProps>(
       <BaseToolbar.Input
         {...rest}
         ref={ref}
-        className={composeBaseClass("zs-toolbar-input", className)}
+        className={className}
         data-slot="toolbar-input"
       />
     );
@@ -299,7 +292,7 @@ const ToolbarSeparator = forwardRef<HTMLDivElement, ToolbarSeparatorProps>(
       <BaseToolbar.Separator
         {...(restLocked as BaseSeparatorProps)}
         ref={ref}
-        className={composeBaseClass("zs-toolbar-separator", className)}
+        className={className}
         data-slot="toolbar-separator"
       />
     );

@@ -75,7 +75,6 @@ import {
 } from "@base-ui/react/toast";
 import { useDirection } from "@base-ui/react/direction-provider";
 import { X } from "lucide-react";
-import { composeBaseClass, classnames } from "../_classnames";
 import { Icon } from "../Icon";
 
 /** Base UI's per-toast payload. The manager publishes this for each
@@ -224,11 +223,7 @@ const ToastViewport = forwardRef<HTMLDivElement, ToastViewportProps>(
         ref={ref}
         {...rest}
         data-position={position}
-        className={classnames(
-          "zs-toast-viewport",
-          `zs-toast-viewport--${position}`,
-          className,
-        )}
+        className={className}
         data-slot="toast-viewport"
       >
         {children ?? <DefaultToastList />}
@@ -259,7 +254,7 @@ function DefaultToastList() {
     <>
       {manager.toasts.map((entry) => (
         <ToastRoot key={entry.id} toast={entry} swipeDirection={swipeDirection}>
-          <div className="zs-toast-content" data-slot="toast-content">
+          <div data-slot="toast-content">
             {entry.title ? <ToastTitle>{entry.title}</ToastTitle> : null}
             {entry.description ? (
               <ToastDescription>{entry.description}</ToastDescription>
@@ -425,11 +420,7 @@ const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(function ToastRoot(
       // omit the attribute from the rendered DOM.
       aria-modal={undefined}
       data-variant={variant}
-      className={classnames(
-        "zs-toast-root",
-        `zs-toast-root--${variant}`,
-        className,
-      )}
+      className={className}
       data-slot="toast-root"
     />
   );
@@ -453,7 +444,7 @@ const ToastTitle = forwardRef<HTMLHeadingElement, ToastTitleProps>(
     return (
       <BaseToast.Title
         ref={ref}
-        className={composeBaseClass("zs-toast-title", className)}
+        className={className}
         data-slot="toast-title"
         {...rest}
       />
@@ -484,7 +475,7 @@ const ToastDescription = forwardRef<
   return (
     <BaseToast.Description
       ref={ref}
-      className={composeBaseClass("zs-toast-description", className)}
+      className={className}
       data-slot="toast-description"
       {...rest}
     />
@@ -510,7 +501,7 @@ const ToastAction = forwardRef<HTMLButtonElement, ToastActionProps>(
     return (
       <BaseToast.Action
         ref={ref}
-        className={composeBaseClass("zs-toast-action", className)}
+        className={className}
         data-slot="toast-action"
         {...rest}
       />
@@ -540,7 +531,7 @@ const ToastClose = forwardRef<HTMLButtonElement, ToastCloseProps>(
     return (
       <BaseToast.Close
         ref={ref}
-        className={composeBaseClass("zs-toast-close", className)}
+        className={className}
         data-slot="toast-close"
         {...rest}
         /* Apply `aria-label` AFTER the spread so the default survives

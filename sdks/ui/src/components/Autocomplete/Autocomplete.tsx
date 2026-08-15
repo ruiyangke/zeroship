@@ -44,7 +44,6 @@ import {
 import { ChevronDown } from "lucide-react";
 import { Icon } from "../Icon";
 import { useFieldContext, type FieldSize } from "../Field";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type AutocompleteSize = "sm" | "md" | "lg";
 export type AutocompleteVariant = "default" | "outline";
@@ -207,25 +206,17 @@ function AutocompleteRoot<Value extends string = string>(
       >
         <BaseAutocomplete.InputGroup
           data-testid={dataTestid}
-          className={classnames(
-            "zs-combobox-input-group",
-            "zs-autocomplete-input-group",
-            `zs-combobox-input-group--${variant}`,
-            `zs-combobox-input-group--${size}`,
-            className,
-          )}
+          className={className}
           data-slot="autocomplete-input-group"
           data-variant={variant}
           data-size={size}
         >
           <BaseAutocomplete.Input
-            className="zs-combobox-input"
             data-slot="combobox-input"
             placeholder={placeholder}
             {...inputAriaProps}
           />
           <BaseAutocomplete.Icon
-            className="zs-combobox-input-group__icon"
             data-slot="combobox-input-group-icon"
             aria-hidden="true"
           >
@@ -234,23 +225,16 @@ function AutocompleteRoot<Value extends string = string>(
         </BaseAutocomplete.InputGroup>
         <BaseAutocomplete.Portal>
           <BaseAutocomplete.Positioner
-            className="zs-combobox-positioner"
             data-slot="combobox-positioner"
             align={align}
             side={placement}
             sideOffset={sideOffset}
           >
             <BaseAutocomplete.Popup
-              className={classnames(
-                "zs-combobox-popup",
-                "zs-autocomplete-popup",
-                `zs-combobox-popup--${size}`,
-              )}
               data-slot="autocomplete-popup"
               data-size={size}
             >
               <BaseAutocomplete.List
-                className="zs-combobox-list"
                 data-slot="combobox-list"
               >
                 {children}
@@ -281,16 +265,12 @@ const AutocompleteItem = forwardRef<HTMLDivElement, AutocompleteItemProps>(
     return (
       <BaseAutocomplete.Item
         ref={ref}
-        className={composeBaseClass(
-          "zs-autocomplete-item zs-combobox-item",
-          className,
-        )}
+        className={className}
         data-slot="autocomplete-item"
         data-size={size}
         {...rest}
       >
         <span
-          className="zs-autocomplete-item__text"
           data-slot="autocomplete-item-text"
         >
           {children}

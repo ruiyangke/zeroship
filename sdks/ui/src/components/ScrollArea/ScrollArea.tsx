@@ -93,7 +93,6 @@ import {
   type ReactNode,
 } from "react";
 import { ScrollArea as BaseScrollArea } from "@base-ui/react/scroll-area";
-import { classnames } from "../_classnames";
 
 /**
  * Visibility policy for the scrollbar chrome.
@@ -215,7 +214,7 @@ function ScrollAreaRootInner(
         {...rest}
         ref={ref}
         style={rootStyle}
-        className={classnames("zs-scrollarea", className)}
+        className={className}
         data-slot="scrollarea"
         data-visibility={type}
         data-orientation={orientation}
@@ -246,7 +245,7 @@ const ScrollAreaViewport = forwardRef<HTMLDivElement, ScrollAreaViewportProps>(
       <BaseScrollArea.Viewport
         {...rest}
         ref={ref}
-        className={classnames("zs-scrollarea__viewport", className)}
+        className={className}
         data-slot="scrollarea-viewport"
       />
     );
@@ -275,7 +274,7 @@ const ScrollAreaContent = forwardRef<HTMLDivElement, ScrollAreaContentProps>(
       <BaseScrollArea.Content
         {...rest}
         ref={ref}
-        className={classnames("zs-scrollarea__content", className)}
+        className={className}
         data-slot="scrollarea-content"
       />
     );
@@ -331,11 +330,7 @@ const ScrollAreaScrollbar = forwardRef<
       {...rest}
       ref={ref}
       orientation={orientation}
-      className={classnames(
-        "zs-scrollarea__scrollbar",
-        `zs-scrollarea__scrollbar--${orientation}`,
-        className,
-      )}
+      className={className}
       data-slot="scrollarea-scrollbar"
       data-orientation={orientation}
     />
@@ -362,7 +357,7 @@ const ScrollAreaThumb = forwardRef<HTMLDivElement, ScrollAreaThumbProps>(
       <BaseScrollArea.Thumb
         {...rest}
         ref={ref}
-        className={classnames("zs-scrollarea__thumb", className)}
+        className={className}
         data-slot="scrollarea-thumb"
       />
     );
@@ -388,7 +383,7 @@ const ScrollAreaCorner = forwardRef<HTMLDivElement, ScrollAreaCornerProps>(
       <BaseScrollArea.Corner
         {...rest}
         ref={ref}
-        className={classnames("zs-scrollarea__corner", className)}
+        className={className}
         data-slot="scrollarea-corner"
       />
     );

@@ -52,7 +52,6 @@ import {
   type Ref,
 } from "react";
 import { Tooltip as BaseTooltip } from "@base-ui/react/tooltip";
-import { composeBaseClass } from "../_classnames";
 
 export type TooltipSide = "top" | "right" | "bottom" | "left";
 export type TooltipAlign = "start" | "center" | "end";
@@ -294,7 +293,6 @@ const TooltipPopup = forwardRef<HTMLElement, TooltipPopupProps>(
     const popupId = rootCtx?.popupId;
     return (
       <BaseTooltip.Positioner
-        className="zs-tooltip-positioner"
         data-slot="tooltip-positioner"
         side={side}
         align={align}
@@ -304,7 +302,7 @@ const TooltipPopup = forwardRef<HTMLElement, TooltipPopupProps>(
           {...rest}
           ref={ref as Ref<HTMLDivElement>}
           id={popupId}
-          className={composeBaseClass("zs-tooltip-popup", className)}
+          className={className}
           data-slot="tooltip-popup"
         >
           {children}
@@ -330,7 +328,7 @@ const TooltipArrow = forwardRef<HTMLDivElement, TooltipArrowProps>(
     return (
       <BaseTooltip.Arrow
         ref={ref}
-        className={composeBaseClass("zs-tooltip-arrow", className)}
+        className={className}
         data-slot="tooltip-arrow"
         {...rest}
       >

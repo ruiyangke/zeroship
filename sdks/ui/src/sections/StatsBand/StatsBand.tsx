@@ -78,7 +78,6 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
 import { Stack } from "../../layouts/Stack";
@@ -241,24 +240,20 @@ function renderStat(stat: ResolvedStat) {
       key={stat.key}
       role="group"
       data-slot="stats-band-stat"
-      className="zs-stats-band__stat"
     >
       <p
         data-slot="stats-band-stat-value"
-        className="zs-stats-band__stat-value"
       >
         {value}
       </p>
       <p
         data-slot="stats-band-stat-label"
-        className="zs-stats-band__stat-label"
       >
         {label}
       </p>
       {description != null ? (
         <p
           data-slot="stats-band-stat-description"
-          className="zs-stats-band__stat-description"
         >
           {description}
         </p>
@@ -288,7 +283,6 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
     },
     ref,
   ) {
-    const composedClassName = classnames("zs-stats-band", className);
 
     // Stable id the section uses for aria-labelledby when an optional `title`
     // lead-in renders. useId is SSR-safe + collision-free across multiple
@@ -347,7 +341,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
         data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
-        className={composedClassName}
+        className={className}
       >
         <Container size={size} data-slot="stats-band-container">
           {hasHeader ? (
@@ -355,12 +349,10 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
               gap={3}
               align={align === "center" ? "center" : "start"}
               data-slot="stats-band-header"
-              className="zs-stats-band__header"
             >
               {eyebrow != null ? (
                 <p
                   data-slot="stats-band-eyebrow"
-                  className="zs-section-eyebrow zs-stats-band__eyebrow"
                 >
                   {eyebrow}
                 </p>
@@ -369,7 +361,6 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
                 <h2
                   id={titleId}
                   data-slot="stats-band-title"
-                  className="zs-stats-band__title"
                 >
                   {title}
                 </h2>
@@ -377,7 +368,6 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
               {description != null ? (
                 <p
                   data-slot="stats-band-description"
-                  className="zs-stats-band__description"
                 >
                   {description}
                 </p>
@@ -390,7 +380,6 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
             gap={7}
             data-slot="stats-band-items"
             data-columns={resolvedColumns}
-            className="zs-stats-band__items"
           >
             {allStats.map((stat) => renderStat(stat))}
           </Grid>

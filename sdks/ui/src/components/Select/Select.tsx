@@ -62,7 +62,6 @@ import { Select as BaseSelect } from "@base-ui/react/select";
 import { Check, ChevronDown } from "lucide-react";
 import { Icon } from "../Icon";
 import { useFieldContext, type FieldSize } from "../Field";
-import { classnames, composeBaseClass } from "../_classnames";
 
 export type SelectSize = "sm" | "md" | "lg";
 export type SelectVariant = "default" | "outline";
@@ -314,12 +313,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
           data-slot="select-trigger"
           {...triggerAriaProps}
           data-testid={dataTestid}
-          className={classnames(
-            "zs-select-trigger",
-            `zs-select-trigger--${variant}`,
-            `zs-select-trigger--${size}`,
-            className,
-          )}
+          className={className}
           data-variant={variant}
           data-size={size}
           /*
@@ -350,7 +344,6 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
           }}
         >
           <BaseSelect.Value
-            className="zs-select-trigger__value"
             data-slot="select-trigger-value"
             placeholder={placeholder}
           >
@@ -370,7 +363,6 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
               : undefined}
           </BaseSelect.Value>
           <BaseSelect.Icon
-            className="zs-select-trigger__icon"
             data-slot="select-trigger-icon"
             aria-hidden="true"
           >
@@ -379,7 +371,6 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
         </BaseSelect.Trigger>
         <BaseSelect.Portal>
           <BaseSelect.Positioner
-            className="zs-select-positioner"
             data-slot="select-positioner"
             align={align}
             side={placement}
@@ -399,15 +390,10 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
             alignItemWithTrigger={false}
           >
             <BaseSelect.Popup
-              className={classnames(
-                "zs-select-popup",
-                `zs-select-popup--${size}`,
-              )}
               data-slot="select-popup"
               data-size={size}
             >
               <BaseSelect.List
-                className="zs-select-list"
                 data-slot="select-list"
               >
                 {children}
@@ -429,7 +415,7 @@ export interface SelectItemProps extends BaseItemProps {
   "data-testid"?: string;
 }
 
-/* Render: the chip carries our `zs-select-item` class; an indicator
+/* Render: the chip carries `[data-slot="select-item"]`; an indicator
  * pseudo-row reserves space for the checkmark whether or not the item
  * is selected, so single-select rows align with multi-select rows. */
 const SelectItem = forwardRef<HTMLElement, SelectItemProps>(function SelectItem(
@@ -440,20 +426,18 @@ const SelectItem = forwardRef<HTMLElement, SelectItemProps>(function SelectItem(
   return (
     <BaseSelect.Item
       ref={ref as Ref<HTMLDivElement>}
-      className={composeBaseClass("zs-select-item", className) as string}
+      className={className}
       data-slot="select-item"
       data-size={size}
       {...rest}
     >
       <BaseSelect.ItemIndicator
-        className="zs-select-item__indicator"
         data-slot="select-item-indicator"
         keepMounted
       >
         <Icon as={Check} size="sm" />
       </BaseSelect.ItemIndicator>
       <BaseSelect.ItemText
-        className="zs-select-item__text"
         data-slot="select-item-text"
       >
         {children}
@@ -487,7 +471,7 @@ const SelectGroup = forwardRef<HTMLDivElement, SelectGroupProps>(
     return (
       <BaseSelect.Group
         ref={ref}
-        className={composeBaseClass("zs-select-group", className)}
+        className={className}
         data-slot="select-group"
         {...rest}
       >
@@ -509,7 +493,7 @@ const SelectGroupLabel = forwardRef<HTMLDivElement, SelectGroupLabelProps>(
     return (
       <BaseSelect.GroupLabel
         ref={ref}
-        className={composeBaseClass("zs-select-group-label", className)}
+        className={className}
         data-slot="select-group-label"
         {...rest}
       />
@@ -528,7 +512,7 @@ const SelectSeparator = forwardRef<HTMLDivElement, SelectSeparatorProps>(
     return (
       <BaseSelect.Separator
         ref={ref}
-        className={composeBaseClass("zs-select-separator", className)}
+        className={className}
         data-slot="select-separator"
         {...rest}
       />
