@@ -374,6 +374,15 @@ fn cmd_deploy(args: &[String]) {
         std::process::exit(1);
     });
     let auto_create = deploy_auto_create(args);
+    let declared_secrets = resolved
+        .as_ref()
+        .and_then(|cfg| cfg.get("secrets"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
     project_config::print_provenance("deploy", &[("app", &app), ("control", &control_url)]);
     let app_source = app.source.clone();
@@ -393,7 +402,15 @@ fn cmd_deploy(args: &[String]) {
     );
 
     let mut client = CurlControlClient;
-    match deploy_archive(&mut client, &control_url, &app, &token, &body, auto_create) {
+    match deploy_archive(
+        &mut client,
+        &control_url,
+        &app,
+        &token,
+        &body,
+        &declared_secrets,
+        auto_create,
+    ) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id);
@@ -598,6 +615,13 @@ trait ControlClient {
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
 
+    fn list_secrets(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+    ) -> Result<ControlResponse, String>;
+
     fn create_app(
         &mut self,
         control_url: &str,
@@ -638,6 +662,19 @@ impl ControlClient for CurlControlClient {
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
         let url = format!("{control_url}/api/apps");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
+        run_curl(&mut command, None)
+    }
+
+    fn list_secrets(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+    ) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps/{app}/secrets");
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
@@ -742,10 +779,18 @@ fn deploy_archive<C: ControlClient>(
     app: &str,
     token: &str,
     body: &[u8],
+    declared_secrets: &[String],
     auto_create: bool,
 ) -> Result<DeployOutcome, String> {
     if !is_uuid(app) {
         let resolved = resolve_or_create_app(client, control_url, token, app, None, auto_create)?;
+        warn_for_missing_declared_secrets(
+            client,
+            control_url,
+            &resolved.id,
+            token,
+            declared_secrets,
+        );
         let response = client.deploy_zship(control_url, &resolved.id, token, body)?;
         if response.status != 200 {
             return Err(format!(
@@ -756,6 +801,7 @@ fn deploy_archive<C: ControlClient>(
         return deploy_success(response.body, resolved.created);
     }
 
+    warn_for_missing_declared_secrets(client, control_url, app, token, declared_secrets);
     let first = client.deploy_zship(control_url, app, token, body)?;
     if first.status == 200 {
         return deploy_success(first.body, None);
@@ -766,11 +812,71 @@ fn deploy_archive<C: ControlClient>(
     }
 
     let resolved = resolve_or_create_app(client, control_url, token, app, Some(first.status), true)?;
+    warn_for_missing_declared_secrets(
+        client,
+        control_url,
+        &resolved.id,
+        token,
+        declared_secrets,
+    );
     let retry = client.deploy_zship(control_url, &resolved.id, token, body)?;
     if retry.status != 200 {
         return Err(format!("Deploy failed (HTTP {}): {}", retry.status, retry.body));
     }
     deploy_success(retry.body, resolved.created)
+}
+
+fn warn_for_missing_declared_secrets<C: ControlClient>(
+    client: &mut C,
+    control_url: &str,
+    app: &str,
+    token: &str,
+    declared: &[String],
+) {
+    if declared.is_empty() {
+        return;
+    }
+    let response = match client.list_secrets(control_url, app, token) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!(
+                "zeroship deploy: warning: could not check declared secrets for app {app}: {error}"
+            );
+            return;
+        }
+    };
+    if response.status != 200 {
+        eprintln!(
+            "zeroship deploy: warning: could not check declared secrets for app {app} \
+             (HTTP {}): {}",
+            response.status, response.body
+        );
+        return;
+    }
+    let Some(present) = parse_secret_names(&response.body) else {
+        eprintln!(
+            "zeroship deploy: warning: could not parse the secret list for app {app}: {}",
+            response.body
+        );
+        return;
+    };
+    for name in declared {
+        if !present.contains(name) {
+            eprintln!(
+                "zeroship deploy: warning: zeroship.jsonc declares `{name}`, but \
+                 `zeroship secret list` does not show it"
+            );
+        }
+    }
+}
+
+fn parse_secret_names(body: &str) -> Option<std::collections::HashSet<String>> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    json.get("secrets")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect()
 }
 
 fn should_resolve_or_create_after_deploy_failure(response: &ControlResponse) -> bool {
@@ -1253,6 +1359,7 @@ mod tests {
     enum FakeCall {
         Deploy(String),
         List,
+        ListSecrets(String),
         Create(String),
     }
 
@@ -1262,6 +1369,7 @@ mod tests {
         deploys: VecDeque<ControlResponse>,
         lists: VecDeque<ControlResponse>,
         creates: VecDeque<ControlResponse>,
+        secret_lists: VecDeque<ControlResponse>,
     }
 
     impl FakeControlClient {
@@ -1315,6 +1423,18 @@ mod tests {
                 .ok_or_else(|| "unexpected list call".to_string())
         }
 
+        fn list_secrets(
+            &mut self,
+            _control_url: &str,
+            app: &str,
+            _token: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::ListSecrets(app.to_string()));
+            self.secret_lists
+                .pop_front()
+                .ok_or_else(|| "unexpected secret list call".to_string())
+        }
+
         fn create_app(
             &mut self,
             _control_url: &str,
@@ -1346,6 +1466,7 @@ mod tests {
             missing_app,
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("deploy should create and retry");
@@ -1418,6 +1539,7 @@ mod tests {
             &app.value,
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("name deploy should create and retry by id");
@@ -1462,6 +1584,7 @@ mod tests {
             missing_app,
             "token",
             b"zship",
+            &[],
             deploy_auto_create(&args),
         )
         .expect_err("--no-create should keep the original deploy failure");
@@ -1481,6 +1604,7 @@ mod tests {
             "11111111-1111-4111-8111-111111111111",
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("existing app deploy");

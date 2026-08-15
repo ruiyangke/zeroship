@@ -55,7 +55,7 @@
     },
     "secrets": {
       "$ref": "#/$defs/secrets",
-      "description": "Secret NAMES only. Values live in .env (dev) and `zeroship secret set` (deployed). An array of strings has nowhere to put a value."
+      "description": "Secret NAMES only. Values live in .env (dev) and `zeroship secret set` (deployed); deploy warns when a declared deployed value is absent. An array of strings has nowhere to put a value."
     },
     "environments": {
       "type": "object",
