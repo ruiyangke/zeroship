@@ -12,6 +12,7 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 
 - `version`
 - `deploy_hash`
+- `runtime_date`
 - `worker`
 - `resources`
 - `schemas` (JSON schemas referenced by resource input/output metadata)
@@ -46,6 +47,10 @@ op.* migration artifacts, and `runtime_descriptor` points to the generated
 build-time static assets; `runtime_assets` holds runtime-emitted assets;
 `asset_version` is the change counter the gateway uses to know when to resync
 runtime assets.
+
+`runtime_date` is copied from the resolved project config at build time and
+retained as inert deployment metadata. The runtime does not branch on it or
+select compatibility semantics from it.
 
 `workflows` carries the build-discovered workflow declarations. Control and
 worker-side workflow apply use it to reject starts or continue-as-new successors

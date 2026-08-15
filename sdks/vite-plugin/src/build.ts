@@ -830,6 +830,7 @@ export function buildPlugin(
 
         await emitZship({
           root,
+          runtimeDate: projectConfig.runtime_date,
           distDir: clientOutDir,
           // The path the CLI will upload. It is x-cli-read: the packer writes
           // it and `zeroship deploy` reads it, which is exactly the

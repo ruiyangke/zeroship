@@ -38,6 +38,11 @@ pub struct Manifest {
     #[serde(default = "Manifest::default_version")]
     pub version: u16,
 
+    /// Creator project's runtime compatibility date. This value is carried
+    /// through deploys but is inert until runtime behavior gates are defined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_date: Option<String>,
+
     /// Computed from the canonical (deploy_hash-omitted) manifest by the
     /// control plane on receipt. `None` at build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +202,7 @@ impl Default for Manifest {
     fn default() -> Self {
         Self {
             version: 1,
+            runtime_date: None,
             deploy_hash: None,
             worker: None,
             resources: HashMap::new(),
@@ -430,6 +436,7 @@ impl Manifest {
         );
         Self {
             version: 1,
+            runtime_date: None,
             deploy_hash: None,
             worker: None,
             resources,

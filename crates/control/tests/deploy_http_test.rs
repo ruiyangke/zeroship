@@ -132,6 +132,7 @@ fn manifest_for(
     }
     Manifest {
         version: 1,
+        runtime_date: None,
         deploy_hash: None,
         worker: worker_hash.map(|h| WorkerCode {
             entry: "index.js".into(),

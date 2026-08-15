@@ -61,25 +61,17 @@ const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 pkg.name = projectName;
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
-// Rewrite `zeroship.jsonc`'s `name` by SPLICING that one scalar rather than
-// re-serialising. The file is JSONC and its comments are half of what it is
+// Rewrite `zeroship.jsonc`'s `name` and `runtime_date` by splicing those
+// scalars rather than re-serialising. The file is JSONC and its comments are
+// half of what it is
 // for; a JSON.parse + stringify round trip would delete every one of them. The
-// template value is a unique literal, so a plain replace is safe and the result
-// is byte-identical everywhere else.
-//
-// `runtime_date` is NOT stamped with today's date, and that is a decision.
-// Stamping it would make two creators who scaffold on different days receive
-// different files, and the golden-path harness re-runs THIS scaffolder and
-// requires byte equality against `examples/scaffold-app`. The comparison
-// could then never hold. The date buys nothing that pays for that: nothing
-// reads `runtime_date`, and its whole stated value is that projects are in the
-// habit of carrying one. The template's date does that. When a dated behaviour
-// gate actually exists, setting it becomes a deliberate act rather than a
-// silent side effect of `npm create`.
+// template values are unique literals, so the result is byte-identical
+// everywhere else. The runtime date is the UTC date on which the creator
+// scaffolded the project; runtime behavior does not branch on it yet.
 const cfgPath = join(targetDir, "zeroship.jsonc");
 if (existsSync(cfgPath)) {
   const before = readFileSync(cfgPath, "utf-8");
-  const after = before.replace(
+  let after = before.replace(
     '"name": "zeroship-app"',
     `"name": ${JSON.stringify(projectName)}`,
   );
@@ -88,6 +80,22 @@ if (existsSync(cfgPath)) {
   // the failure would only surface as two creators' apps colliding.
   if (after === before) {
     console.error('error: zeroship.jsonc no longer contains the template\'s "zeroship-app" name');
+    process.exit(1);
+  }
+
+  let runtimeDateMatches = 0;
+  const runtimeDate = new Date().toISOString().slice(0, 10);
+  after = after.replace(
+    /(\"runtime_date\"\s*:\s*\")\d{4}-\d{2}-\d{2}(\")/g,
+    (_match, prefix, suffix) => {
+      runtimeDateMatches += 1;
+      return `${prefix}${runtimeDate}${suffix}`;
+    },
+  );
+  if (runtimeDateMatches !== 1) {
+    console.error(
+      `error: zeroship.jsonc must contain exactly one dated "runtime_date"; found ${runtimeDateMatches}`,
+    );
     process.exit(1);
   }
   writeFileSync(cfgPath, after);

@@ -157,7 +157,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         JSON.stringify({
           name: "custom-dist",
           control: "http://localhost:9090",
-          runtime_date: "2026-08-14",
+          runtime_date: "2042-03-04",
           build: { mode: "full", dist: "build", output: "build/app.zship" },
           migrations: { dir: "migrations", out: "generated/zeroship" },
         }),
@@ -174,6 +174,11 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
 
       const archive = await fs.readFile(resolve(root, "build", "app.zship"));
       const { manifest, entries } = readZship(archive);
+      assert.equal(
+        manifest.runtime_date,
+        "2042-03-04",
+        "the archive must carry the configured inert runtime date",
+      );
       const worker = manifest.worker as
         | { entry: string; modules: Record<string, string> }
         | undefined

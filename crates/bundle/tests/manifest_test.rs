@@ -11,6 +11,23 @@ use zeroship_bundle::{
     AuthConfig, AuthLevel, Cors, HandlerEntry, Manifest, ManifestExports, ResourceEntry, ScopeDef,
 };
 
+#[test]
+fn runtime_date_round_trips_without_being_dropped() {
+    let original = json!({
+        "version": 1,
+        "runtime_date": "2042-03-04",
+        "metadata": { "built_at": "2042-03-04T12:00:00Z" },
+    });
+
+    let manifest: Manifest = serde_json::from_value(original.clone()).expect("parse manifest");
+    let reserialized = serde_json::to_value(manifest).expect("serialize manifest");
+    assert_eq!(
+        reserialized.get("runtime_date"),
+        original.get("runtime_date"),
+        "typed manifest ingest must preserve the creator's runtime date"
+    );
+}
+
 /// An old manifest produced before `exports` existed must deserialize
 /// unchanged, and round-trip serialize without inventing the field.
 #[test]
